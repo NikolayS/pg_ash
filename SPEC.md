@@ -29,13 +29,13 @@ pg_ash solves this entirely inside PostgreSQL itself.
 Instead of one row per active session, we store all active sessions for a database in a single row using parallel arrays:
 
 ```
-sample_ts   │ 2026-02-12 03:48:00+00
+sample_ts   │ 3628080          (seconds since 2026-01-01 = 2026-02-12 03:48:00 UTC)
 datid       │ 16384
 wait_ids    │ {5, 5, 1, 0, 0, 9, 1}
 query_ids   │ {-617046263269, 482910384756, 771629384756, -617046263269, 923847561029, NULL, 482910384756}
 ```
 
-Position `i` in both arrays = one active backend. `wait_ids[i]` is a smallint FK to a dictionary table; `query_ids[i]` joins to `pg_stat_statements`.
+Position `i` in both arrays = one active backend. `wait_ids[i]` is a smallint FK to a dictionary table; `query_ids[i]` joins to `pg_stat_statements`. Reconstruct real timestamp: `ash.epoch() + sample_ts * interval '1 second'`.
 
 **Why not JSONB?** Benchmarked on PG17 with 1 day of realistic data (8,640 samples, 20 backends/sample):
 
@@ -69,9 +69,23 @@ Seeded at install time from a hardcoded set of PG14+ wait events. Unknown events
 
 We sample only `state = 'active'` (and optionally `idle in transaction`). Idle connections aren't interesting for wait event profiling and would bloat the arrays. This is what makes the storage manageable: we capture *work*, not *idle connections*.
 
-### 3.4 `now()` for timestamps
+### 3.4 Compact timestamps (4 bytes)
 
-`now()` (transaction time) instead of `clock_timestamp()`. All rows from the same sample tick share the exact same timestamp. Consistent, slightly cheaper, and precision within a tick doesn't matter for 1–10s sampling.
+Timestamps stored as `int4` — seconds since custom epoch `2026-01-01 00:00:00 UTC`. Good until 2094. Saves 4 bytes/row vs `timestamptz`.
+
+```sql
+-- Epoch constant
+create function ash.epoch() returns timestamptz immutable language sql as
+    $$select '2026-01-01 00:00:00+00'::timestamptz$$;
+
+-- Store (in sampler)
+extract(epoch from now() - ash.epoch())::int
+
+-- Reconstruct (in queries)
+ash.epoch() + (sample_ts * interval '1 second')
+```
+
+Uses `now()` (transaction time) — all rows from the same sample tick share the exact same value. Consistent and slightly cheaper than `clock_timestamp()`.
 
 ### 3.5 PGQ-style 3-partition rotation (zero bloat)
 
@@ -135,7 +149,7 @@ create table ash.wait_event_map (
 
 -- Sample data (partitioned)
 create table ash.sample (
-    sample_ts   timestamptz not null default now(),
+    sample_ts   int         not null default extract(epoch from now() - ash.epoch())::int,
     datid       oid         not null,
     wait_ids    smallint[]  not null,
     query_ids   bigint[],
@@ -159,6 +173,7 @@ create index on ash.sample_2 (sample_ts);
 
 | Function | Purpose |
 |----------|---------|
+| `ash.epoch()` | Returns the custom epoch (`2026-01-01 00:00:00 UTC`) |
 | `ash.current_slot()` | Returns the active partition slot (0, 1, or 2) |
 | `ash.take_sample()` | Snapshots `pg_stat_activity` into `ash.sample` |
 | `ash._register_wait(type, event)` | Auto-inserts unknown wait events, returns id |
