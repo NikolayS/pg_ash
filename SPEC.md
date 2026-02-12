@@ -49,6 +49,10 @@ Encoding: `[version, -wait_event_id, count, query_map_id, ..., -next_wait, ...]`
 - Negative value → wait event id (negated), from `ash.wait_event_map`
 - Next positive value → number of backends with this wait event
 - Following N values → dictionary-encoded query_ids (from `ash.query_map`, int4 PK)
+- **Invariant:** `count` MUST equal the number of following query_id elements
+  before the next negative marker (or end of array). The encoder guarantees
+  this; `_validate_data()` checks it. `count` exists for fast summation without
+  walking individual elements.
 - Wait event IDs start at 1 (`id=1` = CPU). This avoids the `-0 = 0` ambiguity
   in the encoding — every wait marker is strictly negative.
 - `0` in a query_id position = unknown/NULL query_id (sentinel)
@@ -64,10 +68,13 @@ effectively unlimited. Cost: ~390 bytes/row vs 221 for smallint[] (50 backends).
 At 1s sampling: ~33 MiB/day. Still very manageable.
 
 **Structural validation:** The encoding is positional with no framing — a
-malformed array silently produces garbage downstream. `ash._validate_data()`
-walks the array and checks structural integrity (negative marker → positive
-count → N query_ids → next marker). Used in reader functions and optionally
-as a `CHECK` constraint.
+malformed array silently produces garbage downstream. Two levels of validation:
+
+- **Cheap CHECK constraint** on the table: `data[1] = 1 AND array_length(data, 1) >= 3`.
+  Catches gross corruption without adding CPU on the hot 1s insert path.
+- **`ash._validate_data()`** — full structural walk (negative marker → positive
+  count → N query_ids → next marker). Used in reader functions and `ash.status()`
+  diagnostics. Never on the insert path.
 
 See [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for the full design exploration
 (8 approaches benchmarked on Postgres 17, 50 backends, 8,640 samples).
@@ -102,8 +109,8 @@ create table ash.query_map (
 /* id=0 reserved: sentinel for NULL/unknown query_id */
 ```
 
-The rotation function optionally garbage-collects `query_map` entries not
-referenced in any live partition, to keep the table small and lookups fast.
+The `query_map` table grows monotonically — no garbage collection. See §Step 3
+for rationale.
 
 Both dictionaries are populated on first encounter via
 `INSERT ... ON CONFLICT DO NOTHING` + CTE fallback to `SELECT` existing ID.
@@ -309,7 +316,8 @@ create table ash.sample (
   sample_ts      int4      not null,  /* seconds since ash.epoch(), from now() */
   datid          oid       not null,
   active_count   smallint  not null,  /* total sampled backends this tick+db */
-  data           integer[] not null,  /* encoded: [ver, -wait, count, qid, ...] */
+  data           integer[] not null
+                   check (data[1] = 1 and array_length(data, 1) >= 3),
   slot           smallint  not null default ash.current_slot()
 ) partition by list (slot);
 
@@ -395,10 +403,15 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Snapshot `pg_stat_activity` → one row per database per sample tick
 - Group by `datid` and wait event, encode into `data integer[]` format:
   `[1, -wait_id, count, qid, qid, ..., -next_wait, ...]` (leading `1` = format v1)
-- In-function dictionary caching: load all existing `wait_event_map` and
-  `query_map` entries into plpgsql hstore/arrays at function start. Per-backend
-  lookups hit local memory, not catalog tables. Only genuinely new entries
-  trigger `INSERT ... ON CONFLICT DO NOTHING` + fallback `SELECT`
+- **Dictionary strategy — two different approaches:**
+  - **wait_event_map**: cache fully at function start (~600 rows max). Tiny,
+    fits in a plpgsql hstore. Per-backend lookups hit local memory.
+  - **query_map**: do NOT cache fully (can be millions of rows in ORM-heavy
+    workloads). Instead: (1) collect distinct `query_id`s seen in this tick
+    into a temp table, (2) bulk `INSERT ... ON CONFLICT DO NOTHING` into
+    `ash.query_map`, (3) join back to get the `int4` IDs. This is O(distinct
+    query_ids per tick), not O(total query_map size). Use `ON COMMIT DROP`
+    temp table — pg_cron job runs in its own transaction.
 - Wait event NULL handling: `active` + no wait → `active||CPU`;
   `idle in transaction` + no wait → `idle in transaction||IDLE`
 - Filter: `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
@@ -423,13 +436,19 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Advance `current_slot` to next partition (already truncated)
 - `TRUNCATE` the old previous partition (recycle it as the new "next")
 - Update `rotated_at = now()` in `ash.config`
-- Optionally garbage-collect `ash.query_map`: delete entries not referenced in
-  any live partition (keeps table small, lookups fast)
-- **Edge case:** If `take_sample()` is mid-flight during rotation (read
-  `current_slot`, then rotation advances, then insert), the sample lands in
-  the old slot. This is harmless for data correctness but means the "previous"
-  partition may briefly have samples newer than "current"'s oldest. Reader
-  functions must query by `sample_ts` range, not by partition identity.
+- **No query_map garbage collection.** GC would require scanning/unnesting all
+  `integer[]` arrays in live partitions to build a "referenced" set — expensive
+  analytics query just to save a few MiB of dictionary. `query_map` grows
+  monotonically but slowly (one row per distinct `query_id` ever seen). Even
+  pathological ORM churn produces manageable table sizes. If it ever becomes
+  a problem, a manual `TRUNCATE ash.query_map` + re-seeding is the escape hatch.
+- **Critical rule:** `take_sample()` must NEVER read `current_slot` and pass
+  it explicitly to INSERT. Always rely on `DEFAULT ash.current_slot()` evaluated
+  at row insert time. If the sampler caches the slot and rotation fires mid-flight,
+  the insert lands in a partition that `rotate()` is about to truncate → data loss.
+  With DEFAULT, after rotation the insert goes to the new current partition.
+- `rotate()` must truncate only the partition derived from the *old* slot value
+  (the one that was "previous" before the advance), never the new current.
 - Log rotation event (optional: raise notice)
 
 ### Step 4: Start/stop functions
