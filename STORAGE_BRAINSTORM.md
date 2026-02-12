@@ -1,7 +1,11 @@
 # Storage Brainstorm
 
 Design exploration for pg_ash sample row format. All benchmarks run on Postgres 17,
-8,640 samples (1 day at 10s), 50 active backends per sample, 15 distinct wait events.
+8,640 samples (1 day at 10s), 50 active + idle-in-transaction backends per sample,
+15 distinct wait events.
+
+Default sampling is 1s (86,400 samples/day). Benchmarks below used 10s for
+convenience — multiply sizes by 10× for 1s numbers.
 
 ## Approaches Tested
 
@@ -19,10 +23,10 @@ create table sample_flat (
 );
 ```
 
-172,800 rows/day. Each row ~60 bytes, but 23 bytes of tuple header overhead per row
-dominates at this scale.
+172,800 rows/day (at 10s). Each row ~60 bytes, but 23 bytes of tuple header
+overhead per row dominates at this scale.
 
-**Result: 10.2 MiB/day**
+**Result: 10.2 MiB/day (at 10s), ~102 MiB/day (at 1s)**
 
 ### 2. Parallel arrays — `smallint[]` + `bigint[]`
 
@@ -145,20 +149,20 @@ functions for all operations — loses native array operators (`unnest`,
 
 ## Summary
 
-| # | Approach | Bytes/row | MiB/day | Notes |
-|---|----------|-----------|---------|-------|
-| 1 | Flat per-session | 60 (×20 rows) | 10.2 | Baseline, naive |
-| 3 | JSONB grouped | 910 | 7.5 | Self-describing but bloated |
-| 2 | `smallint[]` + `bigint[]` | 630 | 5.3 | Simple parallel arrays |
-| 4 | JSONB → `bytea` (pglz) | 381 | 3.1 | Good ratio, bad read perf |
-| 5 | `smallint[]` + `smallint[]` (dict) | 292 | 2.5 | Dictionary-encoded qids |
-| 6 | Interleaved `smallint[]` | 264 | 2.2 | Single array, stride-2 |
-| **7** | **Encoded `smallint[]`** | **221** | **1.9** | **Best balance** |
-| 8 | Encoded `bytea` (compact) | 190 | 1.6 | Smallest, hardest to query |
+| # | Approach | Bytes/row | MiB/day (10s) | MiB/day (1s) | Notes |
+|---|----------|-----------|---------------|--------------|-------|
+| 1 | Flat per-session | 60 (×20 rows) | 10.2 | 102 | Baseline, naive |
+| 3 | JSONB grouped | 910 | 7.5 | 75 | Self-describing but bloated |
+| 2 | `smallint[]` + `bigint[]` | 630 | 5.3 | 53 | Simple parallel arrays |
+| 4 | JSONB → `bytea` (pglz) | 381 | 3.1 | 31 | Good ratio, bad read perf |
+| 5 | `smallint[]` + `smallint[]` (dict) | 292 | 2.5 | 25 | Dictionary-encoded qids |
+| 6 | Interleaved `smallint[]` | 264 | 2.2 | 22 | Single array, stride-2 |
+| **7** | **Encoded `smallint[]`** | **221** | **1.9** | **19** | **Best balance** |
+| 8 | Encoded `bytea` (compact) | 190 | 1.6 | 16 | Smallest, hardest to query |
 
 ## Decision: Encoded `smallint[]` (#7)
 
-**221 bytes/row. 1.9 MiB/day for 50 backends at 10s sampling.**
+**221 bytes/row. ~19 MiB/day for 50 active + idle-in-transaction backends at 1s sampling (default).**
 
 Rationale:
 - **5.4× compression** vs flat rows
@@ -203,8 +207,15 @@ Map `query_id` (int8, 8 bytes) → `smallint` (2 bytes) via a lookup table.
 Most systems have 50–200 distinct query_ids. This is already built into the
 encoded format (#7) — the `query_ids` in the array are dictionary references.
 
-### What about `datid`?
+### `datid` kept — server-wide view
 
-Dropping `datid` saves only 4 bytes/row (186 vs 190). Not worth losing
-multi-database support. Most systems have 1–3 databases, so the column
-compresses well if it ever TOASTs.
+`datid` (oid, 4 bytes/row) is kept in the schema. Cross-database analysis
+("is the server overloaded?") requires seeing all backends in one place.
+pg_ash is installed once (in the pg_cron database) and samples all databases
+via `pg_stat_activity`.
+
+### Sampled sessions
+
+We capture `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`.
+Idle-in-transaction sessions are always included — they hold locks, block vacuum,
+and are silent killers. Purely `idle` sessions are excluded.
