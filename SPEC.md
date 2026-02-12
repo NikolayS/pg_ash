@@ -1,22 +1,32 @@
 # pg_ash — Active Session History for PostgreSQL
 
-## Overview
+## 1. Goal
 
-**pg_ash** samples `pg_stat_activity` at a configurable frequency (1–60s) and stores wait event history in a bloat-free rotating partition scheme inspired by Skype's PGQ.
+Provide lightweight, always-on wait event history for PostgreSQL — the equivalent of Oracle's ASH (Active Session History) — using only pure SQL and `pg_cron`. No C extensions, no `shared_preload_libraries` changes, no external agents.
 
-No extensions required beyond `pg_cron`. Pure SQL. Runs on the primary. Designed for small-to-medium clusters where installing custom C extensions isn't practical or allowed.
+Target: small-to-medium PostgreSQL clusters running on the primary, where installing `pg_wait_sampling` or similar C extensions is impractical or not allowed.
 
-**Compatibility:** PostgreSQL 14+.
+## 2. Problem Statement
 
-## Why
+PostgreSQL's `pg_stat_activity` is a point-in-time snapshot. It shows what's happening *right now*, but the moment you look away, the data is gone. This makes it nearly impossible to answer basic observability questions:
 
-PostgreSQL has `pg_stat_activity` but it's a point-in-time snapshot — blink and you miss it. Oracle has ASH (Active Session History). `pg_wait_sampling` exists but requires a C extension and `shared_preload_libraries`. pg_ash gives you the same observability with zero operational overhead: just SQL + pg_cron.
+- **"What was the database waiting on at 3am?"** — You can't know unless you were watching.
+- **"Which queries cause the most lock contention?"** — `pg_stat_statements` gives you timing totals but no wait event breakdown per query.
+- **"Is IO or CPU the bottleneck?"** — Requires continuous sampling to see the ratio over time.
+- **"Did something change after Tuesday's deploy?"** — No historical baseline to compare against.
 
-## Architecture
+Existing solutions:
+- **pg_wait_sampling** — Excellent, but requires a C extension and `shared_preload_libraries` restart. Many managed environments (RDS, Cloud SQL) don't allow it.
+- **pgsentinel** — Similar C extension limitations.
+- **External monitoring agents** — Pull `pg_stat_activity` from outside, but add network overhead, require separate infrastructure, and often store data externally.
 
-### Sample Row Format
+pg_ash solves this entirely inside PostgreSQL itself.
 
-One row per sample per database. Parallel arrays — each index position = one active backend.
+## 3. Design Decisions
+
+### 3.1 One row per database per sample (parallel arrays)
+
+Instead of one row per active session, we store all active sessions for a database in a single row using parallel arrays:
 
 ```
 sample_ts   │ 2026-02-12 03:48:00+00
@@ -25,78 +35,47 @@ wait_ids    │ {5, 5, 1, 0, 0, 9, 1}
 query_ids   │ {-617046263269, 482910384756, 771629384756, -617046263269, 923847561029, NULL, 482910384756}
 ```
 
-- `wait_ids[i]` → lookup in `ash.wait_event_map` for the wait event name
-- `query_ids[i]` → join to `pg_stat_statements` for query text
-- `wait_id = 0` means running on CPU (no wait event)
-- `query_ids` element is NULL when `query_id` is not set (e.g., `compute_query_id = off`)
+Position `i` in both arrays = one active backend. `wait_ids[i]` is a smallint FK to a dictionary table; `query_ids[i]` joins to `pg_stat_statements`.
 
-7 active backends across 3 distinct wait events → **1 row**.
+**Why not JSONB?** Benchmarked on PG17 with 1 day of realistic data (8,640 samples, 20 backends/sample):
 
-### Wait Event Dictionary
+| Approach | Rows/day | Size/day | Bytes/row |
+|----------|----------|----------|-----------|
+| **Parallel arrays** | **8,640** | **2.5 MB** | **307** |
+| JSONB grouped | 8,640 | 5.4 MB | 634 |
+| Flat per-session | 172,800 | 10.2 MB | 60 |
+
+Arrays are 2× more compact than JSONB (native binary, no per-key text framing) and 4× more compact than flat rows (20× fewer tuples, less header overhead).
+
+**Why not flat rows?** 20× more rows means 20× more tuple headers (23 bytes each), 20× more index entries, and 20× more vacuum work. The array approach eliminates all of that.
+
+### 3.2 Wait event dictionary (smallint IDs)
+
+Wait events are stored as `smallint` (2 bytes) referencing a dictionary table, not as text. There are ~200 known wait events in PostgreSQL. This saves ~20 bytes per array element vs storing `"LWLock:LockManager"` as text.
 
 ```sql
 create table ash.wait_event_map (
     id       smallint primary key generated always as identity,
-    type     text not null,  -- 'LWLock', 'IO', 'Lock', etc.
-    event    text not null,  -- 'LockManager', 'DataFileRead', etc.
+    type     text not null,   -- 'LWLock', 'IO', 'Lock', ...
+    event    text not null,   -- 'LockManager', 'DataFileRead', ...
     unique (type, event)
 );
-
--- id=0 is reserved: CPU (running, no wait event)
-insert into ash.wait_event_map (id, type, event)
-    overriding system value
-    values (0, '', 'CPU');
+-- id=0 reserved for CPU (running, no wait event)
 ```
 
-Populated at install time from a known set of PG14+ wait events (~200 entries). The sampler function auto-inserts unknown wait events on first encounter (future-proof for new PG versions).
+Seeded at install time from a hardcoded set of PG14+ wait events. Unknown events are auto-registered on first encounter (future-proof).
 
-On PG17+, we could also seed from `pg_wait_events`, but we don't require it.
+### 3.3 Only active sessions
 
-### Sample Table
+We sample only `state = 'active'` (and optionally `idle in transaction`). Idle connections aren't interesting for wait event profiling and would bloat the arrays. This is what makes the storage manageable: we capture *work*, not *idle connections*.
 
-```sql
-create table ash.sample (
-    sample_ts   timestamptz not null default now(),
-    datid       oid         not null,
-    wait_ids    smallint[]  not null,
-    query_ids   bigint[]
-) partition by list (slot);
-```
+### 3.4 `now()` for timestamps
 
-**Why `now()` not `clock_timestamp()`:** All rows from the same sample tick share the same timestamp. `now()` is transaction-time — perfectly consistent and slightly cheaper. Precision within a sampling tick doesn't matter.
+`now()` (transaction time) instead of `clock_timestamp()`. All rows from the same sample tick share the exact same timestamp. Consistent, slightly cheaper, and precision within a tick doesn't matter for 1–10s sampling.
 
-**Why parallel arrays over JSONB:**
+### 3.5 PGQ-style 3-partition rotation (zero bloat)
 
-Benchmarked with 1 day of data (8,640 samples, 20 backends):
-
-| Approach | Size/day | Bytes/row |
-|----------|----------|-----------|
-| **Parallel arrays** | **2.5 MB** | 307 |
-| JSONB grouped | 5.4 MB | 634 |
-| Flat per-session | 10.2 MB | 60 (but 20× more rows) |
-
-Arrays are 2× more compact than JSONB and native binary — no per-key text overhead.
-
-### Storage Math
-
-At 10-second sampling, 1 database:
-
-| Active backends | Rows/day | Size/day |
-|-----------------|----------|----------|
-| 5 | 8,640 | ~1 MB |
-| 20 | 8,640 | ~2.5 MB |
-| 50 | 8,640 | ~5 MB |
-| 100 | 8,640 | ~9 MB |
-
-Row count is always 8,640/day regardless of backend count (1 row per sample). Size scales with array length.
-
-At 1-second sampling, multiply by 10.
-
-With 2 live partitions (current + previous day), worst case 100 backends at 1s: ~180 MB total. Still trivial.
-
-### Bloat-Free Storage: PGQ-Style 3-Partition Rotation
-
-Three partitions rotating through roles:
+Inspired by Skype's PGQ. Three partitions rotate through roles:
 
 ```
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
@@ -107,21 +86,60 @@ Three partitions rotating through roles:
 ```
 
 At rotation (default: daily at midnight):
-1. Advance `current_slot` to the "next" partition (already truncated, ready)
-2. `TRUNCATE` the old "previous" partition (now becomes "next")
+1. Advance `current_slot` → the "next" partition (already truncated, ready for writes)
+2. `TRUNCATE` the old "previous" partition (becomes the new "next")
 
 **Why this works:**
 - `TRUNCATE` is instantaneous, generates minimal WAL
-- No dead tuples, no vacuum pressure, no bloat — ever
-- "Previous" partition always available for queries (yesterday's data)
-- Predictable, bounded storage
+- Zero dead tuples, zero vacuum pressure, zero bloat — ever
+- "Previous" partition always queryable (yesterday's data)
+- Predictable, bounded storage — you always know exactly how much space ASH uses
+- Indexes are rebuilt instantly on the empty partition after `TRUNCATE`
 
-### Partition Key
+**Partition key:** A synthetic `slot` column (smallint, values 0/1/2) set by `ash.current_slot()`. Partitioned by `LIST (slot)`.
+
+### 3.6 No query text storage
+
+Query text is not stored. That's what `pg_stat_statements` is for. We store `query_id` (bigint) which joins to it. Storing query text would 10–100× the storage cost.
+
+### 3.7 PostgreSQL 14+ minimum
+
+`query_id` was introduced in PG14 (`compute_query_id` GUC). Without it, the core value proposition (correlating wait events to specific queries) is lost.
+
+## 4. Schema
+
+### 4.1 Tables
 
 ```sql
+create schema ash;
+
+-- Configuration (singleton row)
+create table ash.config (
+    singleton          bool primary key default true check (singleton),
+    current_slot       smallint not null default 0,
+    sample_interval    interval not null default '10 seconds',
+    rotation_period    interval not null default '1 day',
+    include_idle_xact  bool not null default false,
+    include_bg_workers bool not null default false,
+    rotated_at         timestamptz not null default clock_timestamp(),
+    installed_at       timestamptz not null default clock_timestamp()
+);
+
+-- Wait event dictionary
+create table ash.wait_event_map (
+    id       smallint primary key generated always as identity,
+    type     text not null,
+    event    text not null,
+    unique (type, event)
+);
+
+-- Sample data (partitioned)
 create table ash.sample (
-    ...
-    slot smallint not null default ash.current_slot()
+    sample_ts   timestamptz not null default now(),
+    datid       oid         not null,
+    wait_ids    smallint[]  not null,
+    query_ids   bigint[],
+    slot        smallint    not null default ash.current_slot()
 ) partition by list (slot);
 
 create table ash.sample_0 partition of ash.sample for values in (0);
@@ -129,211 +147,120 @@ create table ash.sample_1 partition of ash.sample for values in (1);
 create table ash.sample_2 partition of ash.sample for values in (2);
 ```
 
-### Indexes
+### 4.2 Indexes
 
 ```sql
--- Primary access pattern: time-range queries
 create index on ash.sample_0 (sample_ts);
 create index on ash.sample_1 (sample_ts);
 create index on ash.sample_2 (sample_ts);
 ```
 
-Indexes are rebuilt instantly after `TRUNCATE`. No index bloat.
+### 4.3 Functions
 
-GIN indexes on the arrays are possible but likely unnecessary — most queries filter by `sample_ts` first, then scan the arrays. The sample table is compact enough.
+| Function | Purpose |
+|----------|---------|
+| `ash.current_slot()` | Returns the active partition slot (0, 1, or 2) |
+| `ash.take_sample()` | Snapshots `pg_stat_activity` into `ash.sample` |
+| `ash._register_wait(type, event)` | Auto-inserts unknown wait events, returns id |
+| `ash.rotate()` | Advances the current slot and truncates the recycled partition |
+| `ash.start(interval)` | Creates pg_cron jobs for sampling and rotation |
+| `ash.stop()` | Removes pg_cron jobs |
 
-## Sampling
+### 4.4 Convenience Views
 
-### The Sampler Function
+| View | Purpose |
+|------|---------|
+| `ash.top_waits` | Top wait events in the last hour |
+| `ash.wait_timeline` | Wait events bucketed by minute |
+| `ash.top_queries` | Queries with most wait samples |
+| `ash.cpu_vs_waiting` | CPU vs waiting breakdown |
 
-```sql
-create or replace function ash.take_sample()
-returns void as $$
-    insert into ash.sample (datid, wait_ids, query_ids)
-    select
-        datid,
-        array_agg(coalesce(w.id, ash._register_wait(sa.wait_event_type, sa.wait_event))),
-        array_agg(query_id)
-    from pg_stat_activity sa
-    left join ash.wait_event_map w
-        on w.type = coalesce(sa.wait_event_type, '')
-        and w.event = coalesce(sa.wait_event, 'CPU')
-    where sa.pid != pg_backend_pid()
-        and sa.state = 'active'
-        and sa.backend_type = 'client backend'
-    group by sa.datid;
-$$ language sql;
-```
+## 5. Storage Estimates
 
-**Only `state = 'active'`** — idle and idle-in-transaction sessions aren't interesting for wait event profiling. This is what keeps storage tiny.
+At 10-second sampling, 1 database:
 
-The `_register_wait()` fallback auto-inserts any wait event not in the dictionary (handles new PG versions without manual updates).
+| Active backends | Rows/day | Size/day | Size with 2 partitions |
+|-----------------|----------|----------|------------------------|
+| 5 | 8,640 | ~1 MB | ~2 MB |
+| 20 | 8,640 | ~2.5 MB | ~5 MB |
+| 50 | 8,640 | ~5 MB | ~10 MB |
+| 100 | 8,640 | ~9 MB | ~18 MB |
 
-### pg_cron Scheduling
+At 1-second sampling, multiply size by 10× (rows become 86,400/day).
 
-```sql
--- Sample every 10 seconds (default)
-select cron.schedule('ash_sampler', '10 seconds', 'select ash.take_sample()');
+Row count depends only on sampling frequency, not backend count. Size scales with array length.
 
--- Rotation daily at midnight
-select cron.schedule('ash_rotate', '0 0 * * *', 'select ash.rotate()');
-```
+## 6. Implementation Plan
 
-Minimum interval: 1 second (pg_cron limit). Oracle ASH also samples at 1s.
+### Step 1: Schema and dictionary
+- Create `ash` schema
+- Create `ash.config` table with singleton constraint
+- Create `ash.wait_event_map` and seed with PG14+ wait events (~200 entries)
+- `id=0` reserved for CPU (no wait event)
+- Create `ash._register_wait()` for auto-inserting unknown events
 
-### The Rotate Function
+### Step 2: Partitioned sample table
+- Create `ash.sample` partitioned by `LIST (slot)`
+- Create 3 child partitions (`sample_0`, `sample_1`, `sample_2`)
+- Create `ash.current_slot()` function reading from `ash.config`
+- Create `sample_ts` indexes on each partition
 
-```sql
-create or replace function ash.rotate()
-returns void as $$
-declare
-    v_current smallint;
-    v_next smallint;
-    v_old_prev smallint;
-begin
-    select current_slot into v_current from ash.config;
-    v_next := (v_current + 1) % 3;
-    v_old_prev := (v_current + 2) % 3;
+### Step 3: Sampler function
+- Create `ash.take_sample()` — snapshots active sessions from `pg_stat_activity`
+- Group by `datid`, aggregate `wait_ids` and `query_ids` as parallel arrays
+- Handle the wait event lookup with LEFT JOIN + `_register_wait()` fallback
+- Respect `include_idle_xact` and `include_bg_workers` config flags
 
-    -- Advance: start writing to the next slot (already empty)
-    update ash.config set
-        current_slot = v_next,
-        rotated_at = clock_timestamp();
+### Step 4: Rotation function
+- Create `ash.rotate()` — advances `current_slot`, truncates recycled partition
+- Must be safe to call concurrently (idempotent or locked)
 
-    -- Truncate the old previous (now becomes "next", to be used next rotation)
-    execute format('truncate ash.sample_%s', v_old_prev);
-end;
-$$ language plpgsql;
-```
+### Step 5: Start/stop functions
+- Create `ash.start(interval)` — schedules pg_cron jobs for sampling and rotation
+- Create `ash.stop()` — unschedules pg_cron jobs
+- Validate pg_cron is available before scheduling
 
-## Configuration
+### Step 6: Convenience views
+- `ash.top_waits` — top wait events, last hour
+- `ash.wait_timeline` — per-minute wait event breakdown
+- `ash.top_queries` — queries with most wait samples, joined to `pg_stat_statements`
+- `ash.cpu_vs_waiting` — CPU vs waiting ratio
 
-```sql
-create table ash.config (
-    singleton       bool primary key default true check (singleton),
-    current_slot    smallint not null default 0,
-    sample_interval interval not null default '10 seconds',
-    rotation_period interval not null default '1 day',
-    include_idle_xact bool not null default false,
-    include_bg_workers bool not null default false,
-    rotated_at      timestamptz not null default clock_timestamp(),
-    installed_at    timestamptz not null default clock_timestamp()
-);
-```
+### Step 7: Install/uninstall scripts
+- `ash--1.0.sql` — single-file install (schema + tables + functions + views + seed data)
+- Document `ash.start()` / `ash.stop()` / `drop schema ash cascade`
 
-Options:
-- `include_idle_xact`: also capture `idle in transaction` sessions (off by default)
-- `include_bg_workers`: also capture autovacuum, WAL sender, etc. (off by default)
+### Step 8: Testing
+- Test on PG14, 15, 16, 17, 18
+- Verify sampling under load (pgbench)
+- Verify rotation doesn't lose data or create gaps
+- Verify storage matches estimates
+- Verify unknown wait events are auto-registered
+- Test with `include_idle_xact = true` and `include_bg_workers = true`
+- Test `ash.stop()` + `ash.start()` cycling
 
-## Query Examples
+### Step 9: Documentation and examples
+- README with quick start
+- Example queries for common scenarios
+- Grafana dashboard queries
+- Storage planning guide
 
-### Top wait events in the last hour
+### Step 10: CI
+- GitHub Actions: install pg_cron, install pg_ash, run pgbench, verify samples, verify rotation
+- Test matrix: PG14, 15, 16, 17, 18
 
-```sql
-select
-    w.type || ':' || w.event as wait_event,
-    count(*) as samples,
-    round(100.0 * count(*) / sum(count(*)) over (), 1) as pct
-from ash.sample s,
-     unnest(s.wait_ids) as wid
-join ash.wait_event_map w on w.id = wid
-where s.sample_ts > now() - interval '1 hour'
-    and wid != 0  -- exclude CPU
-group by 1
-order by 2 desc
-limit 20;
-```
+## 7. Limitations
 
-### Wait event timeline (minute buckets)
+- **1s minimum sampling** — pg_cron limit. Sub-second requires `pg_wait_sampling` (C extension).
+- **Primary only** — `pg_stat_activity` on replicas doesn't show replica query wait events in the same way.
+- **No per-PID tracking** — aggregated by database per sample. Can't trace one backend's journey across time. (By design — keeps storage tiny.)
+- **No query text** — join `query_id` to `pg_stat_statements`.
+- **Requires `compute_query_id = on`** — default since PG14, but can be turned off.
 
-```sql
-select
-    date_trunc('minute', s.sample_ts) as minute,
-    w.type || ':' || w.event as wait_event,
-    count(*) as samples
-from ash.sample s,
-     unnest(s.wait_ids) as wid
-join ash.wait_event_map w on w.id = wid
-where s.sample_ts > now() - interval '1 hour'
-    and wid != 0
-group by 1, 2
-order by 1, 3 desc;
-```
+## 8. Future Ideas
 
-### Top queries by wait time
-
-```sql
-select
-    qid as query_id,
-    count(*) as wait_samples,
-    array_agg(distinct w.type || ':' || w.event) as wait_events
-from ash.sample s,
-     unnest(s.wait_ids, s.query_ids) as u(wid, qid)
-join ash.wait_event_map w on w.id = wid
-where s.sample_ts > now() - interval '1 hour'
-    and wid != 0
-    and qid is not null
-group by 1
-order by 2 desc
-limit 20;
-```
-
-### CPU vs waiting breakdown
-
-```sql
-select
-    case when wid = 0 then 'CPU' else 'Waiting' end as state,
-    count(*) as samples,
-    round(100.0 * count(*) / sum(count(*)) over (), 1) as pct
-from ash.sample s,
-     unnest(s.wait_ids) as wid
-where s.sample_ts > now() - interval '1 hour'
-group by 1;
-```
-
-## Installation
-
-```sql
-create extension if not exists pg_cron;
-\i ash--1.0.sql
-select ash.start();           -- 10s sampling (default)
--- or: select ash.start('1 second');
-```
-
-## Uninstall
-
-```sql
-select ash.stop();    -- removes pg_cron jobs
-drop schema ash cascade;
-```
-
-## Files
-
-```
-pg_ash/
-├── README.md
-├── SPEC.md               (this file)
-├── LICENSE                (Apache 2.0)
-├── ash--1.0.sql           (full install script)
-└── sql/
-    └── views/
-        ├── top_waits.sql
-        ├── wait_timeline.sql
-        ├── top_queries.sql
-        └── cpu_vs_waiting.sql
-```
-
-## Limitations
-
-- **Sampling resolution:** 1s minimum (pg_cron limit). Sub-second needs `pg_wait_sampling` (C extension).
-- **Primary only:** designed for primary, `pg_stat_activity` on replicas shows limited info.
-- **No per-PID tracking:** aggregated by database. Can't trace individual backend journeys. (By design — keeps storage tiny.)
-- **No query text:** use `pg_stat_statements` and join on `query_id`.
-
-## Future Ideas
-
-- Grafana dashboard JSON (wait event heatmap, top queries, CPU vs waiting)
-- `ash.report()` — text-based ASH report function (like Oracle's `ASHREPORT`)
-- Wait event dictionary compression: many events will never appear; could lazy-populate
-- Aggregate rollup table (per-minute summaries kept for 30+ days)
-- Multi-day retention via more partitions (e.g., 7×3 = 21 partitions for weekly rotation)
+- **`ash.report(interval)`** — text-based ASH report function, like Oracle's `ASHREPORT`
+- **Grafana dashboard JSON** — wait event heatmap, top queries, CPU vs waiting over time
+- **Aggregate rollup** — per-minute summaries kept for 30+ days (tiny storage)
+- **Multi-day retention** — more partitions (e.g., 7 days = 9 partitions in 3 rotation groups)
+- **Per-PID mode** — optional flat-row table for detailed per-backend tracking at higher storage cost
