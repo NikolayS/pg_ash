@@ -151,7 +151,7 @@ create schema ash;
 create table ash.config (
   singleton          bool primary key default true check (singleton),
   current_slot       smallint not null default 0,
-  sample_interval    interval not null default '10 seconds',
+  sample_interval    interval not null default '1 second',
   rotation_period    interval not null default '1 day',
   include_idle_xact  bool not null default false,
   include_bg_workers bool not null default false,
@@ -217,16 +217,16 @@ create index on ash.sample_2 (sample_ts);
 
 ## 5. Storage Estimates
 
-At 10-second sampling, 1 database, encoded `smallint[]` format:
+Default: **1-second sampling** (matches Oracle ASH). Encoded `smallint[]` format, 1 database:
 
 | Active backends | Rows/day | Size/day | Size with 2 partitions |
 |-----------------|----------|----------|------------------------|
-| 5 | 8,640 | ~0.5 MiB | ~1 MiB |
-| 20 | 8,640 | ~1.0 MiB | ~2.0 MiB |
-| 50 | 8,640 | ~1.8 MiB | ~3.6 MiB |
-| 100 | 8,640 | ~3.4 MiB | ~6.8 MiB |
+| 5 | 86,400 | ~5 MiB | ~10 MiB |
+| 20 | 86,400 | ~10 MiB | ~20 MiB |
+| 50 | 86,400 | ~19 MiB | ~38 MiB |
+| 100 | 86,400 | ~35 MiB | ~70 MiB |
 
-At 1-second sampling, multiply size by 10× (rows become 86,400/day).
+At 10-second sampling, divide by 10×.
 
 Row count depends only on sampling frequency, not backend count. Size scales with array length.
 
@@ -258,7 +258,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Log rotation event (optional: insert marker row or raise notice)
 
 ### Step 4: Start/stop functions
-- `ash.start(interval default '10 seconds')` — schedule pg_cron jobs (sampler + rotation)
+- `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation)
 - `ash.stop()` — unschedule pg_cron jobs
 - Validate pg_cron is installed before attempting schedule
 
@@ -280,11 +280,11 @@ Simulate realistic production workloads without waiting real time:
 - ~20 distinct query_ids with realistic repetition patterns (zipf-like)
 - Generate directly via `INSERT ... SELECT generate_series()`
 
-**Scenarios:**
-- **1 day:** 8,640 rows, ~1.9 MiB — baseline
-- **1 month:** 259,200 rows, ~57 MiB — measure query latency on reader functions
-- **1 year:** 3,153,600 rows, ~680 MiB — measure query latency, verify index effectiveness
-- **10 years:** 31,536,000 rows, ~6.6 GiB — stress test, verify reader functions still perform
+**Scenarios (50 active backends, 1s sampling, 1 database):**
+- **1 day:** 86,400 rows, ~19 MiB — baseline
+- **1 month:** 2,592,000 rows, ~570 MiB — measure query latency on reader functions
+- **1 year:** 31,536,000 rows, ~6.8 GiB — measure query latency, verify index effectiveness
+- **10 years:** 315,360,000 rows, ~68 GiB — stress test, verify reader functions still perform
 
 **What to measure:**
 - Table + index size at each scale

@@ -18,7 +18,7 @@ Encoding: `[-wait_event_id, count, query_id, query_id, ...]`. 6 active backends 
 
 ## Storage
 
-~1.9 MiB/day with 50 active backends at 10s sampling. See [SPEC.md](SPEC.md) for full benchmarks and [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for design exploration.
+~19 MiB/day with 50 active backends at 1s sampling (default). See [SPEC.md](SPEC.md) for full benchmarks and [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for design exploration.
 
 ## Requirements
 
