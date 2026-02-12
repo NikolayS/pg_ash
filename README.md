@@ -6,7 +6,7 @@ Inspired by Oracle ASH. Requires only `pg_cron`. Pure SQL, no C extensions, no `
 
 ## What it does
 
-Samples `pg_stat_activity` at a configurable frequency (1–60s) and stores wait events in a compact encoded `smallint[]` format (one row per database per sample tick) with PGQ-style 3-partition rotation — zero vacuum, zero bloat, bounded storage.
+Samples `pg_stat_activity` at a configurable frequency (1–60s) and stores wait events in a compact encoded `integer[]` format (one row per database per sample tick) with PGQ-style 3-partition rotation — zero vacuum, zero bloat, bounded storage.
 
 **Sample row:**
 ```
@@ -19,7 +19,7 @@ Encoding: `[-wait_event_id, count, query_id, query_id, ...]`. 6 active backends 
 
 ## Storage
 
-~19 MiB/day with 50 active backends at 1s sampling (default). See [SPEC.md](SPEC.md) for full benchmarks and [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for design exploration.
+~33 MiB/day with 50 active backends at 1s sampling (default). See [SPEC.md](SPEC.md) for full benchmarks and [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for design exploration.
 
 ## Requirements
 

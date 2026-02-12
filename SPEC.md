@@ -28,10 +28,10 @@ External monitoring systems are still valuable for long-term storage and trend a
 
 ## 3. Design Decisions
 
-### 3.1 One row per database per sample tick (encoded `smallint[]`)
+### 3.1 One row per database per sample tick (encoded `integer[]`)
 
 Instead of one row per active session, we store all active sessions for a database
-in a single row using a compact encoded `smallint[]`:
+in a single row using a compact encoded `integer[]` (int4):
 
 ```
 sample_ts   │ 3628080    (seconds since 2026-01-01 = 2026-02-12 03:48:00 UTC)
@@ -39,17 +39,30 @@ datid       │ 16384
 data        │ {-5, 3, 101, 102, 101, -1, 2, 103, 104, -1, 1, 105}
 ```
 
-Encoding: `[-wait_event_id, count, query_id, query_id, ..., -next_wait, ...]`
+Encoding: `[-wait_event_id, count, query_map_id, query_map_id, ..., -next_wait, ...]`
 
 - Negative value → wait event id (negated), from `ash.wait_event_map`
 - Next value → number of backends with this wait event
-- Following N values → dictionary-encoded query_ids (from `ash.query_map`)
+- Following N values → dictionary-encoded query_ids (from `ash.query_map`, int4 PK)
 - Wait event IDs start at 1 (`id=1` = CPU). This avoids the `-0 = 0` ambiguity
   in the encoding — every wait marker is strictly negative.
+- `0` in a query_id position = unknown/NULL query_id (sentinel)
 
 6 active backends across 3 wait events → **1 row, 12 array elements**.
 
 Reconstruct timestamp: `ash.epoch() + sample_ts * interval '1 second'`.
+
+**Why `integer[]` not `smallint[]`:** `smallint` caps at 32,767 distinct
+query_map entries. Busy systems with ORMs, ad-hoc SQL, and schema changes can
+approach this over months. `integer` (int4) gives 2 billion entries —
+effectively unlimited. Cost: ~390 bytes/row vs 221 for smallint[] (50 backends).
+At 1s sampling: ~33 MiB/day. Still very manageable.
+
+**Structural validation:** The encoding is positional with no framing — a
+malformed array silently produces garbage downstream. `ash._validate_data()`
+walks the array and checks structural integrity (negative marker → positive
+count → N query_ids → next marker). Used in reader functions and optionally
+as a `CHECK` constraint.
 
 See [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for the full design exploration
 (8 approaches benchmarked on Postgres 17, 50 backends, 8,640 samples).
@@ -72,27 +85,41 @@ create table ash.wait_event_map (
 /* IDs start at 1 to avoid -0 = 0 ambiguity in the encoding */
 ```
 
-**Query IDs** stored as `smallint` (2 bytes) referencing `ash.query_map`.
-Most systems have 50–200 distinct query_ids in any given 2-day window.
-Saves 6 bytes per element vs raw `int8`.
+**Query IDs** stored as `int4` (4 bytes) referencing `ash.query_map`.
+Maps `int8` query_ids to compact `int4` dictionary IDs. 2 billion capacity —
+effectively unlimited.
 
 ```sql
 create table ash.query_map (
-  id       smallint primary key generated always as identity,
+  id       int4 primary key generated always as identity,
   query_id int8 not null unique
 );
+/* id=0 reserved: sentinel for NULL/unknown query_id */
 ```
 
-**Overflow protection:** `smallint` caps at 32,767 distinct entries. Systems with
-high query diversity (ORMs, ad-hoc SQL, multi-tenant) could approach this over
-months. The rotation function (`ash.rotate()`) garbage-collects `query_map`
-entries that no longer appear in any live partition — keeping the dictionary
-bounded to the 2-day retention window. The identity sequence is reset after
-cleanup to recycle IDs.
+The rotation function optionally garbage-collects `query_map` entries not
+referenced in any live partition, to keep the table small and lookups fast.
 
-Both dictionaries are seeded on first encounter — the sampler auto-registers
-unknown wait events and query_ids via `INSERT ... ON CONFLICT DO NOTHING`
-(concurrency-safe UPSERT).
+Both dictionaries are populated on first encounter via
+`INSERT ... ON CONFLICT DO NOTHING` + CTE fallback to `SELECT` existing ID.
+This is concurrency-safe — if two `take_sample()` calls race (manual + pg_cron),
+neither blocks and no sample is lost.
+
+**Sampler NULL handling for `wait_event_map`:**
+
+```sql
+/* in the sampler query */
+coalesce(sa.wait_event_type, '') as type,
+coalesce(sa.wait_event,
+  case
+    when sa.state = 'active' then 'CPU'
+    when sa.state like 'idle in transaction%' then 'IDLE'
+  end
+) as event
+```
+
+This maps `active` + no wait event → `active|:CPU` and
+`idle in transaction` + no wait event → `idle in transaction|:IDLE`.
 
 ### 3.3 Single install, all databases
 
@@ -227,16 +254,16 @@ create table ash.wait_event_map (
 
 /* query_id dictionary */
 create table ash.query_map (
-  id       smallint primary key generated always as identity,
+  id       int4 primary key generated always as identity,
   query_id int8 not null unique
 );
 
 /* sample data (partitioned) */
 create table ash.sample (
-  sample_ts int        not null default extract(epoch from now() - ash.epoch())::int,
-  datid     oid        not null,
-  data      smallint[] not null,  /* encoded: [-wait, count, qid, qid, ...] */
-  slot      smallint   not null default ash.current_slot()
+  sample_ts int       not null default extract(epoch from now() - ash.epoch())::int,
+  datid     oid       not null,
+  data      integer[] not null,  /* encoded: [-wait, count, qid, qid, ...] */
+  slot      smallint  not null default ash.current_slot()
 ) partition by list (slot);
 
 create table ash.sample_0 partition of ash.sample for values in (0);
@@ -260,7 +287,8 @@ create index on ash.sample_2 (sample_ts);
 | `ash.current_slot()` | Returns the active partition slot (0, 1, or 2) |
 | `ash.take_sample()` | Snapshots `pg_stat_activity` into `ash.sample` |
 | `ash._register_wait(state, type, event)` | Auto-inserts unknown wait events, returns id |
-| `ash._register_query(int8)` | Auto-inserts unknown query_ids, returns smallint id |
+| `ash._register_query(int8)` | Auto-inserts unknown query_ids, returns int4 id |
+| `ash._validate_data(integer[])` | Validates encoded array structure, returns bool |
 | `ash.rotate()` | Advances the current slot and truncates the recycled partition |
 | `ash.start(interval)` | Creates pg_cron jobs for sampling and rotation |
 | `ash.stop()` | Removes pg_cron jobs |
@@ -276,14 +304,14 @@ create index on ash.sample_2 (sample_ts);
 
 ## 5. Storage Estimates
 
-Default: **1-second sampling** (matches Oracle ASH). Encoded `smallint[]` format, 1 database:
+Default: **1-second sampling** (matches Oracle ASH). Encoded `integer[]` format, 1 database:
 
 | Active backends | Rows/day | Size/day | Size with 2 partitions |
 |-----------------|----------|----------|------------------------|
-| 5 | 86,400 | ~5 MiB | ~10 MiB |
-| 20 | 86,400 | ~10 MiB | ~20 MiB |
-| 50 | 86,400 | ~19 MiB | ~38 MiB |
-| 100 | 86,400 | ~35 MiB | ~70 MiB |
+| 5 | 86,400 | ~8 MiB | ~16 MiB |
+| 20 | 86,400 | ~18 MiB | ~36 MiB |
+| 50 | 86,400 | ~33 MiB | ~66 MiB |
+| 100 | 86,400 | ~62 MiB | ~124 MiB |
 
 At 10-second sampling, divide by 10×.
 
@@ -317,9 +345,14 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 ### Step 3: Rotation function (`ash.rotate()`)
 - Advance `current_slot` to next partition (already truncated)
 - `TRUNCATE` the old previous partition (recycle it as the new "next")
-- Garbage-collect `ash.query_map`: delete entries not referenced in any live partition,
-  reset identity sequence to recycle IDs (prevents smallint overflow)
+- Optionally garbage-collect `ash.query_map`: delete entries not referenced in
+  any live partition (keeps table small, lookups fast)
 - Advisory lock to prevent concurrent rotation
+- **Edge case:** If `take_sample()` is mid-flight during rotation (read
+  `current_slot`, then rotation advances, then insert), the sample lands in
+  the old slot. This is harmless for data correctness but means the "previous"
+  partition may briefly have samples newer than "current"'s oldest. Reader
+  functions must query by `sample_ts` range, not by partition identity.
 - Log rotation event (optional: raise notice)
 
 ### Step 4: Start/stop functions
@@ -348,10 +381,10 @@ Simulate realistic production workloads without waiting real time:
 - Generate directly via `INSERT ... SELECT generate_series()`
 
 **Scenarios (50 active backends, 1s sampling, 1 database):**
-- **1 day:** 86,400 rows, ~19 MiB — baseline
-- **1 month:** 2,592,000 rows, ~570 MiB — measure query latency on reader functions
-- **1 year:** 31,536,000 rows, ~6.8 GiB — measure query latency, verify index effectiveness
-- **10 years:** 315,360,000 rows, ~68 GiB — stress test, verify reader functions still perform
+- **1 day:** 86,400 rows, ~33 MiB — baseline
+- **1 month:** 2,592,000 rows, ~1 GiB — measure query latency on reader functions
+- **1 year:** 31,536,000 rows, ~12 GiB — measure query latency, verify index effectiveness
+- **10 years:** 315,360,000 rows, ~120 GiB — stress test, verify reader functions still perform
 
 **What to measure:**
 - Table + index size at each scale
