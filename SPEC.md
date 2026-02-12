@@ -57,16 +57,19 @@ See [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for the full design explorati
 ### 3.2 Dictionary encoding (wait events + query_ids)
 
 **Wait events** stored as `smallint` (2 bytes) referencing `ash.wait_event_map`.
-~200 known wait events in Postgres. Saves ~20 bytes per element vs text.
+The dictionary key is `(state, type, event)` — so `active|IO:DataFileRead` and
+`idle in transaction|IO:DataFileRead` get separate IDs. ~200 wait events × 3 states
+= ~600 entries max, fits comfortably in `smallint`.
 
 ```sql
 create table ash.wait_event_map (
   id    smallint primary key generated always as identity,
+  state text not null,   -- 'active', 'idle in transaction', 'idle in transaction (aborted)'
   type  text not null,   -- 'LWLock', 'IO', 'Lock', ...
   event text not null,   -- 'LockManager', 'DataFileRead', ...
-  unique (type, event)
+  unique (state, type, event)
 );
-/* id=1 reserved for CPU (running, no wait event); IDs start at 1 to avoid -0 = 0 ambiguity */
+/* IDs start at 1 to avoid -0 = 0 ambiguity in the encoding */
 ```
 
 **Query IDs** stored as `smallint` (2 bytes) referencing `ash.query_map`.
@@ -171,12 +174,13 @@ create table ash.config (
   installed_at       timestamptz not null default clock_timestamp()
 );
 
-/* wait event dictionary */
+/* wait event dictionary — keyed by (state, type, event) */
 create table ash.wait_event_map (
   id    smallint primary key generated always as identity,
-  type  text not null,
-  event text not null,
-  unique (type, event)
+  state text not null,  -- 'active', 'idle in transaction', ...
+  type  text not null,  -- 'LWLock', 'IO', 'Lock', ...
+  event text not null,  -- 'LockManager', 'DataFileRead', ...
+  unique (state, type, event)
 );
 
 /* query_id dictionary */
@@ -249,7 +253,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Create `ash` schema
 - `ash.epoch()` — immutable function returning `2026-01-01 00:00:00 UTC`
 - `ash.config` singleton table (current_slot, sample_interval, rotation_period, flags)
-- `ash.wait_event_map` dictionary seeded with Postgres 14+ wait events (~200 entries), `id=1` = CPU
+- `ash.wait_event_map` dictionary keyed by `(state, type, event)` — seeded on first encounter, `id=1` = `active|CPU`
 - `ash._register_wait(type, event)` — auto-inserts unknown events, returns id
 - `ash.current_slot()` — returns active partition slot from config
 - `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
