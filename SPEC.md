@@ -73,7 +73,8 @@ create table ash.wait_event_map (
 ```
 
 **Query IDs** stored as `smallint` (2 bytes) referencing `ash.query_map`.
-Most systems have 50–200 distinct query_ids. Saves 6 bytes per element vs raw `int8`.
+Most systems have 50–200 distinct query_ids in any given 2-day window.
+Saves 6 bytes per element vs raw `int8`.
 
 ```sql
 create table ash.query_map (
@@ -82,8 +83,16 @@ create table ash.query_map (
 );
 ```
 
+**Overflow protection:** `smallint` caps at 32,767 distinct entries. Systems with
+high query diversity (ORMs, ad-hoc SQL, multi-tenant) could approach this over
+months. The rotation function (`ash.rotate()`) garbage-collects `query_map`
+entries that no longer appear in any live partition — keeping the dictionary
+bounded to the 2-day retention window. The identity sequence is reset after
+cleanup to recycle IDs.
+
 Both dictionaries are seeded on first encounter — the sampler auto-registers
-unknown wait events and query_ids.
+unknown wait events and query_ids via `INSERT ... ON CONFLICT DO NOTHING`
+(concurrency-safe UPSERT).
 
 ### 3.3 Single install, all databases
 
@@ -154,7 +163,40 @@ Query text is not stored. That's what `pg_stat_statements` is for. We store `que
 
 ### 3.8 Postgres 14+ minimum
 
-`query_id` was introduced in Postgres 14 (`compute_query_id` GUC). Without it, the core value proposition (correlating wait events to specific queries) is lost.
+`query_id` was introduced in Postgres 14 (`compute_query_id` GUC). Without it,
+the core value proposition (correlating wait events to specific queries) is lost.
+
+### 3.9 Required privileges
+
+The sampler role needs `pg_read_all_stats` (or superuser) to see all backends
+in `pg_stat_activity`. Without it, you only see your own sessions — useless
+for server-wide observability.
+
+Joining to `pg_stat_statements` for query text also requires
+`pg_read_all_stats` or membership in `pg_monitor`.
+
+### 3.10 NULL handling
+
+- **`query_id` is NULL:** Common for utility commands, DDL, or when
+  `compute_query_id = off`. Stored as `0` in the encoded array (sentinel
+  meaning "unknown query"). Does not consume a `query_map` entry.
+- **`datid` is NULL:** Possible for background workers without a database
+  context. Stored as `0::oid`. Only relevant when `include_bg_workers = true`.
+- **`wait_event` is NULL with `state = 'active'`:** Backend is running on CPU.
+  Mapped to `active|CPU` in `wait_event_map`.
+- **`wait_event` is NULL with `state = 'idle in transaction'`:** Backend is
+  idle in a transaction, not waiting on anything specific. Mapped to
+  `idle in transaction|IDLE` in `wait_event_map`.
+
+### 3.11 pg_cron version and UTC
+
+Requires pg_cron >= 1.5 for second-granularity schedules (`'1 second'`).
+Some managed providers may ship older versions — check `select * from
+pg_available_extensions where name = 'pg_cron'`.
+
+pg_cron interprets cron expressions in UTC. The midnight rotation
+(`0 0 * * *`) fires at midnight UTC, not local time. This is fine for
+pg_ash — rotation boundaries don't need to align with local midnight.
 
 ## 4. Schema
 
@@ -267,12 +309,18 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Filter: `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
   `backend_type = 'client backend'` (+ optionally background workers)
 - Respect config flag: `include_bg_workers`
+- Performance: select only needed columns, filter early on `state` and
+  `backend_type` to minimize shared memory reads
+- Dictionary registration via `INSERT ... ON CONFLICT DO NOTHING` + `RETURNING`
+  (concurrency-safe, no locks)
 
 ### Step 3: Rotation function (`ash.rotate()`)
 - Advance `current_slot` to next partition (already truncated)
 - `TRUNCATE` the old previous partition (recycle it as the new "next")
-- Advisory lock or check to prevent concurrent rotation
-- Log rotation event (optional: insert marker row or raise notice)
+- Garbage-collect `ash.query_map`: delete entries not referenced in any live partition,
+  reset identity sequence to recycle IDs (prevents smallint overflow)
+- Advisory lock to prevent concurrent rotation
+- Log rotation event (optional: raise notice)
 
 ### Step 4: Start/stop functions
 - `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation)
@@ -354,6 +402,8 @@ Simulate realistic production workloads without waiting real time:
 - **No per-PID tracking** — aggregated by database per sample. Can't trace one backend's journey across time. (By design — keeps storage tiny.)
 - **No query text** — join `query_id` to `pg_stat_statements`.
 - **Requires `compute_query_id = on`** — default since Postgres 14, but can be turned off.
+- **Requires pg_cron >= 1.5** — for second-granularity scheduling. Some managed providers ship older versions.
+- **Requires `pg_read_all_stats`** — sampler role must see all backends in `pg_stat_activity`.
 
 ## 8. Future Ideas
 
