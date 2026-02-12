@@ -106,14 +106,18 @@ effectively unlimited.
 
 ```sql
 create table ash.query_map (
-  id       int4 primary key generated always as identity,
-  query_id int8 not null unique
+  id        int4 primary key generated always as identity,
+  query_id  int8 not null unique,
+  last_seen int4 not null default extract(epoch from now() - ash.epoch())::int4
 );
 /* id=0 reserved: sentinel for NULL/unknown query_id */
 ```
 
-The `query_map` table grows monotonically — no garbage collection. See §Step 3
-for rationale.
+**Automatic garbage collection:** The sampler updates `last_seen` for every
+query_id encountered in each tick. During rotation, `rotate()` deletes
+entries where `last_seen < min(sample_ts)` across all live partitions
+(i.e., older than the oldest surviving sample). This is O(query_map size) —
+a simple index scan, no array unnesting required.
 
 Both dictionaries are populated on first encounter via
 `INSERT ... ON CONFLICT DO NOTHING` + CTE fallback to `SELECT` existing ID.
@@ -339,10 +343,11 @@ create table ash.wait_event_map (
   unique (state, type, event)
 );
 
-/* query_id dictionary */
+/* query_id dictionary — last_seen enables automatic GC */
 create table ash.query_map (
-  id       int4 primary key generated always as identity,
-  query_id int8 not null unique
+  id        int4 primary key generated always as identity,
+  query_id  int8 not null unique,
+  last_seen int4 not null default extract(epoch from now() - ash.epoch())::int4
 );
 
 /* sample data (partitioned)
@@ -458,9 +463,10 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
   - **query_map**: do NOT cache fully (can be millions of rows in ORM-heavy
     workloads). Instead: (1) collect distinct `query_id`s seen in this tick
     into a temp table, (2) bulk `INSERT ... ON CONFLICT DO NOTHING` into
-    `ash.query_map`, (3) join back to get the `int4` IDs. This is O(distinct
-    query_ids per tick), not O(total query_map size). Use `ON COMMIT DROP`
-    temp table — pg_cron job runs in its own transaction.
+    `ash.query_map`, (3) bulk update `last_seen` for all matched IDs,
+    (4) join back to get the `int4` IDs. This is O(distinct query_ids per
+    tick), not O(total query_map size). Use `ON COMMIT DROP` temp table —
+    pg_cron job runs in its own transaction.
 - Wait event NULL handling: `active` + no wait → `active||CPU`;
   `idle in transaction` + no wait → `idle in transaction||IDLE`
 - Filter: `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
@@ -485,12 +491,11 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Advance `current_slot` to next partition (already truncated)
 - `TRUNCATE` the old previous partition (recycle it as the new "next")
 - Update `rotated_at = now()` in `ash.config`
-- **No query_map garbage collection.** GC would require scanning/unnesting all
-  `integer[]` arrays in live partitions to build a "referenced" set — expensive
-  analytics query just to save a few MiB of dictionary. `query_map` grows
-  monotonically but slowly (one row per distinct `query_id` ever seen). Even
-  pathological ORM churn produces manageable table sizes. If it ever becomes
-  a problem, a manual `TRUNCATE ash.query_map` + re-seeding is the escape hatch.
+- **Automatic query_map garbage collection:** Delete entries where
+  `last_seen < min(sample_ts)` across live partitions. The sampler updates
+  `last_seen` on every tick for all query_ids encountered. GC is O(query_map
+  size) — a simple scan, no array unnesting. Runs as part of `rotate()`
+  after the TRUNCATE, so it doesn't block the hot path.
 - **Critical rule:** `take_sample()` must NEVER read `current_slot` and pass
   it explicitly to INSERT. Always rely on `DEFAULT ash.current_slot()` evaluated
   at row insert time. If the sampler caches the slot and rotation fires mid-flight,
