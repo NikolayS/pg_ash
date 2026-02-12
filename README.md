@@ -24,7 +24,7 @@ query_ids │ {-617046263269, 482910384756, 771629384, -617046263269, 9238475610
 
 ## Requirements
 
-- PostgreSQL 13+ (`query_id` requires PG14+)
+- PostgreSQL 14+
 - `pg_cron` 1.5+ (for sub-minute scheduling)
 
 ## Status

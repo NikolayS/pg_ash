@@ -6,7 +6,7 @@
 
 No extensions required beyond `pg_cron`. Pure SQL. Runs on the primary. Designed for small-to-medium clusters where installing custom C extensions isn't practical or allowed.
 
-**Compatibility:** PostgreSQL 13+ (`query_id` requires PG14+; on PG13 it will be NULL).
+**Compatibility:** PostgreSQL 14+.
 
 ## Why
 
@@ -28,7 +28,7 @@ query_ids   │ {-617046263269, 482910384756, 771629384756, -617046263269, 92384
 - `wait_ids[i]` → lookup in `ash.wait_event_map` for the wait event name
 - `query_ids[i]` → join to `pg_stat_statements` for query text
 - `wait_id = 0` means running on CPU (no wait event)
-- `query_ids` element is NULL when `query_id` is not available (PG13, or not set)
+- `query_ids` element is NULL when `query_id` is not set (e.g., `compute_query_id = off`)
 
 7 active backends across 3 distinct wait events → **1 row**.
 
@@ -48,7 +48,7 @@ insert into ash.wait_event_map (id, type, event)
     values (0, '', 'CPU');
 ```
 
-Populated at install time from a known set of PG13+ wait events (~200 entries). The sampler function auto-inserts unknown wait events on first encounter (future-proof for new PG versions).
+Populated at install time from a known set of PG14+ wait events (~200 entries). The sampler function auto-inserts unknown wait events on first encounter (future-proof for new PG versions).
 
 On PG17+, we could also seed from `pg_wait_events`, but we don't require it.
 
@@ -329,7 +329,6 @@ pg_ash/
 - **Primary only:** designed for primary, `pg_stat_activity` on replicas shows limited info.
 - **No per-PID tracking:** aggregated by database. Can't trace individual backend journeys. (By design — keeps storage tiny.)
 - **No query text:** use `pg_stat_statements` and join on `query_id`.
-- **`query_id` requires PG14+:** on PG13, `query_ids` will contain NULLs. Wait event profiling still works.
 
 ## Future Ideas
 
