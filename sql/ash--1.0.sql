@@ -519,3 +519,583 @@ BEGIN
     RETURN;
 END;
 $$;
+
+
+--------------------------------------------------------------------------------
+-- STEP 3: Rotation function
+--------------------------------------------------------------------------------
+
+-- Rotate partitions: advance current_slot, truncate the old previous partition
+CREATE OR REPLACE FUNCTION ash.rotate()
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_old_slot smallint;
+    v_new_slot smallint;
+    v_truncate_slot smallint;
+    v_rotation_period interval;
+    v_rotated_at timestamptz;
+    v_min_sample_ts int4;
+    v_deleted_queries int;
+BEGIN
+    -- Try to acquire advisory lock to prevent concurrent rotation
+    IF NOT pg_try_advisory_lock(hashtext('ash_rotate')) THEN
+        RETURN 'skipped: another rotation in progress';
+    END IF;
+
+    BEGIN
+        -- Get current config
+        SELECT current_slot, rotation_period, rotated_at
+        INTO v_old_slot, v_rotation_period, v_rotated_at
+        FROM ash.config
+        WHERE singleton = true;
+
+        -- Check if we rotated too recently (within 90% of rotation_period)
+        IF now() - v_rotated_at < v_rotation_period * 0.9 THEN
+            PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
+            RETURN 'skipped: rotated too recently at ' || v_rotated_at::text;
+        END IF;
+
+        -- Set lock timeout to avoid blocking on long-running queries
+        SET LOCAL lock_timeout = '2s';
+
+        -- Calculate new slot (0 -> 1 -> 2 -> 0)
+        v_new_slot := (v_old_slot + 1) % 3;
+
+        -- The partition to truncate is the one that was "previous" before rotation
+        -- which is (old_slot - 1 + 3) % 3, but after we advance, it becomes
+        -- the "next" partition: (new_slot + 1) % 3
+        v_truncate_slot := (v_new_slot + 1) % 3;
+
+        -- Advance current_slot first (before truncate)
+        UPDATE ash.config
+        SET current_slot = v_new_slot,
+            rotated_at = now()
+        WHERE singleton = true;
+
+        -- Truncate the recycled partition by explicit name
+        CASE v_truncate_slot
+            WHEN 0 THEN TRUNCATE ash.sample_0;
+            WHEN 1 THEN TRUNCATE ash.sample_1;
+            WHEN 2 THEN TRUNCATE ash.sample_2;
+        END CASE;
+
+        -- Automatic query_map garbage collection
+        -- Find minimum sample_ts across all live partitions (current and previous)
+        SELECT min(sample_ts) INTO v_min_sample_ts
+        FROM ash.sample
+        WHERE slot IN (v_new_slot, v_old_slot);
+
+        -- Delete query_map entries older than the oldest surviving sample
+        IF v_min_sample_ts IS NOT NULL THEN
+            DELETE FROM ash.query_map
+            WHERE last_seen < v_min_sample_ts;
+            GET DIAGNOSTICS v_deleted_queries = ROW_COUNT;
+        ELSE
+            v_deleted_queries := 0;
+        END IF;
+
+        PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
+
+        RETURN format('rotated: slot %s -> %s, truncated slot %s, gc''d %s query_map entries',
+                      v_old_slot, v_new_slot, v_truncate_slot, v_deleted_queries);
+
+    EXCEPTION WHEN lock_not_available THEN
+        PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
+        RETURN 'failed: lock timeout on partition truncate, will retry next cycle';
+    WHEN OTHERS THEN
+        PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
+        RAISE;
+    END;
+END;
+$$;
+
+
+--------------------------------------------------------------------------------
+-- STEP 4: Start/stop/uninstall functions
+--------------------------------------------------------------------------------
+
+-- Check if pg_cron extension is available
+CREATE OR REPLACE FUNCTION ash._pg_cron_available()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM pg_extension WHERE extname = 'pg_cron'
+    )
+$$;
+
+-- Start sampling: create pg_cron jobs
+CREATE OR REPLACE FUNCTION ash.start(p_interval interval DEFAULT '1 second')
+RETURNS TABLE (job_type text, job_id bigint, status text)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_sampler_job bigint;
+    v_rotation_job bigint;
+    v_cron_version text;
+BEGIN
+    -- Check if pg_cron is available
+    IF NOT ash._pg_cron_available() THEN
+        job_type := 'error';
+        job_id := NULL;
+        status := 'pg_cron extension not installed';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Check pg_cron version (need >= 1.5 for second granularity)
+    SELECT extversion INTO v_cron_version
+    FROM pg_extension WHERE extname = 'pg_cron';
+
+    IF v_cron_version < '1.5' THEN
+        job_type := 'error';
+        job_id := NULL;
+        status := format('pg_cron version %s too old, need >= 1.5', v_cron_version);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Check for existing sampler job (idempotent)
+    SELECT jobid INTO v_sampler_job
+    FROM cron.job
+    WHERE jobname = 'ash_sampler';
+
+    IF v_sampler_job IS NOT NULL THEN
+        job_type := 'sampler';
+        job_id := v_sampler_job;
+        status := 'already exists';
+        RETURN NEXT;
+    ELSE
+        -- Create sampler job
+        SELECT cron.schedule(
+            'ash_sampler',
+            p_interval::text,
+            'SELECT ash.take_sample()'
+        ) INTO v_sampler_job;
+
+        job_type := 'sampler';
+        job_id := v_sampler_job;
+        status := 'created';
+        RETURN NEXT;
+    END IF;
+
+    -- Check for existing rotation job (idempotent)
+    SELECT jobid INTO v_rotation_job
+    FROM cron.job
+    WHERE jobname = 'ash_rotation';
+
+    IF v_rotation_job IS NOT NULL THEN
+        job_type := 'rotation';
+        job_id := v_rotation_job;
+        status := 'already exists';
+        RETURN NEXT;
+    ELSE
+        -- Create rotation job (daily at midnight UTC)
+        SELECT cron.schedule(
+            'ash_rotation',
+            '0 0 * * *',
+            'SELECT ash.rotate()'
+        ) INTO v_rotation_job;
+
+        job_type := 'rotation';
+        job_id := v_rotation_job;
+        status := 'created';
+        RETURN NEXT;
+    END IF;
+
+    -- Update sample_interval in config
+    UPDATE ash.config SET sample_interval = p_interval WHERE singleton = true;
+
+    RETURN;
+END;
+$$;
+
+-- Stop sampling: remove pg_cron jobs
+CREATE OR REPLACE FUNCTION ash.stop()
+RETURNS TABLE (job_type text, job_id bigint, status text)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_job_id bigint;
+BEGIN
+    -- Check if pg_cron is available
+    IF NOT ash._pg_cron_available() THEN
+        job_type := 'info';
+        job_id := NULL;
+        status := 'pg_cron not installed, no jobs to remove';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Remove sampler job
+    SELECT jobid INTO v_job_id
+    FROM cron.job
+    WHERE jobname = 'ash_sampler';
+
+    IF v_job_id IS NOT NULL THEN
+        PERFORM cron.unschedule('ash_sampler');
+        job_type := 'sampler';
+        job_id := v_job_id;
+        status := 'removed';
+        RETURN NEXT;
+    END IF;
+
+    -- Remove rotation job
+    SELECT jobid INTO v_job_id
+    FROM cron.job
+    WHERE jobname = 'ash_rotation';
+
+    IF v_job_id IS NOT NULL THEN
+        PERFORM cron.unschedule('ash_rotation');
+        job_type := 'rotation';
+        job_id := v_job_id;
+        status := 'removed';
+        RETURN NEXT;
+    END IF;
+
+    RETURN;
+END;
+$$;
+
+-- Uninstall: stop jobs and drop schema
+CREATE OR REPLACE FUNCTION ash.uninstall()
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_rec record;
+    v_jobs_removed int := 0;
+BEGIN
+    -- Stop pg_cron jobs first
+    FOR v_rec IN SELECT * FROM ash.stop() LOOP
+        IF v_rec.status = 'removed' THEN
+            v_jobs_removed := v_jobs_removed + 1;
+        END IF;
+    END LOOP;
+
+    -- Drop the schema
+    DROP SCHEMA ash CASCADE;
+
+    RETURN format('uninstalled: removed %s pg_cron jobs, dropped ash schema', v_jobs_removed);
+END;
+$$;
+
+
+--------------------------------------------------------------------------------
+-- STEP 5: Reader and diagnostic functions
+--------------------------------------------------------------------------------
+
+-- Helper to get active slots (current and previous)
+CREATE OR REPLACE FUNCTION ash._active_slots()
+RETURNS smallint[]
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT ARRAY[
+        current_slot,
+        ((current_slot - 1 + 3) % 3)::smallint
+    ]
+    FROM ash.config
+    WHERE singleton = true
+$$;
+
+-- Status: diagnostic dashboard
+CREATE OR REPLACE FUNCTION ash.status()
+RETURNS TABLE (
+    metric text,
+    value text
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_config record;
+    v_last_sample_ts int4;
+    v_samples_current int;
+    v_samples_total int;
+    v_wait_events int;
+    v_query_ids int;
+BEGIN
+    -- Get config
+    SELECT * INTO v_config FROM ash.config WHERE singleton = true;
+
+    -- Last sample timestamp
+    SELECT max(sample_ts) INTO v_last_sample_ts FROM ash.sample;
+
+    -- Samples in current partition
+    SELECT count(*) INTO v_samples_current
+    FROM ash.sample WHERE slot = v_config.current_slot;
+
+    -- Total samples
+    SELECT count(*) INTO v_samples_total FROM ash.sample;
+
+    -- Dictionary sizes
+    SELECT count(*) INTO v_wait_events FROM ash.wait_event_map;
+    SELECT count(*) INTO v_query_ids FROM ash.query_map;
+
+    metric := 'current_slot'; value := v_config.current_slot::text; RETURN NEXT;
+    metric := 'sample_interval'; value := v_config.sample_interval::text; RETURN NEXT;
+    metric := 'rotation_period'; value := v_config.rotation_period::text; RETURN NEXT;
+    metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; RETURN NEXT;
+    metric := 'installed_at'; value := v_config.installed_at::text; RETURN NEXT;
+    metric := 'rotated_at'; value := v_config.rotated_at::text; RETURN NEXT;
+    metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; RETURN NEXT;
+
+    IF v_last_sample_ts IS NOT NULL THEN
+        metric := 'last_sample_ts'; value := (ash.epoch() + v_last_sample_ts * interval '1 second')::text; RETURN NEXT;
+        metric := 'time_since_last_sample'; value := (now() - (ash.epoch() + v_last_sample_ts * interval '1 second'))::text; RETURN NEXT;
+    ELSE
+        metric := 'last_sample_ts'; value := 'no samples'; RETURN NEXT;
+    END IF;
+
+    metric := 'samples_in_current_slot'; value := v_samples_current::text; RETURN NEXT;
+    metric := 'samples_total'; value := v_samples_total::text; RETURN NEXT;
+    metric := 'wait_event_map_count'; value := v_wait_events::text; RETURN NEXT;
+    metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; RETURN NEXT;
+    metric := 'query_map_count'; value := v_query_ids::text; RETURN NEXT;
+
+    -- pg_cron status if available
+    IF ash._pg_cron_available() THEN
+        metric := 'pg_cron_available'; value := 'yes'; RETURN NEXT;
+        FOR metric, value IN
+            SELECT 'cron_job_' || jobname,
+                   format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
+            FROM cron.job
+            WHERE jobname IN ('ash_sampler', 'ash_rotation')
+        LOOP
+            RETURN NEXT;
+        END LOOP;
+    ELSE
+        metric := 'pg_cron_available'; value := 'no'; RETURN NEXT;
+    END IF;
+
+    RETURN;
+END;
+$$;
+
+-- Top wait events
+CREATE OR REPLACE FUNCTION ash.top_waits(
+    p_interval interval DEFAULT '1 hour',
+    p_limit int DEFAULT 20
+)
+RETURNS TABLE (
+    state text,
+    wait_type text,
+    wait_event text,
+    samples bigint,
+    pct numeric
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH decoded AS (
+        SELECT d.state, d.type, d.event
+        FROM ash.sample s
+        CROSS JOIN LATERAL ash.decode_sample(s.data) d
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+    ),
+    totals AS (
+        SELECT state, type, event, count(*) as cnt
+        FROM decoded
+        GROUP BY state, type, event
+    ),
+    grand_total AS (
+        SELECT sum(cnt) as total FROM totals
+    )
+    SELECT
+        t.state,
+        t.type as wait_type,
+        t.event as wait_event,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+    FROM totals t, grand_total gt
+    ORDER BY t.cnt DESC
+    LIMIT p_limit
+$$;
+
+-- Wait event timeline (time-bucketed breakdown)
+CREATE OR REPLACE FUNCTION ash.wait_timeline(
+    p_interval interval DEFAULT '1 hour',
+    p_bucket interval DEFAULT '1 minute'
+)
+RETURNS TABLE (
+    bucket_start timestamptz,
+    state text,
+    wait_type text,
+    wait_event text,
+    samples bigint
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH decoded AS (
+        SELECT
+            ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch FROM p_bucket)::int4)) * interval '1 second' as bucket,
+            d.state,
+            d.type,
+            d.event
+        FROM ash.sample s
+        CROSS JOIN LATERAL ash.decode_sample(s.data) d
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+    )
+    SELECT
+        bucket as bucket_start,
+        state,
+        type as wait_type,
+        event as wait_event,
+        count(*) as samples
+    FROM decoded
+    GROUP BY bucket, state, type, event
+    ORDER BY bucket, samples DESC
+$$;
+
+-- Top queries by wait samples
+CREATE OR REPLACE FUNCTION ash.top_queries(
+    p_interval interval DEFAULT '1 hour',
+    p_limit int DEFAULT 20
+)
+RETURNS TABLE (
+    query_id bigint,
+    samples bigint,
+    pct numeric,
+    query_text text
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_has_pg_stat_statements boolean;
+BEGIN
+    -- Check if pg_stat_statements is available
+    SELECT EXISTS (
+        SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+    ) INTO v_has_pg_stat_statements;
+
+    IF v_has_pg_stat_statements THEN
+        RETURN QUERY
+        WITH decoded AS (
+            SELECT d.query_id as qid
+            FROM ash.sample s
+            CROSS JOIN LATERAL ash.decode_sample(s.data) d
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+              AND d.query_id IS NOT NULL
+        ),
+        totals AS (
+            SELECT qid, count(*) as cnt
+            FROM decoded
+            GROUP BY qid
+        ),
+        grand_total AS (
+            SELECT sum(cnt) as total FROM totals
+        )
+        SELECT
+            t.qid as query_id,
+            t.cnt as samples,
+            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            left(pss.query, 100) as query_text
+        FROM totals t
+        CROSS JOIN grand_total gt
+        LEFT JOIN pg_stat_statements pss ON pss.queryid = t.qid
+        ORDER BY t.cnt DESC
+        LIMIT p_limit;
+    ELSE
+        RETURN QUERY
+        WITH decoded AS (
+            SELECT d.query_id as qid
+            FROM ash.sample s
+            CROSS JOIN LATERAL ash.decode_sample(s.data) d
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+              AND d.query_id IS NOT NULL
+        ),
+        totals AS (
+            SELECT qid, count(*) as cnt
+            FROM decoded
+            GROUP BY qid
+        ),
+        grand_total AS (
+            SELECT sum(cnt) as total FROM totals
+        )
+        SELECT
+            t.qid as query_id,
+            t.cnt as samples,
+            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            NULL::text as query_text
+        FROM totals t
+        CROSS JOIN grand_total gt
+        ORDER BY t.cnt DESC
+        LIMIT p_limit;
+    END IF;
+END;
+$$;
+
+-- CPU vs waiting ratio
+CREATE OR REPLACE FUNCTION ash.cpu_vs_waiting(
+    p_interval interval DEFAULT '1 hour'
+)
+RETURNS TABLE (
+    category text,
+    samples bigint,
+    pct numeric
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH decoded AS (
+        SELECT
+            CASE
+                WHEN d.type = 'CPU' THEN 'CPU'
+                ELSE 'Waiting'
+            END as cat
+        FROM ash.sample s
+        CROSS JOIN LATERAL ash.decode_sample(s.data) d
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+    ),
+    totals AS (
+        SELECT cat, count(*) as cnt
+        FROM decoded
+        GROUP BY cat
+    ),
+    grand_total AS (
+        SELECT sum(cnt) as total FROM totals
+    )
+    SELECT
+        t.cat as category,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+    FROM totals t, grand_total gt
+    ORDER BY t.cnt DESC
+$$;
+
+-- Samples by database
+CREATE OR REPLACE FUNCTION ash.samples_by_database(
+    p_interval interval DEFAULT '1 hour'
+)
+RETURNS TABLE (
+    database_name text,
+    datid oid,
+    samples bigint,
+    total_backends bigint
+)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT
+        COALESCE(d.datname, '<background>') as database_name,
+        s.datid,
+        count(*) as samples,
+        sum(s.active_count) as total_backends
+    FROM ash.sample s
+    LEFT JOIN pg_database d ON d.oid = s.datid
+    WHERE s.slot = ANY(ash._active_slots())
+      AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+    GROUP BY s.datid, d.datname
+    ORDER BY total_backends DESC
+$$;

@@ -1,42 +1,48 @@
-# Task: Implement pg_ash Steps 1-2
+# Task: Implement pg_ash Steps 3-7 + CI
 
-Read SPEC.md carefully. Implement Steps 1-2 from section 6 (Implementation Plan).
+You already completed Steps 1-2. The schema is installed on PG17 at localhost:5433 user postgres.
 
-Write everything to: `sql/ash--1.0.sql`
+Read SPEC.md for all design details. Add to the existing sql/ash--1.0.sql file.
 
-## Step 1: Core schema + infrastructure
-- `ash` schema
-- `ash.epoch()` immutable function
-- `ash.config` singleton table with initial row  
-- `ash.wait_event_map` dictionary (smallint PK, state/type/event unique)
-- `ash.query_map` dictionary (int4 PK, query_id int8 unique, last_seen int4)
-- `ash._register_wait(state, type, event)` — upsert, returns id
-- `ash._register_query(int8)` — upsert, returns int4 id
-- `ash.current_slot()` — reads config
-- `ash.sample` partitioned by LIST(slot), 3 children, (datid, sample_ts) indexes
-- `ash._validate_data(integer[])` — structural validation
-- CHECK: `data[1] = 1 AND array_length(data, 1) >= 3`
+## Step 3: Rotation function
+- `ash.rotate()` — advance current_slot, TRUNCATE recycled partition
+- pg_try_advisory_lock to prevent concurrent rotation
+- Check rotated_at vs rotation_period — skip if too recent
+- SET LOCAL lock_timeout = '2s'
+- Truncate only the OLD previous partition by explicit name
+- Update rotated_at in config
+- Automatic query_map GC: DELETE WHERE last_seen < min sample_ts in live partitions
 
-## Step 2: Sampler + decoder
-- `ash.take_sample()` — the core sampler
-  - sample_ts from `now()` not clock_timestamp
-  - Filter: state IN (active, idle in transaction, idle in transaction (aborted))
-  - backend_type = 'client backend' (+ bg workers if config says so)
-  - Encode: `[1, -wait_id, count, qid, ..., -next_wait, ...]`
-  - Cache wait_event_map fully at start (small)
-  - query_map: collect per-tick distinct query_ids, bulk upsert, bulk update last_seen, join back
-  - NULL wait_event: active->CPU/CPU, idle-in-xact->IDLE/IDLE
-  - active_count per row
-  - NEVER set slot explicitly — use DEFAULT ash.current_slot()
-  - Per-row error handling: RAISE WARNING, skip bad rows
-  - Sentinel 0 for NULL query_id
-- `ash.decode_sample(integer[])` — returns TABLE(state, type, event, query_id, count)
-  - Skip query_map join for sentinel 0 (return NULL query_id)
-  - Unknown version -> RAISE WARNING, return zero rows
+## Step 4: Start/stop/uninstall
+- `ash.start(interval default '1 second')` — create pg_cron jobs. Idempotent: if jobs exist, return existing IDs. Check pg_cron >= 1.5.
+- `ash.stop()` — remove pg_cron jobs, return removed IDs
+- `ash.uninstall()` — calls stop() then DROP SCHEMA ash CASCADE
+- NOTE: pg_cron is probably NOT available on this test server. Write the functions but handle the case where pg_cron extension doesn't exist gracefully. Test what you can.
+
+## Step 5: Reader + diagnostic functions
+- `ash.status()` — last sample ts, samples in current partition, current slot, time since rotation, dictionary utilization
+- `ash.top_waits(interval, int)` — top wait events with percentages
+- `ash.wait_timeline(interval, interval)` — time-bucketed breakdown  
+- `ash.top_queries(interval, int)` — top queries by wait samples, LEFT JOIN pg_stat_statements if available
+- `ash.cpu_vs_waiting(interval)` — CPU vs waiting ratio
+- All reader functions: add WHERE slot IN (current, previous) for partition pruning. Handle datid=0 with LEFT JOIN pg_database.
+
+## Step 7: Install/uninstall script cleanup
+- Make sure ash--1.0.sql is a clean single-file install
+- Dropping schema should be clean via ash.uninstall() or DROP SCHEMA ash CASCADE
+
+## CI: GitHub Actions
+- Create .github/workflows/test.yml
+- Test matrix: Postgres 14, 15, 16, 17, 18
+- Install pg_cron extension in CI
+- Install pg_ash, run take_sample(), verify data, test decode_sample(), test rotation, test reader functions
+- All tests should pass
 
 ## Testing
-Connect to local PG17: `psql -h localhost -p 5433 -U postgres -d postgres`
-pg_cron probably not available — test manually with SELECT ash.take_sample().
-Install schema, call take_sample() a few times, verify arrays, test decode_sample().
+After implementing each step, test on psql -h localhost -p 5433 -U postgres -d postgres.
+Drop and reinstall schema if needed.
+Generate background activity with pg_sleep for testing.
+Verify reader functions produce reasonable output.
+Test rotation: insert samples, rotate, verify data survives in previous partition, verify truncated partition is empty.
 
-When fully working and tested, say DONE.
+When fully working with CI green, say DONE.

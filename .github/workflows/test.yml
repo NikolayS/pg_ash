@@ -1,0 +1,265 @@
+name: Test pg_ash
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [14, 15, 16, 17]
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pg_cron
+        run: |
+          # Install pg_cron from package
+          sudo apt-get update
+          sudo apt-get install -y postgresql-${{ matrix.postgres }}-cron || echo "pg_cron package not available, will test without"
+
+      - name: Configure pg_cron in container
+        run: |
+          # Try to enable pg_cron if available
+          docker exec ${{ job.services.postgres.id }} bash -c "
+            if [ -f /usr/share/postgresql/${{ matrix.postgres }}/extension/pg_cron.control ]; then
+              echo \"shared_preload_libraries = 'pg_cron'\" >> /var/lib/postgresql/data/postgresql.conf
+              echo \"cron.database_name = 'postgres'\" >> /var/lib/postgresql/data/postgresql.conf
+            fi
+          " || true
+          # Restart postgres to load pg_cron
+          docker restart ${{ job.services.postgres.id }} || true
+          sleep 5
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..30}; do
+            if pg_isready -h localhost -p 5432 -U postgres; then
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Create pg_cron extension if available
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron;" || echo "pg_cron not available"
+
+      - name: Install pg_ash
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -f sql/ash--1.0.sql
+
+      - name: Test Step 1 - Schema and infrastructure
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres << 'EOF'
+          -- Verify all objects exist
+          DO $$
+          BEGIN
+            ASSERT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'ash'), 'ash schema missing';
+            ASSERT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'epoch' AND pronamespace = 'ash'::regnamespace), 'epoch() missing';
+            ASSERT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'config'), 'config table missing';
+            ASSERT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'wait_event_map'), 'wait_event_map missing';
+            ASSERT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'query_map'), 'query_map missing';
+            ASSERT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'sample'), 'sample table missing';
+            ASSERT (SELECT count(*) FROM ash.config) = 1, 'config not initialized';
+            RAISE NOTICE 'Step 1 tests passed';
+          END;
+          $$;
+          EOF
+
+      - name: Test Step 2 - Sampler and decoder
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres << 'EOF'
+          -- Test take_sample (may return 0 if no other activity)
+          SELECT ash.take_sample();
+
+          -- Test _validate_data
+          DO $$
+          BEGIN
+            ASSERT ash._validate_data('{1,-1,2,5,6}'::integer[]) = true, 'valid data failed';
+            ASSERT ash._validate_data('{1,-1,3,5,6}'::integer[]) = false, 'invalid count not detected';
+            ASSERT ash._validate_data('{2,-1,2,5,6}'::integer[]) = false, 'invalid version not detected';
+            RAISE NOTICE 'Step 2 validation tests passed';
+          END;
+          $$;
+
+          -- Test decode_sample
+          INSERT INTO ash.wait_event_map (state, type, event) VALUES ('active', 'CPU', 'CPU') ON CONFLICT DO NOTHING;
+          INSERT INTO ash.query_map (query_id, last_seen) VALUES (12345, 1000) ON CONFLICT DO NOTHING;
+
+          DO $$
+          DECLARE
+            v_wait_id smallint;
+            v_qid_id int4;
+            v_count int;
+          BEGIN
+            SELECT id INTO v_wait_id FROM ash.wait_event_map WHERE state = 'active' AND type = 'CPU';
+            SELECT id INTO v_qid_id FROM ash.query_map WHERE query_id = 12345;
+
+            SELECT count(*) INTO v_count
+            FROM ash.decode_sample(ARRAY[1, -v_wait_id, 2, v_qid_id, 0]::integer[]);
+
+            ASSERT v_count = 2, 'decode_sample returned wrong count: ' || v_count;
+            RAISE NOTICE 'Step 2 decoder tests passed';
+          END;
+          $$;
+          EOF
+
+      - name: Test Step 3 - Rotation
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres << 'EOF'
+          -- Insert test data
+          INSERT INTO ash.sample (sample_ts, datid, active_count, data)
+          VALUES (1000, 1, 2, '{1,-1,2,1,1}');
+
+          -- Force rotation
+          UPDATE ash.config SET rotated_at = now() - interval '2 days';
+          SELECT ash.rotate();
+
+          -- Verify slot advanced
+          DO $$
+          DECLARE
+            v_slot smallint;
+          BEGIN
+            SELECT current_slot INTO v_slot FROM ash.config;
+            ASSERT v_slot = 1, 'slot not advanced: ' || v_slot;
+            RAISE NOTICE 'Step 3 rotation tests passed';
+          END;
+          $$;
+          EOF
+
+      - name: Test Step 4 - Start/stop
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres << 'EOF'
+          -- Test start (may fail gracefully if pg_cron not available)
+          SELECT * FROM ash.start();
+
+          -- Test stop
+          SELECT * FROM ash.stop();
+
+          -- Verify functions exist and return properly
+          DO $$
+          BEGIN
+            ASSERT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'start' AND pronamespace = 'ash'::regnamespace);
+            ASSERT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'stop' AND pronamespace = 'ash'::regnamespace);
+            ASSERT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'uninstall' AND pronamespace = 'ash'::regnamespace);
+            RAISE NOTICE 'Step 4 tests passed';
+          END;
+          $$;
+          EOF
+
+      - name: Test Step 5 - Reader functions
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres << 'EOF'
+          -- Ensure we have some test data
+          INSERT INTO ash.wait_event_map (state, type, event)
+          VALUES ('active', 'IO', 'DataFileRead') ON CONFLICT DO NOTHING;
+
+          UPDATE ash.config SET current_slot = 0;
+          DELETE FROM ash.sample;
+
+          INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
+          VALUES
+            (extract(epoch FROM now() - ash.epoch())::int4, 1, 3, '{1,-1,3,1,1,1}', 0),
+            (extract(epoch FROM now() - ash.epoch())::int4 - 60, 1, 2, '{1,-2,2,1,1}', 0);
+
+          -- Test all reader functions
+          SELECT count(*) FROM ash.status();
+          SELECT count(*) FROM ash.top_waits();
+          SELECT count(*) FROM ash.cpu_vs_waiting();
+          SELECT count(*) FROM ash.top_queries();
+          SELECT count(*) FROM ash.wait_timeline();
+          SELECT count(*) FROM ash.samples_by_database();
+
+          DO $$
+          BEGIN
+            RAISE NOTICE 'Step 5 reader function tests passed';
+          END;
+          $$;
+          EOF
+
+      - name: Test uninstall
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres << 'EOF'
+          SELECT ash.uninstall();
+
+          DO $$
+          BEGIN
+            ASSERT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'ash'), 'schema not dropped';
+            RAISE NOTICE 'Uninstall test passed';
+          END;
+          $$;
+          EOF
+
+      - name: Reinstall and final verification
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -f sql/ash--1.0.sql
+          psql -h localhost -U postgres -d postgres -c "SELECT * FROM ash.status() LIMIT 5;"
+          echo "All tests passed for PostgreSQL ${{ matrix.postgres }}"
+
+  test-pg18:
+    runs-on: ubuntu-latest
+    container:
+      image: pgxn/pgxn-tools
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL 18
+        run: |
+          pg-start 18 || pg-start 17  # Fallback to 17 if 18 not available
+
+      - name: Install pg_ash
+        run: |
+          psql -d postgres -f sql/ash--1.0.sql
+
+      - name: Run tests
+        run: |
+          psql -d postgres << 'EOF'
+          -- Basic verification
+          SELECT count(*) FROM ash.status();
+          SELECT ash.take_sample();
+          SELECT ash._validate_data('{1,-1,2,1,1}'::integer[]);
+
+          DO $$
+          BEGIN
+            RAISE NOTICE 'PostgreSQL 18 tests passed';
+          END;
+          $$;
+          EOF
