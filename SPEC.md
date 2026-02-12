@@ -18,9 +18,13 @@ Postgres's `pg_stat_activity` shows what's happening *right now*, but the moment
 Existing solutions:
 - **pg_wait_sampling** — Excellent, but requires a C extension and `shared_preload_libraries` restart. Many managed environments (RDS, Cloud SQL) don't allow it.
 - **pgsentinel** — Similar C extension limitations.
-- **External monitoring agents** — Pull `pg_stat_activity` from outside, but add network overhead, require separate infrastructure, and often store data externally.
+- **External monitoring agents** — Pull `pg_stat_activity` from outside, but network round-trip limits sampling frequency and adds latency. Typically 10–60s intervals at best.
 
-pg_ash solves this entirely inside Postgres itself.
+pg_ash solves the sampling problem entirely inside Postgres itself:
+1. **Higher frequency** — 1s sampling with zero network RTT (in-process SQL)
+2. **Self-diagnostics** — the database can analyze its own wait event history without external infrastructure
+
+External monitoring systems are still valuable for long-term storage and trend analysis. pg_ash keeps only "today" and "yesterday" (2 rotation periods). Monitoring agents can periodically export pg_ash data for longer retention — getting the best of both worlds: high-frequency local sampling + long-term external storage.
 
 ## 3. Design Decisions
 
