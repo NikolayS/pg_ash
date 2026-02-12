@@ -156,7 +156,7 @@ create function ash.epoch() returns timestamptz immutable language sql as
     $$select '2026-01-01 00:00:00+00'::timestamptz$$;
 
 -- Store (in sampler) — use clock_timestamp(), not now()
-extract(epoch from clock_timestamp() - ash.epoch())::int
+extract(epoch from clock_timestamp() - ash.epoch())::int4
 
 -- Reconstruct (in queries)
 ash.epoch() + (sample_ts * interval '1 second')
@@ -168,6 +168,12 @@ back-to-back in a single transaction, `now()` would give identical timestamps to
 of them — hiding the pileup. `clock_timestamp()` gives the real wall-clock time of
 each sample, so you see the truth: "3 samples fired at 00:01, 00:01, 00:02" instead
 of the lie: "3 samples at 00:00, 00:00, 00:00".
+
+**Precision note:** `extract(epoch ...)` returns `double precision`.
+Casting to `int4` truncates sub-second fractions — this is intentional.
+We sample at 1s resolution; sub-second precision would waste storage and
+complicate queries. The `int4` range (2,147,483,647 seconds from epoch)
+covers until 2094 — well beyond any reasonable planning horizon.
 
 ### 3.6 PGQ-style 3-partition rotation (zero bloat)
 
@@ -201,6 +207,20 @@ At rotation (default: daily at midnight):
 - Indexes are rebuilt instantly on the empty partition after `TRUNCATE`
 
 **Partition key:** A synthetic `slot` column (smallint, values 0/1/2) set by `ash.current_slot()`. Partitioned by `LIST (slot)`.
+
+**Double-rotation safety:** What if rotation fires twice before the sampler
+runs? (pg_cron hiccup, long-running sampler, clock skew.) The second rotation
+would advance the slot again, and the sampler's in-flight insert (using the
+stale `current_slot` it read before the first rotation) would land in a
+partition that just got truncated.
+
+Defense: the `rotated_at` check in step 2 is the primary guard — it rejects
+any rotation that fires within `rotation_period * 0.9` of the last one. The
+advisory lock (step 1) prevents concurrent rotation. Together, these make
+double-rotation effectively impossible in normal operation. In the pathological
+case where the system clock jumps forward by >1 day, the admin will need to
+manually verify data integrity — but that's a broken clock problem, not a
+pg_ash problem.
 
 ### 3.7 No query text storage
 
@@ -283,12 +303,17 @@ create table ash.query_map (
   query_id int8 not null unique
 );
 
-/* sample data (partitioned) */
+/* sample data (partitioned)
+ *
+ * sample_ts is int4 (seconds since ash.epoch()), not timestamptz —
+ * see §3.5 for why. config uses timestamptz for human-readable operational
+ * timestamps; sample uses int4 for compact storage at scale.
+ */
 create table ash.sample (
-  sample_ts      int       not null,  /* set by take_sample() via clock_timestamp() */
+  sample_ts      int4      not null,  /* seconds since ash.epoch(), set by take_sample() */
   datid          oid       not null,
-  active_count   smallint  not null,  /* total sampled backends this tick+db (avoids re-summing) */
-  data           integer[] not null,  /* encoded: [ver, -wait, count, qid, qid, ...] */
+  active_count   smallint  not null,  /* total sampled backends this tick+db */
+  data           integer[] not null,  /* encoded: [ver, -wait, count, qid, ...] */
   slot           smallint  not null default ash.current_slot()
 ) partition by list (slot);
 
@@ -327,15 +352,20 @@ range scans. Worth benchmarking at Step 6, but B-tree is the safe default.
 | `ash.rotate()` | Advances the current slot and truncates the recycled partition |
 | `ash.start(interval)` | Creates pg_cron jobs for sampling and rotation |
 | `ash.stop()` | Removes pg_cron jobs |
+| `ash.status()` | Diagnostic dashboard: last sample ts, samples in current partition, current slot, time since last rotation, pg_cron job status, dictionary utilization (wait_event_map count vs smallint max, query_map count) |
 
-### 4.4 Convenience Views
+### 4.4 Reader functions
 
-| View | Purpose |
-|------|---------|
-| `ash.top_waits` | Top wait events in the last hour |
-| `ash.wait_timeline` | Wait events bucketed by minute |
-| `ash.top_queries` | Queries with most wait samples |
-| `ash.cpu_vs_waiting` | CPU vs waiting breakdown |
+All readers are **functions** (not views) — they take time range and limit
+parameters. Views with hardcoded `'1 hour'` are less useful than they look.
+See §4.3 for the full function list.
+
+**Partition scanning note:** Since `ash.sample` is partitioned by `slot`
+(not by `sample_ts`), Postgres's partition pruning cannot eliminate
+partitions based on `WHERE sample_ts >= X`. Every reader query scans all
+three partitions. This is fine for the expected data sizes (~66 MiB across
+two active partitions) — the `(datid, sample_ts)` B-tree index does all
+the filtering work. Not worth optimizing until data sizes are 10× larger.
 
 ## 5. Storage Estimates
 
@@ -381,6 +411,11 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Store `active_count` per row — total sampled backends for this datid+tick
 - Performance: select only needed columns, filter early on `state` and
   `backend_type` to minimize shared memory reads
+- **Error handling:** Per-row `BEGIN ... EXCEPTION WHEN OTHERS` around
+  encoding. If a backend has unexpected values (new `backend_type` in
+  Postgres 18, NULL `datid` when `include_bg_workers = false` leaks through),
+  `RAISE WARNING` and skip the row. Losing one problematic backend is far
+  better than losing an entire tick of all backends.
 
 ### Step 3: Rotation function (`ash.rotate()`)
 - `pg_try_advisory_lock(hashtext('ash_rotate'))` — if false, return (another
@@ -408,14 +443,21 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Install pg_ash in the same database as pg_cron (typically `postgres`).
   The sampler reads `pg_stat_activity` which shows all backends across all databases.
 
-### Step 5: Reader functions (human/LLM-readable output)
+### Step 5: Reader + diagnostic functions
+- `ash.status()` — first thing you run when debugging "why isn't ASH working?"
+  Returns: last sample timestamp, samples in current partition, current slot,
+  time since last rotation, pg_cron job status (joined to `cron.job`),
+  dictionary utilization (wait_event_map rows / 32767, query_map rows)
+- `ash.decode_sample(integer[])` — set-returning function, turns encoded array
+  into human-readable `TABLE(state, type, event, query_id, count)`. Isolates
+  the encoding format so users/views never reimplement it.
 - `ash.top_waits(interval default '1 hour', int default 20)` — top wait events with %, human-readable
 - `ash.wait_timeline(interval default '1 hour', interval default '1 minute')` — time-bucketed wait event breakdown
 - `ash.top_queries(interval default '1 hour', int default 20)` — queries with most wait samples, joined to `pg_stat_statements` for query text
 - `ash.cpu_vs_waiting(interval default '1 hour')` — CPU vs waiting ratio
 - `ash.report(interval default '1 hour')` — full text report combining all of the above, Oracle ASHREPORT-style
 - All functions return `SETOF record` or `TABLE(...)` for easy `\x` display or programmatic consumption
-- All translate `int4` timestamps to human-readable `timestamptz` and `smallint` wait_ids to `type:event` text
+- All translate `int4` timestamps to human-readable `timestamptz` and dictionary IDs to human-readable text
 
 ### Step 6: Benchmarks — simulated long-running production
 Simulate realistic production workloads without waiting real time:
@@ -427,18 +469,28 @@ Simulate realistic production workloads without waiting real time:
 - Generate directly via `INSERT ... SELECT generate_series()`
 
 **Scenarios (50 active backends, 1s sampling, 1 database):**
-- **1 day:** 86,400 rows, ~33 MiB — baseline
-- **1 month:** 2,592,000 rows, ~1 GiB — measure query latency on reader functions
-- **1 year:** 31,536,000 rows, ~12 GiB — measure query latency, verify index effectiveness
-- **10 years:** 315,360,000 rows, ~120 GiB — stress test, verify reader functions still perform
+- **1 day:** 86,400 rows, ~33 MiB — the realistic production scenario. This is
+  what one partition actually holds. Reader functions must be **sub-100ms** here.
+- **1 month:** 2,592,000 rows, ~1 GiB — stress test for long-retention configs.
+  Reader functions should still be <500ms for 1-hour windows (index-backed).
+
+The "1 year" and "10 year" scenarios are not realistic — no single partition
+would ever hold that much data in normal operation. They're only useful to
+verify that `TRUNCATE` is instant regardless of partition size (it will be —
+`TRUNCATE` doesn't depend on row count).
+
+**Sampler performance benchmark:** Measure `take_sample()` execution time
+with 50, 100, 200, 500 active backends. Target: <100ms for 200 backends.
+If it creeps toward 500ms+ (unlikely but possible with dictionary inserts
+on first encounter), that's a signal to optimize the caching strategy.
 
 **What to measure:**
 - Table + index size at each scale
-- `ash.top_waits('1 hour')` query time
+- `ash.top_waits('1 hour')` query time (target: sub-100ms for 1-day partition)
 - `ash.top_queries('1 hour')` query time
-- `ash.wait_timeline('1 hour')` query time
+- `ash.wait_timeline('1 hour', '1 minute')` query time
 - `ash.report('24 hours')` query time
-- Full sequential scan time (worst case)
+- `take_sample()` execution time at various backend counts
 - `TRUNCATE` time on a full partition (should be <1ms regardless of size)
 - Index scan performance for time-range queries
 
