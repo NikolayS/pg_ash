@@ -24,7 +24,7 @@ pg_ash solves this entirely inside Postgres itself.
 
 ## 3. Design Decisions
 
-### 3.1 One row per database per sample (encoded `smallint[]`)
+### 3.1 One row per sample tick (encoded `smallint[]`)
 
 Instead of one row per active session, we store all active sessions for a database
 in a single row using a compact encoded `smallint[]`:
@@ -39,7 +39,8 @@ Encoding: `[-wait_event_id, count, query_id, query_id, ..., -next_wait, ...]`
 - Negative value → wait event id (negated), from `ash.wait_event_map`
 - Next value → number of backends with this wait event
 - Following N values → dictionary-encoded query_ids (from `ash.query_map`)
-- `wait_id = 0` (encoded as `0`) means running on CPU (no wait event)
+- Wait event IDs start at 1 (`id=1` = CPU). This avoids the `-0 = 0` ambiguity
+  in the encoding — every wait marker is strictly negative.
 
 6 active backends across 3 wait events → **1 row, 12 array elements**.
 
@@ -60,7 +61,7 @@ create table ash.wait_event_map (
   event text not null,   -- 'LockManager', 'DataFileRead', ...
   unique (type, event)
 );
-/* id=0 reserved for CPU (running, no wait event) */
+/* id=1 reserved for CPU (running, no wait event); IDs start at 1 to avoid -0 = 0 ambiguity */
 ```
 
 **Query IDs** stored as `smallint` (2 bytes) referencing `ash.query_map`.
@@ -236,7 +237,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Create `ash` schema
 - `ash.epoch()` — immutable function returning `2026-01-01 00:00:00 UTC`
 - `ash.config` singleton table (current_slot, sample_interval, rotation_period, flags)
-- `ash.wait_event_map` dictionary seeded with Postgres 14+ wait events (~200 entries), `id=0` = CPU
+- `ash.wait_event_map` dictionary seeded with Postgres 14+ wait events (~200 entries), `id=1` = CPU
 - `ash._register_wait(type, event)` — auto-inserts unknown events, returns id
 - `ash.current_slot()` — returns active partition slot from config
 - `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
@@ -290,7 +291,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 Simulate realistic production workloads without waiting real time:
 
 **Data generation:**
-- 50 active backends, 10s sampling, 1 database
+- 50 active backends, 1s sampling, 1 database
 - Realistic wait event distribution (not uniform — weight toward IO:DataFileRead, LWLock:*, CPU)
 - ~20 distinct query_ids with realistic repetition patterns (zipf-like)
 - Generate directly via `INSERT ... SELECT generate_series()`
@@ -353,7 +354,6 @@ Simulate realistic production workloads without waiting real time:
 
 ## 8. Future Ideas
 
-- **`ash.report(interval)`** — text-based ASH report function, like Oracle's `ASHREPORT`
 - **Grafana dashboard JSON** — wait event heatmap, top queries, CPU vs waiting over time
 - **Aggregate rollup** — per-minute summaries kept for 30+ days (tiny storage)
 - **Multi-day retention** — more partitions (e.g., 7 days = 9 partitions in 3 rotation groups)
