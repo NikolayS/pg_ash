@@ -155,19 +155,18 @@ Timestamps stored as `int4` — seconds since custom epoch `2026-01-01 00:00:00 
 create function ash.epoch() returns timestamptz immutable language sql as
     $$select '2026-01-01 00:00:00+00'::timestamptz$$;
 
--- Store (in sampler) — use clock_timestamp(), not now()
-extract(epoch from clock_timestamp() - ash.epoch())::int4
+-- Store (in sampler)
+extract(epoch from now() - ash.epoch())::int4
 
 -- Reconstruct (in queries)
 ash.epoch() + (sample_ts * interval '1 second')
 ```
 
-Uses `clock_timestamp()` (wall clock at point of execution), not `now()` (transaction
-start time). This matters because if pg_cron jobs pile up under load and execute
-back-to-back in a single transaction, `now()` would give identical timestamps to all
-of them — hiding the pileup. `clock_timestamp()` gives the real wall-clock time of
-each sample, so you see the truth: "3 samples fired at 00:01, 00:01, 00:02" instead
-of the lie: "3 samples at 00:00, 00:00, 00:00".
+Uses `now()` (transaction start time). Each pg_cron job runs in its own
+transaction, so `now()` gives one consistent timestamp per sample tick.
+This is the right choice: if two samples somehow race (manual + cron),
+they get distinct transaction timestamps. And `now()` is cheaper than
+`clock_timestamp()` — no syscall per invocation.
 
 **Precision note:** `extract(epoch ...)` returns `double precision`.
 Casting to `int4` truncates sub-second fractions — this is intentional.
@@ -197,7 +196,7 @@ At rotation (default: daily at midnight):
    blocking the sampler
 4. Advance `current_slot` → the "next" partition (already truncated, ready for writes)
 5. `TRUNCATE` the old "previous" partition (becomes the new "next")
-6. Update `rotated_at = clock_timestamp()` in `ash.config`
+6. Update `rotated_at = now()` in `ash.config`
 
 **Why this works:**
 - `TRUNCATE` is instantaneous, generates minimal WAL
@@ -253,18 +252,15 @@ Joining to `pg_stat_statements` for query text also requires
   idle in a transaction, not waiting on anything specific. Mapped to
   `idle in transaction|IDLE` in `wait_event_map`.
 
-### 3.11 pg_cron version and scheduling
+### 3.11 pg_cron >= 1.5 required
 
-**Default: 1-second sampling using pg_cron >= 1.5** (`schedule_in_database()`
-with interval syntax). This is the recommended setup.
+Requires pg_cron >= 1.5 for second-granularity scheduling. This version
+introduced interval-based scheduling (`'1 second'`) and
+`cron.schedule_in_database()`. Available on most managed providers
+(RDS, Cloud SQL, AlloyDB, Crunchy Bridge, Neon, Supabase).
 
-**Fallback for older pg_cron:** If the provider ships pg_cron < 1.5 (no
-sub-minute scheduling), pg_ash can fall back to `* * * * *` (once per minute)
-as the cron schedule, with the sampler function internally looping for 60
-iterations at 1s intervals using `pg_sleep(1)`. This gives the same 1s
-sampling frequency but with a single cron trigger per minute. The tradeoff
-is that one connection is occupied for ~60s per minute, and if the job is
-killed mid-loop, up to 59 samples are lost. Document both modes in README.
+`ash.start()` checks the installed pg_cron version and raises an error
+if < 1.5.
 
 pg_cron interprets cron expressions in UTC. The midnight rotation
 (`0 0 * * *`) fires at midnight UTC, not local time. This is fine for
@@ -310,7 +306,7 @@ create table ash.query_map (
  * timestamps; sample uses int4 for compact storage at scale.
  */
 create table ash.sample (
-  sample_ts      int4      not null,  /* seconds since ash.epoch(), set by take_sample() */
+  sample_ts      int4      not null,  /* seconds since ash.epoch(), from now() */
   datid          oid       not null,
   active_count   smallint  not null,  /* total sampled backends this tick+db */
   data           integer[] not null,  /* encoded: [ver, -wait, count, qid, ...] */
@@ -394,8 +390,8 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
 
 ### Step 2: Sampler function (`ash.take_sample()`)
-- Capture `t := clock_timestamp()` once at function entry — derive `sample_ts`
-  from `t`, all rows in this tick get the same timestamp
+- `sample_ts` derived from `now()` — one consistent timestamp per tick
+  (each pg_cron invocation is its own transaction)
 - Snapshot `pg_stat_activity` → one row per database per sample tick
 - Group by `datid` and wait event, encode into `data integer[]` format:
   `[1, -wait_id, count, qid, qid, ..., -next_wait, ...]` (leading `1` = format v1)
@@ -426,7 +422,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
   on the partition being truncated, abort gracefully and retry next cron tick
 - Advance `current_slot` to next partition (already truncated)
 - `TRUNCATE` the old previous partition (recycle it as the new "next")
-- Update `rotated_at = clock_timestamp()` in `ash.config`
+- Update `rotated_at = now()` in `ash.config`
 - Optionally garbage-collect `ash.query_map`: delete entries not referenced in
   any live partition (keeps table small, lookups fast)
 - **Edge case:** If `take_sample()` is mid-flight during rotation (read
@@ -533,7 +529,7 @@ on first encounter), that's a signal to optimize the caching strategy.
 - **No per-PID tracking** — aggregated by database per sample. Can't trace one backend's journey across time. (By design — keeps storage tiny.)
 - **No query text** — join `query_id` to `pg_stat_statements`.
 - **Requires `compute_query_id = on`** — default since Postgres 14, but can be turned off.
-- **pg_cron >= 1.5 recommended** — for native second-granularity scheduling. Older versions work via the `pg_sleep()` loop fallback (see 3.11).
+- **Requires pg_cron >= 1.5** — for second-granularity scheduling. Most managed providers ship this or newer.
 - **Requires `pg_read_all_stats`** — sampler role must see all backends in `pg_stat_activity`.
 
 ## 8. Future Ideas
