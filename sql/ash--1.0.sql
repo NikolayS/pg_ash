@@ -74,6 +74,11 @@ CREATE TABLE IF NOT EXISTS ash.sample_1 PARTITION OF ash.sample FOR VALUES IN (1
 CREATE TABLE IF NOT EXISTS ash.sample_2 PARTITION OF ash.sample FOR VALUES IN (2);
 
 -- Create indexes on partitions
+-- (sample_ts) for time-range reader queries
+CREATE INDEX IF NOT EXISTS sample_0_ts_idx ON ash.sample_0 (sample_ts);
+CREATE INDEX IF NOT EXISTS sample_1_ts_idx ON ash.sample_1 (sample_ts);
+CREATE INDEX IF NOT EXISTS sample_2_ts_idx ON ash.sample_2 (sample_ts);
+-- (datid, sample_ts) for per-database time-range queries
 CREATE INDEX IF NOT EXISTS sample_0_datid_ts_idx ON ash.sample_0 (datid, sample_ts);
 CREATE INDEX IF NOT EXISTS sample_1_datid_ts_idx ON ash.sample_1 (datid, sample_ts);
 CREATE INDEX IF NOT EXISTS sample_2_datid_ts_idx ON ash.sample_2 (datid, sample_ts);
@@ -876,7 +881,7 @@ BEGIN
 END;
 $$;
 
--- Top wait events
+-- Top wait events (inline SQL decode — no plpgsql per-row overhead)
 CREATE OR REPLACE FUNCTION ash.top_waits(
     p_interval interval DEFAULT '1 hour',
     p_limit int DEFAULT 20
@@ -891,33 +896,35 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $$
-    WITH decoded AS (
-        SELECT d.state, d.type, d.event
-        FROM ash.sample s
-        CROSS JOIN LATERAL ash.decode_sample(s.data) d
+    WITH waits AS (
+        SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
         WHERE s.slot = ANY(ash._active_slots())
           AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+          AND s.data[i] < 0
     ),
     totals AS (
-        SELECT state, type, event, count(*) as cnt
-        FROM decoded
-        GROUP BY state, type, event
+        SELECT w.wait_id, sum(w.cnt) as cnt
+        FROM waits w
+        GROUP BY w.wait_id
     ),
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        t.state,
-        t.type as wait_type,
-        t.event as wait_event,
+        wm.state,
+        wm.type as wait_type,
+        wm.event as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
-    FROM totals t, grand_total gt
+    FROM totals t
+    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+    CROSS JOIN grand_total gt
     ORDER BY t.cnt DESC
     LIMIT p_limit
 $$;
 
--- Wait event timeline (time-bucketed breakdown)
+-- Wait event timeline (time-bucketed breakdown, inline SQL decode)
 CREATE OR REPLACE FUNCTION ash.wait_timeline(
     p_interval interval DEFAULT '1 hour',
     p_bucket interval DEFAULT '1 minute'
@@ -932,29 +939,34 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $$
-    WITH decoded AS (
+    WITH waits AS (
         SELECT
             ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch FROM p_bucket)::int4)) * interval '1 second' as bucket,
-            d.state,
-            d.type,
-            d.event
-        FROM ash.sample s
-        CROSS JOIN LATERAL ash.decode_sample(s.data) d
+            (-s.data[i])::smallint as wait_id,
+            s.data[i + 1] as cnt
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
         WHERE s.slot = ANY(ash._active_slots())
           AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+          AND s.data[i] < 0
     )
     SELECT
-        bucket as bucket_start,
-        state,
-        type as wait_type,
-        event as wait_event,
-        count(*) as samples
-    FROM decoded
-    GROUP BY bucket, state, type, event
-    ORDER BY bucket, samples DESC
+        w.bucket as bucket_start,
+        wm.state,
+        wm.type as wait_type,
+        wm.event as wait_event,
+        sum(w.cnt) as samples
+    FROM waits w
+    JOIN ash.wait_event_map wm ON wm.id = w.wait_id
+    GROUP BY w.bucket, wm.state, wm.type, wm.event
+    ORDER BY w.bucket, sum(w.cnt) DESC
 $$;
 
--- Top queries by wait samples
+-- Top queries by wait samples (inline SQL decode)
+-- Extracts individual query_map_ids from the encoded array.
+-- Format: [ver, -wid, count, qid, qid, ..., -wid, count, qid, ...]
+-- Every element that is >= 0 and not at position 1 (version) and not
+-- immediately after a negative element (that's the count) is a query_map_id.
+-- We use generate_subscripts and filter: data[i] >= 0 AND i > 1 AND data[i-1] >= 0
 CREATE OR REPLACE FUNCTION ash.top_queries(
     p_interval interval DEFAULT '1 hour',
     p_limit int DEFAULT 20
@@ -971,63 +983,68 @@ AS $$
 DECLARE
     v_has_pg_stat_statements boolean;
 BEGIN
-    -- Check if pg_stat_statements is available
     SELECT EXISTS (
         SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
     ) INTO v_has_pg_stat_statements;
 
     IF v_has_pg_stat_statements THEN
         RETURN QUERY
-        WITH decoded AS (
-            SELECT d.query_id as qid
-            FROM ash.sample s
-            CROSS JOIN LATERAL ash.decode_sample(s.data) d
+        WITH qids AS (
+            SELECT s.data[i] as map_id
+            FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-              AND d.query_id IS NOT NULL
+              AND i > 1                   -- skip version byte
+              AND s.data[i] >= 0          -- not a wait_id marker
+              AND s.data[i - 1] >= 0      -- not a count (count follows negative marker)
         ),
         totals AS (
-            SELECT qid, count(*) as cnt
-            FROM decoded
-            GROUP BY qid
+            SELECT map_id, count(*) as cnt
+            FROM qids
+            WHERE map_id > 0  -- skip sentinel 0 (NULL query_id)
+            GROUP BY map_id
         ),
         grand_total AS (
             SELECT sum(cnt) as total FROM totals
         )
         SELECT
-            t.qid as query_id,
+            qm.query_id,
             t.cnt as samples,
             round(t.cnt::numeric / gt.total * 100, 2) as pct,
             left(pss.query, 100) as query_text
         FROM totals t
+        JOIN ash.query_map qm ON qm.id = t.map_id
         CROSS JOIN grand_total gt
-        LEFT JOIN pg_stat_statements pss ON pss.queryid = t.qid
+        LEFT JOIN pg_stat_statements pss ON pss.queryid = qm.query_id
         ORDER BY t.cnt DESC
         LIMIT p_limit;
     ELSE
         RETURN QUERY
-        WITH decoded AS (
-            SELECT d.query_id as qid
-            FROM ash.sample s
-            CROSS JOIN LATERAL ash.decode_sample(s.data) d
+        WITH qids AS (
+            SELECT s.data[i] as map_id
+            FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-              AND d.query_id IS NOT NULL
+              AND i > 1
+              AND s.data[i] >= 0
+              AND s.data[i - 1] >= 0
         ),
         totals AS (
-            SELECT qid, count(*) as cnt
-            FROM decoded
-            GROUP BY qid
+            SELECT map_id, count(*) as cnt
+            FROM qids
+            WHERE map_id > 0
+            GROUP BY map_id
         ),
         grand_total AS (
             SELECT sum(cnt) as total FROM totals
         )
         SELECT
-            t.qid as query_id,
+            qm.query_id,
             t.cnt as samples,
             round(t.cnt::numeric / gt.total * 100, 2) as pct,
             NULL::text as query_text
         FROM totals t
+        JOIN ash.query_map qm ON qm.id = t.map_id
         CROSS JOIN grand_total gt
         ORDER BY t.cnt DESC
         LIMIT p_limit;
@@ -1035,7 +1052,7 @@ BEGIN
 END;
 $$;
 
--- CPU vs waiting ratio
+-- CPU vs waiting ratio (inline SQL decode)
 CREATE OR REPLACE FUNCTION ash.cpu_vs_waiting(
     p_interval interval DEFAULT '1 hour'
 )
@@ -1047,20 +1064,25 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $$
-    WITH decoded AS (
+    WITH waits AS (
         SELECT
-            CASE
-                WHEN d.type = 'CPU' THEN 'CPU'
-                ELSE 'Waiting'
-            END as cat
-        FROM ash.sample s
-        CROSS JOIN LATERAL ash.decode_sample(s.data) d
+            (-s.data[i])::smallint as wait_id,
+            s.data[i + 1] as cnt
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
         WHERE s.slot = ANY(ash._active_slots())
           AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+          AND s.data[i] < 0
+    ),
+    categorized AS (
+        SELECT
+            CASE WHEN wm.type = 'CPU' THEN 'CPU' ELSE 'Waiting' END as cat,
+            w.cnt
+        FROM waits w
+        JOIN ash.wait_event_map wm ON wm.id = w.wait_id
     ),
     totals AS (
-        SELECT cat, count(*) as cnt
-        FROM decoded
+        SELECT cat, sum(cnt) as cnt
+        FROM categorized
         GROUP BY cat
     ),
     grand_total AS (
