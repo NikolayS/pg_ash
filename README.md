@@ -11,7 +11,8 @@ Samples `pg_stat_activity` at a configurable frequency (1–60s) and stores wait
 **Sample row:**
 ```
 sample_ts │ 3628080    (seconds since 2026-01-01 = 2026-02-12 03:48:00 UTC)
-data      │ {-5, 3, 101, 102, 101, -1, 2, 103, 104, -0, 1, 105}
+datid     │ 16384
+data      │ {-5, 3, 101, 102, 101, -1, 2, 103, 104, -1, 1, 105}
 ```
 
 Encoding: `[-wait_event_id, count, query_id, query_id, ...]`. 6 active backends across 3 wait events → 1 row, ~12 array elements. Wait event IDs and query IDs reference dictionary tables.

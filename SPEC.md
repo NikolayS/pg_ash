@@ -28,14 +28,15 @@ External monitoring systems are still valuable for long-term storage and trend a
 
 ## 3. Design Decisions
 
-### 3.1 One row per sample tick (encoded `smallint[]`)
+### 3.1 One row per database per sample tick (encoded `smallint[]`)
 
 Instead of one row per active session, we store all active sessions for a database
 in a single row using a compact encoded `smallint[]`:
 
 ```
 sample_ts   │ 3628080    (seconds since 2026-01-01 = 2026-02-12 03:48:00 UTC)
-data        │ {-5, 3, 101, 102, 101, -1, 2, 103, 104, -0, 1, 105}
+datid       │ 16384
+data        │ {-5, 3, 101, 102, 101, -1, 2, 103, 104, -1, 1, 105}
 ```
 
 Encoding: `[-wait_event_id, count, query_id, query_id, ..., -next_wait, ...]`
@@ -81,14 +82,14 @@ create table ash.query_map (
 Both dictionaries are seeded on first encounter — the sampler auto-registers
 unknown wait events and query_ids.
 
-### 3.3 One install per database
+### 3.3 Single install, all databases
 
-pg_ash is installed per database. The `ash.sample` table stores data only for
-the database it lives in — no `datid` column. If you need ASH on multiple
-databases, install pg_ash in each one separately.
+pg_ash is installed once (in the pg_cron database, typically `postgres`) and
+samples all active backends across all databases. Each sample row includes `datid`
+so you can filter by database or view server-wide load.
 
-This saves 4 bytes/row, simplifies the sampler (no `GROUP BY datid`), and makes
-reader functions cleaner.
+This is essential for "is the server overloaded?" analysis — you need all backends
+in one place, not scattered across per-database installs.
 
 ### 3.4 Only active sessions
 
@@ -178,9 +179,10 @@ create table ash.query_map (
   query_id int8 not null unique
 );
 
-/* sample data (partitioned, one table per database) */
+/* sample data (partitioned) */
 create table ash.sample (
   sample_ts int        not null default extract(epoch from now() - ash.epoch())::int,
+  datid     oid        not null,
   data      smallint[] not null,  /* encoded: [-wait, count, qid, qid, ...] */
   slot      smallint   not null default ash.current_slot()
 ) partition by list (slot);
@@ -247,8 +249,8 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
 
 ### Step 2: Sampler function (`ash.take_sample()`)
-- Snapshot `pg_stat_activity` → one row per sample tick
-- Group by wait event, encode into `data smallint[]` format:
+- Snapshot `pg_stat_activity` → one row per database per sample tick
+- Group by `datid` and wait event, encode into `data smallint[]` format:
   `[-wait_id, count, qid, qid, ..., -next_wait, ...]`
 - Wait event lookup via `ash.wait_event_map` + `_register_wait()` fallback
 - Query ID lookup via `ash.query_map` + `_register_query()` fallback
@@ -266,21 +268,8 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation)
 - `ash.stop()` — unschedule pg_cron jobs
 - Validate pg_cron is installed before attempting schedule
-- **Multi-database caveat:** pg_cron lives in one database (usually `postgres`).
-  Use `cron.schedule_in_database()` (pg_cron 1.4+) to target other databases:
-  ```sql
-  /* Run from the pg_cron database */
-  select cron.schedule_in_database(
-    'ash_sampler_myapp', '1 second',
-    'select ash.take_sample()', 'myapp'
-  );
-  select cron.schedule_in_database(
-    'ash_rotate_myapp', '0 0 * * *',
-    'select ash.rotate()', 'myapp'
-  );
-  ```
-  `ash.start()` attempts `cron.schedule()` locally first; if pg_cron is not in the
-  current database, it raises a notice with the exact SQL to run from the pg_cron database.
+- Install pg_ash in the same database as pg_cron (typically `postgres`).
+  The sampler reads `pg_stat_activity` which shows all backends across all databases.
 
 ### Step 5: Reader functions (human/LLM-readable output)
 - `ash.top_waits(interval default '1 hour', int default 20)` — top wait events with %, human-readable
