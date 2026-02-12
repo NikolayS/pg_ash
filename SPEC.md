@@ -261,6 +261,21 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation)
 - `ash.stop()` — unschedule pg_cron jobs
 - Validate pg_cron is installed before attempting schedule
+- **Multi-database caveat:** pg_cron lives in one database (usually `postgres`).
+  Use `cron.schedule_in_database()` (pg_cron 1.4+) to target other databases:
+  ```sql
+  /* Run from the pg_cron database */
+  select cron.schedule_in_database(
+    'ash_sampler_myapp', '1 second',
+    'select ash.take_sample()', 'myapp'
+  );
+  select cron.schedule_in_database(
+    'ash_rotate_myapp', '0 0 * * *',
+    'select ash.rotate()', 'myapp'
+  );
+  ```
+  `ash.start()` attempts `cron.schedule()` locally first; if pg_cron is not in the
+  current database, it raises a notice with the exact SQL to run from the pg_cron database.
 
 ### Step 5: Reader functions (human/LLM-readable output)
 - `ash.top_waits(interval default '1 hour', int default 20)` — top wait events with %, human-readable
