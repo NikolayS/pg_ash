@@ -473,6 +473,9 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
   `backend_type = 'client backend'` (+ optionally background workers)
 - Respect config flag: `include_bg_workers`
 - Store `active_count` per row — total sampled backends for this datid+tick
+- **No row for zero activity:** If a database has zero matching backends in a
+  tick, no row is emitted. Gaps in the time series for a specific `datid` mean
+  "no active or idle-in-transaction sessions during those ticks" — not data loss.
 - Performance: select only needed columns, filter early on `state` and
   `backend_type` to minimize shared memory reads
 - **Error handling:** Per-row `BEGIN ... EXCEPTION WHEN OTHERS` around
@@ -509,6 +512,9 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation).
   Returns the pg_cron job IDs so the user can verify in `cron.job`.
   Checks pg_cron version >= 1.5 and raises error if not met.
+  **Idempotent:** If jobs already exist, returns existing IDs instead of
+  creating duplicates. Duplicate samplers would double storage and cause
+  dictionary insert races.
 - `ash.stop()` — unschedule pg_cron jobs. Returns which job IDs were removed.
 - `ash.uninstall()` — calls `ash.stop()` then `DROP SCHEMA ash CASCADE`.
   Plain `DROP SCHEMA` without `ash.stop()` first leaves orphaned pg_cron jobs
