@@ -207,42 +207,78 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 
 ## 6. Implementation Plan
 
-### Step 1: Schema and dictionary
+### Step 1: Core schema and infrastructure
 - Create `ash` schema
-- Create `ash.config` table with singleton constraint
-- Create `ash.wait_event_map` and seed with PG14+ wait events (~200 entries)
-- `id=0` reserved for CPU (no wait event)
-- Create `ash._register_wait()` for auto-inserting unknown events
+- `ash.epoch()` — immutable function returning `2026-01-01 00:00:00 UTC`
+- `ash.config` singleton table (current_slot, sample_interval, rotation_period, flags)
+- `ash.wait_event_map` dictionary seeded with PG14+ wait events (~200 entries), `id=0` = CPU
+- `ash._register_wait(type, event)` — auto-inserts unknown events, returns id
+- `ash.current_slot()` — returns active partition slot from config
+- `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
 
-### Step 2: Partitioned sample table
-- Create `ash.sample` partitioned by `LIST (slot)`
-- Create 3 child partitions (`sample_0`, `sample_1`, `sample_2`)
-- Create `ash.current_slot()` function reading from `ash.config`
-- Create `sample_ts` indexes on each partition
+### Step 2: Sampler function (`ash.take_sample()`)
+- Snapshot `pg_stat_activity` → one row per database
+- `GROUP BY datid`, aggregate into `wait_ids smallint[]` and `query_ids bigint[]`
+- Wait event lookup via LEFT JOIN to dictionary + `_register_wait()` fallback
+- Filter: `state = 'active'` (+ optionally `idle in transaction`), `backend_type = 'client backend'` (+ optionally background workers)
+- Respect config flags: `include_idle_xact`, `include_bg_workers`
 
-### Step 3: Sampler function
-- Create `ash.take_sample()` — snapshots active sessions from `pg_stat_activity`
-- Group by `datid`, aggregate `wait_ids` and `query_ids` as parallel arrays
-- Handle the wait event lookup with LEFT JOIN + `_register_wait()` fallback
-- Respect `include_idle_xact` and `include_bg_workers` config flags
+### Step 3: Rotation function (`ash.rotate()`)
+- Advance `current_slot` to next partition (already truncated)
+- `TRUNCATE` the old previous partition (recycle it as the new "next")
+- Advisory lock or check to prevent concurrent rotation
+- Log rotation event (optional: insert marker row or raise notice)
 
-### Step 4: Rotation function
-- Create `ash.rotate()` — advances `current_slot`, truncates recycled partition
-- Must be safe to call concurrently (idempotent or locked)
+### Step 4: Start/stop functions
+- `ash.start(interval default '10 seconds')` — schedule pg_cron jobs (sampler + rotation)
+- `ash.stop()` — unschedule pg_cron jobs
+- Validate pg_cron is installed before attempting schedule
 
-### Step 5: Start/stop functions
-- Create `ash.start(interval)` — schedules pg_cron jobs for sampling and rotation
-- Create `ash.stop()` — unschedules pg_cron jobs
-- Validate pg_cron is available before scheduling
+### Step 5: Reader functions (human/LLM-readable output)
+- `ash.top_waits(interval default '1 hour', int default 20)` — top wait events with %, human-readable
+- `ash.wait_timeline(interval default '1 hour', interval default '1 minute')` — time-bucketed wait event breakdown
+- `ash.top_queries(interval default '1 hour', int default 20)` — queries with most wait samples, joined to `pg_stat_statements` for query text
+- `ash.cpu_vs_waiting(interval default '1 hour')` — CPU vs waiting ratio
+- `ash.report(interval default '1 hour')` — full text report combining all of the above, Oracle ASHREPORT-style
+- All functions return `SETOF record` or `TABLE(...)` for easy `\x` display or programmatic consumption
+- All translate `int4` timestamps to human-readable `timestamptz` and `smallint` wait_ids to `type:event` text
 
-### Step 6: Convenience views
-- `ash.top_waits` — top wait events, last hour
-- `ash.wait_timeline` — per-minute wait event breakdown
-- `ash.top_queries` — queries with most wait samples, joined to `pg_stat_statements`
-- `ash.cpu_vs_waiting` — CPU vs waiting ratio
+### Step 6: Benchmarks — simulated long-running production
+Simulate realistic production workloads without waiting real time:
+
+**Data generation:**
+- 50 active backends, 10s sampling, 1 database
+- Realistic wait event distribution (not uniform — weight toward IO:DataFileRead, LWLock:*, CPU)
+- ~20 distinct query_ids with realistic repetition patterns (zipf-like)
+- Generate directly via `INSERT ... SELECT generate_series()`
+
+**Scenarios:**
+- **1 day:** 8,640 rows, ~5 MB — baseline
+- **1 month:** 259,200 rows, ~150 MB — measure query latency on reader functions
+- **1 year:** 3,153,600 rows, ~1.8 GB — measure query latency, verify index effectiveness
+- **10 years:** 31,536,000 rows, ~18 GB — stress test, verify reader functions still perform
+
+**What to measure:**
+- Table + index size at each scale
+- `ash.top_waits('1 hour')` query time
+- `ash.top_queries('1 hour')` query time
+- `ash.wait_timeline('1 hour')` query time
+- `ash.report('24 hours')` query time
+- Full sequential scan time (worst case)
+- `TRUNCATE` time on a full partition (should be <1ms regardless of size)
+- Index scan performance for time-range queries
+
+**Rotation simulation:**
+- Fill partition 0 with 1 year of data
+- Call `ash.rotate()` — verify partition 1 becomes current, partition 2 gets truncated
+- Verify partition 0 data survives (now "previous")
+- Call `ash.rotate()` again — verify partition 0 gets truncated (instant, regardless of 1 year of data)
+- Verify zero bloat after repeated rotations
+
+**Note:** All "1 year" / "10 year" data lives in a single partition (no rotation during generation). This tests the worst case — a partition that never got rotated. In production, each partition only holds 1 rotation period (1 day by default).
 
 ### Step 7: Install/uninstall scripts
-- `ash--1.0.sql` — single-file install (schema + tables + functions + views + seed data)
+- `ash--1.0.sql` — single-file install (schema + tables + functions + seed data)
 - Document `ash.start()` / `ash.stop()` / `drop schema ash cascade`
 
 ### Step 8: Testing
@@ -251,10 +287,10 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Verify rotation doesn't lose data or create gaps
 - Verify storage matches estimates
 - Verify unknown wait events are auto-registered
-- Test with `include_idle_xact = true` and `include_bg_workers = true`
+- Test config flags (`include_idle_xact`, `include_bg_workers`)
 - Test `ash.stop()` + `ash.start()` cycling
 
-### Step 9: Documentation and examples
+### Step 9: Documentation
 - README with quick start
 - Example queries for common scenarios
 - Grafana dashboard queries
