@@ -217,7 +217,7 @@ create index on ash.sample_2 (sample_ts);
 | `ash.epoch()` | Returns the custom epoch (`2026-01-01 00:00:00 UTC`) |
 | `ash.current_slot()` | Returns the active partition slot (0, 1, or 2) |
 | `ash.take_sample()` | Snapshots `pg_stat_activity` into `ash.sample` |
-| `ash._register_wait(type, event)` | Auto-inserts unknown wait events, returns id |
+| `ash._register_wait(state, type, event)` | Auto-inserts unknown wait events, returns id |
 | `ash._register_query(int8)` | Auto-inserts unknown query_ids, returns smallint id |
 | `ash.rotate()` | Advances the current slot and truncates the recycled partition |
 | `ash.start(interval)` | Creates pg_cron jobs for sampling and rotation |
@@ -254,7 +254,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.epoch()` — immutable function returning `2026-01-01 00:00:00 UTC`
 - `ash.config` singleton table (current_slot, sample_interval, rotation_period, flags)
 - `ash.wait_event_map` dictionary keyed by `(state, type, event)` — seeded on first encounter, `id=1` = `active|CPU`
-- `ash._register_wait(type, event)` — auto-inserts unknown events, returns id
+- `ash._register_wait(state, type, event)` — auto-inserts unknown events, returns id
 - `ash.current_slot()` — returns active partition slot from config
 - `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
 
