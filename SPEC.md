@@ -31,7 +31,6 @@ in a single row using a compact encoded `smallint[]`:
 
 ```
 sample_ts   │ 3628080    (seconds since 2026-01-01 = 2026-02-12 03:48:00 UTC)
-datid       │ 16384
 data        │ {-5, 3, 101, 102, 101, -1, 2, 103, 104, -0, 1, 105}
 ```
 
@@ -77,11 +76,20 @@ create table ash.query_map (
 Both dictionaries are seeded on first encounter — the sampler auto-registers
 unknown wait events and query_ids.
 
-### 3.3 Only active sessions
+### 3.3 One install per database
+
+pg_ash is installed per database. The `ash.sample` table stores data only for
+the database it lives in — no `datid` column. If you need ASH on multiple
+databases, install pg_ash in each one separately.
+
+This saves 4 bytes/row, simplifies the sampler (no `GROUP BY datid`), and makes
+reader functions cleaner.
+
+### 3.4 Only active sessions
 
 We sample only `state = 'active'` (and optionally `idle in transaction`). Idle connections aren't interesting for wait event profiling and would bloat the arrays. This is what makes the storage manageable: we capture *work*, not *idle connections*.
 
-### 3.4 Compact timestamps (4 bytes)
+### 3.5 Compact timestamps (4 bytes)
 
 Timestamps stored as `int4` — seconds since custom epoch `2026-01-01 00:00:00 UTC`. Good until 2094. Saves 4 bytes/row vs `timestamptz`.
 
@@ -99,7 +107,7 @@ ash.epoch() + (sample_ts * interval '1 second')
 
 Uses `now()` (transaction time) — all rows from the same sample tick share the exact same value. Consistent and slightly cheaper than `clock_timestamp()`.
 
-### 3.5 PGQ-style 3-partition rotation (zero bloat)
+### 3.6 PGQ-style 3-partition rotation (zero bloat)
 
 Inspired by Skype's PGQ. Three partitions rotate through roles:
 
@@ -124,11 +132,11 @@ At rotation (default: daily at midnight):
 
 **Partition key:** A synthetic `slot` column (smallint, values 0/1/2) set by `ash.current_slot()`. Partitioned by `LIST (slot)`.
 
-### 3.6 No query text storage
+### 3.7 No query text storage
 
 Query text is not stored. That's what `pg_stat_statements` is for. We store `query_id` (bigint) which joins to it. Storing query text would 10–100× the storage cost.
 
-### 3.7 Postgres 14+ minimum
+### 3.8 Postgres 14+ minimum
 
 `query_id` was introduced in Postgres 14 (`compute_query_id` GUC). Without it, the core value proposition (correlating wait events to specific queries) is lost.
 
@@ -165,12 +173,11 @@ create table ash.query_map (
   query_id int8 not null unique
 );
 
-/* sample data (partitioned) */
+/* sample data (partitioned, one table per database) */
 create table ash.sample (
-  sample_ts int      not null default extract(epoch from now() - ash.epoch())::int,
-  datid     oid      not null,
+  sample_ts int        not null default extract(epoch from now() - ash.epoch())::int,
   data      smallint[] not null,  /* encoded: [-wait, count, qid, qid, ...] */
-  slot      smallint not null default ash.current_slot()
+  slot      smallint   not null default ash.current_slot()
 ) partition by list (slot);
 
 create table ash.sample_0 partition of ash.sample for values in (0);
@@ -215,9 +222,9 @@ At 10-second sampling, 1 database, encoded `smallint[]` format:
 | Active backends | Rows/day | Size/day | Size with 2 partitions |
 |-----------------|----------|----------|------------------------|
 | 5 | 8,640 | ~0.5 MiB | ~1 MiB |
-| 20 | 8,640 | ~1.1 MiB | ~2.2 MiB |
-| 50 | 8,640 | ~1.9 MiB | ~3.8 MiB |
-| 100 | 8,640 | ~3.5 MiB | ~7 MiB |
+| 20 | 8,640 | ~1.0 MiB | ~2.0 MiB |
+| 50 | 8,640 | ~1.8 MiB | ~3.6 MiB |
+| 100 | 8,640 | ~3.4 MiB | ~6.8 MiB |
 
 At 1-second sampling, multiply size by 10× (rows become 86,400/day).
 
@@ -235,8 +242,8 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
 
 ### Step 2: Sampler function (`ash.take_sample()`)
-- Snapshot `pg_stat_activity` → one row per database
-- Group by `datid` and wait event, encode into `data smallint[]` format:
+- Snapshot `pg_stat_activity` → one row per sample tick
+- Group by wait event, encode into `data smallint[]` format:
   `[-wait_id, count, qid, qid, ..., -next_wait, ...]`
 - Wait event lookup via `ash.wait_event_map` + `_register_wait()` fallback
 - Query ID lookup via `ash.query_map` + `_register_query()` fallback

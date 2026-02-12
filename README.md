@@ -11,7 +11,6 @@ Samples `pg_stat_activity` at a configurable frequency (1–60s) and stores wait
 **Sample row:**
 ```
 sample_ts │ 3628080    (seconds since 2026-01-01 = 2026-02-12 03:48:00 UTC)
-datid     │ 16384
 data      │ {-5, 3, 101, 102, 101, -1, 2, 103, 104, -0, 1, 105}
 ```
 
