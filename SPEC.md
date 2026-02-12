@@ -8,7 +8,7 @@ Target: small-to-medium Postgres clusters running on the primary, where installi
 
 ## 2. Problem Statement
 
-Postgres's `pg_stat_activity` is a point-in-time snapshot. It shows what's happening *right now*, but the moment you look away, the data is gone. This makes it nearly impossible to answer basic observability questions:
+Postgres's `pg_stat_activity` shows what's happening *right now*, but the moment you look away, the data is gone. (Technically, it reads from shared memory row by row — not an atomic snapshot — but it's the best we have.) This makes it nearly impossible to answer basic observability questions:
 
 - **"What was the database waiting on at 3am?"** — You can't know unless you were watching.
 - **"Which queries cause the most lock contention?"** — `pg_stat_statements` gives you timing totals but no wait event breakdown per query.
@@ -106,7 +106,7 @@ extract(epoch from now() - ash.epoch())::int
 ash.epoch() + (sample_ts * interval '1 second')
 ```
 
-Uses `now()` (transaction time) — all rows from the same sample tick share the exact same value. Consistent and slightly cheaper than `clock_timestamp()`.
+Uses `now()` (transaction time) — gives one consistent timestamp per sample tick, even though `pg_stat_activity` itself is not an atomic snapshot (each row is read from shared memory at slightly different times). Good enough for 1s resolution observability.
 
 ### 3.6 PGQ-style 3-partition rotation (zero bloat)
 
