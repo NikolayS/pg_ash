@@ -91,9 +91,16 @@ so you can filter by database or view server-wide load.
 This is essential for "is the server overloaded?" analysis — you need all backends
 in one place, not scattered across per-database installs.
 
-### 3.4 Only active sessions
+### 3.4 Active + idle-in-transaction sessions
 
-We sample only `state = 'active'` (and optionally `idle in transaction`). Idle connections aren't interesting for wait event profiling and would bloat the arrays. This is what makes the storage manageable: we capture *work*, not *idle connections*.
+We sample `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`.
+
+- **Active** — currently executing, the core of wait event analysis.
+- **Idle in transaction** — not executing, but holding locks and blocking vacuum. These are silent killers — invisible in wait event profiles but causing real damage. Capturing them answers "why did autovacuum stall at 3am?"
+
+Purely `idle` connections are excluded — they're just sleeping and don't affect anything. This keeps the arrays manageable: we capture *work and held resources*, not *idle connections*.
+
+Background workers (autovacuum, WAL sender, etc.) are optionally included via `include_bg_workers` config flag (off by default).
 
 ### 3.5 Compact timestamps (4 bytes)
 
@@ -159,7 +166,6 @@ create table ash.config (
   current_slot       smallint not null default 0,
   sample_interval    interval not null default '1 second',
   rotation_period    interval not null default '1 day',
-  include_idle_xact  bool not null default false,
   include_bg_workers bool not null default false,
   rotated_at         timestamptz not null default clock_timestamp(),
   installed_at       timestamptz not null default clock_timestamp()
@@ -254,9 +260,9 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
   `[-wait_id, count, qid, qid, ..., -next_wait, ...]`
 - Wait event lookup via `ash.wait_event_map` + `_register_wait()` fallback
 - Query ID lookup via `ash.query_map` + `_register_query()` fallback
-- Filter: `state = 'active'` (+ optionally `idle in transaction`),
+- Filter: `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
   `backend_type = 'client backend'` (+ optionally background workers)
-- Respect config flags: `include_idle_xact`, `include_bg_workers`
+- Respect config flag: `include_bg_workers`
 
 ### Step 3: Rotation function (`ash.rotate()`)
 - Advance `current_slot` to next partition (already truncated)
@@ -324,7 +330,7 @@ Simulate realistic production workloads without waiting real time:
 - Verify rotation doesn't lose data or create gaps
 - Verify storage matches estimates
 - Verify unknown wait events are auto-registered
-- Test config flags (`include_idle_xact`, `include_bg_workers`)
+- Test config flag `include_bg_workers`
 - Test `ash.stop()` + `ash.start()` cycling
 
 ### Step 9: Documentation
