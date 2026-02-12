@@ -45,7 +45,10 @@ Encoding: `[version, -wait_event_id, count, query_map_id, ..., -next_wait, ...]`
 
 - `data[1]` = format version (`1` for v1). Enables future evolution
   (new fields, different grouping) without breaking reader functions.
-  Reader functions check version and dispatch accordingly.
+  Reader functions check version and dispatch accordingly. If a reader
+  encounters an unknown version, it must `RAISE WARNING` and return zero
+  rows for that sample — not crash. This matters when v2 is deployed but
+  old reader functions haven't been upgraded yet.
 - Negative value → wait event id (negated), from `ash.wait_event_map`
 - Next positive value → number of backends with this wait event
 - Following N values → dictionary-encoded query_ids (from `ash.query_map`, int4 PK)
@@ -121,7 +124,12 @@ neither blocks and no sample is lost.
 
 ```sql
 /* in the sampler query */
-coalesce(sa.wait_event_type, '') as type,
+coalesce(sa.wait_event_type,
+  case
+    when sa.state = 'active' then 'CPU'
+    when sa.state like 'idle in transaction%' then 'IDLE'
+  end
+) as type,
 coalesce(sa.wait_event,
   case
     when sa.state = 'active' then 'CPU'
@@ -130,8 +138,17 @@ coalesce(sa.wait_event,
 ) as event
 ```
 
-This maps `active` + no wait event → `active|:CPU` and
-`idle in transaction` + no wait event → `idle in transaction|:IDLE`.
+This maps:
+- `active` + no wait event → `(state='active', type='CPU', event='CPU')`
+- `idle in transaction` + no wait event → `(state='idle in transaction', type='IDLE', event='IDLE')`
+
+The `type` field is `'CPU'` / `'IDLE'` (not empty string) so decoded output
+is self-describing. `coalesce(wait_event_type, '')` in the sampler query is
+an intermediate step; the dictionary stores the clean synthetic type.
+
+**Decoder sentinel handling:** `decode_sample()` must not join `query_map`
+on `id = 0` (the sentinel for NULL/unknown `query_id`). Return `NULL` for
+`query_id` when the encoded value is `0`.
 
 ### 3.3 Single install, all databases
 
@@ -174,6 +191,11 @@ transaction, so `now()` gives one consistent timestamp per sample tick.
 This is the right choice: if two samples somehow race (manual + cron),
 they get distinct transaction timestamps. And `now()` is cheaper than
 `clock_timestamp()` — no syscall per invocation.
+
+**Manual invocation warning:** `SELECT ash.take_sample()` must be called as
+a standalone statement, not inside a longer transaction. Repeated calls
+within the same transaction get the same `now()` → duplicate timestamps.
+Document this in README.
 
 **Precision note:** `extract(epoch ...)` returns `double precision`.
 Casting to `int4` truncates sub-second fractions — this is intentional.
@@ -228,6 +250,15 @@ case where the system clock jumps forward by >1 day, the admin will need to
 manually verify data integrity — but that's a broken clock problem, not a
 pg_ash problem.
 
+**Failed TRUNCATE recovery:** If step 5 (TRUNCATE) fails due to `lock_timeout`,
+`current_slot` has already been advanced (step 4). This means:
+- `take_sample()` inserts into the correct new partition — fine.
+- The old "previous" partition wasn't truncated — 3 partitions have data.
+- Next rotation: the un-truncated partition is now two rotations old. It becomes
+  the new "next" and gets truncated at that point.
+- Self-healing after one extra cycle. During that cycle you have 3 partitions
+  of data instead of 2. Benign — slightly more storage, no data loss.
+
 ### 3.7 No query text storage
 
 Query text is not stored. That's what `pg_stat_statements` is for. We store `query_id` (bigint) which joins to it. Storing query text would 10–100× the storage cost.
@@ -243,8 +274,16 @@ The sampler role needs `pg_read_all_stats` (or superuser) to see all backends
 in `pg_stat_activity`. Without it, you only see your own sessions — useless
 for server-wide observability.
 
-Joining to `pg_stat_statements` for query text also requires
-`pg_read_all_stats` or membership in `pg_monitor`.
+**Managed providers:** Many managed Postgres services (RDS, Cloud SQL) don't
+grant `pg_read_all_stats` to arbitrary roles. The sampler typically needs to
+run as the managed "admin" role (e.g., `rds_superuser` on RDS, `cloudsqlsuperuser`
+on Cloud SQL). Document provider-specific setup in README.
+
+**pg_stat_statements is optional.** Reader functions that join `query_id` to
+`pg_stat_statements` for query text need `pg_read_all_stats` or `pg_monitor`
+membership. But all reader functions must work without it — show `query_id`
+only when pg_stat_statements is not available or the user lacks privileges.
+This keeps pg_ash useful even in locked-down environments.
 
 ### 3.10 NULL handling
 
@@ -315,7 +354,9 @@ create table ash.query_map (
 create table ash.sample (
   sample_ts      int4      not null,  /* seconds since ash.epoch(), from now() */
   datid          oid       not null,
-  active_count   smallint  not null,  /* total sampled backends this tick+db */
+  active_count   smallint  not null,  /* sum of counts in data[]; denormalized for
+                                      * fast filtering: WHERE active_count > 50
+                                      * without decoding the array */
   data           integer[] not null
                    check (data[1] = 1 and array_length(data, 1) >= 3),
   slot           smallint  not null default ash.current_slot()
@@ -354,8 +395,9 @@ range scans. Worth benchmarking at Step 6, but B-tree is the safe default.
 | `ash._validate_data(integer[])` | Validates encoded array structure, returns bool |
 | `ash.decode_sample(integer[])` | Decodes array → `TABLE(state text, type text, event text, query_id int8, count int)` |
 | `ash.rotate()` | Advances the current slot and truncates the recycled partition |
-| `ash.start(interval)` | Creates pg_cron jobs for sampling and rotation |
-| `ash.stop()` | Removes pg_cron jobs |
+| `ash.start(interval)` | Creates pg_cron jobs, returns job IDs |
+| `ash.stop()` | Removes pg_cron jobs, returns removed job IDs |
+| `ash.uninstall()` | Calls `stop()` then `DROP SCHEMA ash CASCADE` |
 | `ash.status()` | Diagnostic dashboard: last sample ts, samples in current partition, current slot, time since last rotation, pg_cron job status, dictionary utilization (wait_event_map count vs smallint max, query_map count) |
 
 ### 4.4 Reader functions
@@ -366,10 +408,17 @@ See §4.3 for the full function list.
 
 **Partition scanning note:** Since `ash.sample` is partitioned by `slot`
 (not by `sample_ts`), Postgres's partition pruning cannot eliminate
-partitions based on `WHERE sample_ts >= X`. Every reader query scans all
-three partitions. This is fine for the expected data sizes (~66 MiB across
-two active partitions) — the `(datid, sample_ts)` B-tree index does all
-the filtering work. Not worth optimizing until data sizes are 10× larger.
+partitions based on `WHERE sample_ts >= X`. However, reader functions can
+add `WHERE slot IN (current, previous)` (computed from `ash.current_slot()`)
+to prune the empty "next" partition. Marginal gain, but it's one line of
+code and conceptually clean. The `(datid, sample_ts)` B-tree index does
+the real filtering work.
+
+**`datid = 0` handling:** When `include_bg_workers = true`, background
+workers without a database context produce `datid = 0::oid`. This doesn't
+join to `pg_database`. Reader functions that show database names must use
+`LEFT JOIN pg_database ON datid = oid` and display `'<background>'` or
+similar for `datid = 0`.
 
 ## 5. Storage Estimates
 
@@ -451,9 +500,14 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
   (the one that was "previous" before the advance), never the new current.
 - Log rotation event (optional: raise notice)
 
-### Step 4: Start/stop functions
-- `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation)
-- `ash.stop()` — unschedule pg_cron jobs
+### Step 4: Start/stop/uninstall functions
+- `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation).
+  Returns the pg_cron job IDs so the user can verify in `cron.job`.
+  Checks pg_cron version >= 1.5 and raises error if not met.
+- `ash.stop()` — unschedule pg_cron jobs. Returns which job IDs were removed.
+- `ash.uninstall()` — calls `ash.stop()` then `DROP SCHEMA ash CASCADE`.
+  Plain `DROP SCHEMA` without `ash.stop()` first leaves orphaned pg_cron jobs
+  that fire errors every second — `ash.uninstall()` prevents this.
 - Validate pg_cron is installed before attempting schedule
 - Install pg_ash in the same database as pg_cron (typically `postgres`).
   The sampler reads `pg_stat_activity` which shows all backends across all databases.
@@ -520,7 +574,8 @@ on first encounter), that's a signal to optimize the caching strategy.
 
 ### Step 7: Install/uninstall scripts
 - `ash--1.0.sql` — single-file install (schema + tables + functions + seed data)
-- Document `ash.start()` / `ash.stop()` / `drop schema ash cascade`
+- `ash.uninstall()` — clean removal: stops cron jobs then drops schema
+- Document: install → `ash.start()` → `ash.status()` → `ash.uninstall()`
 
 ### Step 8: Testing
 - Test on Postgres 14, 15, 16, 17, 18
