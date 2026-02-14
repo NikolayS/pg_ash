@@ -311,13 +311,11 @@ BEGIN
             COALESCE(sa.wait_event_type,
                 CASE
                     WHEN sa.state = 'active' THEN 'CPU'
-                    WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE'
                 END
             ) as wait_type,
             COALESCE(sa.wait_event,
                 CASE
                     WHEN sa.state = 'active' THEN 'CPU*'
-                    WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE'
                 END
             ) as wait_event
         FROM pg_stat_activity sa
@@ -372,11 +370,9 @@ BEGIN
             JOIN _ash_wait_cache wc
               ON wc.state = sa.state
              AND wc.type = COALESCE(sa.wait_event_type,
-                    CASE WHEN sa.state = 'active' THEN 'CPU'
-                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE' END)
+                    CASE WHEN sa.state = 'active' THEN 'CPU' END)
              AND wc.event = COALESCE(sa.wait_event,
-                    CASE WHEN sa.state = 'active' THEN 'CPU*'
-                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE' END)
+                    CASE WHEN sa.state = 'active' THEN 'CPU*' END)
             LEFT JOIN _ash_qids qc ON qc.query_id = sa.query_id
             WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
               AND (sa.backend_type = 'client backend'
