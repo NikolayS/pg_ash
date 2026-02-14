@@ -1097,6 +1097,163 @@ AS $$
 $$;
 
 -- Samples by database
+-- Top queries with text from pg_stat_statements
+-- Returns query text and pgss stats when pg_stat_statements is available,
+-- NULL columns otherwise.
+CREATE OR REPLACE FUNCTION ash.top_queries_with_text(
+    p_interval interval DEFAULT '1 hour',
+    p_limit int DEFAULT 20
+)
+RETURNS TABLE (
+    query_id bigint,
+    samples bigint,
+    pct numeric,
+    calls bigint,
+    mean_time_ms numeric,
+    query_text text
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_has_pgss boolean;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+    ) INTO v_has_pgss;
+
+    IF v_has_pgss THEN
+        RETURN QUERY
+        WITH qids AS (
+            SELECT s.data[i] as map_id
+            FROM ash.sample s, generate_subscripts(s.data, 1) i
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+              AND i > 1
+              AND s.data[i] >= 0
+              AND s.data[i - 1] >= 0
+        ),
+        totals AS (
+            SELECT map_id, count(*) as cnt
+            FROM qids
+            WHERE map_id > 0
+            GROUP BY map_id
+        ),
+        grand_total AS (
+            SELECT sum(cnt) as total FROM totals
+        )
+        SELECT
+            qm.query_id,
+            t.cnt as samples,
+            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            pss.calls,
+            round(pss.mean_exec_time::numeric, 2) as mean_time_ms,
+            left(pss.query, 200) as query_text
+        FROM totals t
+        JOIN ash.query_map qm ON qm.id = t.map_id
+        CROSS JOIN grand_total gt
+        LEFT JOIN pg_stat_statements pss ON pss.queryid = qm.query_id
+        ORDER BY t.cnt DESC
+        LIMIT p_limit;
+    ELSE
+        RETURN QUERY
+        WITH qids AS (
+            SELECT s.data[i] as map_id
+            FROM ash.sample s, generate_subscripts(s.data, 1) i
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+              AND i > 1
+              AND s.data[i] >= 0
+              AND s.data[i - 1] >= 0
+        ),
+        totals AS (
+            SELECT map_id, count(*) as cnt
+            FROM qids
+            WHERE map_id > 0
+            GROUP BY map_id
+        ),
+        grand_total AS (
+            SELECT sum(cnt) as total FROM totals
+        )
+        SELECT
+            qm.query_id,
+            t.cnt as samples,
+            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            NULL::bigint as calls,
+            NULL::numeric as mean_time_ms,
+            NULL::text as query_text
+        FROM totals t
+        JOIN ash.query_map qm ON qm.id = t.map_id
+        CROSS JOIN grand_total gt
+        ORDER BY t.cnt DESC
+        LIMIT p_limit;
+    END IF;
+END;
+$$;
+
+-- Wait profile for a specific query — what is this query waiting on?
+-- Walks the encoded arrays, finds the query_map_id, then looks back to find
+-- which wait group it belongs to (the nearest preceding negative element).
+CREATE OR REPLACE FUNCTION ash.query_waits(
+    p_query_id bigint,
+    p_interval interval DEFAULT '1 hour'
+)
+RETURNS TABLE (
+    wait_event_type text,
+    wait_event text,
+    samples bigint,
+    pct numeric
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_map_id int4;
+BEGIN
+    SELECT id INTO v_map_id FROM ash.query_map WHERE query_id = p_query_id;
+    IF v_map_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    WITH hits AS (
+        -- Find every position where the query appears in a sample,
+        -- then walk backwards to find the wait group marker
+        SELECT
+            (SELECT (- s.data[j])::smallint
+             FROM generate_series(i, 2, -1) j
+             WHERE s.data[j] < 0
+             LIMIT 1
+            ) as wait_id
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
+          AND i > 1
+          AND s.data[i] = v_map_id
+          AND s.data[i] >= 0
+          AND s.data[i - 1] >= 0  -- it's a query_id position, not a count
+    ),
+    totals AS (
+        SELECT wait_id, count(*) as cnt
+        FROM hits
+        WHERE wait_id IS NOT NULL
+        GROUP BY wait_id
+    ),
+    grand_total AS (
+        SELECT sum(cnt) as total FROM totals
+    )
+    SELECT
+        wm.type as wait_event_type,
+        wm.event as wait_event,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+    FROM totals t
+    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+    CROSS JOIN grand_total gt
+    ORDER BY t.cnt DESC;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ash.samples_by_database(
     p_interval interval DEFAULT '1 hour'
 )
