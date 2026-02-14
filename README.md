@@ -12,7 +12,8 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 
 | | pg_ash | pg_wait_sampling | pgsentinel |
 |---|---|---|---|
-| Install | `CREATE EXTENSION` | shared_preload_libraries | Compile + shared_preload_libraries |
+| Install | `\i` (pure SQL) | shared_preload_libraries | Compile + shared_preload_libraries |
+| Works on managed (RDS, Cloud SQL) | Yes | Only if provider ships it | No |
 | Storage | Disk (~30 MiB/day) | Memory only | Memory only |
 | Historical queries | Yes (persistent) | Ring buffer (lost on restart) | Ring buffer (lost on restart) |
 | Pure SQL | Yes | No (C extension) | No (C extension) |
@@ -21,8 +22,8 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 ## Quick start
 
 ```sql
--- install
-create extension pg_ash;
+-- install (just run the SQL file — works on RDS, Cloud SQL, AlloyDB, etc.)
+\i ash--1.0.sql
 
 -- start sampling (1 sample/second via pg_cron)
 select ash.start('1 second');
@@ -34,6 +35,9 @@ select * from ash.waits_by_type('1 hour');
 
 -- stop sampling
 select ash.stop();
+
+-- uninstall (drops the ash schema and pg_cron jobs)
+select ash.uninstall();
 ```
 
 ## Usage
