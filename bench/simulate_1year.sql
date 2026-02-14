@@ -46,7 +46,7 @@ ON CONFLICT (state, type, event) DO NOTHING;
 
 -- Seed 200 query_ids
 INSERT INTO ash.query_map (query_id, last_seen)
-SELECT (1000000 + i * 12347)::int8, 0
+SELECT (1000000 + i * 12347)::int8, extract(epoch FROM now() - ash.epoch())::int4
 FROM generate_series(1, 200) i
 ON CONFLICT (query_id) DO NOTHING;
 

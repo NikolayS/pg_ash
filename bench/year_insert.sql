@@ -20,7 +20,7 @@ INSERT INTO ash.wait_event_map (state, type, event) VALUES
     ('idle in transaction', 'IdleTx', 'IdleTx')
 ON CONFLICT DO NOTHING;
 INSERT INTO ash.query_map (query_id, last_seen)
-SELECT (1000000 + i * 12347)::int8, 0 FROM generate_series(1, 200) i ON CONFLICT DO NOTHING;
+SELECT (1000000 + i * 12347)::int8, extract(epoch FROM now() - ash.epoch())::int4 FROM generate_series(1, 200) i ON CONFLICT DO NOTHING;
 
 -- Build templates
 CREATE OR REPLACE FUNCTION ash._bt(p_n int DEFAULT 500, p_b int DEFAULT 50)
