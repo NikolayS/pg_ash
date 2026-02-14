@@ -20,7 +20,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 | Historical queries | Yes (persistent) | Ring buffer (lost on restart) | Ring buffer (lost on restart) | Depends on setup |
 | Pure SQL | Yes | No (C extension) | No (C extension) | No |
 | Maintenance overhead | None | None | None | High |
-| Dependencies | pg_cron 1.5+ | — | — | Agent + storage |
+| Requirements | pg_cron 1.5+ | shared_preload_libraries (restart required) | Compile + shared_preload_libraries (restart required) | Agent + storage |
 
 ## Quick start
 
