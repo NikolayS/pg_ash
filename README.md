@@ -13,7 +13,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 | | pg_ash | pg_wait_sampling | pgsentinel |
 |---|---|---|---|
 | Install | `\i` (pure SQL) | shared_preload_libraries | Compile + shared_preload_libraries |
-| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Only if provider ships it | No |
+| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of 2025) | No |
 | Storage | Disk (~30 MiB/day) | Memory only | Memory only |
 | Historical queries | Yes (persistent) | Ring buffer (lost on restart) | Ring buffer (lost on restart) |
 | Pure SQL | Yes | No (C extension) | No (C extension) |
