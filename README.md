@@ -63,18 +63,23 @@ select * from ash.activity_summary('8 hours');
 ```
 
 ```sql
--- top wait events in the last hour
-select * from ash.top_waits('1 hour', 5);
+-- top wait events in the last hour (default: top 10 + Other)
+select * from ash.top_waits('1 hour');
 ```
 
 ```
     wait_event     | samples |  pct
 -------------------+---------+-------
- CPU*          |   20160 | 37.33
+ CPU*              |   20160 | 37.33
  Lock:tuple        |   12965 | 24.01
  LWLock:WALWrite   |    7920 | 14.67
  IO:DataFileWrite  |    7200 | 13.33
  IO:DataFileRead   |    5760 | 10.67
+ Client:ClientRead |    3600 |  6.67
+ Timeout:PgSleep   |    2160 |  4.00
+ LWLock:BufferIO   |    1440 |  2.67
+ Lock:transactionid|     720 |  1.33
+ Other             |     540 |  1.00
 ```
 
 ```sql
@@ -138,7 +143,7 @@ select * from ash.query_waits(1234567890, '1 hour');
  Lock:tuple       |    2880 | 28.57
  IO:DataFileWrite |    2880 | 28.57
  IO:DataFileRead  |    1440 | 14.29
- CPU*         |    1440 | 14.29
+ CPU*             |    1440 | 14.29
  LWLock:WALWrite  |    1440 | 14.29
 ```
 
@@ -182,7 +187,7 @@ select * from ash.status();
 | `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
 | `ash.status()` | Sampling status and partition info |
 
-All interval-based functions default to `'1 hour'`. Limit defaults to `20`.
+All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
 
 ### Absolute time (incident investigation)
 
