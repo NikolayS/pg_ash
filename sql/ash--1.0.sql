@@ -305,12 +305,15 @@ BEGIN
     WHERE q.query_id = m.query_id;
 
     -- Register any new wait events we encounter
+    -- CPU* means the backend is active with no wait event reported. This is
+    -- either genuine CPU work or an uninstrumented code path in Postgres.
+    -- The asterisk signals this ambiguity. See https://gaps.wait.events
     FOR v_rec IN
         SELECT DISTINCT
             sa.state,
             COALESCE(sa.wait_event_type,
                 CASE
-                    WHEN sa.state = 'active' THEN 'CPU'
+                    WHEN sa.state = 'active' THEN 'CPU*'
                 END
             ) as wait_type,
             COALESCE(sa.wait_event,
@@ -370,7 +373,7 @@ BEGIN
             JOIN _ash_wait_cache wc
               ON wc.state = sa.state
              AND wc.type = COALESCE(sa.wait_event_type,
-                    CASE WHEN sa.state = 'active' THEN 'CPU' END)
+                    CASE WHEN sa.state = 'active' THEN 'CPU*' END)
              AND wc.event = COALESCE(sa.wait_event,
                     CASE WHEN sa.state = 'active' THEN 'CPU*' END)
             LEFT JOIN _ash_qids qc ON qc.query_id = sa.query_id

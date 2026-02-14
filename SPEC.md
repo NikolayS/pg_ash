@@ -52,7 +52,7 @@ Encoding: `[-wait_event_id, count, query_map_id, ..., -next_wait, ...]`
   before the next negative marker (or end of array). The encoder guarantees
   this; `_validate_data()` checks it. `count` exists for fast summation without
   walking individual elements.
-- Wait event IDs start at 1 (`id=1` = CPU). This avoids the `-0 = 0` ambiguity
+- Wait event IDs start at 1 (`id=1` = CPU*). This avoids the `-0 = 0` ambiguity
   in the encoding — every wait marker is strictly negative.
 - `0` in a query_id position = unknown/NULL query_id (sentinel)
 
@@ -126,23 +126,23 @@ neither blocks and no sample is lost.
 /* in the sampler query */
 coalesce(sa.wait_event_type,
   case
-    when sa.state = 'active' then 'CPU'
+    when sa.state = 'active' then 'CPU*'
     when sa.state like 'idle in transaction%' then 'IDLE'
   end
 ) as type,
 coalesce(sa.wait_event,
   case
-    when sa.state = 'active' then 'CPU'
+    when sa.state = 'active' then 'CPU*'
     when sa.state like 'idle in transaction%' then 'IDLE'
   end
 ) as event
 ```
 
 This maps:
-- `active` + no wait event → `(state='active', type='CPU', event='CPU')`
+- `active` + no wait event → `(state='active', type='CPU*', event='CPU*')`
 - `idle in transaction` + no wait event → `(state='idle in transaction', type='IDLE', event='IDLE')`
 
-The `type` field is `'CPU'` / `'IDLE'` (not empty string) so decoded output
+The `type` field is `'CPU*'` / `'IDLE'` (not empty string) so decoded output
 is self-describing. `coalesce(wait_event_type, '')` in the sampler query is
 an intermediate step; the dictionary stores the clean synthetic type.
 
@@ -292,8 +292,9 @@ This keeps pg_ash useful even in locked-down environments.
   meaning "unknown query"). Does not consume a `query_map` entry.
 - **`datid` is NULL:** Possible for background workers without a database
   context. Stored as `0::oid`. Only relevant when `include_bg_workers = true`.
-- **`wait_event` is NULL with `state = 'active'`:** Backend is running on CPU.
-  Mapped to `active|CPU` in `wait_event_map`.
+- **`wait_event` is NULL with `state = 'active'`:** Backend is likely running
+  on CPU, but could be in an uninstrumented code path (see [gaps.wait.events](https://gaps.wait.events)).
+  Mapped to `active|CPU*` in `wait_event_map`.
 - **`wait_event` is NULL with `state = 'idle in transaction'`:** Backend is
   idle in a transaction, not waiting on anything specific. Mapped to
   `idle in transaction|IDLE` in `wait_event_map`.
@@ -442,7 +443,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Create `ash` schema
 - `ash.epoch()` — immutable function returning `2026-01-01 00:00:00 UTC`
 - `ash.config` singleton table (current_slot, sample_interval, rotation_period, flags)
-- `ash.wait_event_map` dictionary keyed by `(state, type, event)` — seeded on first encounter, `id=1` = `active|CPU`
+- `ash.wait_event_map` dictionary keyed by `(state, type, event)` — seeded on first encounter, `id=1` = `active|CPU*`
 - `ash._register_wait(state, type, event)` — auto-inserts unknown events, returns id
 - `ash.current_slot()` — returns active partition slot from config
 - `ash.sample` partitioned by `LIST (slot)` with 3 child partitions + indexes
@@ -463,7 +464,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
     (4) join back to get the `int4` IDs. This is O(distinct query_ids per
     tick), not O(total query_map size). Use `ON COMMIT DROP` temp table —
     pg_cron job runs in its own transaction.
-- Wait event NULL handling: `active` + no wait → `active||CPU`;
+- Wait event NULL handling: `active` + no wait → `active||CPU*`;
   `idle in transaction` + no wait → `idle in transaction||IDLE`
 - Filter: `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
   `backend_type = 'client backend'` (+ optionally background workers)

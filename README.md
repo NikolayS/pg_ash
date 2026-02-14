@@ -98,7 +98,7 @@ select * from ash.cpu_vs_waiting('1 hour');
 ```
  wait_event_type | samples |  pct
 -----------------+---------+-------
- CPU             |   20160 | 37.33
+ CPU*            |   20160 | 37.33
  Lock            |   12965 | 24.01
  IO              |    7200 | 13.33
  LWLock          |    7920 | 14.67
