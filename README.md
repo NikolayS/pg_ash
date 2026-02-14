@@ -150,9 +150,9 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 ```
 {-5, 3, 101, 102, 101, -1, 2, 103, 104, -8, 1, 105}
  │   │  │              │  │  │           │  │  │
- │   │  └─ query_ids   │  │  └─ qids    │  │  └─ qid
- │   └─ count=3        │  └─ count=2    │  └─ count=1
- └─ wait_event_id=5    └─ weid=1        └─ weid=8
+ │   │  └─ query_ids   │  │  └─ qids     │  │  └─ qid
+ │   └─ count=3        │  └─ count=2     │  └─ count=1
+ └─ wait_event_id=5    └─ weid=1         └─ weid=8
 ```
 
 6 active backends across 3 wait events = 1 row, 12 array elements. Full row size: 24 (tuple header) + 4 (sample_ts) + 4 (datid) + 2 (active_count) + 2 (slot) + 68 (array: 20-byte header + 12 × 4) + alignment = **106 bytes** (measured with `pg_column_size`).
@@ -175,11 +175,11 @@ Skytools PGQ-style 3-partition ring buffer. Three physical tables (`sample_0`, `
 Only 2 partitions hold data at any time. The third is always empty, ready for the next rotation.
 
 ```
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│ sample_0 │  │ sample_1 │  │ sample_2 │
+┌──────────┐  ┌───────────┐  ┌──────────┐
+│ sample_0 │  │ sample_1  │  │ sample_2 │
 │ (today)  │  │(yesterday)│  │ (empty)  │
-│ writing  │  │ readable │  │ next     │
-└──────────┘  └──────────┘  └──────────┘
+│ writing  │  │ readable  │  │ next     │
+└──────────┘  └───────────┘  └──────────┘
                               ↑ TRUNCATE + rotate
 ```
 
