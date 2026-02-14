@@ -1186,7 +1186,7 @@ BEGIN
         -- then walk backwards to find the wait group marker
         SELECT
             (SELECT (- s.data[j])::smallint
-             FROM generate_series(i, 2, -1) j
+             FROM generate_series(i, 1, -1) j
              WHERE s.data[j] < 0
              LIMIT 1
             ) as wait_id
@@ -1463,7 +1463,7 @@ BEGIN
     WITH hits AS (
         SELECT
             (SELECT (- s.data[j])::smallint
-             FROM generate_series(i, 2, -1) j
+             FROM generate_series(i, 1, -1) j
              WHERE s.data[j] < 0 LIMIT 1
             ) as wait_id
         FROM ash.sample s, generate_subscripts(s.data, 1) i
