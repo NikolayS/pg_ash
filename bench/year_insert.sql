@@ -7,7 +7,7 @@ DROP SCHEMA IF EXISTS ash CASCADE;
 
 -- Seed dicts
 INSERT INTO ash.wait_event_map (state, type, event) VALUES
-    ('active', 'CPU', 'CPU'), ('active', 'IO', 'DataFileRead'),
+    ('active', 'CPU*', 'CPU*'), ('active', 'IO', 'DataFileRead'),
     ('active', 'IO', 'DataFileWrite'), ('active', 'IO', 'WALWrite'),
     ('active', 'IO', 'WALSync'), ('active', 'IO', 'BufFileRead'),
     ('active', 'LWLock', 'WALWriteLock'), ('active', 'LWLock', 'BufferContent'),
@@ -17,7 +17,7 @@ INSERT INTO ash.wait_event_map (state, type, event) VALUES
     ('active', 'Lock', 'tuple'), ('active', 'Lock', 'transactionid'),
     ('active', 'Lock', 'virtualxid'), ('active', 'Lock', 'advisory'),
     ('active', 'Client', 'ClientRead'), ('active', 'Client', 'ClientWrite'),
-    ('idle in transaction', 'IDLE', 'IDLE')
+    ('idle in transaction', 'IdleTx', 'IdleTx')
 ON CONFLICT DO NOTHING;
 INSERT INTO ash.query_map (query_id, last_seen)
 SELECT (1000000 + i * 12347)::int8, 0 FROM generate_series(1, 200) i ON CONFLICT DO NOTHING;
@@ -135,8 +135,8 @@ SELECT * FROM ash.top_waits('1 hour', 5);
 SELECT * FROM ash.top_waits('24 hours', 5);
 \echo '--- top_queries(1h) ---'
 SELECT * FROM ash.top_queries('1 hour', 5);
-\echo '--- cpu_vs_waiting(1h) ---'
-SELECT * FROM ash.cpu_vs_waiting('1 hour');
+\echo '--- waits_by_type(1h) ---'
+SELECT * FROM ash.waits_by_type('1 hour');
 \echo '--- wait_timeline(1h, 5min) ---'
 SELECT count(*) as buckets FROM ash.wait_timeline('1 hour', '5 minutes');
 \echo '--- top_waits(7 days) ---'

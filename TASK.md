@@ -24,7 +24,7 @@ Read SPEC.md for all design details. Add to the existing sql/ash--1.0.sql file.
 - `ash.top_waits(interval, int)` — top wait events with percentages
 - `ash.wait_timeline(interval, interval)` — time-bucketed breakdown  
 - `ash.top_queries(interval, int)` — top queries by wait samples, LEFT JOIN pg_stat_statements if available
-- `ash.cpu_vs_waiting(interval)` — CPU vs waiting ratio
+- `ash.waits_by_type(interval)` — wait event type distribution
 - All reader functions: add WHERE slot IN (current, previous) for partition pruning. Handle datid=0 with LEFT JOIN pg_database.
 
 ## Step 7: Install/uninstall script cleanup

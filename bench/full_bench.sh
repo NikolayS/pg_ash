@@ -172,7 +172,7 @@ BEGIN
     FOR s IN 0..3599 LOOP
         FOR d IN 1..array_length(v_dbs, 1) LOOP
             INSERT INTO ash.sample (sample_ts, datid, active_count, data)
-            VALUES (v_base + s, v_dbs[d], (10 + d * 5)::smallint, ARRAY[1, -1, 10, 100, 200]);
+            VALUES (v_base + s, v_dbs[d], (10 + d * 5)::smallint, ARRAY[-1, 10, 100, 200]);
         END LOOP;
     END LOOP;
 END;
@@ -304,8 +304,8 @@ echo "--- top_queries from real capture ---"
 $PG -c "SELECT * FROM ash.top_queries('5 minutes', 10);"
 
 echo ""
-echo "--- cpu_vs_waiting from real capture ---"
-$PG -c "SELECT * FROM ash.cpu_vs_waiting('5 minutes');"
+echo "--- waits_by_type from real capture ---"
+$PG -c "SELECT * FROM ash.waits_by_type('5 minutes');"
 
 echo ""
 echo "================================================================"

@@ -12,7 +12,7 @@ $PG -f /tmp/pg_ash/sql/ash--1.0.sql 2>&1 | tail -1
 echo "=== Seed dictionaries ==="
 $PG << 'SQL'
 INSERT INTO ash.wait_event_map (state, type, event) VALUES
-    ('active', 'CPU', 'CPU'), ('active', 'IO', 'DataFileRead'),
+    ('active', 'CPU*', 'CPU*'), ('active', 'IO', 'DataFileRead'),
     ('active', 'IO', 'DataFileWrite'), ('active', 'IO', 'WALWrite'),
     ('active', 'IO', 'WALSync'), ('active', 'IO', 'BufFileRead'),
     ('active', 'LWLock', 'WALWriteLock'), ('active', 'LWLock', 'BufferContent'),
@@ -22,7 +22,7 @@ INSERT INTO ash.wait_event_map (state, type, event) VALUES
     ('active', 'Lock', 'tuple'), ('active', 'Lock', 'transactionid'),
     ('active', 'Lock', 'virtualxid'), ('active', 'Lock', 'advisory'),
     ('active', 'Client', 'ClientRead'), ('active', 'Client', 'ClientWrite'),
-    ('idle in transaction', 'IDLE', 'IDLE')
+    ('idle in transaction', 'IdleTx', 'IdleTx')
 ON CONFLICT DO NOTHING;
 INSERT INTO ash.query_map (query_id, last_seen)
 SELECT (1000000 + i * 12347)::int8, 0 FROM generate_series(1, 200) i ON CONFLICT DO NOTHING;
@@ -134,8 +134,8 @@ $PG -c "\timing on" -c "SELECT * FROM ash.top_waits('24 hours', 5);"
 echo "--- top_queries(1h) ---"
 $PG -c "\timing on" -c "SELECT * FROM ash.top_queries('1 hour', 5);"
 
-echo "--- cpu_vs_waiting(1h) ---"
-$PG -c "\timing on" -c "SELECT * FROM ash.cpu_vs_waiting('1 hour');"
+echo "--- waits_by_type(1h) ---"
+$PG -c "\timing on" -c "SELECT * FROM ash.waits_by_type('1 hour');"
 
 echo "--- wait_timeline(1h, 5min) ---"
 $PG -c "\timing on" -c "SELECT count(*) as buckets FROM ash.wait_timeline('1 hour', '5 minutes');"

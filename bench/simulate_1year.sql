@@ -21,7 +21,7 @@ DROP SCHEMA IF EXISTS ash CASCADE;
 \echo '========================================'
 
 INSERT INTO ash.wait_event_map (state, type, event) VALUES
-    ('active', 'CPU', 'CPU'),
+    ('active', 'CPU*', 'CPU*'),
     ('active', 'IO', 'DataFileRead'),
     ('active', 'IO', 'DataFileWrite'),
     ('active', 'IO', 'WALWrite'),
@@ -41,7 +41,7 @@ INSERT INTO ash.wait_event_map (state, type, event) VALUES
     ('active', 'Lock', 'advisory'),
     ('active', 'Client', 'ClientRead'),
     ('active', 'Client', 'ClientWrite'),
-    ('idle in transaction', 'IDLE', 'IDLE')
+    ('idle in transaction', 'IdleTx', 'IdleTx')
 ON CONFLICT (state, type, event) DO NOTHING;
 
 -- Seed 200 query_ids
@@ -176,8 +176,8 @@ SELECT * FROM ash.top_waits('1 hour', 10);
 SELECT * FROM ash.top_queries('1 hour', 10);
 
 \echo ''
-\echo '--- cpu_vs_waiting(1 hour) ---'
-SELECT * FROM ash.cpu_vs_waiting('1 hour');
+\echo '--- waits_by_type(1 hour) ---'
+SELECT * FROM ash.waits_by_type('1 hour');
 
 \echo ''
 \echo '--- wait_timeline(1 hour, 5 min) ---'
@@ -311,8 +311,8 @@ SELECT * FROM ash.top_waits('24 hours', 5);
 \echo '--- top_queries(1 hour) ---'
 SELECT * FROM ash.top_queries('1 hour', 5);
 
-\echo '--- cpu_vs_waiting(1 hour) ---'
-SELECT * FROM ash.cpu_vs_waiting('1 hour');
+\echo '--- waits_by_type(1 hour) ---'
+SELECT * FROM ash.waits_by_type('1 hour');
 
 \echo '--- wait_timeline(1 hour, 5 min) ---'
 SELECT count(*) as buckets FROM ash.wait_timeline('1 hour', '5 minutes');

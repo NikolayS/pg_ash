@@ -127,22 +127,22 @@ neither blocks and no sample is lost.
 coalesce(sa.wait_event_type,
   case
     when sa.state = 'active' then 'CPU*'
-    when sa.state like 'idle in transaction%' then 'IDLE'
+    when sa.state like 'idle in transaction%' then 'IdleTx'
   end
 ) as type,
 coalesce(sa.wait_event,
   case
     when sa.state = 'active' then 'CPU*'
-    when sa.state like 'idle in transaction%' then 'IDLE'
+    when sa.state like 'idle in transaction%' then 'IdleTx'
   end
 ) as event
 ```
 
 This maps:
 - `active` + no wait event → `(state='active', type='CPU*', event='CPU*')`
-- `idle in transaction` + no wait event → `(state='idle in transaction', type='IDLE', event='IDLE')`
+- `idle in transaction` + no wait event → `(state='idle in transaction', type='IdleTx', event='IdleTx')`
 
-The `type` field is `'CPU*'` / `'IDLE'` (not empty string) so decoded output
+The `type` field is `'CPU*'` / `'IdleTx'` (not empty string) so decoded output
 is self-describing. `coalesce(wait_event_type, '')` in the sampler query is
 an intermediate step; the dictionary stores the clean synthetic type.
 
@@ -297,7 +297,7 @@ This keeps pg_ash useful even in locked-down environments.
   Mapped to `active|CPU*` in `wait_event_map`.
 - **`wait_event` is NULL with `state = 'idle in transaction'`:** Backend is
   idle in a transaction, not waiting on anything specific. Mapped to
-  `idle in transaction|IDLE` in `wait_event_map`.
+  `idle in transaction|IdleTx` in `wait_event_map`.
 
 ### 3.11 pg_cron >= 1.5 required
 
@@ -465,7 +465,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
     tick), not O(total query_map size). Use `ON COMMIT DROP` temp table —
     pg_cron job runs in its own transaction.
 - Wait event NULL handling: `active` + no wait → `active||CPU*`;
-  `idle in transaction` + no wait → `idle in transaction||IDLE`
+  `idle in transaction` + no wait → `idle in transaction||IdleTx`
 - Filter: `state in ('active', 'idle in transaction', 'idle in transaction (aborted)')`,
   `backend_type = 'client backend'` (+ optionally background workers)
 - Respect config flag: `include_bg_workers`
