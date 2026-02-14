@@ -1030,7 +1030,7 @@ CREATE OR REPLACE FUNCTION ash.cpu_vs_waiting(
     p_interval interval DEFAULT '1 hour'
 )
 RETURNS TABLE (
-    category text,
+    wait_event_type text,
     samples bigint,
     pct numeric
 )
@@ -1046,23 +1046,17 @@ AS $$
           AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
           AND s.data[i] < 0
     ),
-    categorized AS (
-        SELECT
-            CASE WHEN wm.type = 'CPU' THEN 'CPU' ELSE 'Waiting' END as cat,
-            w.cnt
+    totals AS (
+        SELECT wm.type as wait_type, sum(w.cnt) as cnt
         FROM waits w
         JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-    ),
-    totals AS (
-        SELECT cat, sum(cnt) as cnt
-        FROM categorized
-        GROUP BY cat
+        GROUP BY wm.type
     ),
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        t.cat as category,
+        t.wait_type as wait_event_type,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t, grand_total gt
@@ -1416,7 +1410,7 @@ CREATE OR REPLACE FUNCTION ash.cpu_vs_waiting_at(
     p_end timestamptz
 )
 RETURNS TABLE (
-    category text,
+    wait_event_type text,
     samples bigint,
     pct numeric
 )
@@ -1431,17 +1425,15 @@ AS $$
           AND s.sample_ts < ash._to_sample_ts(p_end)
           AND s.data[i] < 0
     ),
-    categorized AS (
-        SELECT CASE WHEN wm.type = 'CPU' THEN 'CPU' ELSE 'Waiting' END as cat, w.cnt
-        FROM waits w JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-    ),
     totals AS (
-        SELECT cat, sum(cnt) as cnt FROM categorized GROUP BY cat
+        SELECT wm.type as wait_type, sum(w.cnt) as cnt
+        FROM waits w JOIN ash.wait_event_map wm ON wm.id = w.wait_id
+        GROUP BY wm.type
     ),
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
     )
-    SELECT t.cat, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    SELECT t.wait_type, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
     FROM totals t, grand_total gt
     ORDER BY t.cnt DESC
 $$;
