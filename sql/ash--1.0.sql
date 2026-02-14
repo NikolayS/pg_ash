@@ -494,7 +494,7 @@ BEGIN
                 WHERE m.id = v_map_id;
             END IF;
 
-            wait_event := v_type || ':' || v_event;
+            wait_event := CASE WHEN v_event LIKE v_type || '%' THEN v_event ELSE v_type || ':' || v_event END;
             query_id := v_query_id;
             count := 1;
             RETURN NEXT;
@@ -890,7 +890,7 @@ AS $$
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        wm.type || ':' || wm.event as wait_event,
+        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t
@@ -925,7 +925,7 @@ AS $$
     )
     SELECT
         w.bucket as bucket_start,
-        wm.type || ':' || wm.event as wait_event,
+        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         sum(w.cnt) as samples
     FROM waits w
     JOIN ash.wait_event_map wm ON wm.id = w.wait_id
@@ -1215,7 +1215,7 @@ BEGIN
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        wm.type || ':' || wm.event as wait_event,
+        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t
@@ -1294,7 +1294,7 @@ AS $$
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        wm.type || ':' || wm.event as wait_event,
+        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t
@@ -1402,7 +1402,7 @@ AS $$
     )
     SELECT
         w.bucket as bucket_start,
-        wm.type || ':' || wm.event as wait_event,
+        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         sum(w.cnt) as samples
     FROM waits w
     JOIN ash.wait_event_map wm ON wm.id = w.wait_id
@@ -1487,7 +1487,7 @@ BEGIN
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
     )
-    SELECT wm.type || ':' || wm.event, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    SELECT CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
     FROM totals t
     JOIN ash.wait_event_map wm ON wm.id = t.wait_id
     CROSS JOIN grand_total gt

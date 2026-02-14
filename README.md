@@ -54,7 +54,7 @@ select * from ash.activity_summary('8 hours');
  peak_active_backends | 25
  peak_time            | 2026-02-14 03:17:42+00
  databases_active     | 3
- top_wait_1           | CPU:CPU* (37.33%)
+ top_wait_1           | CPU* (37.33%)
  top_wait_2           | Lock:tuple (24.01%)
  top_wait_3           | LWLock:WALWrite (14.67%)
  top_query_1          | 1234567890 (40.00%)
@@ -70,7 +70,7 @@ select * from ash.top_waits('1 hour', 5);
 ```
     wait_event     | samples |  pct
 -------------------+---------+-------
- CPU:CPU*          |   20160 | 37.33
+ CPU*          |   20160 | 37.33
  Lock:tuple        |   12965 | 24.01
  LWLock:WALWrite   |    7920 | 14.67
  IO:DataFileWrite  |    7200 | 13.33
@@ -134,7 +134,7 @@ select * from ash.query_waits(1234567890, '1 hour');
  Lock:tuple       |    2880 | 28.57
  IO:DataFileWrite |    2880 | 28.57
  IO:DataFileRead  |    1440 | 14.29
- CPU:CPU*         |    1440 | 14.29
+ CPU*         |    1440 | 14.29
  LWLock:WALWrite  |    1440 | 14.29
 ```
 
