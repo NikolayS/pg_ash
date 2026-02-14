@@ -170,7 +170,7 @@ Encoding version is tracked in `ash.config.encoding_version`, not in the array i
 
 ### Rotation
 
-PGQ-style 3-partition ring buffer. Three physical tables (`sample_0`, `sample_1`, `sample_2`) rotate on a configurable schedule (default: daily). TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
+Skytools PGQ-style 3-partition ring buffer. Three physical tables (`sample_0`, `sample_1`, `sample_2`) rotate on a configurable schedule (default: daily). TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
 
 Only 2 partitions hold data at any time. The third is always empty, ready for the next rotation.
 
