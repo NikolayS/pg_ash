@@ -13,7 +13,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 | | pg_ash | pg_wait_sampling | pgsentinel | External sampling |
 |---|---|---|---|---|
 | Install | `\i` (pure SQL) | shared_preload_libraries | Compile + shared_preload_libraries | Separate infra |
-| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of early 2026) | No | Yes, with effort |
+| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of early 2026) | Not known to be supported | Yes, with effort |
 | Sampling rate | 1s (via pg_cron) | 10ms (in-process) | 10ms (in-process) | 15-60s typical |
 | Visibility | Inside Postgres | Inside Postgres | Inside Postgres | Outside only |
 | Storage | Disk (~30 MiB/day) | Memory only | Memory only | External store |
