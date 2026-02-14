@@ -10,14 +10,17 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 
 ### How it compares
 
-| | pg_ash | pg_wait_sampling | pgsentinel |
-|---|---|---|---|
-| Install | `\i` (pure SQL) | shared_preload_libraries | Compile + shared_preload_libraries |
-| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of 2025) | No |
-| Storage | Disk (~30 MiB/day) | Memory only | Memory only |
-| Historical queries | Yes (persistent) | Ring buffer (lost on restart) | Ring buffer (lost on restart) |
-| Pure SQL | Yes | No (C extension) | No (C extension) |
-| Requires | pg_cron 1.5+ | — | — |
+| | pg_ash | pg_wait_sampling | pgsentinel | External sampling |
+|---|---|---|---|---|
+| Install | `\i` (pure SQL) | shared_preload_libraries | Compile + shared_preload_libraries | Separate infra |
+| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of 2025) | No | Yes, with effort |
+| Sampling rate | 1s (via pg_cron) | 10ms (in-process) | 10ms (in-process) | 15-60s typical |
+| Visibility | Inside Postgres | Inside Postgres | Inside Postgres | Outside only |
+| Storage | Disk (~30 MiB/day) | Memory only | Memory only | External store |
+| Historical queries | Yes (persistent) | Ring buffer (lost on restart) | Ring buffer (lost on restart) | Depends on setup |
+| Pure SQL | Yes | No (C extension) | No (C extension) | No |
+| Maintenance overhead | None | None | None | High |
+| Requires | pg_cron 1.5+ | — | — | Agent + storage |
 
 ## Quick start
 
