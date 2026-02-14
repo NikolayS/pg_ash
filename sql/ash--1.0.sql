@@ -872,6 +872,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $$
     WITH waits AS (
         SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
@@ -925,6 +926,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $$
     WITH waits AS (
         SELECT
@@ -965,13 +967,18 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 STABLE
+SET jit = off
 AS $$
 DECLARE
-    v_has_pg_stat_statements boolean;
+    v_has_pg_stat_statements boolean := false;
 BEGIN
-    SELECT EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
-    ) INTO v_has_pg_stat_statements;
+    -- Probe the view directly — extension installed != shared library loaded
+    BEGIN
+        PERFORM 1 FROM pg_stat_statements LIMIT 0;
+        v_has_pg_stat_statements := true;
+    EXCEPTION WHEN OTHERS THEN
+        v_has_pg_stat_statements := false;
+    END;
 
     IF v_has_pg_stat_statements THEN
         RETURN QUERY
@@ -1049,6 +1056,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $$
     WITH waits AS (
         SELECT
@@ -1094,13 +1102,18 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 STABLE
+SET jit = off
 AS $$
 DECLARE
-    v_has_pgss boolean;
+    v_has_pgss boolean := false;
 BEGIN
-    SELECT EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
-    ) INTO v_has_pgss;
+    -- Probe the view directly — extension installed != shared library loaded
+    BEGIN
+        PERFORM 1 FROM pg_stat_statements LIMIT 0;
+        v_has_pgss := true;
+    EXCEPTION WHEN OTHERS THEN
+        v_has_pgss := false;
+    END;
 
     IF v_has_pgss THEN
         RETURN QUERY
@@ -1185,6 +1198,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 STABLE
+SET jit = off
 AS $$
 DECLARE
     v_map_id int4;
@@ -1243,6 +1257,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $$
     SELECT
         COALESCE(d.datname, '<background>') as database_name,
@@ -1283,6 +1298,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $$
     WITH waits AS (
         SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
@@ -1339,15 +1355,20 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 STABLE
+SET jit = off
 AS $$
 DECLARE
-    v_has_pgss boolean;
+    v_has_pgss boolean := false;
     v_start int4 := ash._to_sample_ts(p_start);
     v_end int4 := ash._to_sample_ts(p_end);
 BEGIN
-    SELECT EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
-    ) INTO v_has_pgss;
+    -- Probe the view directly — extension installed != shared library loaded
+    BEGIN
+        PERFORM 1 FROM pg_stat_statements LIMIT 0;
+        v_has_pgss := true;
+    EXCEPTION WHEN OTHERS THEN
+        v_has_pgss := false;
+    END;
 
     IF v_has_pgss THEN
         RETURN QUERY
@@ -1409,6 +1430,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $$
     WITH waits AS (
         SELECT
@@ -1443,6 +1465,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET jit = off
 AS $$
     WITH waits AS (
         SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
@@ -1478,6 +1501,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 STABLE
+SET jit = off
 AS $$
 DECLARE
     v_map_id int4;
@@ -1529,6 +1553,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 STABLE
+SET jit = off
 AS $$
 DECLARE
     v_total_samples bigint;

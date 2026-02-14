@@ -14,7 +14,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 |---|---|---|---|
 | Install | `CREATE EXTENSION` | shared_preload_libraries | Compile + shared_preload_libraries |
 | Storage | Disk (~30 MiB/day) | Memory only | Memory only |
-| Historical queries | Yes (persistent) | No (ring buffer) | No (ring buffer) |
+| Historical queries | Yes (persistent) | Ring buffer (lost on restart) | Ring buffer (lost on restart) |
 | Pure SQL | Yes | No (C extension) | No (C extension) |
 | Requires | pg_cron 1.5+ | — | — |
 
@@ -283,6 +283,13 @@ See [issue #1](https://github.com/NikolayS/pg_ash/issues/1) for full benchmarks 
 - pg_cron 1.5+ (for sub-minute scheduling)
 - pg_stat_statements (optional — enables query text in `top_queries_with_text()`)
 
+**Note on `query_id`**: The default `compute_query_id = auto` only populates `query_id` when pg_stat_statements is in `shared_preload_libraries`. If `query_id` is NULL in `pg_stat_activity`, set:
+
+```sql
+alter system set compute_query_id = 'on';
+-- requires reload: select pg_reload_conf();
+```
+
 ## Configuration
 
 ```sql
@@ -300,7 +307,7 @@ select * from ash.status();
 ## Known limitations
 
 - **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](ROLLUP_DESIGN.md).
-- **JIT must be off for OLTP** — JIT adds 10x overhead to reader queries (30 ms to 340 ms). Disable globally with `ALTER SYSTEM SET jit = off`.
+- **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
 
 ## License

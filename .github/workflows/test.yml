@@ -102,15 +102,15 @@ jobs:
           -- Test _validate_data
           DO $$
           BEGIN
-            ASSERT ash._validate_data('{1,-1,2,5,6}'::integer[]) = true, 'valid data failed';
-            ASSERT ash._validate_data('{1,-1,3,5,6}'::integer[]) = false, 'invalid count not detected';
-            ASSERT ash._validate_data('{2,-1,2,5,6}'::integer[]) = false, 'invalid version not detected';
+            ASSERT ash._validate_data('{-1,2,5,6}'::integer[]) = true, 'valid data failed';
+            ASSERT ash._validate_data('{-1,3,5,6}'::integer[]) = false, 'invalid count not detected';
+            ASSERT ash._validate_data('{1,-1,2,5,6}'::integer[]) = false, 'positive first element not detected';
             RAISE NOTICE 'Step 2 validation tests passed';
           END;
           $$;
 
           -- Test decode_sample
-          INSERT INTO ash.wait_event_map (state, type, event) VALUES ('active', 'CPU', 'CPU') ON CONFLICT DO NOTHING;
+          INSERT INTO ash.wait_event_map (state, type, event) VALUES ('active', 'CPU*', 'CPU*') ON CONFLICT DO NOTHING;
           INSERT INTO ash.query_map (query_id, last_seen) VALUES (12345, 1000) ON CONFLICT DO NOTHING;
 
           DO $$
@@ -119,11 +119,11 @@ jobs:
             v_qid_id int4;
             v_count int;
           BEGIN
-            SELECT id INTO v_wait_id FROM ash.wait_event_map WHERE state = 'active' AND type = 'CPU';
+            SELECT id INTO v_wait_id FROM ash.wait_event_map WHERE state = 'active' AND type = 'CPU*';
             SELECT id INTO v_qid_id FROM ash.query_map WHERE query_id = 12345;
 
             SELECT count(*) INTO v_count
-            FROM ash.decode_sample(ARRAY[1, -v_wait_id, 2, v_qid_id, 0]::integer[]);
+            FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[]);
 
             ASSERT v_count = 2, 'decode_sample returned wrong count: ' || v_count;
             RAISE NOTICE 'Step 2 decoder tests passed';
@@ -255,7 +255,7 @@ jobs:
           -- Basic verification
           SELECT count(*) FROM ash.status();
           SELECT ash.take_sample();
-          SELECT ash._validate_data('{1,-1,2,1,1}'::integer[]);
+          SELECT ash._validate_data('{-1,2,1,1}'::integer[]);
 
           DO $$
           BEGIN

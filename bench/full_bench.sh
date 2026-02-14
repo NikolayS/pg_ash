@@ -102,7 +102,7 @@ DECLARE
 BEGIN
     ws := ARRAY(SELECT id FROM ash.wait_event_map ORDER BY id);
     nw := array_length(ws, 1);
-    d := ARRAY[1];
+    d := ARRAY[]::integer[];
     r := p_backends;
     s := 42 * 7919::int8;
     WHILE r > 0 LOOP

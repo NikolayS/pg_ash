@@ -30,7 +30,7 @@ BEGIN
   ws := ARRAY(SELECT id FROM ash.wait_event_map ORDER BY id); nw := array_length(ws, 1);
   qs := ARRAY(SELECT id FROM ash.query_map ORDER BY id LIMIT 200); nq := array_length(qs, 1);
   FOR t IN 1..p_n LOOP
-    d := ARRAY[1]; r := p_b; s := t * 7919::int8;
+    d := ARRAY[]::integer[]; r := p_b; s := t * 7919::int8;
     WHILE r > 0 LOOP
       s := (s * 48271::int8) % 2147483647::int8; wi := 1 + (s % nw)::int;
       s := (s * 48271::int8) % 2147483647::int8; c := 1 + (s % least(r, 8))::int;

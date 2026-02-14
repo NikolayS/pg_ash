@@ -88,7 +88,7 @@ BEGIN
     v_num_queries := array_length(v_query_ids, 1);
 
     FOR v_template IN 1..p_count LOOP
-        v_data := ARRAY[1];  -- version
+        v_data := ARRAY[]::integer[];
         v_remaining := p_backends;
         v_seed := v_template * 7919::int8;
 
