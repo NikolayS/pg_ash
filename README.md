@@ -158,6 +158,11 @@ select * from ash.histogram('1 hour');
  Other                |     540 |  1.00 | █ 1.00%
 ```
 
+```sql
+-- histogram for a specific incident window
+select * from ash.histogram_at('2026-02-14 03:00', '2026-02-14 03:10');
+```
+
 ### Analyze a specific query
 
 ```sql
