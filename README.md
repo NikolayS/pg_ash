@@ -30,7 +30,7 @@ select ash.start('1 second');
 -- wait a few minutes, then query
 select * from ash.top_waits('1 hour');
 select * from ash.top_queries_with_text('1 hour');
-select * from ash.cpu_vs_waiting('1 hour');
+select * from ash.waits_by_type('1 hour');
 
 -- stop sampling
 select ash.stop();
@@ -92,7 +92,7 @@ select * from ash.top_queries_with_text('1 hour', 5);
 
 ```sql
 -- breakdown by wait event type
-select * from ash.cpu_vs_waiting('1 hour');
+select * from ash.waits_by_type('1 hour');
 ```
 
 ```
@@ -176,7 +176,7 @@ select * from ash.status();
 | `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
 | `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join |
 | `ash.query_waits(query_id, interval)` | Wait profile for a specific query |
-| `ash.cpu_vs_waiting(interval)` | Breakdown by wait event type |
+| `ash.waits_by_type(interval)` | Breakdown by wait event type |
 | `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
 | `ash.samples_by_database(interval)` | Per-database activity |
 | `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
@@ -191,7 +191,7 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `20`.
 | `ash.top_waits_at(start, end, limit)` | Top waits in a time range |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
 | `ash.query_waits_at(query_id, start, end)` | Query wait profile in a time range |
-| `ash.cpu_vs_waiting_at(start, end)` | Breakdown by wait event type in a time range |
+| `ash.waits_by_type_at(start, end)` | Breakdown by wait event type in a time range |
 | `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |
 
 Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.

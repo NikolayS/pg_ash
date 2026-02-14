@@ -531,7 +531,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.top_waits(interval default '1 hour', int default 20)` — top wait events with %, human-readable
 - `ash.wait_timeline(interval default '1 hour', interval default '1 minute')` — time-bucketed wait event breakdown
 - `ash.top_queries(interval default '1 hour', int default 20)` — queries with most wait samples, joined to `pg_stat_statements` for query text
-- `ash.cpu_vs_waiting(interval default '1 hour')` — CPU vs waiting ratio
+- `ash.waits_by_type(interval default '1 hour')` — wait event type distribution
 - `ash.report(interval default '1 hour')` — full text report combining all of the above, Oracle ASHREPORT-style
 - All functions return `SETOF record` or `TABLE(...)` for easy `\x` display or programmatic consumption
 - All translate `int4` timestamps to human-readable `timestamptz` and dictionary IDs to human-readable text

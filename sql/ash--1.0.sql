@@ -863,7 +863,7 @@ $$;
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
 CREATE OR REPLACE FUNCTION ash.top_waits(
     p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 20
+    p_limit int DEFAULT 10
 )
 RETURNS TABLE (
     wait_event text,
@@ -887,16 +887,30 @@ AS $$
     ),
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
+    ),
+    ranked AS (
+        SELECT
+            CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+            t.cnt,
+            row_number() OVER (ORDER BY t.cnt DESC) as rn
+        FROM totals t
+        JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+    ),
+    top_rows AS (
+        SELECT wait_event, cnt, rn FROM ranked WHERE rn < p_limit
+    ),
+    other AS (
+        SELECT 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
+        FROM ranked WHERE rn >= p_limit
+        HAVING sum(cnt) > 0
     )
     SELECT
-        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
-        t.cnt as samples,
-        round(t.cnt::numeric / gt.total * 100, 2) as pct
-    FROM totals t
-    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+        r.wait_event,
+        r.cnt as samples,
+        round(r.cnt::numeric / gt.total * 100, 2) as pct
+    FROM (SELECT * FROM top_rows UNION ALL SELECT * FROM other) r
     CROSS JOIN grand_total gt
-    ORDER BY t.cnt DESC
-    LIMIT p_limit
+    ORDER BY r.rn
 $$;
 
 -- Wait event timeline (time-bucketed breakdown, inline SQL decode)
@@ -1024,8 +1038,8 @@ BEGIN
 END;
 $$;
 
--- CPU vs waiting ratio (inline SQL decode)
-CREATE OR REPLACE FUNCTION ash.cpu_vs_waiting(
+-- Wait event type distribution
+CREATE OR REPLACE FUNCTION ash.waits_by_type(
     p_interval interval DEFAULT '1 hour'
 )
 RETURNS TABLE (
@@ -1260,7 +1274,7 @@ $$;
 CREATE OR REPLACE FUNCTION ash.top_waits_at(
     p_start timestamptz,
     p_end timestamptz,
-    p_limit int DEFAULT 20
+    p_limit int DEFAULT 10
 )
 RETURNS TABLE (
     wait_event text,
@@ -1285,16 +1299,30 @@ AS $$
     ),
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
+    ),
+    ranked AS (
+        SELECT
+            CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+            t.cnt,
+            row_number() OVER (ORDER BY t.cnt DESC) as rn
+        FROM totals t
+        JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+    ),
+    top_rows AS (
+        SELECT wait_event, cnt, rn FROM ranked WHERE rn < p_limit
+    ),
+    other AS (
+        SELECT 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
+        FROM ranked WHERE rn >= p_limit
+        HAVING sum(cnt) > 0
     )
     SELECT
-        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
-        t.cnt as samples,
-        round(t.cnt::numeric / gt.total * 100, 2) as pct
-    FROM totals t
-    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+        r.wait_event,
+        r.cnt as samples,
+        round(r.cnt::numeric / gt.total * 100, 2) as pct
+    FROM (SELECT * FROM top_rows UNION ALL SELECT * FROM other) r
     CROSS JOIN grand_total gt
-    ORDER BY t.cnt DESC
-    LIMIT p_limit
+    ORDER BY r.rn
 $$;
 
 -- Top queries in an absolute time range
@@ -1403,8 +1431,8 @@ AS $$
     ORDER BY w.bucket, sum(w.cnt) DESC
 $$;
 
--- CPU vs waiting in an absolute time range
-CREATE OR REPLACE FUNCTION ash.cpu_vs_waiting_at(
+-- Wait event type distribution in an absolute time range
+CREATE OR REPLACE FUNCTION ash.waits_by_type_at(
     p_start timestamptz,
     p_end timestamptz
 )
