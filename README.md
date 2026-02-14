@@ -333,7 +333,7 @@ select ash.stop();
 select ash.start('5 seconds');
 
 -- change rotation interval (default: 1 day)
-update ash.config set rotation_interval = '12 hours';
+update ash.config set rotation_period = '12 hours';
 
 -- check current configuration
 select * from ash.status();

@@ -580,7 +580,7 @@ BEGIN
         -- even if a query stopped running just before the previous rotation.
         DELETE FROM ash.query_map
         WHERE last_seen < extract(epoch FROM now()
-            - 2 * (SELECT rotation_interval FROM ash.config)
+            - 2 * (SELECT rotation_period FROM ash.config)
             - ash.epoch())::int4;
         GET DIAGNOSTICS v_deleted_queries = ROW_COUNT;
 
@@ -961,7 +961,7 @@ $$;
 -- (i > 1 guards against data[0] which is NULL in 1-indexed arrays)
 CREATE OR REPLACE FUNCTION ash.top_queries(
     p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 20
+    p_limit int DEFAULT 10
 )
 RETURNS TABLE (
     query_id bigint,
@@ -1094,7 +1094,7 @@ $$;
 -- NULL columns otherwise.
 CREATE OR REPLACE FUNCTION ash.top_queries_with_text(
     p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 20
+    p_limit int DEFAULT 10
 )
 RETURNS TABLE (
     query_id bigint,
@@ -1349,7 +1349,7 @@ $$;
 CREATE OR REPLACE FUNCTION ash.top_queries_at(
     p_start timestamptz,
     p_end timestamptz,
-    p_limit int DEFAULT 20
+    p_limit int DEFAULT 10
 )
 RETURNS TABLE (
     query_id bigint,
@@ -1608,7 +1608,8 @@ BEGIN
     -- Top 3 waits
     v_rank := 0;
     FOR r IN SELECT tw.wait_event || ' (' || tw.pct || '%)' as desc
-             FROM ash.top_waits(p_interval, 3) tw
+             FROM ash.top_waits(p_interval, 4) tw
+             WHERE tw.wait_event != 'Other'
     LOOP
         v_rank := v_rank + 1;
         RETURN QUERY SELECT 'top_wait_' || v_rank, r.desc;
