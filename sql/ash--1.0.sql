@@ -314,11 +314,13 @@ BEGIN
             COALESCE(sa.wait_event_type,
                 CASE
                     WHEN sa.state = 'active' THEN 'CPU*'
+                    WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx'
                 END
             ) as wait_type,
             COALESCE(sa.wait_event,
                 CASE
                     WHEN sa.state = 'active' THEN 'CPU*'
+                    WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx'
                 END
             ) as wait_event
         FROM pg_stat_activity sa
@@ -373,9 +375,11 @@ BEGIN
             JOIN _ash_wait_cache wc
               ON wc.state = sa.state
              AND wc.type = COALESCE(sa.wait_event_type,
-                    CASE WHEN sa.state = 'active' THEN 'CPU*' END)
+                    CASE WHEN sa.state = 'active' THEN 'CPU*'
+                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
              AND wc.event = COALESCE(sa.wait_event,
-                    CASE WHEN sa.state = 'active' THEN 'CPU*' END)
+                    CASE WHEN sa.state = 'active' THEN 'CPU*'
+                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
             LEFT JOIN _ash_qids qc ON qc.query_id = sa.query_id
             WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
               AND (sa.backend_type = 'client backend'
@@ -493,7 +497,7 @@ BEGIN
                 WHERE m.id = v_map_id;
             END IF;
 
-            wait_event := CASE WHEN v_event LIKE v_type || '%' THEN v_event ELSE v_type || ':' || v_event END;
+            wait_event := CASE WHEN v_event = v_type THEN v_event ELSE v_type || ':' || v_event END;
             query_id := v_query_id;
             count := 1;
             RETURN NEXT;
@@ -571,14 +575,14 @@ BEGIN
         FROM ash.sample
         WHERE slot IN (v_new_slot, v_old_slot);
 
-        -- Delete query_map entries older than the oldest surviving sample
-        IF v_min_sample_ts IS NOT NULL THEN
-            DELETE FROM ash.query_map
-            WHERE last_seen < v_min_sample_ts;
-            GET DIAGNOSTICS v_deleted_queries = ROW_COUNT;
-        ELSE
-            v_deleted_queries := 0;
-        END IF;
+        -- Delete query_map entries not seen in 2× rotation periods.
+        -- Conservative: ensures no surviving partition can reference a gc'd entry,
+        -- even if a query stopped running just before the previous rotation.
+        DELETE FROM ash.query_map
+        WHERE last_seen < extract(epoch FROM now()
+            - 2 * (SELECT rotation_interval FROM ash.config)
+            - ash.epoch())::int4;
+        GET DIAGNOSTICS v_deleted_queries = ROW_COUNT;
 
         PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
 
@@ -891,18 +895,18 @@ AS $$
     ),
     ranked AS (
         SELECT
-            CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+            CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
             t.cnt,
             row_number() OVER (ORDER BY t.cnt DESC) as rn
         FROM totals t
         JOIN ash.wait_event_map wm ON wm.id = t.wait_id
     ),
     top_rows AS (
-        SELECT wait_event, cnt, rn FROM ranked WHERE rn < p_limit
+        SELECT wait_event, cnt, rn FROM ranked WHERE rn <= p_limit
     ),
     other AS (
         SELECT 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
-        FROM ranked WHERE rn >= p_limit
+        FROM ranked WHERE rn > p_limit
         HAVING sum(cnt) > 0
     )
     SELECT
@@ -940,7 +944,7 @@ AS $$
     )
     SELECT
         w.bucket as bucket_start,
-        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+        CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         sum(w.cnt) as samples
     FROM waits w
     JOIN ash.wait_event_map wm ON wm.id = w.wait_id
@@ -974,7 +978,7 @@ DECLARE
 BEGIN
     -- Probe the view directly — extension installed != shared library loaded
     BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 0;
+        PERFORM 1 FROM pg_stat_statements LIMIT 1;
         v_has_pg_stat_statements := true;
     EXCEPTION WHEN OTHERS THEN
         v_has_pg_stat_statements := false;
@@ -1109,7 +1113,7 @@ DECLARE
 BEGIN
     -- Probe the view directly — extension installed != shared library loaded
     BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 0;
+        PERFORM 1 FROM pg_stat_statements LIMIT 1;
         v_has_pgss := true;
     EXCEPTION WHEN OTHERS THEN
         v_has_pgss := false;
@@ -1236,7 +1240,7 @@ BEGIN
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+        CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t
@@ -1318,18 +1322,18 @@ AS $$
     ),
     ranked AS (
         SELECT
-            CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+            CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
             t.cnt,
             row_number() OVER (ORDER BY t.cnt DESC) as rn
         FROM totals t
         JOIN ash.wait_event_map wm ON wm.id = t.wait_id
     ),
     top_rows AS (
-        SELECT wait_event, cnt, rn FROM ranked WHERE rn < p_limit
+        SELECT wait_event, cnt, rn FROM ranked WHERE rn <= p_limit
     ),
     other AS (
         SELECT 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
-        FROM ranked WHERE rn >= p_limit
+        FROM ranked WHERE rn > p_limit
         HAVING sum(cnt) > 0
     )
     SELECT
@@ -1364,7 +1368,7 @@ DECLARE
 BEGIN
     -- Probe the view directly — extension installed != shared library loaded
     BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 0;
+        PERFORM 1 FROM pg_stat_statements LIMIT 1;
         v_has_pgss := true;
     EXCEPTION WHEN OTHERS THEN
         v_has_pgss := false;
@@ -1445,7 +1449,7 @@ AS $$
     )
     SELECT
         w.bucket as bucket_start,
-        CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+        CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
         sum(w.cnt) as samples
     FROM waits w
     JOIN ash.wait_event_map wm ON wm.id = w.wait_id
@@ -1530,7 +1534,7 @@ BEGIN
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
     )
-    SELECT CASE WHEN wm.event LIKE wm.type || '%' THEN wm.event ELSE wm.type || ':' || wm.event END, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    SELECT CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
     FROM totals t
     JOIN ash.wait_event_map wm ON wm.id = t.wait_id
     CROSS JOIN grand_total gt
