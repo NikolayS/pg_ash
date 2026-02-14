@@ -417,9 +417,7 @@ $$;
 -- Decode sample function
 CREATE OR REPLACE FUNCTION ash.decode_sample(p_data integer[])
 RETURNS TABLE (
-    state text,
-    type text,
-    event text,
+    wait_event text,
     query_id int8,
     count int
 )
@@ -433,7 +431,6 @@ DECLARE
     v_count int;
     v_qid_idx int;
     v_map_id int4;
-    v_state text;
     v_type text;
     v_event text;
     v_query_id int8;
@@ -473,8 +470,8 @@ BEGIN
         v_idx := v_idx + 1;
 
         -- Look up wait event info
-        SELECT w.state, w.type, w.event
-        INTO v_state, v_type, v_event
+        SELECT w.type, w.event
+        INTO v_type, v_event
         FROM ash.wait_event_map w
         WHERE w.id = v_wait_id;
 
@@ -497,9 +494,7 @@ BEGIN
                 WHERE m.id = v_map_id;
             END IF;
 
-            state := v_state;
-            type := v_type;
-            event := v_event;
+            wait_event := v_type || ':' || v_event;
             query_id := v_query_id;
             count := 1;
             RETURN NEXT;
@@ -872,8 +867,6 @@ CREATE OR REPLACE FUNCTION ash.top_waits(
     p_limit int DEFAULT 20
 )
 RETURNS TABLE (
-    state text,
-    wait_type text,
     wait_event text,
     samples bigint,
     pct numeric
@@ -897,9 +890,7 @@ AS $$
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        wm.state,
-        wm.type as wait_type,
-        wm.event as wait_event,
+        wm.type || ':' || wm.event as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t
@@ -916,8 +907,6 @@ CREATE OR REPLACE FUNCTION ash.wait_timeline(
 )
 RETURNS TABLE (
     bucket_start timestamptz,
-    state text,
-    wait_type text,
     wait_event text,
     samples bigint
 )
@@ -936,13 +925,11 @@ AS $$
     )
     SELECT
         w.bucket as bucket_start,
-        wm.state,
-        wm.type as wait_type,
-        wm.event as wait_event,
+        wm.type || ':' || wm.event as wait_event,
         sum(w.cnt) as samples
     FROM waits w
     JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-    GROUP BY w.bucket, wm.state, wm.type, wm.event
+    GROUP BY w.bucket, wm.type, wm.event
     ORDER BY w.bucket, sum(w.cnt) DESC
 $$;
 
@@ -1185,7 +1172,6 @@ CREATE OR REPLACE FUNCTION ash.query_waits(
     p_interval interval DEFAULT '1 hour'
 )
 RETURNS TABLE (
-    wait_event_type text,
     wait_event text,
     samples bigint,
     pct numeric
@@ -1229,8 +1215,7 @@ BEGIN
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        wm.type as wait_event_type,
-        wm.event as wait_event,
+        wm.type || ':' || wm.event as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t
@@ -1285,8 +1270,6 @@ CREATE OR REPLACE FUNCTION ash.top_waits_at(
     p_limit int DEFAULT 20
 )
 RETURNS TABLE (
-    state text,
-    wait_type text,
     wait_event text,
     samples bigint,
     pct numeric
@@ -1311,9 +1294,7 @@ AS $$
         SELECT sum(cnt) as total FROM totals
     )
     SELECT
-        wm.state,
-        wm.type as wait_type,
-        wm.event as wait_event,
+        wm.type || ':' || wm.event as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
     FROM totals t
@@ -1402,8 +1383,6 @@ CREATE OR REPLACE FUNCTION ash.wait_timeline_at(
 )
 RETURNS TABLE (
     bucket_start timestamptz,
-    state text,
-    wait_type text,
     wait_event text,
     samples bigint
 )
@@ -1423,13 +1402,11 @@ AS $$
     )
     SELECT
         w.bucket as bucket_start,
-        wm.state,
-        wm.type as wait_type,
-        wm.event as wait_event,
+        wm.type || ':' || wm.event as wait_event,
         sum(w.cnt) as samples
     FROM waits w
     JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-    GROUP BY w.bucket, wm.state, wm.type, wm.event
+    GROUP BY w.bucket, wm.type, wm.event
     ORDER BY w.bucket, sum(w.cnt) DESC
 $$;
 
@@ -1476,7 +1453,6 @@ CREATE OR REPLACE FUNCTION ash.query_waits_at(
     p_end timestamptz
 )
 RETURNS TABLE (
-    wait_event_type text,
     wait_event text,
     samples bigint,
     pct numeric
@@ -1511,7 +1487,7 @@ BEGIN
     grand_total AS (
         SELECT sum(cnt) as total FROM totals
     )
-    SELECT wm.type, wm.event, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    SELECT wm.type || ':' || wm.event, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
     FROM totals t
     JOIN ash.wait_event_map wm ON wm.id = t.wait_id
     CROSS JOIN grand_total gt
@@ -1583,7 +1559,7 @@ BEGIN
 
     -- Top 3 waits
     v_rank := 0;
-    FOR r IN SELECT tw.wait_type || '/' || tw.wait_event || ' (' || tw.pct || '%)' as desc
+    FOR r IN SELECT tw.wait_event || ' (' || tw.pct || '%)' as desc
              FROM ash.top_waits(p_interval, 3) tw
     LOOP
         v_rank := v_rank + 1;
