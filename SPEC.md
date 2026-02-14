@@ -39,14 +39,10 @@ datid       │ 16384
 data        │ {1, -5, 3, 101, 102, 101, -1, 2, 103, 104, -1, 1, 105}
 ```
 
-First element `1` = format version. Rest follows the encoding rules above.
+First element is a negative wait_event_id marker. Format version tracked in ash.config.encoding_version.
 
-Encoding: `[version, -wait_event_id, count, query_map_id, ..., -next_wait, ...]`
+Encoding: `[-wait_event_id, count, query_map_id, ..., -next_wait, ...]`
 
-- `data[1]` = format version (`1` for v1). Enables future evolution
-  (new fields, different grouping) without breaking reader functions.
-  Reader functions check version and dispatch accordingly. If a reader
-  encounters an unknown version, it must `RAISE WARNING` and return zero
   rows for that sample — not crash. This matters when v2 is deployed but
   old reader functions haven't been upgraded yet.
 - Negative value → wait event id (negated), from `ash.wait_event_map`
@@ -60,7 +56,7 @@ Encoding: `[version, -wait_event_id, count, query_map_id, ..., -next_wait, ...]`
   in the encoding — every wait marker is strictly negative.
 - `0` in a query_id position = unknown/NULL query_id (sentinel)
 
-6 active backends across 3 wait events → **1 row, 13 array elements** (1 version + 12 data).
+6 active backends across 3 wait events → **1 row, 12 array elements**.
 
 Reconstruct timestamp: `ash.epoch() + sample_ts * interval '1 second'`.
 
@@ -73,7 +69,7 @@ At 1s sampling: ~33 MiB/day. Still very manageable.
 **Structural validation:** The encoding is positional with no framing — a
 malformed array silently produces garbage downstream. Two levels of validation:
 
-- **Cheap CHECK constraint** on the table: `data[1] = 1 AND array_length(data, 1) >= 3`.
+- **Cheap CHECK constraint** on the table: `data[1] < 0 AND array_length(data, 1) >= 2`.
   Catches gross corruption without adding CPU on the hot 1s insert path.
 - **`ash._validate_data()`** — full structural walk (negative marker → positive
   count → N query_ids → next marker). Used in reader functions and `ash.status()`
@@ -363,7 +359,7 @@ create table ash.sample (
                                       * fast filtering: WHERE active_count > 50
                                       * without decoding the array */
   data           integer[] not null
-                   check (data[1] = 1 and array_length(data, 1) >= 3),
+                   check (data[1] < 0 and array_length(data, 1) >= 2),
   slot           smallint  not null default ash.current_slot()
 ) partition by list (slot);
 
@@ -456,7 +452,7 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
   (each pg_cron invocation is its own transaction)
 - Snapshot `pg_stat_activity` → one row per database per sample tick
 - Group by `datid` and wait event, encode into `data integer[]` format:
-  `[1, -wait_id, count, qid, qid, ..., -next_wait, ...]` (leading `1` = format v1)
+  `[-wait_id, count, qid, qid, ..., -next_wait, ...]`
 - **Dictionary strategy — two different approaches:**
   - **wait_event_map**: cache fully at function start (~600 rows max). Tiny,
     fits in a plpgsql hstore. Per-backend lookups hit local memory.
