@@ -155,7 +155,7 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
  └─ wait_event_id=5    └─ weid=1        └─ weid=8
 ```
 
-6 active backends across 3 wait events = 1 row, 12 array elements, ~72 bytes.
+6 active backends across 3 wait events = 1 row, 12 array elements. Full row size: 24 (tuple header) + 4 (sample_ts) + 4 (datid) + 2 (active_count) + 2 (slot) + 68 (array: 20-byte header + 12 × 4) + alignment = **106 bytes** (measured with `pg_column_size`).
 
 ### Dictionary tables
 
