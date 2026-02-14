@@ -137,6 +137,27 @@ select * from ash.wait_timeline_at(
 );
 ```
 
+### Visual histogram
+
+```sql
+select * from ash.histogram('1 hour');
+```
+
+```
+     wait_event       | samples |  pct  |                    bar
+----------------------+---------+-------+-------------------------------------------
+ CPU*                 |   20160 | 37.33 | ████████████████████████████████████████ 37.33%
+ Lock:tuple           |   12965 | 24.01 | █████████████████████████ 24.01%
+ LWLock:WALWrite      |    7920 | 14.67 | ███████████████ 14.67%
+ IO:DataFileWrite     |    7200 | 13.33 | ██████████████ 13.33%
+ IO:DataFileRead      |    5760 | 10.67 | ███████████ 10.67%
+ Client:ClientRead    |    3600 |  6.67 | ███████ 6.67%
+ Timeout:PgSleep      |    2160 |  4.00 | ████ 4.00%
+ LWLock:BufferIO      |    1440 |  2.67 | ██ 2.67%
+ Lock:transactionid   |     720 |  1.33 | █ 1.33%
+ Other                |     540 |  1.00 | █ 1.00%
+```
+
 ### Analyze a specific query
 
 ```sql
@@ -185,6 +206,7 @@ select * from ash.status();
 | Function | Description |
 |----------|-------------|
 | `ash.top_waits(interval, limit)` | Top wait events ranked by sample count |
+| `ash.histogram(interval, limit, width)` | Visual bar chart of wait event distribution |
 | `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
 | `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join |
 | `ash.query_waits(query_id, interval)` | Wait profile for a specific query |
@@ -201,6 +223,7 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 | Function | Description |
 |----------|-------------|
 | `ash.top_waits_at(start, end, limit)` | Top waits in a time range |
+| `ash.histogram_at(start, end, limit, width)` | Visual bar chart in a time range |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
 | `ash.query_waits_at(query_id, start, end)` | Query wait profile in a time range |
 | `ash.waits_by_type_at(start, end)` | Breakdown by wait event type in a time range |

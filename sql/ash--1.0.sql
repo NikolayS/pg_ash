@@ -1622,3 +1622,70 @@ BEGIN
     RETURN;
 END;
 $$;
+
+-------------------------------------------------------------------------------
+-- Histogram — visual wait event distribution in your terminal
+-------------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION ash.histogram(
+    p_interval interval DEFAULT '1 hour',
+    p_limit int DEFAULT 10,
+    p_width int DEFAULT 40
+)
+RETURNS TABLE (
+    wait_event text,
+    samples bigint,
+    pct numeric,
+    bar text
+)
+LANGUAGE sql
+STABLE
+SET jit = off
+AS $$
+    WITH data AS (
+        SELECT tw.wait_event, tw.samples, tw.pct
+        FROM ash.top_waits(p_interval, p_limit) tw
+    ),
+    max_pct AS (
+        SELECT max(d.pct) as m FROM data d
+    )
+    SELECT
+        rpad(d.wait_event, 20) as wait_event,
+        d.samples,
+        d.pct,
+        repeat('█', greatest(1, (d.pct / nullif(mp.m, 0) * p_width)::int))
+            || ' ' || d.pct || '%' as bar
+    FROM data d, max_pct mp
+$$;
+
+CREATE OR REPLACE FUNCTION ash.histogram_at(
+    p_start timestamptz,
+    p_end timestamptz,
+    p_limit int DEFAULT 10,
+    p_width int DEFAULT 40
+)
+RETURNS TABLE (
+    wait_event text,
+    samples bigint,
+    pct numeric,
+    bar text
+)
+LANGUAGE sql
+STABLE
+SET jit = off
+AS $$
+    WITH data AS (
+        SELECT tw.wait_event, tw.samples, tw.pct
+        FROM ash.top_waits_at(p_start, p_end, p_limit) tw
+    ),
+    max_pct AS (
+        SELECT max(d.pct) as m FROM data d
+    )
+    SELECT
+        rpad(d.wait_event, 20) as wait_event,
+        d.samples,
+        d.pct,
+        repeat('█', greatest(1, (d.pct / nullif(mp.m, 0) * p_width)::int))
+            || ' ' || d.pct || '%' as bar
+    FROM data d, max_pct mp
+$$;
