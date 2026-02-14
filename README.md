@@ -78,10 +78,10 @@ Measured on Postgres 17, 50 backends, 1s sampling (median of 10 runs, warm cache
 
 | Metric | Result |
 |--------|--------|
-| `top_waits('1 hour')` | 339 ms |
-| `top_waits('24 hours')` | 6.8 s |
+| `top_waits('1 hour')` | **30 ms** (JIT off) |
+| `top_waits('24 hours')` | 6.1 s |
 | `take_sample()` overhead | 53 ms |
-| WAL per sample | ~31 KiB (~3.7 GiB/day) |
+| WAL per sample | ~28 KiB (~2.4 GiB/day) |
 | Rotation (1-day partition) | 9 ms |
 | Dead tuples after rotation | 0 |
 
@@ -95,7 +95,7 @@ See [issue #1](https://github.com/NikolayS/pg_ash/issues/1) for full benchmark r
 ## Known limitations
 
 - **24h queries are slow** (~7s for full-day scan). Aggregate rollup tables would fix this — planned for a future version.
-- **JIT compilation overhead**: JIT adds ~1.5s to reader queries. Consider `SET jit = off` for interactive use.
+- **JIT must be off**: JIT adds 10× overhead to 1-hour reader queries (30ms → 340ms). Disable globally on OLTP servers (`ALTER SYSTEM SET jit = off`) or per-query.
 - **Array building is O(n²)** in plpgsql at high backend counts. Switching to `array_agg()` would fix this.
 
 ## License
