@@ -2,7 +2,7 @@
 
 Active Session History for Postgres — lightweight wait event sampling with zero bloat.
 
-Pure SQL/plpgsql. No C extension, no `shared_preload_libraries` changes. Install and go.
+**The anti-extension.** Pure SQL/plpgsql that works on any Postgres 14+ — including RDS, Cloud SQL, AlloyDB, Supabase, Neon, and every other managed provider. No C extension, no `shared_preload_libraries`, no provider approval, no restart. Just `\i` and go.
 
 ## Why
 
