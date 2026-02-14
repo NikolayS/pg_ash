@@ -240,13 +240,10 @@ DECLARE
     v_data integer[];
     v_active_count smallint;
     v_current_wait_id smallint;
-    v_last_wait_id smallint;
-    v_count_pos int;  -- Position of count in array for current wait event group
     v_rows_inserted int := 0;
     v_state text;
     v_type text;
     v_event text;
-    v_qid int4;
 BEGIN
     -- Get sample timestamp (seconds since epoch, from now())
     v_sample_ts := extract(epoch FROM now() - ash.epoch())::int4;
@@ -356,68 +353,53 @@ BEGIN
           AND sa.pid != pg_backend_pid()
     LOOP
         BEGIN
-            -- Build complete data array for this datid
-            v_data := ARRAY[]::integer[];
-            v_active_count := 0;
-            v_last_wait_id := NULL;
-            v_count_pos := NULL;
+            -- Build encoded array using array_agg — O(n) instead of O(n²)
+            -- 1. Group backends by wait_id, collect qids
+            -- 2. Build per-group sub-arrays: [-wait_id, count] || qids
+            -- 3. Concatenate all sub-arrays into one flat result
 
-            FOR v_rec IN
-                SELECT
-                    sa.state,
-                    COALESCE(sa.wait_event_type,
-                        CASE
-                            WHEN sa.state = 'active' THEN 'CPU'
-                            WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE'
-                        END
-                    ) as wait_type,
-                    COALESCE(sa.wait_event,
-                        CASE
-                            WHEN sa.state = 'active' THEN 'CPU'
-                            WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE'
-                        END
-                    ) as wait_event,
-                    sa.query_id
+            -- Step 1+2: build per-group sub-arrays into a temp table
+            CREATE TEMP TABLE IF NOT EXISTS _ash_groups (
+                gnum int, group_arr integer[]
+            ) ON COMMIT DROP;
+            TRUNCATE _ash_groups;
+
+            INSERT INTO _ash_groups (gnum, group_arr)
+            SELECT
+                row_number() OVER () as gnum,
+                ARRAY[(-wc.id)::integer, count(*)::integer] || array_agg(COALESCE(qc.map_id, 0)::integer)
+            FROM pg_stat_activity sa
+            JOIN _ash_wait_cache wc
+              ON wc.state = sa.state
+             AND wc.type = COALESCE(sa.wait_event_type,
+                    CASE WHEN sa.state = 'active' THEN 'CPU'
+                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE' END)
+             AND wc.event = COALESCE(sa.wait_event,
+                    CASE WHEN sa.state = 'active' THEN 'CPU'
+                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE' END)
+            LEFT JOIN _ash_qids qc ON qc.query_id = sa.query_id
+            WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
+              AND (sa.backend_type = 'client backend'
+                   OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+              AND sa.pid != pg_backend_pid()
+              AND COALESCE(sa.datid, 0::oid) = v_datid_rec.datid
+            GROUP BY wc.id;
+
+            -- Step 3: flatten all group arrays into one
+            IF EXISTS (SELECT 1 FROM _ash_groups) THEN
+                SELECT array_agg(el ORDER BY g.gnum, u.ord)
+                INTO v_data
+                FROM _ash_groups g,
+                     LATERAL unnest(g.group_arr) WITH ORDINALITY AS u(el, ord);
+
+                SELECT count(*)::smallint INTO v_active_count
                 FROM pg_stat_activity sa
                 WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
                   AND (sa.backend_type = 'client backend'
                        OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
                   AND sa.pid != pg_backend_pid()
-                  AND COALESCE(sa.datid, 0::oid) = v_datid_rec.datid
-                ORDER BY sa.state, wait_type, wait_event
-            LOOP
-                -- Get wait event id from cache
-                SELECT id INTO v_current_wait_id
-                FROM _ash_wait_cache
-                WHERE state = v_rec.state AND type = v_rec.wait_type AND event = v_rec.wait_event;
+                  AND COALESCE(sa.datid, 0::oid) = v_datid_rec.datid;
 
-                -- Get query map id (0 for NULL query_id - sentinel)
-                IF v_rec.query_id IS NULL THEN
-                    v_qid := 0;
-                ELSE
-                    SELECT map_id INTO v_qid FROM _ash_qids WHERE query_id = v_rec.query_id;
-                    IF v_qid IS NULL THEN
-                        v_qid := 0;
-                    END IF;
-                END IF;
-
-                -- Check if we need to start a new wait event group
-                IF v_last_wait_id IS NULL OR v_last_wait_id != v_current_wait_id THEN
-                    -- New wait event: add marker, count=1, first qid
-                    v_data := v_data || ARRAY[-v_current_wait_id::integer, 1, v_qid];
-                    v_count_pos := array_length(v_data, 1) - 1;  -- Position of count (before qid)
-                    v_last_wait_id := v_current_wait_id;
-                ELSE
-                    -- Same wait event: increment count at tracked position, add qid
-                    v_data[v_count_pos] := v_data[v_count_pos] + 1;
-                    v_data := v_data || v_qid;
-                END IF;
-
-                v_active_count := v_active_count + 1;
-            END LOOP;
-
-            -- Insert if we have data
-            IF array_length(v_data, 1) > 1 THEN
                 INSERT INTO ash.sample (sample_ts, datid, active_count, data)
                 VALUES (v_sample_ts, v_datid_rec.datid, v_active_count, v_data);
                 v_rows_inserted := v_rows_inserted + 1;

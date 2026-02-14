@@ -239,7 +239,6 @@ select * from ash.status();
 
 - **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](ROLLUP_DESIGN.md).
 - **JIT must be off for OLTP** — JIT adds 10x overhead to reader queries (30 ms to 340 ms). Disable globally with `ALTER SYSTEM SET jit = off`.
-- **Array building is O(n^2)** in plpgsql at high backend counts — switching to `array_agg()` is planned.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
 
 ## License
