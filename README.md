@@ -148,15 +148,14 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 `ash.take_sample()` runs every second via pg_cron. It reads `pg_stat_activity`, groups active backends by `(wait_event_type, wait_event, state)`, and encodes the result into a single `integer[]` per database:
 
 ```
-{1, -5, 3, 101, 102, 101, -1, 2, 103, 104, -8, 1, 105}
- │   │  │  │              │  │  │           │  │  │
- │   │  │  └─ query_ids   │  │  └─ qids    │  │  └─ qid
- │   │  └─ count=3        │  └─ count=2    │  └─ count=1
- │   └─ wait_event_id=5   └─ weid=1        └─ weid=8
- └─ version=1
+{-5, 3, 101, 102, 101, -1, 2, 103, 104, -8, 1, 105}
+ │   │  │              │  │  │           │  │  │
+ │   │  └─ query_ids   │  │  └─ qids    │  │  └─ qid
+ │   └─ count=3        │  └─ count=2    │  └─ count=1
+ └─ wait_event_id=5    └─ weid=1        └─ weid=8
 ```
 
-6 active backends across 3 wait events = 1 row, 13 array elements, ~76 bytes.
+6 active backends across 3 wait events = 1 row, 12 array elements, ~72 bytes.
 
 ### Dictionary tables
 
@@ -166,6 +165,8 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 | `ash.query_map` | Maps `query_id` (from `pg_stat_activity`) to integer IDs |
 
 Dictionaries are auto-populated by the sampler. Wait events are stable (~600 entries max across all Postgres versions). Query map grows as new queries appear and is garbage-collected based on `last_seen`.
+
+Encoding version is tracked in `ash.config.encoding_version`, not in the array itself — zero per-row overhead.
 
 ### Rotation
 

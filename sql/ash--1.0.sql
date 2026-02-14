@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS ash.config (
     sample_interval    interval NOT NULL DEFAULT '1 second',
     rotation_period    interval NOT NULL DEFAULT '1 day',
     include_bg_workers bool NOT NULL DEFAULT false,
+    encoding_version   smallint NOT NULL DEFAULT 1,
     rotated_at         timestamptz NOT NULL DEFAULT clock_timestamp(),
     installed_at       timestamptz NOT NULL DEFAULT clock_timestamp()
 );
@@ -64,7 +65,7 @@ CREATE TABLE IF NOT EXISTS ash.sample (
     datid        oid NOT NULL,
     active_count smallint NOT NULL,
     data         integer[] NOT NULL
-                   CHECK (data[1] = 1 AND array_length(data, 1) >= 3),
+                   CHECK (data[1] < 0 AND array_length(data, 1) >= 2),
     slot         smallint NOT NULL DEFAULT ash.current_slot()
 ) PARTITION BY LIST (slot);
 
@@ -171,18 +172,20 @@ BEGIN
 
     v_len := array_length(p_data, 1);
 
-    -- Must have version marker
-    IF v_len < 3 THEN
+    -- Minimum: one wait group = [-wid, count, qid] = 3 elements
+    -- But could be [-wid, count] = 2 if count=0... no, count > 0
+    -- Actually minimum is [-wid, 1, qid] = 3
+    IF v_len < 2 THEN
         RETURN false;
     END IF;
 
-    -- Version check
-    IF p_data[1] != 1 THEN
+    -- First element must be a negative wait_id marker
+    IF p_data[1] >= 0 THEN
         RETURN false;
     END IF;
 
     -- Walk the structure
-    v_idx := 2;
+    v_idx := 1;
     WHILE v_idx <= v_len LOOP
         -- Expect negative marker (wait event id)
         IF p_data[v_idx] >= 0 THEN
@@ -354,7 +357,7 @@ BEGIN
     LOOP
         BEGIN
             -- Build complete data array for this datid
-            v_data := ARRAY[1];  -- Version marker
+            v_data := ARRAY[]::integer[];
             v_active_count := 0;
             v_last_wait_id := NULL;
             v_count_pos := NULL;
@@ -460,14 +463,14 @@ BEGIN
 
     v_len := array_length(p_data, 1);
 
-    -- Version check
-    IF v_len < 3 OR p_data[1] != 1 THEN
-        RAISE WARNING 'ash.decode_sample: unknown version or invalid data';
+    -- Basic structure check: first element must be negative (wait_id marker)
+    IF v_len < 2 OR p_data[1] >= 0 THEN
+        RAISE WARNING 'ash.decode_sample: invalid data array';
         RETURN;
     END IF;
 
     -- Walk the structure
-    v_idx := 2;
+    v_idx := 1;
     WHILE v_idx <= v_len LOOP
         -- Get wait event id (negative marker)
         IF p_data[v_idx] >= 0 THEN
@@ -964,9 +967,10 @@ $$;
 -- Top queries by wait samples (inline SQL decode)
 -- Extracts individual query_map_ids from the encoded array.
 -- Format: [ver, -wid, count, qid, qid, ..., -wid, count, qid, ...]
--- Every element that is >= 0 and not at position 1 (version) and not
--- immediately after a negative element (that's the count) is a query_map_id.
--- We use generate_subscripts and filter: data[i] >= 0 AND i > 1 AND data[i-1] >= 0
+-- Extracts individual query_map_ids from the encoded array.
+-- Format: [-wid, count, qid, qid, ..., -wid, count, qid, ...]
+-- A query_id position is: data[i] >= 0 AND data[i-1] >= 0 AND i > 1
+-- (i > 1 guards against data[0] which is NULL in 1-indexed arrays)
 CREATE OR REPLACE FUNCTION ash.top_queries(
     p_interval interval DEFAULT '1 hour',
     p_limit int DEFAULT 20
@@ -994,7 +998,7 @@ BEGIN
             FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-              AND i > 1                   -- skip version byte
+              AND i > 1                   -- guard: data[0] is NULL
               AND s.data[i] >= 0          -- not a wait_id marker
               AND s.data[i - 1] >= 0      -- not a count (count follows negative marker)
         ),
