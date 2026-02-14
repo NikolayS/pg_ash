@@ -1278,3 +1278,341 @@ AS $$
     GROUP BY s.datid, d.datname
     ORDER BY total_backends DESC
 $$;
+
+-------------------------------------------------------------------------------
+-- Absolute time range functions — for incident investigation
+-------------------------------------------------------------------------------
+
+-- Convert a timestamptz to our internal sample_ts (seconds since epoch)
+CREATE OR REPLACE FUNCTION ash._to_sample_ts(p_ts timestamptz)
+RETURNS int4
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT extract(epoch FROM p_ts - ash.epoch())::int4
+$$;
+
+-- Top waits in an absolute time range
+CREATE OR REPLACE FUNCTION ash.top_waits_at(
+    p_start timestamptz,
+    p_end timestamptz,
+    p_limit int DEFAULT 20
+)
+RETURNS TABLE (
+    state text,
+    wait_type text,
+    wait_event text,
+    samples bigint,
+    pct numeric
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH waits AS (
+        SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= ash._to_sample_ts(p_start)
+          AND s.sample_ts < ash._to_sample_ts(p_end)
+          AND s.data[i] < 0
+    ),
+    totals AS (
+        SELECT w.wait_id, sum(w.cnt) as cnt
+        FROM waits w
+        GROUP BY w.wait_id
+    ),
+    grand_total AS (
+        SELECT sum(cnt) as total FROM totals
+    )
+    SELECT
+        wm.state,
+        wm.type as wait_type,
+        wm.event as wait_event,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+    FROM totals t
+    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+    CROSS JOIN grand_total gt
+    ORDER BY t.cnt DESC
+    LIMIT p_limit
+$$;
+
+-- Top queries in an absolute time range
+CREATE OR REPLACE FUNCTION ash.top_queries_at(
+    p_start timestamptz,
+    p_end timestamptz,
+    p_limit int DEFAULT 20
+)
+RETURNS TABLE (
+    query_id bigint,
+    samples bigint,
+    pct numeric,
+    query_text text
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_has_pgss boolean;
+    v_start int4 := ash._to_sample_ts(p_start);
+    v_end int4 := ash._to_sample_ts(p_end);
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'
+    ) INTO v_has_pgss;
+
+    IF v_has_pgss THEN
+        RETURN QUERY
+        WITH qids AS (
+            SELECT s.data[i] as map_id
+            FROM ash.sample s, generate_subscripts(s.data, 1) i
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= v_start AND s.sample_ts < v_end
+              AND i > 1 AND s.data[i] >= 0 AND s.data[i - 1] >= 0
+        ),
+        totals AS (
+            SELECT map_id, count(*) as cnt FROM qids WHERE map_id > 0 GROUP BY map_id
+        ),
+        grand_total AS (
+            SELECT sum(cnt) as total FROM totals
+        )
+        SELECT qm.query_id, t.cnt, round(t.cnt::numeric / gt.total * 100, 2),
+               left(pss.query, 100)
+        FROM totals t
+        JOIN ash.query_map qm ON qm.id = t.map_id
+        CROSS JOIN grand_total gt
+        LEFT JOIN pg_stat_statements pss ON pss.queryid = qm.query_id
+        ORDER BY t.cnt DESC LIMIT p_limit;
+    ELSE
+        RETURN QUERY
+        WITH qids AS (
+            SELECT s.data[i] as map_id
+            FROM ash.sample s, generate_subscripts(s.data, 1) i
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= v_start AND s.sample_ts < v_end
+              AND i > 1 AND s.data[i] >= 0 AND s.data[i - 1] >= 0
+        ),
+        totals AS (
+            SELECT map_id, count(*) as cnt FROM qids WHERE map_id > 0 GROUP BY map_id
+        ),
+        grand_total AS (
+            SELECT sum(cnt) as total FROM totals
+        )
+        SELECT qm.query_id, t.cnt, round(t.cnt::numeric / gt.total * 100, 2),
+               NULL::text
+        FROM totals t
+        JOIN ash.query_map qm ON qm.id = t.map_id
+        CROSS JOIN grand_total gt
+        ORDER BY t.cnt DESC LIMIT p_limit;
+    END IF;
+END;
+$$;
+
+-- Wait timeline in an absolute time range
+CREATE OR REPLACE FUNCTION ash.wait_timeline_at(
+    p_start timestamptz,
+    p_end timestamptz,
+    p_bucket interval DEFAULT '1 minute'
+)
+RETURNS TABLE (
+    bucket_start timestamptz,
+    state text,
+    wait_type text,
+    wait_event text,
+    samples bigint
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH waits AS (
+        SELECT
+            ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch FROM p_bucket)::int4)) * interval '1 second' as bucket,
+            (-s.data[i])::smallint as wait_id,
+            s.data[i + 1] as cnt
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= ash._to_sample_ts(p_start)
+          AND s.sample_ts < ash._to_sample_ts(p_end)
+          AND s.data[i] < 0
+    )
+    SELECT
+        w.bucket as bucket_start,
+        wm.state,
+        wm.type as wait_type,
+        wm.event as wait_event,
+        sum(w.cnt) as samples
+    FROM waits w
+    JOIN ash.wait_event_map wm ON wm.id = w.wait_id
+    GROUP BY w.bucket, wm.state, wm.type, wm.event
+    ORDER BY w.bucket, sum(w.cnt) DESC
+$$;
+
+-- CPU vs waiting in an absolute time range
+CREATE OR REPLACE FUNCTION ash.cpu_vs_waiting_at(
+    p_start timestamptz,
+    p_end timestamptz
+)
+RETURNS TABLE (
+    category text,
+    samples bigint,
+    pct numeric
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH waits AS (
+        SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= ash._to_sample_ts(p_start)
+          AND s.sample_ts < ash._to_sample_ts(p_end)
+          AND s.data[i] < 0
+    ),
+    categorized AS (
+        SELECT CASE WHEN wm.type = 'CPU' THEN 'CPU' ELSE 'Waiting' END as cat, w.cnt
+        FROM waits w JOIN ash.wait_event_map wm ON wm.id = w.wait_id
+    ),
+    totals AS (
+        SELECT cat, sum(cnt) as cnt FROM categorized GROUP BY cat
+    ),
+    grand_total AS (
+        SELECT sum(cnt) as total FROM totals
+    )
+    SELECT t.cat, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    FROM totals t, grand_total gt
+    ORDER BY t.cnt DESC
+$$;
+
+-- Query waits in an absolute time range
+CREATE OR REPLACE FUNCTION ash.query_waits_at(
+    p_query_id bigint,
+    p_start timestamptz,
+    p_end timestamptz
+)
+RETURNS TABLE (
+    wait_event_type text,
+    wait_event text,
+    samples bigint,
+    pct numeric
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_map_id int4;
+    v_start int4 := ash._to_sample_ts(p_start);
+    v_end int4 := ash._to_sample_ts(p_end);
+BEGIN
+    SELECT id INTO v_map_id FROM ash.query_map WHERE query_id = p_query_id;
+    IF v_map_id IS NULL THEN RETURN; END IF;
+
+    RETURN QUERY
+    WITH hits AS (
+        SELECT
+            (SELECT (- s.data[j])::smallint
+             FROM generate_series(i, 2, -1) j
+             WHERE s.data[j] < 0 LIMIT 1
+            ) as wait_id
+        FROM ash.sample s, generate_subscripts(s.data, 1) i
+        WHERE s.slot = ANY(ash._active_slots())
+          AND s.sample_ts >= v_start AND s.sample_ts < v_end
+          AND i > 1 AND s.data[i] = v_map_id
+          AND s.data[i] >= 0 AND s.data[i - 1] >= 0
+    ),
+    totals AS (
+        SELECT wait_id, count(*) as cnt FROM hits WHERE wait_id IS NOT NULL GROUP BY wait_id
+    ),
+    grand_total AS (
+        SELECT sum(cnt) as total FROM totals
+    )
+    SELECT wm.type, wm.event, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    FROM totals t
+    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+    CROSS JOIN grand_total gt
+    ORDER BY t.cnt DESC;
+END;
+$$;
+
+-------------------------------------------------------------------------------
+-- Activity summary — the "morning coffee" function
+-------------------------------------------------------------------------------
+
+-- Activity summary — one-call overview of a time period
+-- Returns key-value pairs: sample count, peak backends, top waits, top queries.
+CREATE OR REPLACE FUNCTION ash.activity_summary(
+    p_interval interval DEFAULT '24 hours'
+)
+RETURNS TABLE (
+    metric text,
+    value text
+)
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_total_samples bigint;
+    v_total_backends bigint;
+    v_peak_backends smallint;
+    v_peak_ts timestamptz;
+    v_databases int;
+    v_min_ts int4;
+    r record;
+    v_rank int;
+BEGIN
+    v_min_ts := extract(epoch FROM now() - p_interval - ash.epoch())::int4;
+
+    -- Basic counts
+    SELECT count(*), COALESCE(sum(active_count), 0), max(active_count)
+    INTO v_total_samples, v_total_backends, v_peak_backends
+    FROM ash.sample
+    WHERE slot = ANY(ash._active_slots())
+      AND sample_ts >= v_min_ts;
+
+    IF v_total_samples = 0 THEN
+        RETURN QUERY SELECT 'status'::text, 'no data in this time range'::text;
+        RETURN;
+    END IF;
+
+    -- Peak time
+    SELECT ash.epoch() + sample_ts * interval '1 second'
+    INTO v_peak_ts
+    FROM ash.sample
+    WHERE slot = ANY(ash._active_slots())
+      AND sample_ts >= v_min_ts
+    ORDER BY active_count DESC
+    LIMIT 1;
+
+    -- Distinct databases
+    SELECT count(DISTINCT datid) INTO v_databases
+    FROM ash.sample
+    WHERE slot = ANY(ash._active_slots())
+      AND sample_ts >= v_min_ts;
+
+    RETURN QUERY SELECT 'time_range'::text, p_interval::text;
+    RETURN QUERY SELECT 'total_samples', v_total_samples::text;
+    RETURN QUERY SELECT 'avg_active_backends', round(v_total_backends::numeric / v_total_samples, 1)::text;
+    RETURN QUERY SELECT 'peak_active_backends', v_peak_backends::text;
+    RETURN QUERY SELECT 'peak_time', v_peak_ts::text;
+    RETURN QUERY SELECT 'databases_active', v_databases::text;
+
+    -- Top 3 waits
+    v_rank := 0;
+    FOR r IN SELECT tw.wait_type || '/' || tw.wait_event || ' (' || tw.pct || '%)' as desc
+             FROM ash.top_waits(p_interval, 3) tw
+    LOOP
+        v_rank := v_rank + 1;
+        RETURN QUERY SELECT 'top_wait_' || v_rank, r.desc;
+    END LOOP;
+
+    -- Top 3 queries
+    v_rank := 0;
+    FOR r IN SELECT tq.query_id::text || COALESCE(' — ' || left(tq.query_text, 60), '') || ' (' || tq.pct || '%)' as desc
+             FROM ash.top_queries(p_interval, 3) tq
+    LOOP
+        v_rank := v_rank + 1;
+        RETURN QUERY SELECT 'top_query_' || v_rank, r.desc;
+    END LOOP;
+
+    RETURN;
+END;
+$$;

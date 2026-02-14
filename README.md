@@ -35,6 +35,16 @@ select * from ash.cpu_vs_waiting('1 hour');
 -- top queries with query text (requires pg_stat_statements)
 select * from ash.top_queries_with_text('1 hour');
 
+-- what is a specific query waiting on?
+select * from ash.query_waits(12345678, '1 hour');
+
+-- morning coffee: what happened overnight?
+select * from ash.activity_summary('8 hours');
+
+-- incident investigation: what happened at 3am?
+select * from ash.top_waits_at('2026-02-14 02:50', '2026-02-14 03:10');
+select * from ash.wait_timeline_at('2026-02-14 02:50', '2026-02-14 03:10', '1 minute');
+
 -- stop sampling
 select ash.stop();
 
@@ -43,6 +53,8 @@ select ash.uninstall();
 ```
 
 ## Reader functions
+
+### Relative time (last N hours)
 
 | Function | Description |
 |----------|-------------|
@@ -53,7 +65,18 @@ select ash.uninstall();
 | `ash.cpu_vs_waiting(interval)` | CPU vs waiting breakdown |
 | `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
 | `ash.samples_by_database(interval)` | Activity per database |
+| `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits/queries |
 | `ash.status()` | Current sampling status and partition info |
+
+### Absolute time (incident investigation)
+
+| Function | Description |
+|----------|-------------|
+| `ash.top_waits_at(start, end, limit)` | Top waits in a specific time range |
+| `ash.top_queries_at(start, end, limit)` | Top queries in a specific time range |
+| `ash.query_waits_at(query_id, start, end)` | Query wait profile in a specific time range |
+| `ash.cpu_vs_waiting_at(start, end)` | CPU vs waiting in a specific time range |
+| `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a specific time range |
 
 ## How it works
 
