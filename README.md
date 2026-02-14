@@ -41,23 +41,65 @@ select ash.stop();
 ### What hurt recently?
 
 ```sql
--- morning coffee: overnight summary
+-- morning coffee: what happened overnight?
 select * from ash.activity_summary('8 hours');
+```
 
+```
+        metric        |            value
+----------------------+------------------------------
+ time_range           | 08:00:00
+ total_samples        | 28800
+ avg_active_backends  | 16.4
+ peak_active_backends | 25
+ peak_time            | 2026-02-14 03:17:42+00
+ databases_active     | 3
+ top_wait_1           | CPU/CPU (37.33%)
+ top_wait_2           | Lock/tuple (24.01%)
+ top_wait_3           | LWLock/WALWriteLock (14.67%)
+ top_query_1          | 1234567890 (40.00%)
+ top_query_2          | 9876543210 (22.66%)
+ top_query_3          | 5555555555 (21.33%)
+```
+
+```sql
 -- top wait events in the last hour
-select * from ash.top_waits('1 hour');
+select * from ash.top_waits('1 hour', 5);
+```
 
+```
+ state  | wait_type |  wait_event   | samples |  pct
+--------+-----------+---------------+---------+-------
+ active | CPU       | CPU           |   20160 | 37.33
+ active | Lock      | tuple         |   12965 | 24.01
+ active | LWLock    | WALWriteLock  |    7920 | 14.67
+ active | IO        | DataFileWrite |    7200 | 13.33
+ active | IO        | DataFileRead  |    5760 | 10.67
+```
+
+```sql
 -- top queries with text from pg_stat_statements
-select * from ash.top_queries_with_text('1 hour');
+select * from ash.top_queries_with_text('1 hour', 5);
+```
 
--- CPU vs waiting breakdown
+```
+   query_id   | samples |  pct  | calls | mean_time_ms | query_text
+--------------+---------+-------+-------+--------------+-------------------------------
+ 1234567890   |   21600 | 40.00 |  5600 |        12.34 | select * from orders where...
+ 9876543210   |   12240 | 22.66 |  3200 |         8.56 | update inventory set quant...
+ 5555555555   |   11520 | 21.33 |  1800 |        45.67 | select count(*) from event...
+```
+
+```sql
+-- is the server CPU-bound or waiting?
 select * from ash.cpu_vs_waiting('1 hour');
+```
 
--- wait events over time (1-minute buckets)
-select * from ash.wait_timeline('1 hour', '1 minute');
-
--- which databases are active?
-select * from ash.samples_by_database('1 hour');
+```
+ category | samples |  pct
+----------+---------+-------
+ Waiting  |   33845 | 62.67
+ CPU      |   20160 | 37.33
 ```
 
 ### Investigate an incident
@@ -77,38 +119,47 @@ select * from ash.wait_timeline_at(
     '2026-02-14 03:10',
     '1 minute'
 );
-
--- CPU vs waiting during the incident
-select * from ash.cpu_vs_waiting_at('2026-02-14 03:00', '2026-02-14 03:10');
 ```
 
 ### Analyze a specific query
 
 ```sql
--- what is query 12345678 waiting on?
-select * from ash.query_waits(12345678, '1 hour');
+-- what is query 1234567890 waiting on?
+select * from ash.query_waits(1234567890, '1 hour');
+```
 
+```
+ wait_event_type |  wait_event   | samples |  pct
+-----------------+---------------+---------+-------
+ Lock            | tuple         |    2880 | 28.57
+ IO              | DataFileWrite |    2880 | 28.57
+ IO              | DataFileRead  |    1440 | 14.29
+ CPU             | CPU           |    1440 | 14.29
+ LWLock          | WALWriteLock  |    1440 | 14.29
+```
+
+```sql
 -- same, but during a specific time window
-select * from ash.query_waits_at(12345678, '2026-02-14 03:00', '2026-02-14 03:10');
-
--- top queries with pgss stats (calls, mean_exec_time, query text)
-select * from ash.top_queries_with_text('1 hour');
-```
-
-Output:
-
-```
- query_id  | samples | pct   | calls | mean_time_ms | query_text
------------+---------+-------+-------+--------------+---------------------------
- 123456789 |    1200 | 34.20 |  5600 |        12.34 | select * from orders wh...
-  87654321 |     800 | 22.80 |  3200 |         8.56 | update inventory set qu...
+select * from ash.query_waits_at(1234567890, '2026-02-14 03:00', '2026-02-14 03:10');
 ```
 
 ### Check status
 
 ```sql
--- sampling status, partition info, data age
 select * from ash.status();
+```
+
+```
+           metric           |             value
+----------------------------+-------------------------------
+ current_slot               | 0
+ sample_interval            | 00:00:01
+ rotation_period            | 1 day
+ samples_in_current_slot    | 86400
+ last_sample_ts             | 2026-02-14 20:40:10+00
+ wait_event_map_count       | 21
+ query_map_count            | 200
+ pg_cron_available          | yes
 ```
 
 ## Function reference
