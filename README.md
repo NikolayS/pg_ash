@@ -54,7 +54,7 @@ select * from ash.activity_summary('8 hours');
  peak_active_backends | 25
  peak_time            | 2026-02-14 03:17:42+00
  databases_active     | 3
- top_wait_1           | CPU/CPU (37.33%)
+ top_wait_1           | CPU/CPU* (37.33%)
  top_wait_2           | Lock/tuple (24.01%)
  top_wait_3           | LWLock/WALWriteLock (14.67%)
  top_query_1          | 1234567890 (40.00%)
@@ -70,7 +70,7 @@ select * from ash.top_waits('1 hour', 5);
 ```
  state  | wait_type |  wait_event   | samples |  pct
 --------+-----------+---------------+---------+-------
- active | CPU       | CPU           |   20160 | 37.33
+ active | CPU       | CPU*          |   20160 | 37.33
  active | Lock      | tuple         |   12965 | 24.01
  active | LWLock    | WALWriteLock  |    7920 | 14.67
  active | IO        | DataFileWrite |    7200 | 13.33
@@ -134,7 +134,7 @@ select * from ash.query_waits(1234567890, '1 hour');
  Lock            | tuple         |    2880 | 28.57
  IO              | DataFileWrite |    2880 | 28.57
  IO              | DataFileRead  |    1440 | 14.29
- CPU             | CPU           |    1440 | 14.29
+ CPU             | CPU*          |    1440 | 14.29
  LWLock          | WALWriteLock  |    1440 | 14.29
 ```
 
@@ -218,6 +218,8 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 Dictionaries are auto-populated by the sampler. Wait events are stable (~600 entries max across all Postgres versions). Query map grows as new queries appear and is garbage-collected based on `last_seen`.
 
 Encoding version is tracked in `ash.config.encoding_version`, not in the array itself — zero per-row overhead.
+
+**Note on `CPU*`**: When `wait_event_type` and `wait_event` are both NULL in `pg_stat_activity`, the backend is active but not in a known wait state. This is *either* genuine CPU work *or* an uninstrumented code path where Postgres does not report a wait event. The asterisk signals this ambiguity. See [gaps.wait.events](https://gaps.wait.events) for details on uninstrumented wait events in Postgres — these gaps are being closed over time, making `CPU*` increasingly accurate.
 
 ### Rotation
 

@@ -316,7 +316,7 @@ BEGIN
             ) as wait_type,
             COALESCE(sa.wait_event,
                 CASE
-                    WHEN sa.state = 'active' THEN 'CPU'
+                    WHEN sa.state = 'active' THEN 'CPU*'
                     WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE'
                 END
             ) as wait_event
@@ -375,7 +375,7 @@ BEGIN
                     CASE WHEN sa.state = 'active' THEN 'CPU'
                          WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE' END)
              AND wc.event = COALESCE(sa.wait_event,
-                    CASE WHEN sa.state = 'active' THEN 'CPU'
+                    CASE WHEN sa.state = 'active' THEN 'CPU*'
                          WHEN sa.state LIKE 'idle in transaction%' THEN 'IDLE' END)
             LEFT JOIN _ash_qids qc ON qc.query_id = sa.query_id
             WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
