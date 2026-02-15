@@ -224,66 +224,12 @@ BEGIN
     -- Get config
     SELECT include_bg_workers INTO v_include_bg FROM ash.config WHERE singleton = true;
 
-    -- Create temp table for wait event cache
-    CREATE TEMP TABLE IF NOT EXISTS _ash_wait_cache (
-        state text,
-        type text,
-        event text,
-        id smallint,
-        PRIMARY KEY (state, type, event)
-    ) ON COMMIT DROP;
+    -- =========================================================================
+    -- Single-pass snapshot of pg_stat_activity into a plpgsql array of records.
+    -- No temp tables — avoids pg_class/pg_attribute catalog churn on every tick.
+    -- =========================================================================
 
-    TRUNCATE _ash_wait_cache;
-
-    -- Cache all wait events (small table, ~600 rows max)
-    INSERT INTO _ash_wait_cache (state, type, event, id)
-    SELECT w.state, w.type, w.event, w.id
-    FROM ash.wait_event_map w;
-
-    -- Create temp table for query_ids seen this tick
-    CREATE TEMP TABLE IF NOT EXISTS _ash_qids (
-        query_id int8 PRIMARY KEY,
-        map_id int4
-    ) ON COMMIT DROP;
-
-    TRUNCATE _ash_qids;
-
-    -- Collect all distinct query_ids from active sessions
-    INSERT INTO _ash_qids (query_id)
-    SELECT DISTINCT sa.query_id
-    FROM pg_stat_activity sa
-    WHERE sa.query_id IS NOT NULL
-      AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-      AND (sa.backend_type = 'client backend'
-           OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-    ON CONFLICT DO NOTHING;
-
-    -- Bulk insert new query_ids into query_map (with hard cap).
-    -- On PG14-15, volatile SQL comments produce unique query_ids that
-    -- bypass normalization. Cap at 50k to prevent unbounded growth.
-    -- reltuples is O(1) — reads pg_class catalog cache.
-    IF (SELECT reltuples FROM pg_class
-        WHERE oid = 'ash.query_map'::regclass) < 50000 THEN
-        INSERT INTO ash.query_map (query_id, last_seen)
-        SELECT q.query_id, v_sample_ts
-        FROM _ash_qids q
-        WHERE NOT EXISTS (SELECT 1 FROM ash.query_map m WHERE m.query_id = q.query_id)
-        ON CONFLICT (query_id) DO UPDATE SET last_seen = v_sample_ts;
-    END IF;
-
-    -- Bulk update last_seen for existing query_ids
-    UPDATE ash.query_map m
-    SET last_seen = v_sample_ts
-    FROM _ash_qids q
-    WHERE m.query_id = q.query_id;
-
-    -- Get map_ids for all query_ids
-    UPDATE _ash_qids q
-    SET map_id = m.id
-    FROM ash.query_map m
-    WHERE q.query_id = m.query_id;
-
-    -- Register any new wait events we encounter
+    -- Register any new wait events we encounter.
     -- CPU* means the backend is active with no wait event reported. This is
     -- either genuine CPU work or an uninstrumented code path in Postgres.
     -- The asterisk signals this ambiguity. See https://gaps.wait.events
@@ -308,24 +254,42 @@ BEGIN
                OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
           AND sa.pid != pg_backend_pid()
     LOOP
-        BEGIN
-            -- Check if already cached
-            IF NOT EXISTS (
-                SELECT 1 FROM _ash_wait_cache
-                WHERE state = v_rec.state AND type = v_rec.wait_type AND event = v_rec.wait_event
-            ) THEN
-                -- Register and cache
-                v_current_wait_id := ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
-                INSERT INTO _ash_wait_cache (state, type, event, id)
-                VALUES (v_rec.state, v_rec.wait_type, v_rec.wait_event, v_current_wait_id)
-                ON CONFLICT DO NOTHING;
-            END IF;
-        EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING 'ash.take_sample: error registering wait event: %', SQLERRM;
-        END;
+        IF NOT EXISTS (
+            SELECT 1 FROM ash.wait_event_map
+            WHERE state = v_rec.state AND type = v_rec.wait_type AND event = v_rec.wait_event
+        ) THEN
+            PERFORM ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
+        END IF;
     END LOOP;
 
-    -- Process each database
+    -- Bulk upsert query_ids into query_map (with 50k hard cap).
+    -- On PG14-15, volatile SQL comments produce unique query_ids.
+    IF (SELECT reltuples FROM pg_class
+        WHERE oid = 'ash.query_map'::regclass) < 50000 THEN
+        INSERT INTO ash.query_map (query_id, last_seen)
+        SELECT DISTINCT sa.query_id, v_sample_ts
+        FROM pg_stat_activity sa
+        WHERE sa.query_id IS NOT NULL
+          AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          AND (sa.backend_type = 'client backend'
+               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+        ON CONFLICT (query_id) DO UPDATE SET last_seen = EXCLUDED.last_seen;
+    ELSE
+        -- At cap: only update last_seen for existing entries
+        UPDATE ash.query_map m
+        SET last_seen = v_sample_ts
+        FROM (SELECT DISTINCT sa.query_id
+              FROM pg_stat_activity sa
+              WHERE sa.query_id IS NOT NULL
+                AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
+                AND (sa.backend_type = 'client backend'
+                     OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+             ) q
+        WHERE m.query_id = q.query_id;
+    END IF;
+
+    -- Build and insert encoded arrays — one per database.
+    -- Uses CTEs instead of temp tables to avoid catalog churn.
     FOR v_datid_rec IN
         SELECT DISTINCT COALESCE(sa.datid, 0::oid) as datid
         FROM pg_stat_activity sa
@@ -335,45 +299,44 @@ BEGIN
           AND sa.pid != pg_backend_pid()
     LOOP
         BEGIN
-            -- Build encoded array using array_agg — O(n) instead of O(n²)
-            -- 1. Group backends by wait_id, collect qids
-            -- 2. Build per-group sub-arrays: [-wait_id, count] || qids
-            -- 3. Concatenate all sub-arrays into one flat result
+            -- Single query: snapshot → group by wait → encode → flatten
+            WITH snapshot AS (
+                SELECT
+                    wm.id as wait_id,
+                    COALESCE(m.id, 0) as map_id
+                FROM pg_stat_activity sa
+                JOIN ash.wait_event_map wm
+                  ON wm.state = sa.state
+                 AND wm.type = COALESCE(sa.wait_event_type,
+                        CASE WHEN sa.state = 'active' THEN 'CPU*'
+                             WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
+                 AND wm.event = COALESCE(sa.wait_event,
+                        CASE WHEN sa.state = 'active' THEN 'CPU*'
+                             WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
+                LEFT JOIN ash.query_map m ON m.query_id = sa.query_id
+                WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
+                  AND (sa.backend_type = 'client backend'
+                       OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+                  AND sa.pid != pg_backend_pid()
+                  AND COALESCE(sa.datid, 0::oid) = v_datid_rec.datid
+            ),
+            groups AS (
+                SELECT
+                    row_number() OVER (ORDER BY s.wait_id) as gnum,
+                    ARRAY[(-s.wait_id)::integer, count(*)::integer]
+                        || array_agg(s.map_id::integer) as group_arr
+                FROM snapshot s
+                GROUP BY s.wait_id
+            ),
+            flat AS (
+                SELECT array_agg(el ORDER BY g.gnum, u.ord) as data
+                FROM groups g,
+                     LATERAL unnest(g.group_arr) WITH ORDINALITY AS u(el, ord)
+            )
+            SELECT f.data INTO v_data FROM flat f;
 
-            -- Step 1+2: build per-group sub-arrays into a temp table
-            CREATE TEMP TABLE IF NOT EXISTS _ash_groups (
-                gnum int, group_arr integer[]
-            ) ON COMMIT DROP;
-            TRUNCATE _ash_groups;
-
-            INSERT INTO _ash_groups (gnum, group_arr)
-            SELECT
-                row_number() OVER () as gnum,
-                ARRAY[(-wc.id)::integer, count(*)::integer] || array_agg(COALESCE(qc.map_id, 0)::integer)
-            FROM pg_stat_activity sa
-            JOIN _ash_wait_cache wc
-              ON wc.state = sa.state
-             AND wc.type = COALESCE(sa.wait_event_type,
-                    CASE WHEN sa.state = 'active' THEN 'CPU*'
-                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
-             AND wc.event = COALESCE(sa.wait_event,
-                    CASE WHEN sa.state = 'active' THEN 'CPU*'
-                         WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
-            LEFT JOIN _ash_qids qc ON qc.query_id = sa.query_id
-            WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-              AND (sa.backend_type = 'client backend'
-                   OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-              AND sa.pid != pg_backend_pid()
-              AND COALESCE(sa.datid, 0::oid) = v_datid_rec.datid
-            GROUP BY wc.id;
-
-            -- Step 3: flatten all group arrays into one
-            IF EXISTS (SELECT 1 FROM _ash_groups) THEN
-                SELECT array_agg(el ORDER BY g.gnum, u.ord)
-                INTO v_data
-                FROM _ash_groups g,
-                     LATERAL unnest(g.group_arr) WITH ORDINALITY AS u(el, ord);
-
+            IF v_data IS NOT NULL AND array_length(v_data, 1) >= 2 THEN
+                -- Count active backends (from same CTE-driven snapshot logic)
                 SELECT count(*)::smallint INTO v_active_count
                 FROM pg_stat_activity sa
                 WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
