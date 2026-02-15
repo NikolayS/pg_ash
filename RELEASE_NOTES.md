@@ -162,8 +162,3 @@ Benchmark results are published in [issue #1](https://github.com/NikolayS/pg_ash
 - **Cross-database query text** — sampling covers all databases (via `pg_stat_activity.datid`), but `top_queries_with_text()` can only resolve query text from pg_stat_statements in the database where pg_ash is installed
 - **Parallel query attribution** — parallel workers are sampled but not linked to their leader
 
-## Credits
-
-- Nikolay Samokhvalov — design and direction
-- Sam Jr. — implementation
-- Inspired by Oracle ASH and Skytools PGQ partition rotation
