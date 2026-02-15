@@ -105,7 +105,7 @@ All objects live in the `ash` schema:
 ## What is not in 1.0
 
 - **Rollup tables** — per-minute and per-hour aggregation for long-term trends (designed in `blueprints/ROLLUP_DESIGN.md`, implementation planned for 1.1)
-- **Cross-database sampling** — currently single-database; multi-database requires pg_cron `schedule_in_database()`
+- **Cross-database query text** — sampling covers all databases (via `pg_stat_activity.datid`), but `top_queries_with_text()` can only resolve query text from pg_stat_statements in the database where pg_ash is installed
 - **Parallel query attribution** — parallel workers are sampled but not linked to their leader
 
 ## Credits
