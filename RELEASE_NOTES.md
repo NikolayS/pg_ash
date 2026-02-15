@@ -50,7 +50,7 @@ Absolute-time variants (`_at` suffix): `top_waits_at`, `top_queries_at`, `query_
 
 ## Storage characteristics
 
-Measured on Postgres 17 with representative workloads:
+Measured with representative workloads (see [benchmarks](https://github.com/NikolayS/pg_ash/issues/1)):
 
 - **Row size:** ~106 bytes for 6 active backends (measured with `pg_column_size`)
 - **Daily storage:** ~30 MiB for typical workloads at 1-second sampling
