@@ -34,19 +34,17 @@ Key design decisions:
 | `activity_summary(interval)` | One-call overview — peak backends, top waits, top queries |
 | `histogram(interval, buckets, width)` | Visual bar chart using Unicode blocks |
 | `samples(interval, limit)` | Fully decoded raw sample browser |
-| `status()` | Configuration, slot state, and storage metrics |
 
 Absolute-time variants (`_at` suffix): `top_waits_at`, `top_queries_at`, `query_waits_at`, `waits_by_type_at`, `wait_timeline_at`, `histogram_at`, `samples_at`.
 
-## Operational functions
+## Lifecycle functions
 
 | Function | Description |
 |---|---|
-| `start(interval)` | Create pg_cron jobs for sampling and rotation |
-| `stop()` | Remove pg_cron jobs |
-| `take_sample()` | Manual single sample (useful for testing) |
-| `rotate()` | Manual partition rotation |
-| `uninstall()` | Remove all pg_cron jobs and drop the ash schema |
+| `start(interval)` | Start sampling — creates pg_cron jobs |
+| `stop()` | Stop sampling — removes pg_cron jobs |
+| `status()` | Show configuration, slot state, and storage metrics |
+| `uninstall()` | Stop sampling and drop the ash schema |
 
 ## Storage characteristics
 
