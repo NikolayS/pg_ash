@@ -367,11 +367,11 @@ select * from ash.status();
 pg_cron logs every job execution to `cron.job_run_details`. At 1-second sampling, this adds ~12 MiB/day of unbounded growth. Limit it:
 
 ```sql
-alter system set cron.max_run_history = 10000;
+alter system set cron.max_run_history = 100000;
 select pg_reload_conf();
 ```
 
-This keeps ~2.7 hours of run history (~1.5 MiB) — enough for debugging while preventing bloat. `ash.start()` will warn if this is not set.
+This keeps ~27 hours of run history (~15 MiB) — enough for debugging while preventing bloat. `ash.start()` will warn if this is not set.
 
 ## Known limitations
 

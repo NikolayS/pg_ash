@@ -710,7 +710,7 @@ begin
   begin
     if current_setting('cron.max_run_history', true)::int < 0 then
       raise notice 'hint: cron.max_run_history is unlimited — pg_cron will log every sample.';
-      raise notice 'recommended: alter system set cron.max_run_history = 10000; select pg_reload_conf();';
+      raise notice 'recommended: alter system set cron.max_run_history = 100000; select pg_reload_conf();';
     end if;
   exception when others then
     null; -- GUC not available in older pg_cron versions
