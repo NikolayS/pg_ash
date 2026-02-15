@@ -1740,7 +1740,7 @@ create or replace function ash.timeline_chart(
 )
 returns table (
   bucket_start timestamptz,
-  active int,
+  active numeric,
   chart text
 )
 language plpgsql
@@ -1749,28 +1749,27 @@ set jit = off
 as $$
 declare
   v_chars text[] := array['█', '▓', '░', '▒'];
-  v_max_active int;
+  v_max_active numeric;
   v_start_ts int4;
   v_bucket_secs int4;
   v_rec record;
   v_bar text;
   v_legend text;
-  v_event_chars text;
   v_char_count int;
-  v_total int;
   v_top_events text[];
 begin
   v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
-  -- Find top N wait events globally for the whole interval
-  select array_agg(t.wait_event order by t.samples desc)
+  -- Find top N wait events globally (by average active sessions)
+  select array_agg(t.wait_event order by t.avg_active desc)
   into v_top_events
   from (
     select
       case when wm.event = wm.type then wm.event
         else wm.type || ':' || wm.event end as wait_event,
-      sum(s.data[i + 1]) as samples
+      sum(s.data[i + 1])::numeric
+        / nullif(count(distinct s.sample_ts), 0) as avg_active
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
     where wm.id = (-s.data[i])::smallint
@@ -1786,12 +1785,13 @@ begin
     return;
   end if;
 
-  -- Find max active count across all buckets for bar scaling
-  select max(bucket_total) into v_max_active
+  -- Find max average active sessions across all buckets for bar scaling
+  select max(avg_total) into v_max_active
   from (
     select
       s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket,
-      sum(s.data[i + 1]) as bucket_total
+      sum(s.data[i + 1])::numeric
+        / nullif(count(distinct s.sample_ts), 0) as avg_total
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
       and s.sample_ts >= v_start_ts
@@ -1803,14 +1803,15 @@ begin
     return;
   end if;
 
-  -- Build chart row by row
+  -- Build chart row by row — all counts normalized to avg active sessions
   for v_rec in
     with buckets as (
       select
         s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
         case when wm.event = wm.type then wm.event
           else wm.type || ':' || wm.event end as wait_event,
-        sum(s.data[i + 1]) as cnt
+        sum(s.data[i + 1]) as cnt,
+        count(distinct s.sample_ts) as n_samples
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
@@ -1822,11 +1823,14 @@ begin
     per_bucket as (
       select
         b.bucket_ts,
-        sum(b.cnt) as total,
-        -- counts for top events
-        coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[1]), 0) as c1,
-        coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[2]), 0) as c2,
-        coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[3]), 0) as c3
+        max(b.n_samples) as n_samples,
+        round(sum(b.cnt)::numeric / nullif(max(b.n_samples), 0), 1) as total,
+        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[1]), 0)::numeric
+          / nullif(max(b.n_samples), 0), 1) as c1,
+        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[2]), 0)::numeric
+          / nullif(max(b.n_samples), 0), 1) as c2,
+        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[3]), 0)::numeric
+          / nullif(max(b.n_samples), 0), 1) as c3
       from buckets b
       group by b.bucket_ts
     )
@@ -1834,45 +1838,40 @@ begin
       ash.epoch() + pb.bucket_ts * interval '1 second' as ts,
       pb.total,
       pb.c1, pb.c2, pb.c3,
-      pb.total - pb.c1 - pb.c2 - pb.c3 as c_other
+      greatest(pb.total - pb.c1 - pb.c2 - pb.c3, 0) as c_other
     from per_bucket pb
     order by pb.bucket_ts
   loop
-    v_total := v_rec.total;
     v_bar := '';
     v_legend := '';
 
     -- Build stacked bar: each event gets proportional characters
-    -- Event 1: █
-    v_char_count := greatest(0, round(v_rec.c1::numeric / v_max_active * p_width)::int);
+    v_char_count := greatest(0, round(v_rec.c1 / v_max_active * p_width)::int);
     v_bar := v_bar || repeat(v_chars[1], v_char_count);
     if v_rec.c1 > 0 then
       v_legend := v_legend || v_top_events[1] || '=' || v_rec.c1;
     end if;
 
-    -- Event 2: ▓
     if p_top >= 2 and v_rec.c2 > 0 then
-      v_char_count := greatest(0, round(v_rec.c2::numeric / v_max_active * p_width)::int);
+      v_char_count := greatest(0, round(v_rec.c2 / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[2], v_char_count);
       v_legend := v_legend || ' ' || v_top_events[2] || '=' || v_rec.c2;
     end if;
 
-    -- Event 3: ░
     if p_top >= 3 and v_rec.c3 > 0 then
-      v_char_count := greatest(0, round(v_rec.c3::numeric / v_max_active * p_width)::int);
+      v_char_count := greatest(0, round(v_rec.c3 / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[3], v_char_count);
       v_legend := v_legend || ' ' || v_top_events[3] || '=' || v_rec.c3;
     end if;
 
-    -- Other: ▒
     if v_rec.c_other > 0 then
-      v_char_count := greatest(0, round(v_rec.c_other::numeric / v_max_active * p_width)::int);
+      v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[4], v_char_count);
       v_legend := v_legend || ' Other=' || v_rec.c_other;
     end if;
 
     bucket_start := v_rec.ts;
-    active := v_total;
+    active := v_rec.total;
     chart := v_bar || '  ' || v_legend;
     return next;
   end loop;
@@ -1889,7 +1888,7 @@ create or replace function ash.timeline_chart_at(
 )
 returns table (
   bucket_start timestamptz,
-  active int,
+  active numeric,
   chart text
 )
 language plpgsql
@@ -1898,7 +1897,7 @@ set jit = off
 as $$
 declare
   v_chars text[] := array['█', '▓', '░', '▒'];
-  v_max_active int;
+  v_max_active numeric;
   v_start_ts int4;
   v_end_ts int4;
   v_bucket_secs int4;
@@ -1906,21 +1905,21 @@ declare
   v_bar text;
   v_legend text;
   v_char_count int;
-  v_total int;
   v_top_events text[];
 begin
   v_start_ts := ash._to_sample_ts(p_start);
   v_end_ts := ash._to_sample_ts(p_end);
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
-  -- Find top N wait events globally
-  select array_agg(t.wait_event order by t.samples desc)
+  -- Find top N wait events globally (by average active sessions)
+  select array_agg(t.wait_event order by t.avg_active desc)
   into v_top_events
   from (
     select
       case when wm.event = wm.type then wm.event
         else wm.type || ':' || wm.event end as wait_event,
-      sum(s.data[i + 1]) as samples
+      sum(s.data[i + 1])::numeric
+        / nullif(count(distinct s.sample_ts), 0) as avg_active
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
     where wm.id = (-s.data[i])::smallint
@@ -1936,11 +1935,12 @@ begin
     return;
   end if;
 
-  select max(bucket_total) into v_max_active
+  select max(avg_total) into v_max_active
   from (
     select
       s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket,
-      sum(s.data[i + 1]) as bucket_total
+      sum(s.data[i + 1])::numeric
+        / nullif(count(distinct s.sample_ts), 0) as avg_total
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
       and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
@@ -1958,7 +1958,8 @@ begin
         s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
         case when wm.event = wm.type then wm.event
           else wm.type || ':' || wm.event end as wait_event,
-        sum(s.data[i + 1]) as cnt
+        sum(s.data[i + 1]) as cnt,
+        count(distinct s.sample_ts) as n_samples
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
@@ -1970,10 +1971,14 @@ begin
     per_bucket as (
       select
         b.bucket_ts,
-        sum(b.cnt) as total,
-        coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[1]), 0) as c1,
-        coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[2]), 0) as c2,
-        coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[3]), 0) as c3
+        max(b.n_samples) as n_samples,
+        round(sum(b.cnt)::numeric / nullif(max(b.n_samples), 0), 1) as total,
+        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[1]), 0)::numeric
+          / nullif(max(b.n_samples), 0), 1) as c1,
+        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[2]), 0)::numeric
+          / nullif(max(b.n_samples), 0), 1) as c2,
+        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[3]), 0)::numeric
+          / nullif(max(b.n_samples), 0), 1) as c3
       from buckets b
       group by b.bucket_ts
     )
@@ -1981,40 +1986,39 @@ begin
       ash.epoch() + pb.bucket_ts * interval '1 second' as ts,
       pb.total,
       pb.c1, pb.c2, pb.c3,
-      pb.total - pb.c1 - pb.c2 - pb.c3 as c_other
+      greatest(pb.total - pb.c1 - pb.c2 - pb.c3, 0) as c_other
     from per_bucket pb
     order by pb.bucket_ts
   loop
-    v_total := v_rec.total;
     v_bar := '';
     v_legend := '';
 
-    v_char_count := greatest(0, round(v_rec.c1::numeric / v_max_active * p_width)::int);
+    v_char_count := greatest(0, round(v_rec.c1 / v_max_active * p_width)::int);
     v_bar := v_bar || repeat(v_chars[1], v_char_count);
     if v_rec.c1 > 0 then
       v_legend := v_legend || v_top_events[1] || '=' || v_rec.c1;
     end if;
 
     if p_top >= 2 and v_rec.c2 > 0 then
-      v_char_count := greatest(0, round(v_rec.c2::numeric / v_max_active * p_width)::int);
+      v_char_count := greatest(0, round(v_rec.c2 / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[2], v_char_count);
       v_legend := v_legend || ' ' || v_top_events[2] || '=' || v_rec.c2;
     end if;
 
     if p_top >= 3 and v_rec.c3 > 0 then
-      v_char_count := greatest(0, round(v_rec.c3::numeric / v_max_active * p_width)::int);
+      v_char_count := greatest(0, round(v_rec.c3 / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[3], v_char_count);
       v_legend := v_legend || ' ' || v_top_events[3] || '=' || v_rec.c3;
     end if;
 
     if v_rec.c_other > 0 then
-      v_char_count := greatest(0, round(v_rec.c_other::numeric / v_max_active * p_width)::int);
+      v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[4], v_char_count);
       v_legend := v_legend || ' Other=' || v_rec.c_other;
     end if;
 
     bucket_start := v_rec.ts;
-    active := v_total;
+    active := v_rec.total;
     chart := v_bar || '  ' || v_legend;
     return next;
   end loop;
