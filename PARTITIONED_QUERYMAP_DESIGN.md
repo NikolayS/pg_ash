@@ -49,37 +49,56 @@ No `last_seen` column needed — the entire partition is truncated on rotation.
 
 Zero dead tuples. Zero bloat. No GC logic needed.
 
-### Reader changes
+### Reader changes: view-based abstraction
 
-Readers join to the correct query_map partition based on the sample's slot:
+Create a unified view over all three query_map partitions:
 
 ```sql
--- For each sample row, join to query_map_{slot}
--- Dynamic SQL or UNION approach:
-SELECT ...
-FROM ash.sample_0 s
-LEFT JOIN ash.query_map_0 qm ON qm.id = decoded.map_id
+CREATE VIEW ash.query_map_all AS
+SELECT 0::smallint as slot, id, query_id FROM ash.query_map_0
 UNION ALL
-SELECT ...
-FROM ash.sample_1 s
-LEFT JOIN ash.query_map_1 qm ON qm.id = decoded.map_id
+SELECT 1::smallint, id, query_id FROM ash.query_map_1
+UNION ALL
+SELECT 2::smallint, id, query_id FROM ash.query_map_2;
 ```
 
-Or use a helper function that routes to the correct query_map based on slot.
+Readers join on `(slot, id)` — same single-query pattern as today:
+
+```sql
+-- Before (single query_map):
+LEFT JOIN ash.query_map qm ON qm.id = map_id
+
+-- After (partitioned, via view):
+LEFT JOIN ash.query_map_all qm ON qm.slot = s.slot AND qm.id = map_id
+```
+
+The planner eliminates scans of non-matching partitions. No UNION ALL in each reader function — the view handles routing. **10 functions** join query_map and all follow this same pattern change.
+
+### `decode_sample()` compatibility
+
+`decode_sample(p_data integer[])` has no slot context. Add optional slot parameter:
+
+```sql
+-- Backward-compatible: searches all partitions when slot is NULL
+ash.decode_sample(p_data integer[], p_slot smallint DEFAULT NULL)
+```
+
+When `p_slot` is provided, join only that partition. When NULL, join the view (all partitions). Callers with slot context (like `samples()`) pass it for efficiency.
 
 ### Edge cases
 
-**Query spanning rotation boundary**: Gets different map IDs in each partition. Readers handle this naturally — each partition joins its own map. `top_queries()` aggregates by `query_id` (the real ID from `query_map.query_id`), not by `map_id`.
+**Query spanning rotation boundary**: Gets different map IDs in each partition. Readers handle this naturally — the view join resolves per-slot. `top_queries()` aggregates by `query_id` (the real ID from `query_map.query_id`), not by `map_id`.
 
 **Same query_id in both partitions**: Different map_ids, same query_id. After the reader joins, GROUP BY query_id merges them. Correct.
 
-**Identity sequence reset on TRUNCATE**: Use `ALTER SEQUENCE ... RESTART` after TRUNCATE to keep IDs compact and predictable.
+**Identity sequence reset on TRUNCATE**: Use `ALTER TABLE ... ALTER COLUMN id RESTART` after TRUNCATE to keep IDs compact. Not strictly necessary — int4 overflow at 1s sampling would take ~27,000 years even without reset — but keeps things clean.
 
 ### Complexity cost
 
 - Sampler: routing INSERT to the correct partition (3-way IF or dynamic SQL)
-- Readers: joining to the correct query_map per slot (UNION or dynamic SQL)
-- Rotation: one extra TRUNCATE + sequence reset
+- Readers: change `JOIN query_map` → `JOIN query_map_all ON (slot, id)` in 10 functions
+- `decode_sample()`: add optional `p_slot` parameter, default NULL searches all
+- Rotation: one extra TRUNCATE + `ALTER COLUMN id RESTART`
 - No more GC function, no `last_seen` column, no hard cap needed
 
 ### Trade-off
@@ -89,10 +108,11 @@ Or use a helper function that routes to the correct query_map based on slot.
 | Bloat | Dead tuples from DELETE | Zero |
 | GC logic | DELETE + 2× rotation threshold | None (TRUNCATE) |
 | Hard cap needed | Yes (PG14-15 comment spam) | No (TRUNCATE resets) |
-| Reader complexity | Single JOIN | Per-slot JOIN |
+| Reader complexity | Single JOIN | JOIN via view (same pattern) |
 | Sampler complexity | Single INSERT | Per-slot INSERT |
+| Functions to modify | — | 10 (query_map join) + decode_sample |
 
-The partitioned approach is cleaner but adds routing complexity. Worth it for the zero-bloat guarantee.
+The partitioned approach is cleaner. The view abstraction keeps reader changes minimal — same JOIN pattern, just add `slot` to the join condition.
 
 ---
 
