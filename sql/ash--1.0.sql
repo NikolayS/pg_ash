@@ -611,6 +611,8 @@ DECLARE
     v_sampler_job bigint;
     v_rotation_job bigint;
     v_cron_version text;
+    v_seconds int;
+    v_schedule text;
 BEGIN
     -- Check if pg_cron is available
     IF NOT ash._pg_cron_available() THEN
@@ -633,6 +635,18 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Convert interval to pg_cron schedule format
+    -- pg_cron expects 'N seconds' (not interval text like '00:00:01')
+    v_seconds := extract(epoch FROM p_interval)::int;
+    IF v_seconds < 1 OR v_seconds > 59 THEN
+        job_type := 'error';
+        job_id := NULL;
+        status := format('interval must be 1-59 seconds, got %s', p_interval);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+    v_schedule := v_seconds || ' seconds';
+
     -- Check for existing sampler job (idempotent)
     SELECT jobid INTO v_sampler_job
     FROM cron.job
@@ -647,7 +661,7 @@ BEGIN
         -- Create sampler job
         SELECT cron.schedule(
             'ash_sampler',
-            p_interval::text,
+            v_schedule,
             'SELECT ash.take_sample()'
         ) INTO v_sampler_job;
 
