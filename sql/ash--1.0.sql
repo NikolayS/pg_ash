@@ -129,6 +129,9 @@ AS $$
 DECLARE
     v_id int4;
     v_now_ts int4;
+    v_max_queries int4 := 50000;  -- hard cap: prevents unbounded growth
+                                   -- from volatile comments (PG14-15) or
+                                   -- unnormalized utility statements
 BEGIN
     v_now_ts := extract(epoch FROM now() - ash.epoch())::int4;
 
@@ -141,6 +144,16 @@ BEGIN
         -- Update last_seen
         UPDATE ash.query_map SET last_seen = v_now_ts WHERE query_id = p_query_id;
         RETURN v_id;
+    END IF;
+
+    -- Check hard cap before inserting new entry.
+    -- On PG14-15, volatile comments in queries produce unique query_ids
+    -- (not normalized until PG16). This cap prevents query_map from
+    -- growing unboundedly. Unregistered queries map to 0 (unknown).
+    -- reltuples is a cheap estimate updated by autovacuum/analyze — O(1).
+    IF (SELECT reltuples FROM pg_class
+        WHERE oid = 'ash.query_map'::regclass) >= v_max_queries THEN
+        RETURN 0;  -- sentinel: unknown query_id
     END IF;
 
     -- Insert new entry

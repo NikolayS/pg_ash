@@ -367,6 +367,7 @@ select * from ash.status();
 - **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](ROLLUP_DESIGN.md).
 - **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
+- **query_map hard cap at 50k entries** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. This can flood `query_map`. A hard cap of 50,000 entries prevents unbounded growth — queries beyond the cap are tracked as "unknown." PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
 
 ## License
 
