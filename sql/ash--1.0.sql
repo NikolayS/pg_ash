@@ -357,19 +357,14 @@ BEGIN
                 SELECT array_agg(el ORDER BY g.gnum, u.ord) as data
                 FROM groups g,
                      LATERAL unnest(g.group_arr) WITH ORDINALITY AS u(el, ord)
+            ),
+            backend_count AS (
+                SELECT count(*)::smallint as cnt FROM snapshot
             )
-            SELECT f.data INTO v_data FROM flat f;
+            SELECT f.data, bc.cnt INTO v_data, v_active_count
+            FROM flat f, backend_count bc;
 
             IF v_data IS NOT NULL AND array_length(v_data, 1) >= 2 THEN
-                -- Count active backends (from same CTE-driven snapshot logic)
-                SELECT count(*)::smallint INTO v_active_count
-                FROM pg_stat_activity sa
-                WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-                  AND (sa.backend_type = 'client backend'
-                       OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-                  AND sa.pid != pg_backend_pid()
-                  AND COALESCE(sa.datid, 0::oid) = v_datid_rec.datid;
-
                 INSERT INTO ash.sample (sample_ts, datid, active_count, data)
                 VALUES (v_sample_ts, v_datid_rec.datid, v_active_count, v_data);
                 v_rows_inserted := v_rows_inserted + 1;
