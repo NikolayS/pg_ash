@@ -245,10 +245,14 @@ BEGIN
     v_current_slot := ash.current_slot();
 
     -- =========================================================================
-    -- Sampler: 3 pg_stat_activity reads total.
-    --   1. Registration: new wait events + query_ids (single read)
-    --   2. Distinct datids (single read)
-    --   3. Per-datid encoding CTE (one read per database, but typically 1)
+    -- Sampler: 4 pg_stat_activity reads (single-database setup).
+    --   1. Wait event registration loop
+    --   2. Query_map registration INSERT
+    --   3. Distinct datids loop
+    --   4. Per-datid encoding CTE (+ active_count)
+    -- Reads 1-2 are non-atomic (separate queries) — a backend may appear in
+    -- one but not the other. This is harmless: query_map gets an extra entry,
+    -- or a wait event registers one tick early.
     -- No temp tables — avoids pg_class/pg_attribute catalog churn on every tick.
     -- =========================================================================
 
@@ -285,9 +289,11 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Register query_ids into the current slot's query_map partition.
-    -- Partitioned query_map: no GC, no hard cap — TRUNCATE resets on rotation.
-    -- This is part of read 1 — same pg_stat_activity snapshot window.
+    -- ---- Read 2: Register query_ids into current slot's query_map ----
+    -- Partitioned query_map: TRUNCATE resets on rotation, but between rotations
+    -- PG14-15 volatile SQL comments can flood query_map. 50k hard cap per
+    -- partition prevents unbounded growth. PG16+ normalizes comments.
+    -- NOTE: 3-way IF for clarity on hot path. Bug fixes must be applied 3×.
     IF v_current_slot = 0 THEN
         INSERT INTO ash.query_map_0 (query_id)
         SELECT DISTINCT sa.query_id
@@ -296,6 +302,9 @@ BEGIN
           AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
           AND (sa.backend_type = 'client backend'
                OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          AND sa.pid != pg_backend_pid()
+          AND (SELECT reltuples FROM pg_class
+               WHERE oid = 'ash.query_map_0'::regclass) < 50000
         ON CONFLICT (query_id) DO NOTHING;
     ELSIF v_current_slot = 1 THEN
         INSERT INTO ash.query_map_1 (query_id)
@@ -305,6 +314,9 @@ BEGIN
           AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
           AND (sa.backend_type = 'client backend'
                OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          AND sa.pid != pg_backend_pid()
+          AND (SELECT reltuples FROM pg_class
+               WHERE oid = 'ash.query_map_1'::regclass) < 50000
         ON CONFLICT (query_id) DO NOTHING;
     ELSE
         INSERT INTO ash.query_map_2 (query_id)
@@ -314,6 +326,9 @@ BEGIN
           AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
           AND (sa.backend_type = 'client backend'
                OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          AND sa.pid != pg_backend_pid()
+          AND (SELECT reltuples FROM pg_class
+               WHERE oid = 'ash.query_map_2'::regclass) < 50000
         ON CONFLICT (query_id) DO NOTHING;
     END IF;
 
@@ -465,7 +480,10 @@ BEGIN
                 FROM ash.query_map_all m
                 WHERE m.slot = p_slot AND m.id = v_map_id;
             ELSE
-                -- No slot context — search all partitions (less efficient)
+                -- No slot context — search all partitions (less efficient).
+                -- WARNING: after rotation, the same id may exist in multiple
+                -- partitions with different query_ids (independent sequences).
+                -- Result is nondeterministic. Always pass p_slot when available.
                 SELECT m.query_id INTO v_query_id
                 FROM ash.query_map_all m
                 WHERE m.id = v_map_id
