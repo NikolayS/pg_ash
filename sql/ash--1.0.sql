@@ -941,8 +941,6 @@ $$;
 
 -- Top queries by wait samples (inline SQL decode)
 -- Extracts individual query_map_ids from the encoded array.
--- Format: [ver, -wid, count, qid, qid, ..., -wid, count, qid, ...]
--- Extracts individual query_map_ids from the encoded array.
 -- Format: [-wid, count, qid, qid, ..., -wid, count, qid, ...]
 -- A query_id position is: data[i] >= 0 AND data[i-1] >= 0 AND i > 1
 -- (i > 1 guards against data[0] which is NULL in 1-indexed arrays)
