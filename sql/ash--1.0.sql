@@ -1803,6 +1803,20 @@ begin
     return;
   end if;
 
+  -- Emit legend header row — fixed mapping of characters to wait types
+  v_legend := v_chars[1] || '=' || v_top_events[1];
+  if p_top >= 2 and v_top_events[2] is not null then
+    v_legend := v_legend || '  ' || v_chars[2] || '=' || v_top_events[2];
+  end if;
+  if p_top >= 3 and v_top_events[3] is not null then
+    v_legend := v_legend || '  ' || v_chars[3] || '=' || v_top_events[3];
+  end if;
+  v_legend := v_legend || '  ' || v_chars[4] || '=Other';
+  bucket_start := null;
+  active := null;
+  chart := v_legend;
+  return next;
+
   -- Build chart row by row — all counts normalized to avg active sessions
   for v_rec in
     with buckets as (
@@ -1843,36 +1857,27 @@ begin
     order by pb.bucket_ts
   loop
     v_bar := '';
-    v_legend := '';
 
-    -- Build stacked bar: each event gets proportional characters
+    -- Build stacked bar — characters always map to the same wait type
     v_char_count := greatest(0, round(v_rec.c1 / v_max_active * p_width)::int);
     v_bar := v_bar || repeat(v_chars[1], v_char_count);
-    if v_rec.c1 > 0 then
-      v_legend := v_legend || v_top_events[1] || '=' || v_rec.c1;
-    end if;
 
-    if p_top >= 2 and v_rec.c2 > 0 then
+    if p_top >= 2 then
       v_char_count := greatest(0, round(v_rec.c2 / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[2], v_char_count);
-      v_legend := v_legend || ' ' || v_top_events[2] || '=' || v_rec.c2;
     end if;
 
-    if p_top >= 3 and v_rec.c3 > 0 then
+    if p_top >= 3 then
       v_char_count := greatest(0, round(v_rec.c3 / v_max_active * p_width)::int);
       v_bar := v_bar || repeat(v_chars[3], v_char_count);
-      v_legend := v_legend || ' ' || v_top_events[3] || '=' || v_rec.c3;
     end if;
 
-    if v_rec.c_other > 0 then
-      v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
-      v_bar := v_bar || repeat(v_chars[4], v_char_count);
-      v_legend := v_legend || ' Other=' || v_rec.c_other;
-    end if;
+    v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
+    v_bar := v_bar || repeat(v_chars[4], v_char_count);
 
     bucket_start := v_rec.ts;
     active := v_rec.total;
-    chart := v_bar || '  ' || v_legend;
+    chart := v_bar;
     return next;
   end loop;
 end;
@@ -1951,6 +1956,20 @@ begin
   if v_max_active is null or v_max_active = 0 then
     return;
   end if;
+
+  -- Emit legend header row
+  v_legend := v_chars[1] || '=' || v_top_events[1];
+  if p_top >= 2 and v_top_events[2] is not null then
+    v_legend := v_legend || '  ' || v_chars[2] || '=' || v_top_events[2];
+  end if;
+  if p_top >= 3 and v_top_events[3] is not null then
+    v_legend := v_legend || '  ' || v_chars[3] || '=' || v_top_events[3];
+  end if;
+  v_legend := v_legend || '  ' || v_chars[4] || '=Other';
+  bucket_start := null;
+  active := null;
+  chart := v_legend;
+  return next;
 
   for v_rec in
     with buckets as (
