@@ -53,12 +53,12 @@ select * from ash.activity_summary('8 hours');
  peak_active_backends | 25
  peak_time            | 2026-02-14 03:17:42+00
  databases_active     | 3
- top_wait_1           | CPU* (37.33%)
- top_wait_2           | Lock:tuple (24.01%)
- top_wait_3           | LWLock:WALWrite (14.67%)
- top_query_1          | 1234567890 (40.00%)
- top_query_2          | 9876543210 (22.66%)
- top_query_3          | 5555555555 (21.33%)
+ top_wait_1           | CPU* (35.00%)
+ top_wait_2           | Lock:tuple (20.00%)
+ top_wait_3           | LWLock:WALWrite (13.00%)
+ top_query_1          | 1234567890 (36.00%)
+ top_query_2          | 9876543210 (22.00%)
+ top_query_3          | 5555555555 (19.00%)
 ```
 
 ```sql
@@ -69,16 +69,16 @@ select * from ash.histogram('1 hour');
 ```
      wait_event       | samples |  pct  |                    bar
 ----------------------+---------+-------+-------------------------------------------
- CPU*                 |   20160 | 37.33 | ████████████████████████████████████████ 37.33%
- Lock:tuple           |   12965 | 24.01 | █████████████████████████ 24.01%
- LWLock:WALWrite      |    7920 | 14.67 | ███████████████ 14.67%
- IO:DataFileWrite     |    7200 | 13.33 | ██████████████ 13.33%
- IO:DataFileRead      |    5760 | 10.67 | ███████████ 10.67%
- Client:ClientRead    |    3600 |  6.67 | ███████ 6.67%
- Timeout:PgSleep      |    2160 |  4.00 | ████ 4.00%
- LWLock:BufferIO      |    1440 |  2.67 | ██ 2.67%
- Lock:transactionid   |     720 |  1.33 | █ 1.33%
- Other                |     540 |  1.00 | █ 1.00%
+ CPU*                 |   18900 | 35.00 | █████████████████████████████████████ 35.00%
+ Lock:tuple           |   10800 | 20.00 | █████████████████████ 20.00%
+ LWLock:WALWrite      |    7020 | 13.00 | ██████████████ 13.00%
+ IO:DataFileWrite     |    5940 | 11.00 | ████████████ 11.00%
+ IO:DataFileRead      |    4590 |  8.50 | █████████ 8.50%
+ Client:ClientRead    |    2700 |  5.00 | █████ 5.00%
+ Timeout:PgSleep      |    1890 |  3.50 | ████ 3.50%
+ LWLock:BufferIO      |    1080 |  2.00 | ██ 2.00%
+ Lock:transactionid   |     648 |  1.20 | █ 1.20%
+ Other                |     432 |  0.80 | █ 0.80%
 ```
 
 ```sql
