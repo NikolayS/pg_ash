@@ -90,18 +90,6 @@ All objects live in the `ash` schema:
 - `ash.sample` — partitioned sample table (3 partitions, ring buffer)
 - Indexes on `sample_ts` per partition for time-range queries
 
-## Review history
-
-9 rounds of code review (50+ findings, all resolved):
-
-| Round | Focus | Outcome |
-|---|---|---|
-| R1-R5 | Core SQL, sampler, readers | 15 → 12 → 3 → 6 → 1 → 0 blocking issues |
-| R6 | Temp table elimination | Zero catalog churn verified |
-| R7 | Partitioned query_map implementation | Hard cap restored, pid filter added |
-| R8 | start() bug fix, style | Real bug caught (interval format) |
-| R9 | Style normalization | Clean — zero findings |
-
 ## What is not in 1.0
 
 - **Rollup tables** — per-minute and per-hour aggregation for long-term trends (designed in `blueprints/ROLLUP_DESIGN.md`, implementation planned for 1.1)
