@@ -90,6 +90,17 @@ All objects live in the `ash` schema:
 - `ash.sample` — partitioned sample table (3 partitions, ring buffer)
 - Indexes on `sample_ts` per partition for time-range queries
 
+## Design documents
+
+Detailed design blueprints are in the [`blueprints/`](blueprints/) directory:
+
+- **[SPEC.md](blueprints/SPEC.md)** — full specification: goals, problem statement, design decisions, encoding format, sampling strategy
+- **[STORAGE_BRAINSTORM.md](blueprints/STORAGE_BRAINSTORM.md)** — storage format benchmarks comparing 8 approaches (flat rows, JSONB, hstore, `smallint[]`, `integer[]`, and more) with measured bytes/row on Postgres 17
+- **[PARTITIONED_QUERYMAP_DESIGN.md](blueprints/PARTITIONED_QUERYMAP_DESIGN.md)** — per-partition query_map design: why single-table GC was replaced with lockstep TRUNCATE, edge cases, trade-offs
+- **[ROLLUP_DESIGN.md](blueprints/ROLLUP_DESIGN.md)** — two-level aggregation design (per-minute 30-day, per-hour 5-year) for long-term trend analysis — planned for v1.1
+
+Benchmark results are published in [issue #1](https://github.com/NikolayS/pg_ash/issues/1).
+
 ## What is not in 1.0
 
 - **Rollup tables** — per-minute and per-hour aggregation for long-term trends (designed in `blueprints/ROLLUP_DESIGN.md`, implementation planned for 1.1)
