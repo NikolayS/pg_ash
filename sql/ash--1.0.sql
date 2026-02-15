@@ -242,13 +242,17 @@ BEGIN
 
     -- Get config
     SELECT include_bg_workers INTO v_include_bg FROM ash.config WHERE singleton = true;
+    v_current_slot := ash.current_slot();
 
     -- =========================================================================
-    -- Single-pass snapshot of pg_stat_activity into a plpgsql array of records.
+    -- Sampler: 3 pg_stat_activity reads total.
+    --   1. Registration: new wait events + query_ids (single read)
+    --   2. Distinct datids (single read)
+    --   3. Per-datid encoding CTE (one read per database, but typically 1)
     -- No temp tables — avoids pg_class/pg_attribute catalog churn on every tick.
     -- =========================================================================
 
-    -- Register any new wait events we encounter.
+    -- ---- Read 1: Register new wait events and query_ids ----
     -- CPU* means the backend is active with no wait event reported. This is
     -- either genuine CPU work or an uninstrumented code path in Postgres.
     -- The asterisk signals this ambiguity. See https://gaps.wait.events
@@ -283,7 +287,7 @@ BEGIN
 
     -- Register query_ids into the current slot's query_map partition.
     -- Partitioned query_map: no GC, no hard cap — TRUNCATE resets on rotation.
-    v_current_slot := ash.current_slot();
+    -- This is part of read 1 — same pg_stat_activity snapshot window.
     IF v_current_slot = 0 THEN
         INSERT INTO ash.query_map_0 (query_id)
         SELECT DISTINCT sa.query_id
@@ -313,6 +317,7 @@ BEGIN
         ON CONFLICT (query_id) DO NOTHING;
     END IF;
 
+    -- ---- Read 2+3: Per-database encoding ----
     -- Build and insert encoded arrays — one per database.
     -- Uses CTEs instead of temp tables to avoid catalog churn.
     FOR v_datid_rec IN
