@@ -665,6 +665,11 @@ begin
       'SELECT ash.take_sample()'
     ) into v_sampler_job;
 
+    -- Clear nodename so pg_cron uses Unix socket instead of TCP.
+    -- cron.schedule() defaults nodename to 'localhost' which forces TCP
+    -- and fails when pg_hba.conf only allows socket connections.
+    update cron.job set nodename = '' where jobid = v_sampler_job;
+
     job_type := 'sampler';
     job_id := v_sampler_job;
     status := 'created';
@@ -688,6 +693,8 @@ begin
       '0 0 * * *',
       'SELECT ash.rotate()'
     ) into v_rotation_job;
+
+    update cron.job set nodename = '' where jobid = v_rotation_job;
 
     job_type := 'rotation';
     job_id := v_rotation_job;
