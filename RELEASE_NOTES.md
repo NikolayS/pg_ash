@@ -37,6 +37,63 @@ Key design decisions:
 
 Absolute-time variants (`_at` suffix): `top_waits_at`, `top_queries_at`, `query_waits_at`, `waits_by_type_at`, `wait_timeline_at`, `histogram_at`, `samples_at`.
 
+## Examples
+
+```sql
+-- what happened overnight?
+select * from ash.activity_summary('8 hours');
+```
+
+```
+        metric        |            value
+----------------------+------------------------------
+ time_range           | 08:00:00
+ total_samples        | 28800
+ avg_active_backends  | 16.4
+ peak_active_backends | 25
+ peak_time            | 2026-02-14 03:17:42+00
+ databases_active     | 3
+ top_wait_1           | CPU* (37.33%)
+ top_wait_2           | Lock:tuple (24.01%)
+ top_wait_3           | LWLock:WALWrite (14.67%)
+ top_query_1          | 1234567890 (40.00%)
+ top_query_2          | 9876543210 (22.66%)
+ top_query_3          | 5555555555 (21.33%)
+```
+
+```sql
+-- visual wait event distribution
+select * from ash.histogram('1 hour');
+```
+
+```
+     wait_event       | samples |  pct  |                    bar
+----------------------+---------+-------+-------------------------------------------
+ CPU*                 |   20160 | 37.33 | ████████████████████████████████████████ 37.33%
+ Lock:tuple           |   12965 | 24.01 | █████████████████████████ 24.01%
+ LWLock:WALWrite      |    7920 | 14.67 | ███████████████ 14.67%
+ IO:DataFileWrite     |    7200 | 13.33 | ██████████████ 13.33%
+ IO:DataFileRead      |    5760 | 10.67 | ███████████ 10.67%
+ Client:ClientRead    |    3600 |  6.67 | ███████ 6.67%
+ Timeout:PgSleep      |    2160 |  4.00 | ████ 4.00%
+ LWLock:BufferIO      |    1440 |  2.67 | ██ 2.67%
+ Lock:transactionid   |     720 |  1.33 | █ 1.33%
+ Other                |     540 |  1.00 | █ 1.00%
+```
+
+```sql
+-- decoded raw samples with query text
+select * from ash.samples('10 minutes', 20);
+```
+
+```
+       sample_time        | database_name | active_backends |   wait_event    |  query_id  |                query_text
+--------------------------+---------------+-----------------+-----------------+------------+------------------------------------------
+ 2026-02-14 20:40:10+00   | mydb          |              12 | CPU*            | 1234567890 | select * from orders where created_at > ...
+ 2026-02-14 20:40:10+00   | mydb          |              12 | IO:DataFileRead | 9876543210 | update inventory set quantity = quantit...
+ 2026-02-14 20:40:10+00   | mydb          |              12 | Lock:tuple      | 5555555555 | insert into events (type, payload) valu...
+```
+
 ## Lifecycle functions
 
 | Function | Description |
