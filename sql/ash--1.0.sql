@@ -6,211 +6,211 @@
 --------------------------------------------------------------------------------
 
 -- Create schema
-CREATE SCHEMA IF NOT EXISTS ash;
+create schema if not exists ash;
 
 -- Epoch function: 2026-01-01 00:00:00 UTC
 -- WARNING: This value must NEVER change after installation. All sample_ts
 -- values are seconds since this epoch. Changing it corrupts all timestamps.
-CREATE OR REPLACE FUNCTION ash.epoch()
-RETURNS timestamptz
-LANGUAGE sql
-IMMUTABLE
-PARALLEL SAFE
-AS $$
-    SELECT '2026-01-01 00:00:00+00'::timestamptz
+create or replace function ash.epoch()
+returns timestamptz
+language sql
+immutable
+parallel safe
+as $$
+    select '2026-01-01 00:00:00+00'::timestamptz
 $$;
 
 -- Configuration singleton table
-CREATE TABLE IF NOT EXISTS ash.config (
-    singleton          bool PRIMARY KEY DEFAULT true CHECK (singleton),
-    current_slot       smallint NOT NULL DEFAULT 0,
-    sample_interval    interval NOT NULL DEFAULT '1 second',
-    rotation_period    interval NOT NULL DEFAULT '1 day',
-    include_bg_workers bool NOT NULL DEFAULT false,
-    encoding_version   smallint NOT NULL DEFAULT 1,
-    rotated_at         timestamptz NOT NULL DEFAULT clock_timestamp(),
-    installed_at       timestamptz NOT NULL DEFAULT clock_timestamp()
+create table if not exists ash.config (
+    singleton          bool primary key default true check (singleton),
+    current_slot       smallint not null default 0,
+    sample_interval    interval not null default '1 second',
+    rotation_period    interval not null default '1 day',
+    include_bg_workers bool not null default false,
+    encoding_version   smallint not null default 1,
+    rotated_at         timestamptz not null default clock_timestamp(),
+    installed_at       timestamptz not null default clock_timestamp()
 );
 
 -- Insert initial row if not exists
-INSERT INTO ash.config (singleton) VALUES (true) ON CONFLICT DO NOTHING;
+insert into ash.config (singleton) values (true) on conflict do nothing;
 
 -- Wait event dictionary
-CREATE TABLE IF NOT EXISTS ash.wait_event_map (
-    id    smallint PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 1),
-    state text NOT NULL,
-    type  text NOT NULL,
-    event text NOT NULL,
-    UNIQUE (state, type, event)
+create table if not exists ash.wait_event_map (
+    id    smallint primary key generated always as identity (start with 1),
+    state text not null,
+    type  text not null,
+    event text not null,
+    unique (state, type, event)
 );
 
 -- Query ID dictionaries — one per sample partition, TRUNCATE together.
 -- Each has its own identity sequence (explicit, not LIKE INCLUDING ALL,
 -- because PG14-15 shares sequences with LIKE INCLUDING ALL).
-CREATE TABLE IF NOT EXISTS ash.query_map_0 (
-    id        int4 PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 1),
-    query_id  int8 NOT NULL UNIQUE
+create table if not exists ash.query_map_0 (
+    id        int4 primary key generated always as identity (start with 1),
+    query_id  int8 not null unique
 );
-CREATE TABLE IF NOT EXISTS ash.query_map_1 (
-    id        int4 PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 1),
-    query_id  int8 NOT NULL UNIQUE
+create table if not exists ash.query_map_1 (
+    id        int4 primary key generated always as identity (start with 1),
+    query_id  int8 not null unique
 );
-CREATE TABLE IF NOT EXISTS ash.query_map_2 (
-    id        int4 PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 1),
-    query_id  int8 NOT NULL UNIQUE
+create table if not exists ash.query_map_2 (
+    id        int4 primary key generated always as identity (start with 1),
+    query_id  int8 not null unique
 );
 
 -- Unified view for readers — planner eliminates non-matching partitions
 -- when slot is a constant (which it is, from s.slot in reader queries).
-CREATE OR REPLACE VIEW ash.query_map_all AS
-    SELECT 0::smallint AS slot, id, query_id FROM ash.query_map_0
-    UNION ALL
-    SELECT 1::smallint, id, query_id FROM ash.query_map_1
-    UNION ALL
-    SELECT 2::smallint, id, query_id FROM ash.query_map_2;
+create or replace view ash.query_map_all as
+    select 0::smallint as slot, id, query_id from ash.query_map_0
+    union all
+    select 1::smallint, id, query_id from ash.query_map_1
+    union all
+    select 2::smallint, id, query_id from ash.query_map_2;
 
 -- Current slot function
-CREATE OR REPLACE FUNCTION ash.current_slot()
-RETURNS smallint
-LANGUAGE sql
-STABLE
-PARALLEL SAFE
-AS $$
-    SELECT current_slot FROM ash.config WHERE singleton = true
+create or replace function ash.current_slot()
+returns smallint
+language sql
+stable
+parallel safe
+as $$
+    select current_slot from ash.config where singleton = true
 $$;
 
 -- Sample table (partitioned by slot)
-CREATE TABLE IF NOT EXISTS ash.sample (
-    sample_ts    int4 NOT NULL,
-    datid        oid NOT NULL,
-    active_count smallint NOT NULL,
-    data         integer[] NOT NULL
-                   CHECK (data[1] < 0 AND array_length(data, 1) >= 2),
-    slot         smallint NOT NULL DEFAULT ash.current_slot()
-) PARTITION BY LIST (slot);
+create table if not exists ash.sample (
+    sample_ts    int4 not null,
+    datid        oid not null,
+    active_count smallint not null,
+    data         integer[] not null
+                   check (data[1] < 0 and array_length(data, 1) >= 2),
+    slot         smallint not null default ash.current_slot()
+) partition by list (slot);
 
 -- Create partitions
-CREATE TABLE IF NOT EXISTS ash.sample_0 PARTITION OF ash.sample FOR VALUES IN (0);
-CREATE TABLE IF NOT EXISTS ash.sample_1 PARTITION OF ash.sample FOR VALUES IN (1);
-CREATE TABLE IF NOT EXISTS ash.sample_2 PARTITION OF ash.sample FOR VALUES IN (2);
+create table if not exists ash.sample_0 partition of ash.sample for values in (0);
+create table if not exists ash.sample_1 partition of ash.sample for values in (1);
+create table if not exists ash.sample_2 partition of ash.sample for values in (2);
 
 -- Create indexes on partitions
 -- (sample_ts) for time-range reader queries
-CREATE INDEX IF NOT EXISTS sample_0_ts_idx ON ash.sample_0 (sample_ts);
-CREATE INDEX IF NOT EXISTS sample_1_ts_idx ON ash.sample_1 (sample_ts);
-CREATE INDEX IF NOT EXISTS sample_2_ts_idx ON ash.sample_2 (sample_ts);
+create index if not exists sample_0_ts_idx on ash.sample_0 (sample_ts);
+create index if not exists sample_1_ts_idx on ash.sample_1 (sample_ts);
+create index if not exists sample_2_ts_idx on ash.sample_2 (sample_ts);
 -- (datid, sample_ts) for per-database time-range queries
-CREATE INDEX IF NOT EXISTS sample_0_datid_ts_idx ON ash.sample_0 (datid, sample_ts);
-CREATE INDEX IF NOT EXISTS sample_1_datid_ts_idx ON ash.sample_1 (datid, sample_ts);
-CREATE INDEX IF NOT EXISTS sample_2_datid_ts_idx ON ash.sample_2 (datid, sample_ts);
+create index if not exists sample_0_datid_ts_idx on ash.sample_0 (datid, sample_ts);
+create index if not exists sample_1_datid_ts_idx on ash.sample_1 (datid, sample_ts);
+create index if not exists sample_2_datid_ts_idx on ash.sample_2 (datid, sample_ts);
 
 -- Register wait event function (upsert, returns id)
-CREATE OR REPLACE FUNCTION ash._register_wait(p_state text, p_type text, p_event text)
-RETURNS smallint
-LANGUAGE plpgsql
-AS $$
-DECLARE
+create or replace function ash._register_wait(p_state text, p_type text, p_event text)
+returns smallint
+language plpgsql
+as $$
+declare
     v_id smallint;
-BEGIN
+begin
     -- Try to get existing
-    SELECT id INTO v_id
-    FROM ash.wait_event_map
-    WHERE state = p_state AND type = p_type AND event = p_event;
+    select id into v_id
+    from ash.wait_event_map
+    where state = p_state and type = p_type and event = p_event;
 
-    IF v_id IS NOT NULL THEN
-        RETURN v_id;
-    END IF;
+    if v_id is not null then
+        return v_id;
+    end if;
 
     -- Insert new entry
-    INSERT INTO ash.wait_event_map (state, type, event)
-    VALUES (p_state, p_type, p_event)
-    ON CONFLICT (state, type, event) DO NOTHING
-    RETURNING id INTO v_id;
+    insert into ash.wait_event_map (state, type, event)
+    values (p_state, p_type, p_event)
+    on conflict (state, type, event) do nothing
+    returning id into v_id;
 
     -- If insert succeeded, return it
-    IF v_id IS NOT NULL THEN
-        RETURN v_id;
-    END IF;
+    if v_id is not null then
+        return v_id;
+    end if;
 
     -- Race condition: another session inserted, fetch it
-    SELECT id INTO v_id
-    FROM ash.wait_event_map
-    WHERE state = p_state AND type = p_type AND event = p_event;
+    select id into v_id
+    from ash.wait_event_map
+    where state = p_state and type = p_type and event = p_event;
 
-    RETURN v_id;
-END;
+    return v_id;
+end;
 $$;
 
 -- (_register_query removed — bulk registration in take_sample() handles
 -- query_map inserts directly via per-partition INSERT ON CONFLICT)
 
 -- Validate data array structure
-CREATE OR REPLACE FUNCTION ash._validate_data(p_data integer[])
-RETURNS boolean
-LANGUAGE plpgsql
-IMMUTABLE
-AS $$
-DECLARE
+create or replace function ash._validate_data(p_data integer[])
+returns boolean
+language plpgsql
+immutable
+as $$
+declare
     v_len int;
     v_idx int;
     v_count int;
     v_qid_count int;
-BEGIN
+begin
     -- Basic checks
-    IF p_data IS NULL OR array_length(p_data, 1) IS NULL THEN
-        RETURN false;
-    END IF;
+    if p_data is null or array_length(p_data, 1) is null then
+        return false;
+    end if;
 
     v_len := array_length(p_data, 1);
 
     -- Minimum: one wait group = [-wid, count, qid] = 3 elements
     -- But could be [-wid, count] = 2 if count=0... no, count > 0
     -- Actually minimum is [-wid, 1, qid] = 3
-    IF v_len < 2 THEN
-        RETURN false;
-    END IF;
+    if v_len < 2 then
+        return false;
+    end if;
 
     -- First element must be a negative wait_id marker
-    IF p_data[1] >= 0 THEN
-        RETURN false;
-    END IF;
+    if p_data[1] >= 0 then
+        return false;
+    end if;
 
     -- Walk the structure
     v_idx := 1;
-    WHILE v_idx <= v_len LOOP
+    while v_idx <= v_len loop
         -- Expect negative marker (wait event id)
-        IF p_data[v_idx] >= 0 THEN
-            RETURN false;
-        END IF;
+        if p_data[v_idx] >= 0 then
+            return false;
+        end if;
 
         v_idx := v_idx + 1;
 
         -- Expect count
-        IF v_idx > v_len THEN
-            RETURN false;
-        END IF;
+        if v_idx > v_len then
+            return false;
+        end if;
 
         v_count := p_data[v_idx];
-        IF v_count <= 0 THEN
-            RETURN false;
-        END IF;
+        if v_count <= 0 then
+            return false;
+        end if;
 
         v_idx := v_idx + 1;
 
         -- Expect exactly v_count query_ids (non-negative)
         v_qid_count := 0;
-        WHILE v_idx <= v_len AND p_data[v_idx] >= 0 LOOP
+        while v_idx <= v_len and p_data[v_idx] >= 0 loop
             v_qid_count := v_qid_count + 1;
             v_idx := v_idx + 1;
-        END LOOP;
+        end loop;
 
-        IF v_qid_count != v_count THEN
-            RETURN false;
-        END IF;
-    END LOOP;
+        if v_qid_count != v_count then
+            return false;
+        end if;
+    end loop;
 
-    RETURN true;
-END;
+    return true;
+end;
 $$;
 
 
@@ -219,11 +219,11 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Core sampler function (no hstore dependency)
-CREATE OR REPLACE FUNCTION ash.take_sample()
-RETURNS int
-LANGUAGE plpgsql
-AS $$
-DECLARE
+create or replace function ash.take_sample()
+returns int
+language plpgsql
+as $$
+declare
     v_sample_ts int4;
     v_include_bg bool;
     v_rec record;
@@ -236,12 +236,12 @@ DECLARE
     v_state text;
     v_type text;
     v_event text;
-BEGIN
+begin
     -- Get sample timestamp (seconds since epoch, from now())
-    v_sample_ts := extract(epoch FROM now() - ash.epoch())::int4;
+    v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
 
     -- Get config
-    SELECT include_bg_workers INTO v_include_bg FROM ash.config WHERE singleton = true;
+    select include_bg_workers into v_include_bg from ash.config where singleton = true;
     v_current_slot := ash.current_slot();
 
     -- =========================================================================
@@ -260,158 +260,158 @@ BEGIN
     -- CPU* means the backend is active with no wait event reported. This is
     -- either genuine CPU work or an uninstrumented code path in Postgres.
     -- The asterisk signals this ambiguity. See https://gaps.wait.events
-    FOR v_rec IN
-        SELECT DISTINCT
+    for v_rec in
+        select distinct
             sa.state,
-            COALESCE(sa.wait_event_type,
-                CASE
-                    WHEN sa.state = 'active' THEN 'CPU*'
-                    WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx'
-                END
+            coalesce(sa.wait_event_type,
+                case
+                    when sa.state = 'active' then 'CPU*'
+                    when sa.state like 'idle in transaction%' then 'IdleTx'
+                end
             ) as wait_type,
-            COALESCE(sa.wait_event,
-                CASE
-                    WHEN sa.state = 'active' THEN 'CPU*'
-                    WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx'
-                END
+            coalesce(sa.wait_event,
+                case
+                    when sa.state = 'active' then 'CPU*'
+                    when sa.state like 'idle in transaction%' then 'IdleTx'
+                end
             ) as wait_event
-        FROM pg_stat_activity sa
-        WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-          AND (sa.backend_type = 'client backend'
-               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          AND sa.pid != pg_backend_pid()
-    LOOP
-        IF NOT EXISTS (
-            SELECT 1 FROM ash.wait_event_map
-            WHERE state = v_rec.state AND type = v_rec.wait_type AND event = v_rec.wait_event
-        ) THEN
-            PERFORM ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
-        END IF;
-    END LOOP;
+        from pg_stat_activity sa
+        where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          and (sa.backend_type = 'client backend'
+               or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          and sa.pid != pg_backend_pid()
+    loop
+        if not exists (
+            select 1 from ash.wait_event_map
+            where state = v_rec.state and type = v_rec.wait_type and event = v_rec.wait_event
+        ) then
+            perform ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
+        end if;
+    end loop;
 
     -- ---- Read 2: Register query_ids into current slot's query_map ----
     -- Partitioned query_map: TRUNCATE resets on rotation, but between rotations
     -- PG14-15 volatile SQL comments can flood query_map. 50k hard cap per
     -- partition prevents unbounded growth. PG16+ normalizes comments.
     -- NOTE: 3-way IF for clarity on hot path. Bug fixes must be applied 3×.
-    IF v_current_slot = 0 THEN
-        INSERT INTO ash.query_map_0 (query_id)
-        SELECT DISTINCT sa.query_id
-        FROM pg_stat_activity sa
-        WHERE sa.query_id IS NOT NULL
-          AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-          AND (sa.backend_type = 'client backend'
-               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          AND sa.pid != pg_backend_pid()
-          AND (SELECT reltuples FROM pg_class
-               WHERE oid = 'ash.query_map_0'::regclass) < 50000
-        ON CONFLICT (query_id) DO NOTHING;
-    ELSIF v_current_slot = 1 THEN
-        INSERT INTO ash.query_map_1 (query_id)
-        SELECT DISTINCT sa.query_id
-        FROM pg_stat_activity sa
-        WHERE sa.query_id IS NOT NULL
-          AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-          AND (sa.backend_type = 'client backend'
-               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          AND sa.pid != pg_backend_pid()
-          AND (SELECT reltuples FROM pg_class
-               WHERE oid = 'ash.query_map_1'::regclass) < 50000
-        ON CONFLICT (query_id) DO NOTHING;
-    ELSE
-        INSERT INTO ash.query_map_2 (query_id)
-        SELECT DISTINCT sa.query_id
-        FROM pg_stat_activity sa
-        WHERE sa.query_id IS NOT NULL
-          AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-          AND (sa.backend_type = 'client backend'
-               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          AND sa.pid != pg_backend_pid()
-          AND (SELECT reltuples FROM pg_class
-               WHERE oid = 'ash.query_map_2'::regclass) < 50000
-        ON CONFLICT (query_id) DO NOTHING;
-    END IF;
+    if v_current_slot = 0 then
+        insert into ash.query_map_0 (query_id)
+        select distinct sa.query_id
+        from pg_stat_activity sa
+        where sa.query_id is not null
+          and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          and (sa.backend_type = 'client backend'
+               or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          and sa.pid != pg_backend_pid()
+          and (select reltuples from pg_class
+               where oid = 'ash.query_map_0'::regclass) < 50000
+        on conflict (query_id) do nothing;
+    elsif v_current_slot = 1 then
+        insert into ash.query_map_1 (query_id)
+        select distinct sa.query_id
+        from pg_stat_activity sa
+        where sa.query_id is not null
+          and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          and (sa.backend_type = 'client backend'
+               or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          and sa.pid != pg_backend_pid()
+          and (select reltuples from pg_class
+               where oid = 'ash.query_map_1'::regclass) < 50000
+        on conflict (query_id) do nothing;
+    else
+        insert into ash.query_map_2 (query_id)
+        select distinct sa.query_id
+        from pg_stat_activity sa
+        where sa.query_id is not null
+          and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          and (sa.backend_type = 'client backend'
+               or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          and sa.pid != pg_backend_pid()
+          and (select reltuples from pg_class
+               where oid = 'ash.query_map_2'::regclass) < 50000
+        on conflict (query_id) do nothing;
+    end if;
 
     -- ---- Read 2+3: Per-database encoding ----
     -- Build and insert encoded arrays — one per database.
     -- Uses CTEs instead of temp tables to avoid catalog churn.
-    FOR v_datid_rec IN
-        SELECT DISTINCT COALESCE(sa.datid, 0::oid) as datid
-        FROM pg_stat_activity sa
-        WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-          AND (sa.backend_type = 'client backend'
-               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          AND sa.pid != pg_backend_pid()
-    LOOP
-        BEGIN
+    for v_datid_rec in
+        select distinct coalesce(sa.datid, 0::oid) as datid
+        from pg_stat_activity sa
+        where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          and (sa.backend_type = 'client backend'
+               or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+          and sa.pid != pg_backend_pid()
+    loop
+        begin
             -- Single query: snapshot → group by wait → encode → flatten
-            WITH snapshot AS (
-                SELECT
+            with snapshot as (
+                select
                     wm.id as wait_id,
-                    COALESCE(m.id, 0) as map_id
-                FROM pg_stat_activity sa
-                JOIN ash.wait_event_map wm
-                  ON wm.state = sa.state
-                 AND wm.type = COALESCE(sa.wait_event_type,
-                        CASE WHEN sa.state = 'active' THEN 'CPU*'
-                             WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
-                 AND wm.event = COALESCE(sa.wait_event,
-                        CASE WHEN sa.state = 'active' THEN 'CPU*'
-                             WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
-                LEFT JOIN ash.query_map_all m ON m.slot = v_current_slot AND m.query_id = sa.query_id
-                WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-                  AND (sa.backend_type = 'client backend'
-                       OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-                  AND sa.pid != pg_backend_pid()
-                  AND COALESCE(sa.datid, 0::oid) = v_datid_rec.datid
+                    coalesce(m.id, 0) as map_id
+                from pg_stat_activity sa
+                join ash.wait_event_map wm
+                  on wm.state = sa.state
+                 and wm.type = coalesce(sa.wait_event_type,
+                        case when sa.state = 'active' then 'CPU*'
+                             when sa.state like 'idle in transaction%' then 'IdleTx' end)
+                 and wm.event = coalesce(sa.wait_event,
+                        case when sa.state = 'active' then 'CPU*'
+                             when sa.state like 'idle in transaction%' then 'IdleTx' end)
+                left join ash.query_map_all m on m.slot = v_current_slot and m.query_id = sa.query_id
+                where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+                  and (sa.backend_type = 'client backend'
+                       or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+                  and sa.pid != pg_backend_pid()
+                  and coalesce(sa.datid, 0::oid) = v_datid_rec.datid
             ),
-            groups AS (
-                SELECT
-                    row_number() OVER (ORDER BY s.wait_id) as gnum,
-                    ARRAY[(-s.wait_id)::integer, count(*)::integer]
+            groups as (
+                select
+                    row_number() over (order by s.wait_id) as gnum,
+                    array[(-s.wait_id)::integer, count(*)::integer]
                         || array_agg(s.map_id::integer) as group_arr
-                FROM snapshot s
-                GROUP BY s.wait_id
+                from snapshot s
+                group by s.wait_id
             ),
-            flat AS (
-                SELECT array_agg(el ORDER BY g.gnum, u.ord) as data
-                FROM groups g,
-                     LATERAL unnest(g.group_arr) WITH ORDINALITY AS u(el, ord)
+            flat as (
+                select array_agg(el order by g.gnum, u.ord) as data
+                from groups g,
+                     lateral unnest(g.group_arr) with ordinality as u(el, ord)
             ),
-            backend_count AS (
-                SELECT count(*)::smallint as cnt FROM snapshot
+            backend_count as (
+                select count(*)::smallint as cnt from snapshot
             )
-            SELECT f.data, bc.cnt INTO v_data, v_active_count
-            FROM flat f, backend_count bc;
+            select f.data, bc.cnt into v_data, v_active_count
+            from flat f, backend_count bc;
 
-            IF v_data IS NOT NULL AND array_length(v_data, 1) >= 2 THEN
-                INSERT INTO ash.sample (sample_ts, datid, active_count, data)
-                VALUES (v_sample_ts, v_datid_rec.datid, v_active_count, v_data);
+            if v_data is not null and array_length(v_data, 1) >= 2 then
+                insert into ash.sample (sample_ts, datid, active_count, data)
+                values (v_sample_ts, v_datid_rec.datid, v_active_count, v_data);
                 v_rows_inserted := v_rows_inserted + 1;
-            END IF;
+            end if;
 
-        EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING 'ash.take_sample: error inserting sample for datid %: %', v_datid_rec.datid, SQLERRM;
-        END;
-    END LOOP;
+        exception when others then
+            raise warning 'ash.take_sample: error inserting sample for datid %: %', v_datid_rec.datid, sqlerrm;
+        end;
+    end loop;
 
-    RETURN v_rows_inserted;
-END;
+    return v_rows_inserted;
+end;
 $$;
 
 -- Decode sample function
 -- p_slot: when provided, look up query_ids from that partition only.
 -- When NULL (default), search all partitions via query_map_all view.
-CREATE OR REPLACE FUNCTION ash.decode_sample(p_data integer[], p_slot smallint DEFAULT NULL)
-RETURNS TABLE (
+create or replace function ash.decode_sample(p_data integer[], p_slot smallint default null)
+returns table (
     wait_event text,
     query_id int8,
     count int
 )
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
+language plpgsql
+stable
+as $$
+declare
     v_len int;
     v_idx int;
     v_wait_id smallint;
@@ -421,84 +421,84 @@ DECLARE
     v_type text;
     v_event text;
     v_query_id int8;
-BEGIN
+begin
     -- Basic validation
-    IF p_data IS NULL OR array_length(p_data, 1) IS NULL THEN
-        RETURN;
-    END IF;
+    if p_data is null or array_length(p_data, 1) is null then
+        return;
+    end if;
 
     v_len := array_length(p_data, 1);
 
     -- Basic structure check: first element must be negative (wait_id marker)
-    IF v_len < 2 OR p_data[1] >= 0 THEN
-        RAISE WARNING 'ash.decode_sample: invalid data array';
-        RETURN;
-    END IF;
+    if v_len < 2 or p_data[1] >= 0 then
+        raise warning 'ash.decode_sample: invalid data array';
+        return;
+    end if;
 
     -- Walk the structure
     v_idx := 1;
-    WHILE v_idx <= v_len LOOP
+    while v_idx <= v_len loop
         -- Get wait event id (negative marker)
-        IF p_data[v_idx] >= 0 THEN
-            RAISE WARNING 'ash.decode_sample: expected negative wait_id at position %', v_idx;
-            RETURN;
-        END IF;
+        if p_data[v_idx] >= 0 then
+            raise warning 'ash.decode_sample: expected negative wait_id at position %', v_idx;
+            return;
+        end if;
 
         v_wait_id := -p_data[v_idx];
         v_idx := v_idx + 1;
 
         -- Get count
-        IF v_idx > v_len THEN
-            RAISE WARNING 'ash.decode_sample: unexpected end of array at position %', v_idx;
-            RETURN;
-        END IF;
+        if v_idx > v_len then
+            raise warning 'ash.decode_sample: unexpected end of array at position %', v_idx;
+            return;
+        end if;
 
         v_count := p_data[v_idx];
         v_idx := v_idx + 1;
 
         -- Look up wait event info
-        SELECT w.type, w.event
-        INTO v_type, v_event
-        FROM ash.wait_event_map w
-        WHERE w.id = v_wait_id;
+        select w.type, w.event
+        into v_type, v_event
+        from ash.wait_event_map w
+        where w.id = v_wait_id;
 
         -- Process each query_id
-        FOR v_qid_idx IN 1..v_count LOOP
-            IF v_idx > v_len THEN
-                RAISE WARNING 'ash.decode_sample: not enough query_ids for count %', v_count;
-                RETURN;
-            END IF;
+        for v_qid_idx in 1..v_count loop
+            if v_idx > v_len then
+                raise warning 'ash.decode_sample: not enough query_ids for count %', v_count;
+                return;
+            end if;
 
             v_map_id := p_data[v_idx];
             v_idx := v_idx + 1;
 
             -- Handle sentinel (0 = NULL query_id)
-            IF v_map_id = 0 THEN
-                v_query_id := NULL;
-            ELSIF p_slot IS NOT NULL THEN
-                SELECT m.query_id INTO v_query_id
-                FROM ash.query_map_all m
-                WHERE m.slot = p_slot AND m.id = v_map_id;
-            ELSE
+            if v_map_id = 0 then
+                v_query_id := null;
+            elsif p_slot is not null then
+                select m.query_id into v_query_id
+                from ash.query_map_all m
+                where m.slot = p_slot and m.id = v_map_id;
+            else
                 -- No slot context — search all partitions (less efficient).
                 -- WARNING: after rotation, the same id may exist in multiple
                 -- partitions with different query_ids (independent sequences).
                 -- Result is nondeterministic. Always pass p_slot when available.
-                SELECT m.query_id INTO v_query_id
-                FROM ash.query_map_all m
-                WHERE m.id = v_map_id
-                LIMIT 1;
-            END IF;
+                select m.query_id into v_query_id
+                from ash.query_map_all m
+                where m.id = v_map_id
+                limit 1;
+            end if;
 
-            wait_event := CASE WHEN v_event = v_type THEN v_event ELSE v_type || ':' || v_event END;
+            wait_event := case when v_event = v_type then v_event else v_type || ':' || v_event end;
             query_id := v_query_id;
             count := 1;
-            RETURN NEXT;
-        END LOOP;
-    END LOOP;
+            return next;
+        end loop;
+    end loop;
 
-    RETURN;
-END;
+    return;
+end;
 $$;
 
 
@@ -508,37 +508,37 @@ $$;
 
 -- Rotate partitions: advance current_slot, truncate the old previous partition
 -- and its matching query_map partition (lockstep TRUNCATE — zero bloat everywhere).
-CREATE OR REPLACE FUNCTION ash.rotate()
-RETURNS text
-LANGUAGE plpgsql
-AS $$
-DECLARE
+create or replace function ash.rotate()
+returns text
+language plpgsql
+as $$
+declare
     v_old_slot smallint;
     v_new_slot smallint;
     v_truncate_slot smallint;
     v_rotation_period interval;
     v_rotated_at timestamptz;
-BEGIN
+begin
     -- Try to acquire advisory lock to prevent concurrent rotation
-    IF NOT pg_try_advisory_lock(hashtext('ash_rotate')) THEN
-        RETURN 'skipped: another rotation in progress';
-    END IF;
+    if not pg_try_advisory_lock(hashtext('ash_rotate')) then
+        return 'skipped: another rotation in progress';
+    end if;
 
-    BEGIN
+    begin
         -- Get current config
-        SELECT current_slot, rotation_period, rotated_at
-        INTO v_old_slot, v_rotation_period, v_rotated_at
-        FROM ash.config
-        WHERE singleton = true;
+        select current_slot, rotation_period, rotated_at
+        into v_old_slot, v_rotation_period, v_rotated_at
+        from ash.config
+        where singleton = true;
 
         -- Check if we rotated too recently (within 90% of rotation_period)
-        IF now() - v_rotated_at < v_rotation_period * 0.9 THEN
-            PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
-            RETURN 'skipped: rotated too recently at ' || v_rotated_at::text;
-        END IF;
+        if now() - v_rotated_at < v_rotation_period * 0.9 then
+            perform pg_advisory_unlock(hashtext('ash_rotate'));
+            return 'skipped: rotated too recently at ' || v_rotated_at::text;
+        end if;
 
         -- Set lock timeout to avoid blocking on long-running queries
-        SET LOCAL lock_timeout = '2s';
+        set local lock_timeout = '2s';
 
         -- Calculate new slot (0 -> 1 -> 2 -> 0)
         v_new_slot := (v_old_slot + 1) % 3;
@@ -549,41 +549,41 @@ BEGIN
         v_truncate_slot := (v_new_slot + 1) % 3;
 
         -- Advance current_slot first (before truncate)
-        UPDATE ash.config
-        SET current_slot = v_new_slot,
+        update ash.config
+        set current_slot = v_new_slot,
             rotated_at = now()
-        WHERE singleton = true;
+        where singleton = true;
 
         -- Lockstep TRUNCATE: sample partition + matching query_map partition.
         -- Zero bloat everywhere — no DELETE, no dead tuples, no GC needed.
-        CASE v_truncate_slot
-            WHEN 0 THEN
-                TRUNCATE ash.sample_0;
-                TRUNCATE ash.query_map_0;
-                ALTER TABLE ash.query_map_0 ALTER COLUMN id RESTART;
-            WHEN 1 THEN
-                TRUNCATE ash.sample_1;
-                TRUNCATE ash.query_map_1;
-                ALTER TABLE ash.query_map_1 ALTER COLUMN id RESTART;
-            WHEN 2 THEN
-                TRUNCATE ash.sample_2;
-                TRUNCATE ash.query_map_2;
-                ALTER TABLE ash.query_map_2 ALTER COLUMN id RESTART;
-        END CASE;
+        case v_truncate_slot
+            when 0 then
+                truncate ash.sample_0;
+                truncate ash.query_map_0;
+                alter table ash.query_map_0 alter column id restart;
+            when 1 then
+                truncate ash.sample_1;
+                truncate ash.query_map_1;
+                alter table ash.query_map_1 alter column id restart;
+            when 2 then
+                truncate ash.sample_2;
+                truncate ash.query_map_2;
+                alter table ash.query_map_2 alter column id restart;
+        end case;
 
-        PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
+        perform pg_advisory_unlock(hashtext('ash_rotate'));
 
-        RETURN format('rotated: slot %s -> %s, truncated slot %s (sample + query_map)',
+        return format('rotated: slot %s -> %s, truncated slot %s (sample + query_map)',
                       v_old_slot, v_new_slot, v_truncate_slot);
 
-    EXCEPTION WHEN lock_not_available THEN
-        PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
-        RETURN 'failed: lock timeout on partition truncate, will retry next cycle';
-    WHEN OTHERS THEN
-        PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
-        RAISE;
-    END;
-END;
+    exception when lock_not_available then
+        perform pg_advisory_unlock(hashtext('ash_rotate'));
+        return 'failed: lock timeout on partition truncate, will retry next cycle';
+    when others then
+        perform pg_advisory_unlock(hashtext('ash_rotate'));
+        raise;
+    end;
+end;
 $$;
 
 
@@ -592,184 +592,184 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Check if pg_cron extension is available
-CREATE OR REPLACE FUNCTION ash._pg_cron_available()
-RETURNS boolean
-LANGUAGE sql
-STABLE
-AS $$
-    SELECT EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'pg_cron'
+create or replace function ash._pg_cron_available()
+returns boolean
+language sql
+stable
+as $$
+    select exists (
+        select 1 from pg_extension where extname = 'pg_cron'
     )
 $$;
 
 -- Start sampling: create pg_cron jobs
-CREATE OR REPLACE FUNCTION ash.start(p_interval interval DEFAULT '1 second')
-RETURNS TABLE (job_type text, job_id bigint, status text)
-LANGUAGE plpgsql
-AS $$
-DECLARE
+create or replace function ash.start(p_interval interval default '1 second')
+returns table (job_type text, job_id bigint, status text)
+language plpgsql
+as $$
+declare
     v_sampler_job bigint;
     v_rotation_job bigint;
     v_cron_version text;
     v_seconds int;
     v_schedule text;
-BEGIN
+begin
     -- Check if pg_cron is available
-    IF NOT ash._pg_cron_available() THEN
+    if not ash._pg_cron_available() then
         job_type := 'error';
-        job_id := NULL;
+        job_id := null;
         status := 'pg_cron extension not installed';
-        RETURN NEXT;
-        RETURN;
-    END IF;
+        return next;
+        return;
+    end if;
 
     -- Check pg_cron version (need >= 1.5 for second granularity)
-    SELECT extversion INTO v_cron_version
-    FROM pg_extension WHERE extname = 'pg_cron';
+    select extversion into v_cron_version
+    from pg_extension where extname = 'pg_cron';
 
-    IF v_cron_version < '1.5' THEN
+    if v_cron_version < '1.5' then
         job_type := 'error';
-        job_id := NULL;
+        job_id := null;
         status := format('pg_cron version %s too old, need >= 1.5', v_cron_version);
-        RETURN NEXT;
-        RETURN;
-    END IF;
+        return next;
+        return;
+    end if;
 
     -- Convert interval to pg_cron schedule format
     -- pg_cron expects 'N seconds' (not interval text like '00:00:01')
-    v_seconds := extract(epoch FROM p_interval)::int;
-    IF v_seconds < 1 OR v_seconds > 59 THEN
+    v_seconds := extract(epoch from p_interval)::int;
+    if v_seconds < 1 or v_seconds > 59 then
         job_type := 'error';
-        job_id := NULL;
+        job_id := null;
         status := format('interval must be 1-59 seconds, got %s', p_interval);
-        RETURN NEXT;
-        RETURN;
-    END IF;
+        return next;
+        return;
+    end if;
     v_schedule := v_seconds || ' seconds';
 
     -- Check for existing sampler job (idempotent)
-    SELECT jobid INTO v_sampler_job
-    FROM cron.job
-    WHERE jobname = 'ash_sampler';
+    select jobid into v_sampler_job
+    from cron.job
+    where jobname = 'ash_sampler';
 
-    IF v_sampler_job IS NOT NULL THEN
+    if v_sampler_job is not null then
         job_type := 'sampler';
         job_id := v_sampler_job;
         status := 'already exists';
-        RETURN NEXT;
-    ELSE
+        return next;
+    else
         -- Create sampler job
-        SELECT cron.schedule(
+        select cron.schedule(
             'ash_sampler',
             v_schedule,
             'SELECT ash.take_sample()'
-        ) INTO v_sampler_job;
+        ) into v_sampler_job;
 
         job_type := 'sampler';
         job_id := v_sampler_job;
         status := 'created';
-        RETURN NEXT;
-    END IF;
+        return next;
+    end if;
 
     -- Check for existing rotation job (idempotent)
-    SELECT jobid INTO v_rotation_job
-    FROM cron.job
-    WHERE jobname = 'ash_rotation';
+    select jobid into v_rotation_job
+    from cron.job
+    where jobname = 'ash_rotation';
 
-    IF v_rotation_job IS NOT NULL THEN
+    if v_rotation_job is not null then
         job_type := 'rotation';
         job_id := v_rotation_job;
         status := 'already exists';
-        RETURN NEXT;
-    ELSE
+        return next;
+    else
         -- Create rotation job (daily at midnight UTC)
-        SELECT cron.schedule(
+        select cron.schedule(
             'ash_rotation',
             '0 0 * * *',
             'SELECT ash.rotate()'
-        ) INTO v_rotation_job;
+        ) into v_rotation_job;
 
         job_type := 'rotation';
         job_id := v_rotation_job;
         status := 'created';
-        RETURN NEXT;
-    END IF;
+        return next;
+    end if;
 
     -- Update sample_interval in config
-    UPDATE ash.config SET sample_interval = p_interval WHERE singleton = true;
+    update ash.config set sample_interval = p_interval where singleton = true;
 
-    RETURN;
-END;
+    return;
+end;
 $$;
 
 -- Stop sampling: remove pg_cron jobs
-CREATE OR REPLACE FUNCTION ash.stop()
-RETURNS TABLE (job_type text, job_id bigint, status text)
-LANGUAGE plpgsql
-AS $$
-DECLARE
+create or replace function ash.stop()
+returns table (job_type text, job_id bigint, status text)
+language plpgsql
+as $$
+declare
     v_job_id bigint;
-BEGIN
+begin
     -- Check if pg_cron is available
-    IF NOT ash._pg_cron_available() THEN
+    if not ash._pg_cron_available() then
         job_type := 'info';
-        job_id := NULL;
+        job_id := null;
         status := 'pg_cron not installed, no jobs to remove';
-        RETURN NEXT;
-        RETURN;
-    END IF;
+        return next;
+        return;
+    end if;
 
     -- Remove sampler job
-    SELECT jobid INTO v_job_id
-    FROM cron.job
-    WHERE jobname = 'ash_sampler';
+    select jobid into v_job_id
+    from cron.job
+    where jobname = 'ash_sampler';
 
-    IF v_job_id IS NOT NULL THEN
-        PERFORM cron.unschedule('ash_sampler');
+    if v_job_id is not null then
+        perform cron.unschedule('ash_sampler');
         job_type := 'sampler';
         job_id := v_job_id;
         status := 'removed';
-        RETURN NEXT;
-    END IF;
+        return next;
+    end if;
 
     -- Remove rotation job
-    SELECT jobid INTO v_job_id
-    FROM cron.job
-    WHERE jobname = 'ash_rotation';
+    select jobid into v_job_id
+    from cron.job
+    where jobname = 'ash_rotation';
 
-    IF v_job_id IS NOT NULL THEN
-        PERFORM cron.unschedule('ash_rotation');
+    if v_job_id is not null then
+        perform cron.unschedule('ash_rotation');
         job_type := 'rotation';
         job_id := v_job_id;
         status := 'removed';
-        RETURN NEXT;
-    END IF;
+        return next;
+    end if;
 
-    RETURN;
-END;
+    return;
+end;
 $$;
 
 -- Uninstall: stop jobs and drop schema
-CREATE OR REPLACE FUNCTION ash.uninstall()
-RETURNS text
-LANGUAGE plpgsql
-AS $$
-DECLARE
+create or replace function ash.uninstall()
+returns text
+language plpgsql
+as $$
+declare
     v_rec record;
     v_jobs_removed int := 0;
-BEGIN
+begin
     -- Stop pg_cron jobs first
-    FOR v_rec IN SELECT * FROM ash.stop() LOOP
-        IF v_rec.status = 'removed' THEN
+    for v_rec in select * from ash.stop() loop
+        if v_rec.status = 'removed' then
             v_jobs_removed := v_jobs_removed + 1;
-        END IF;
-    END LOOP;
+        end if;
+    end loop;
 
     -- Drop the schema
-    DROP SCHEMA ash CASCADE;
+    drop schema ash cascade;
 
-    RETURN format('uninstalled: removed %s pg_cron jobs, dropped ash schema', v_jobs_removed);
-END;
+    return format('uninstalled: removed %s pg_cron jobs, dropped ash schema', v_jobs_removed);
+end;
 $$;
 
 
@@ -778,179 +778,179 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Helper to get active slots (current and previous)
-CREATE OR REPLACE FUNCTION ash._active_slots()
-RETURNS smallint[]
-LANGUAGE sql
-STABLE
-AS $$
-    SELECT ARRAY[
+create or replace function ash._active_slots()
+returns smallint[]
+language sql
+stable
+as $$
+    select array[
         current_slot,
         ((current_slot - 1 + 3) % 3)::smallint
     ]
-    FROM ash.config
-    WHERE singleton = true
+    from ash.config
+    where singleton = true
 $$;
 
 -- Status: diagnostic dashboard
-CREATE OR REPLACE FUNCTION ash.status()
-RETURNS TABLE (
+create or replace function ash.status()
+returns table (
     metric text,
     value text
 )
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
+language plpgsql
+stable
+as $$
+declare
     v_config record;
     v_last_sample_ts int4;
     v_samples_current int;
     v_samples_total int;
     v_wait_events int;
     v_query_ids int;
-BEGIN
+begin
     -- Get config
-    SELECT * INTO v_config FROM ash.config WHERE singleton = true;
+    select * into v_config from ash.config where singleton = true;
 
     -- Last sample timestamp
-    SELECT max(sample_ts) INTO v_last_sample_ts FROM ash.sample;
+    select max(sample_ts) into v_last_sample_ts from ash.sample;
 
     -- Samples in current partition
-    SELECT count(*) INTO v_samples_current
-    FROM ash.sample WHERE slot = v_config.current_slot;
+    select count(*) into v_samples_current
+    from ash.sample where slot = v_config.current_slot;
 
     -- Total samples
-    SELECT count(*) INTO v_samples_total FROM ash.sample;
+    select count(*) into v_samples_total from ash.sample;
 
     -- Dictionary sizes
-    SELECT count(*) INTO v_wait_events FROM ash.wait_event_map;
-    SELECT count(*) INTO v_query_ids FROM ash.query_map_all;
+    select count(*) into v_wait_events from ash.wait_event_map;
+    select count(*) into v_query_ids from ash.query_map_all;
 
-    metric := 'current_slot'; value := v_config.current_slot::text; RETURN NEXT;
-    metric := 'sample_interval'; value := v_config.sample_interval::text; RETURN NEXT;
-    metric := 'rotation_period'; value := v_config.rotation_period::text; RETURN NEXT;
-    metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; RETURN NEXT;
-    metric := 'installed_at'; value := v_config.installed_at::text; RETURN NEXT;
-    metric := 'rotated_at'; value := v_config.rotated_at::text; RETURN NEXT;
-    metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; RETURN NEXT;
+    metric := 'current_slot'; value := v_config.current_slot::text; return next;
+    metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
+    metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
+    metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
+    metric := 'installed_at'; value := v_config.installed_at::text; return next;
+    metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
+    metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
 
-    IF v_last_sample_ts IS NOT NULL THEN
-        metric := 'last_sample_ts'; value := (ash.epoch() + v_last_sample_ts * interval '1 second')::text; RETURN NEXT;
-        metric := 'time_since_last_sample'; value := (now() - (ash.epoch() + v_last_sample_ts * interval '1 second'))::text; RETURN NEXT;
-    ELSE
-        metric := 'last_sample_ts'; value := 'no samples'; RETURN NEXT;
-    END IF;
+    if v_last_sample_ts is not null then
+        metric := 'last_sample_ts'; value := (ash.epoch() + v_last_sample_ts * interval '1 second')::text; return next;
+        metric := 'time_since_last_sample'; value := (now() - (ash.epoch() + v_last_sample_ts * interval '1 second'))::text; return next;
+    else
+        metric := 'last_sample_ts'; value := 'no samples'; return next;
+    end if;
 
-    metric := 'samples_in_current_slot'; value := v_samples_current::text; RETURN NEXT;
-    metric := 'samples_total'; value := v_samples_total::text; RETURN NEXT;
-    metric := 'wait_event_map_count'; value := v_wait_events::text; RETURN NEXT;
-    metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; RETURN NEXT;
-    metric := 'query_map_count'; value := v_query_ids::text; RETURN NEXT;
+    metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
+    metric := 'samples_total'; value := v_samples_total::text; return next;
+    metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
+    metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
+    metric := 'query_map_count'; value := v_query_ids::text; return next;
 
     -- pg_cron status if available
-    IF ash._pg_cron_available() THEN
-        metric := 'pg_cron_available'; value := 'yes'; RETURN NEXT;
-        FOR metric, value IN
-            SELECT 'cron_job_' || jobname,
+    if ash._pg_cron_available() then
+        metric := 'pg_cron_available'; value := 'yes'; return next;
+        for metric, value in
+            select 'cron_job_' || jobname,
                    format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
-            FROM cron.job
-            WHERE jobname IN ('ash_sampler', 'ash_rotation')
-        LOOP
-            RETURN NEXT;
-        END LOOP;
-    ELSE
-        metric := 'pg_cron_available'; value := 'no'; RETURN NEXT;
-    END IF;
+            from cron.job
+            where jobname in ('ash_sampler', 'ash_rotation')
+        loop
+            return next;
+        end loop;
+    else
+        metric := 'pg_cron_available'; value := 'no'; return next;
+    end if;
 
-    RETURN;
-END;
+    return;
+end;
 $$;
 
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
-CREATE OR REPLACE FUNCTION ash.top_waits(
-    p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 10
+create or replace function ash.top_waits(
+    p_interval interval default '1 hour',
+    p_limit int default 10
 )
-RETURNS TABLE (
+returns table (
     wait_event text,
     samples bigint,
     pct numeric
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH waits AS (
-        SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-          AND s.data[i] < 0
+language sql
+stable
+set jit = off
+as $$
+    with waits as (
+        select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+          and s.data[i] < 0
     ),
-    totals AS (
-        SELECT w.wait_id, sum(w.cnt) as cnt
-        FROM waits w
-        GROUP BY w.wait_id
+    totals as (
+        select w.wait_id, sum(w.cnt) as cnt
+        from waits w
+        group by w.wait_id
     ),
-    grand_total AS (
-        SELECT sum(cnt) as total FROM totals
+    grand_total as (
+        select sum(cnt) as total from totals
     ),
-    ranked AS (
-        SELECT
-            CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+    ranked as (
+        select
+            case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
             t.cnt,
-            row_number() OVER (ORDER BY t.cnt DESC) as rn
-        FROM totals t
-        JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+            row_number() over (order by t.cnt desc) as rn
+        from totals t
+        join ash.wait_event_map wm on wm.id = t.wait_id
     ),
-    top_rows AS (
-        SELECT wait_event, cnt, rn FROM ranked WHERE rn <= p_limit
+    top_rows as (
+        select wait_event, cnt, rn from ranked where rn <= p_limit
     ),
-    other AS (
-        SELECT 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
-        FROM ranked WHERE rn > p_limit
-        HAVING sum(cnt) > 0
+    other as (
+        select 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
+        from ranked where rn > p_limit
+        having sum(cnt) > 0
     )
-    SELECT
+    select
         r.wait_event,
         r.cnt as samples,
         round(r.cnt::numeric / gt.total * 100, 2) as pct
-    FROM (SELECT * FROM top_rows UNION ALL SELECT * FROM other) r
-    CROSS JOIN grand_total gt
-    ORDER BY r.rn
+    from (select * from top_rows union all select * from other) r
+    cross join grand_total gt
+    order by r.rn
 $$;
 
 -- Wait event timeline (time-bucketed breakdown, inline SQL decode)
-CREATE OR REPLACE FUNCTION ash.wait_timeline(
-    p_interval interval DEFAULT '1 hour',
-    p_bucket interval DEFAULT '1 minute'
+create or replace function ash.wait_timeline(
+    p_interval interval default '1 hour',
+    p_bucket interval default '1 minute'
 )
-RETURNS TABLE (
+returns table (
     bucket_start timestamptz,
     wait_event text,
     samples bigint
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH waits AS (
-        SELECT
-            ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch FROM p_bucket)::int4)) * interval '1 second' as bucket,
+language sql
+stable
+set jit = off
+as $$
+    with waits as (
+        select
+            ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
             (-s.data[i])::smallint as wait_id,
             s.data[i + 1] as cnt
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-          AND s.data[i] < 0
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+          and s.data[i] < 0
     )
-    SELECT
+    select
         w.bucket as bucket_start,
-        CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+        case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
         sum(w.cnt) as samples
-    FROM waits w
-    JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-    GROUP BY w.bucket, wm.type, wm.event
-    ORDER BY w.bucket, sum(w.cnt) DESC
+    from waits w
+    join ash.wait_event_map wm on wm.id = w.wait_id
+    group by w.bucket, wm.type, wm.event
+    order by w.bucket, sum(w.cnt) desc
 $$;
 
 -- Top queries by wait samples (inline SQL decode)
@@ -958,144 +958,144 @@ $$;
 -- Format: [-wid, count, qid, qid, ..., -wid, count, qid, ...]
 -- A query_id position is: data[i] >= 0 AND data[i-1] >= 0 AND i > 1
 -- (i > 1 guards against data[0] which is NULL in 1-indexed arrays)
-CREATE OR REPLACE FUNCTION ash.top_queries(
-    p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 10
+create or replace function ash.top_queries(
+    p_interval interval default '1 hour',
+    p_limit int default 10
 )
-RETURNS TABLE (
+returns table (
     query_id bigint,
     samples bigint,
     pct numeric,
     query_text text
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-DECLARE
+language plpgsql
+stable
+set jit = off
+as $$
+declare
     v_has_pg_stat_statements boolean := false;
-BEGIN
+begin
     -- Probe the view directly — extension installed != shared library loaded
-    BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 1;
+    begin
+        perform 1 from pg_stat_statements limit 1;
         v_has_pg_stat_statements := true;
-    EXCEPTION WHEN OTHERS THEN
+    exception when others then
         v_has_pg_stat_statements := false;
-    END;
+    end;
 
-    IF v_has_pg_stat_statements THEN
-        RETURN QUERY
-        WITH qids AS (
-            SELECT s.slot, s.data[i] as map_id
-            FROM ash.sample s, generate_subscripts(s.data, 1) i
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-              AND i > 1                   -- guard: data[0] is NULL
-              AND s.data[i] >= 0          -- not a wait_id marker
-              AND s.data[i - 1] >= 0      -- not a count (count follows negative marker)
+    if v_has_pg_stat_statements then
+        return query
+        with qids as (
+            select s.slot, s.data[i] as map_id
+            from ash.sample s, generate_subscripts(s.data, 1) i
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+              and i > 1                   -- guard: data[0] is NULL
+              and s.data[i] >= 0          -- not a wait_id marker
+              and s.data[i - 1] >= 0      -- not a count (count follows negative marker)
         ),
-        resolved AS (
-            SELECT qm.query_id, count(*) as cnt
-            FROM qids q
-            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
-            WHERE q.map_id > 0  -- skip sentinel 0 (NULL query_id)
-            GROUP BY qm.query_id
+        resolved as (
+            select qm.query_id, count(*) as cnt
+            from qids q
+            join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+            where q.map_id > 0  -- skip sentinel 0 (NULL query_id)
+            group by qm.query_id
         ),
-        grand_total AS (
-            SELECT sum(cnt) as total FROM resolved
+        grand_total as (
+            select sum(cnt) as total from resolved
         )
-        SELECT
+        select
             r.query_id,
             r.cnt as samples,
             round(r.cnt::numeric / gt.total * 100, 2) as pct,
             left(pss.query, 100) as query_text
-        FROM resolved r
-        CROSS JOIN grand_total gt
-        LEFT JOIN pg_stat_statements pss ON pss.queryid = r.query_id
-        ORDER BY r.cnt DESC
-        LIMIT p_limit;
-    ELSE
-        RETURN QUERY
-        WITH qids AS (
-            SELECT s.slot, s.data[i] as map_id
-            FROM ash.sample s, generate_subscripts(s.data, 1) i
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-              AND i > 1
-              AND s.data[i] >= 0
-              AND s.data[i - 1] >= 0
+        from resolved r
+        cross join grand_total gt
+        left join pg_stat_statements pss on pss.queryid = r.query_id
+        order by r.cnt desc
+        limit p_limit;
+    else
+        return query
+        with qids as (
+            select s.slot, s.data[i] as map_id
+            from ash.sample s, generate_subscripts(s.data, 1) i
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+              and i > 1
+              and s.data[i] >= 0
+              and s.data[i - 1] >= 0
         ),
-        resolved AS (
-            SELECT qm.query_id, count(*) as cnt
-            FROM qids q
-            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
-            WHERE q.map_id > 0
-            GROUP BY qm.query_id
+        resolved as (
+            select qm.query_id, count(*) as cnt
+            from qids q
+            join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+            where q.map_id > 0
+            group by qm.query_id
         ),
-        grand_total AS (
-            SELECT sum(cnt) as total FROM resolved
+        grand_total as (
+            select sum(cnt) as total from resolved
         )
-        SELECT
+        select
             r.query_id,
             r.cnt as samples,
             round(r.cnt::numeric / gt.total * 100, 2) as pct,
-            NULL::text as query_text
-        FROM resolved r
-        CROSS JOIN grand_total gt
-        ORDER BY r.cnt DESC
-        LIMIT p_limit;
-    END IF;
-END;
+            null::text as query_text
+        from resolved r
+        cross join grand_total gt
+        order by r.cnt desc
+        limit p_limit;
+    end if;
+end;
 $$;
 
 -- Wait event type distribution
-CREATE OR REPLACE FUNCTION ash.waits_by_type(
-    p_interval interval DEFAULT '1 hour'
+create or replace function ash.waits_by_type(
+    p_interval interval default '1 hour'
 )
-RETURNS TABLE (
+returns table (
     wait_event_type text,
     samples bigint,
     pct numeric
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH waits AS (
-        SELECT
+language sql
+stable
+set jit = off
+as $$
+    with waits as (
+        select
             (-s.data[i])::smallint as wait_id,
             s.data[i + 1] as cnt
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-          AND s.data[i] < 0
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+          and s.data[i] < 0
     ),
-    totals AS (
-        SELECT wm.type as wait_type, sum(w.cnt) as cnt
-        FROM waits w
-        JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-        GROUP BY wm.type
+    totals as (
+        select wm.type as wait_type, sum(w.cnt) as cnt
+        from waits w
+        join ash.wait_event_map wm on wm.id = w.wait_id
+        group by wm.type
     ),
-    grand_total AS (
-        SELECT sum(cnt) as total FROM totals
+    grand_total as (
+        select sum(cnt) as total from totals
     )
-    SELECT
+    select
         t.wait_type as wait_event_type,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
-    FROM totals t, grand_total gt
-    ORDER BY t.cnt DESC
+    from totals t, grand_total gt
+    order by t.cnt desc
 $$;
 
 -- Samples by database
 -- Top queries with text from pg_stat_statements
 -- Returns query text and pgss stats when pg_stat_statements is available,
 -- NULL columns otherwise.
-CREATE OR REPLACE FUNCTION ash.top_queries_with_text(
-    p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 10
+create or replace function ash.top_queries_with_text(
+    p_interval interval default '1 hour',
+    p_limit int default 10
 )
-RETURNS TABLE (
+returns table (
     query_id bigint,
     samples bigint,
     pct numeric,
@@ -1103,178 +1103,178 @@ RETURNS TABLE (
     mean_time_ms numeric,
     query_text text
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-DECLARE
+language plpgsql
+stable
+set jit = off
+as $$
+declare
     v_has_pgss boolean := false;
-BEGIN
+begin
     -- Probe the view directly — extension installed != shared library loaded
-    BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 1;
+    begin
+        perform 1 from pg_stat_statements limit 1;
         v_has_pgss := true;
-    EXCEPTION WHEN OTHERS THEN
+    exception when others then
         v_has_pgss := false;
-    END;
+    end;
 
-    IF v_has_pgss THEN
-        RETURN QUERY
-        WITH qids AS (
-            SELECT s.slot, s.data[i] as map_id
-            FROM ash.sample s, generate_subscripts(s.data, 1) i
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-              AND i > 1
-              AND s.data[i] >= 0
-              AND s.data[i - 1] >= 0
+    if v_has_pgss then
+        return query
+        with qids as (
+            select s.slot, s.data[i] as map_id
+            from ash.sample s, generate_subscripts(s.data, 1) i
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+              and i > 1
+              and s.data[i] >= 0
+              and s.data[i - 1] >= 0
         ),
-        resolved AS (
-            SELECT qm.query_id, count(*) as cnt
-            FROM qids q
-            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
-            WHERE q.map_id > 0
-            GROUP BY qm.query_id
+        resolved as (
+            select qm.query_id, count(*) as cnt
+            from qids q
+            join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+            where q.map_id > 0
+            group by qm.query_id
         ),
-        grand_total AS (
-            SELECT sum(cnt) as total FROM resolved
+        grand_total as (
+            select sum(cnt) as total from resolved
         )
-        SELECT
+        select
             r.query_id,
             r.cnt as samples,
             round(r.cnt::numeric / gt.total * 100, 2) as pct,
             pss.calls,
             round(pss.mean_exec_time::numeric, 2) as mean_time_ms,
             left(pss.query, 200) as query_text
-        FROM resolved r
-        CROSS JOIN grand_total gt
-        LEFT JOIN pg_stat_statements pss ON pss.queryid = r.query_id
-        ORDER BY r.cnt DESC
-        LIMIT p_limit;
-    ELSE
-        RETURN QUERY
-        WITH qids AS (
-            SELECT s.slot, s.data[i] as map_id
-            FROM ash.sample s, generate_subscripts(s.data, 1) i
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-              AND i > 1
-              AND s.data[i] >= 0
-              AND s.data[i - 1] >= 0
+        from resolved r
+        cross join grand_total gt
+        left join pg_stat_statements pss on pss.queryid = r.query_id
+        order by r.cnt desc
+        limit p_limit;
+    else
+        return query
+        with qids as (
+            select s.slot, s.data[i] as map_id
+            from ash.sample s, generate_subscripts(s.data, 1) i
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+              and i > 1
+              and s.data[i] >= 0
+              and s.data[i - 1] >= 0
         ),
-        resolved AS (
-            SELECT qm.query_id, count(*) as cnt
-            FROM qids q
-            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
-            WHERE q.map_id > 0
-            GROUP BY qm.query_id
+        resolved as (
+            select qm.query_id, count(*) as cnt
+            from qids q
+            join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+            where q.map_id > 0
+            group by qm.query_id
         ),
-        grand_total AS (
-            SELECT sum(cnt) as total FROM resolved
+        grand_total as (
+            select sum(cnt) as total from resolved
         )
-        SELECT
+        select
             r.query_id,
             r.cnt as samples,
             round(r.cnt::numeric / gt.total * 100, 2) as pct,
-            NULL::bigint as calls,
-            NULL::numeric as mean_time_ms,
-            NULL::text as query_text
-        FROM resolved r
-        CROSS JOIN grand_total gt
-        ORDER BY r.cnt DESC
-        LIMIT p_limit;
-    END IF;
-END;
+            null::bigint as calls,
+            null::numeric as mean_time_ms,
+            null::text as query_text
+        from resolved r
+        cross join grand_total gt
+        order by r.cnt desc
+        limit p_limit;
+    end if;
+end;
 $$;
 
 -- Wait profile for a specific query — what is this query waiting on?
 -- Walks the encoded arrays, finds the query_map_id, then looks back to find
 -- which wait group it belongs to (the nearest preceding negative element).
-CREATE OR REPLACE FUNCTION ash.query_waits(
+create or replace function ash.query_waits(
     p_query_id bigint,
-    p_interval interval DEFAULT '1 hour'
+    p_interval interval default '1 hour'
 )
-RETURNS TABLE (
+returns table (
     wait_event text,
     samples bigint,
     pct numeric
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-BEGIN
+language plpgsql
+stable
+set jit = off
+as $$
+begin
     -- Check if this query_id exists in any partition
-    IF NOT EXISTS (SELECT 1 FROM ash.query_map_all WHERE query_id = p_query_id) THEN
-        RETURN;
-    END IF;
+    if not exists (select 1 from ash.query_map_all where query_id = p_query_id) then
+        return;
+    end if;
 
-    RETURN QUERY
-    WITH map_ids AS (
+    return query
+    with map_ids as (
         -- All (slot, id) pairs for this query across partitions
-        SELECT slot, id FROM ash.query_map_all WHERE query_id = p_query_id
+        select slot, id from ash.query_map_all where query_id = p_query_id
     ),
-    hits AS (
+    hits as (
         -- Find every position where the query appears in a sample,
         -- then walk backwards to find the wait group marker
-        SELECT
-            (SELECT (- s.data[j])::smallint
-             FROM generate_series(i, 1, -1) j
-             WHERE s.data[j] < 0
-             LIMIT 1
+        select
+            (select (- s.data[j])::smallint
+             from generate_series(i, 1, -1) j
+             where s.data[j] < 0
+             limit 1
             ) as wait_id
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-          AND i > 1
-          AND s.data[i] >= 0
-          AND s.data[i - 1] >= 0  -- it's a query_id position, not a count
-          AND EXISTS (SELECT 1 FROM map_ids m WHERE m.slot = s.slot AND m.id = s.data[i])
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+          and i > 1
+          and s.data[i] >= 0
+          and s.data[i - 1] >= 0  -- it's a query_id position, not a count
+          and exists (select 1 from map_ids m where m.slot = s.slot and m.id = s.data[i])
     ),
-    totals AS (
-        SELECT wait_id, count(*) as cnt
-        FROM hits
-        WHERE wait_id IS NOT NULL
-        GROUP BY wait_id
+    totals as (
+        select wait_id, count(*) as cnt
+        from hits
+        where wait_id is not null
+        group by wait_id
     ),
-    grand_total AS (
-        SELECT sum(cnt) as total FROM totals
+    grand_total as (
+        select sum(cnt) as total from totals
     )
-    SELECT
-        CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+    select
+        case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
         t.cnt as samples,
         round(t.cnt::numeric / gt.total * 100, 2) as pct
-    FROM totals t
-    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
-    CROSS JOIN grand_total gt
-    ORDER BY t.cnt DESC;
-END;
+    from totals t
+    join ash.wait_event_map wm on wm.id = t.wait_id
+    cross join grand_total gt
+    order by t.cnt desc;
+end;
 $$;
 
-CREATE OR REPLACE FUNCTION ash.samples_by_database(
-    p_interval interval DEFAULT '1 hour'
+create or replace function ash.samples_by_database(
+    p_interval interval default '1 hour'
 )
-RETURNS TABLE (
+returns table (
     database_name text,
     datid oid,
     samples bigint,
     total_backends bigint
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    SELECT
-        COALESCE(d.datname, '<background>') as database_name,
+language sql
+stable
+set jit = off
+as $$
+    select
+        coalesce(d.datname, '<background>') as database_name,
         s.datid,
         count(*) as samples,
         sum(s.active_count) as total_backends
-    FROM ash.sample s
-    LEFT JOIN pg_database d ON d.oid = s.datid
-    WHERE s.slot = ANY(ash._active_slots())
-      AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
-    GROUP BY s.datid, d.datname
-    ORDER BY total_backends DESC
+    from ash.sample s
+    left join pg_database d on d.oid = s.datid
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+    group by s.datid, d.datname
+    order by total_backends desc
 $$;
 
 -------------------------------------------------------------------------------
@@ -1282,275 +1282,275 @@ $$;
 -------------------------------------------------------------------------------
 
 -- Convert a timestamptz to our internal sample_ts (seconds since epoch)
-CREATE OR REPLACE FUNCTION ash._to_sample_ts(p_ts timestamptz)
-RETURNS int4
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT extract(epoch FROM p_ts - ash.epoch())::int4
+create or replace function ash._to_sample_ts(p_ts timestamptz)
+returns int4
+language sql
+immutable
+as $$
+    select extract(epoch from p_ts - ash.epoch())::int4
 $$;
 
 -- Top waits in an absolute time range
-CREATE OR REPLACE FUNCTION ash.top_waits_at(
+create or replace function ash.top_waits_at(
     p_start timestamptz,
     p_end timestamptz,
-    p_limit int DEFAULT 10
+    p_limit int default 10
 )
-RETURNS TABLE (
+returns table (
     wait_event text,
     samples bigint,
     pct numeric
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH waits AS (
-        SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= ash._to_sample_ts(p_start)
-          AND s.sample_ts < ash._to_sample_ts(p_end)
-          AND s.data[i] < 0
+language sql
+stable
+set jit = off
+as $$
+    with waits as (
+        select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= ash._to_sample_ts(p_start)
+          and s.sample_ts < ash._to_sample_ts(p_end)
+          and s.data[i] < 0
     ),
-    totals AS (
-        SELECT w.wait_id, sum(w.cnt) as cnt
-        FROM waits w
-        GROUP BY w.wait_id
+    totals as (
+        select w.wait_id, sum(w.cnt) as cnt
+        from waits w
+        group by w.wait_id
     ),
-    grand_total AS (
-        SELECT sum(cnt) as total FROM totals
+    grand_total as (
+        select sum(cnt) as total from totals
     ),
-    ranked AS (
-        SELECT
-            CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+    ranked as (
+        select
+            case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
             t.cnt,
-            row_number() OVER (ORDER BY t.cnt DESC) as rn
-        FROM totals t
-        JOIN ash.wait_event_map wm ON wm.id = t.wait_id
+            row_number() over (order by t.cnt desc) as rn
+        from totals t
+        join ash.wait_event_map wm on wm.id = t.wait_id
     ),
-    top_rows AS (
-        SELECT wait_event, cnt, rn FROM ranked WHERE rn <= p_limit
+    top_rows as (
+        select wait_event, cnt, rn from ranked where rn <= p_limit
     ),
-    other AS (
-        SELECT 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
-        FROM ranked WHERE rn > p_limit
-        HAVING sum(cnt) > 0
+    other as (
+        select 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
+        from ranked where rn > p_limit
+        having sum(cnt) > 0
     )
-    SELECT
+    select
         r.wait_event,
         r.cnt as samples,
         round(r.cnt::numeric / gt.total * 100, 2) as pct
-    FROM (SELECT * FROM top_rows UNION ALL SELECT * FROM other) r
-    CROSS JOIN grand_total gt
-    ORDER BY r.rn
+    from (select * from top_rows union all select * from other) r
+    cross join grand_total gt
+    order by r.rn
 $$;
 
 -- Top queries in an absolute time range
-CREATE OR REPLACE FUNCTION ash.top_queries_at(
+create or replace function ash.top_queries_at(
     p_start timestamptz,
     p_end timestamptz,
-    p_limit int DEFAULT 10
+    p_limit int default 10
 )
-RETURNS TABLE (
+returns table (
     query_id bigint,
     samples bigint,
     pct numeric,
     query_text text
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-DECLARE
+language plpgsql
+stable
+set jit = off
+as $$
+declare
     v_has_pgss boolean := false;
     v_start int4 := ash._to_sample_ts(p_start);
     v_end int4 := ash._to_sample_ts(p_end);
-BEGIN
+begin
     -- Probe the view directly — extension installed != shared library loaded
-    BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 1;
+    begin
+        perform 1 from pg_stat_statements limit 1;
         v_has_pgss := true;
-    EXCEPTION WHEN OTHERS THEN
+    exception when others then
         v_has_pgss := false;
-    END;
+    end;
 
-    IF v_has_pgss THEN
-        RETURN QUERY
-        WITH qids AS (
-            SELECT s.slot, s.data[i] as map_id
-            FROM ash.sample s, generate_subscripts(s.data, 1) i
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= v_start AND s.sample_ts < v_end
-              AND i > 1 AND s.data[i] >= 0 AND s.data[i - 1] >= 0
+    if v_has_pgss then
+        return query
+        with qids as (
+            select s.slot, s.data[i] as map_id
+            from ash.sample s, generate_subscripts(s.data, 1) i
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= v_start and s.sample_ts < v_end
+              and i > 1 and s.data[i] >= 0 and s.data[i - 1] >= 0
         ),
-        resolved AS (
-            SELECT qm.query_id, count(*) as cnt
-            FROM qids q
-            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
-            WHERE q.map_id > 0
-            GROUP BY qm.query_id
+        resolved as (
+            select qm.query_id, count(*) as cnt
+            from qids q
+            join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+            where q.map_id > 0
+            group by qm.query_id
         ),
-        grand_total AS (
-            SELECT sum(cnt) as total FROM resolved
+        grand_total as (
+            select sum(cnt) as total from resolved
         )
-        SELECT r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
+        select r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
                left(pss.query, 100)
-        FROM resolved r
-        CROSS JOIN grand_total gt
-        LEFT JOIN pg_stat_statements pss ON pss.queryid = r.query_id
-        ORDER BY r.cnt DESC LIMIT p_limit;
-    ELSE
-        RETURN QUERY
-        WITH qids AS (
-            SELECT s.slot, s.data[i] as map_id
-            FROM ash.sample s, generate_subscripts(s.data, 1) i
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= v_start AND s.sample_ts < v_end
-              AND i > 1 AND s.data[i] >= 0 AND s.data[i - 1] >= 0
+        from resolved r
+        cross join grand_total gt
+        left join pg_stat_statements pss on pss.queryid = r.query_id
+        order by r.cnt desc limit p_limit;
+    else
+        return query
+        with qids as (
+            select s.slot, s.data[i] as map_id
+            from ash.sample s, generate_subscripts(s.data, 1) i
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= v_start and s.sample_ts < v_end
+              and i > 1 and s.data[i] >= 0 and s.data[i - 1] >= 0
         ),
-        resolved AS (
-            SELECT qm.query_id, count(*) as cnt
-            FROM qids q
-            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
-            WHERE q.map_id > 0
-            GROUP BY qm.query_id
+        resolved as (
+            select qm.query_id, count(*) as cnt
+            from qids q
+            join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+            where q.map_id > 0
+            group by qm.query_id
         ),
-        grand_total AS (
-            SELECT sum(cnt) as total FROM resolved
+        grand_total as (
+            select sum(cnt) as total from resolved
         )
-        SELECT r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
-               NULL::text
-        FROM resolved r
-        CROSS JOIN grand_total gt
-        ORDER BY r.cnt DESC LIMIT p_limit;
-    END IF;
-END;
+        select r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
+               null::text
+        from resolved r
+        cross join grand_total gt
+        order by r.cnt desc limit p_limit;
+    end if;
+end;
 $$;
 
 -- Wait timeline in an absolute time range
-CREATE OR REPLACE FUNCTION ash.wait_timeline_at(
+create or replace function ash.wait_timeline_at(
     p_start timestamptz,
     p_end timestamptz,
-    p_bucket interval DEFAULT '1 minute'
+    p_bucket interval default '1 minute'
 )
-RETURNS TABLE (
+returns table (
     bucket_start timestamptz,
     wait_event text,
     samples bigint
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH waits AS (
-        SELECT
-            ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch FROM p_bucket)::int4)) * interval '1 second' as bucket,
+language sql
+stable
+set jit = off
+as $$
+    with waits as (
+        select
+            ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
             (-s.data[i])::smallint as wait_id,
             s.data[i + 1] as cnt
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= ash._to_sample_ts(p_start)
-          AND s.sample_ts < ash._to_sample_ts(p_end)
-          AND s.data[i] < 0
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= ash._to_sample_ts(p_start)
+          and s.sample_ts < ash._to_sample_ts(p_end)
+          and s.data[i] < 0
     )
-    SELECT
+    select
         w.bucket as bucket_start,
-        CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END as wait_event,
+        case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
         sum(w.cnt) as samples
-    FROM waits w
-    JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-    GROUP BY w.bucket, wm.type, wm.event
-    ORDER BY w.bucket, sum(w.cnt) DESC
+    from waits w
+    join ash.wait_event_map wm on wm.id = w.wait_id
+    group by w.bucket, wm.type, wm.event
+    order by w.bucket, sum(w.cnt) desc
 $$;
 
 -- Wait event type distribution in an absolute time range
-CREATE OR REPLACE FUNCTION ash.waits_by_type_at(
+create or replace function ash.waits_by_type_at(
     p_start timestamptz,
     p_end timestamptz
 )
-RETURNS TABLE (
+returns table (
     wait_event_type text,
     samples bigint,
     pct numeric
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH waits AS (
-        SELECT (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= ash._to_sample_ts(p_start)
-          AND s.sample_ts < ash._to_sample_ts(p_end)
-          AND s.data[i] < 0
+language sql
+stable
+set jit = off
+as $$
+    with waits as (
+        select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= ash._to_sample_ts(p_start)
+          and s.sample_ts < ash._to_sample_ts(p_end)
+          and s.data[i] < 0
     ),
-    totals AS (
-        SELECT wm.type as wait_type, sum(w.cnt) as cnt
-        FROM waits w JOIN ash.wait_event_map wm ON wm.id = w.wait_id
-        GROUP BY wm.type
+    totals as (
+        select wm.type as wait_type, sum(w.cnt) as cnt
+        from waits w join ash.wait_event_map wm on wm.id = w.wait_id
+        group by wm.type
     ),
-    grand_total AS (
-        SELECT sum(cnt) as total FROM totals
+    grand_total as (
+        select sum(cnt) as total from totals
     )
-    SELECT t.wait_type, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
-    FROM totals t, grand_total gt
-    ORDER BY t.cnt DESC
+    select t.wait_type, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    from totals t, grand_total gt
+    order by t.cnt desc
 $$;
 
 -- Query waits in an absolute time range
-CREATE OR REPLACE FUNCTION ash.query_waits_at(
+create or replace function ash.query_waits_at(
     p_query_id bigint,
     p_start timestamptz,
     p_end timestamptz
 )
-RETURNS TABLE (
+returns table (
     wait_event text,
     samples bigint,
     pct numeric
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-DECLARE
+language plpgsql
+stable
+set jit = off
+as $$
+declare
     v_start int4 := ash._to_sample_ts(p_start);
     v_end int4 := ash._to_sample_ts(p_end);
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM ash.query_map_all WHERE query_id = p_query_id) THEN
-        RETURN;
-    END IF;
+begin
+    if not exists (select 1 from ash.query_map_all where query_id = p_query_id) then
+        return;
+    end if;
 
-    RETURN QUERY
-    WITH map_ids AS (
-        SELECT slot, id FROM ash.query_map_all WHERE query_id = p_query_id
+    return query
+    with map_ids as (
+        select slot, id from ash.query_map_all where query_id = p_query_id
     ),
-    hits AS (
-        SELECT
-            (SELECT (- s.data[j])::smallint
-             FROM generate_series(i, 1, -1) j
-             WHERE s.data[j] < 0 LIMIT 1
+    hits as (
+        select
+            (select (- s.data[j])::smallint
+             from generate_series(i, 1, -1) j
+             where s.data[j] < 0 limit 1
             ) as wait_id
-        FROM ash.sample s, generate_subscripts(s.data, 1) i
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= v_start AND s.sample_ts < v_end
-          AND i > 1
-          AND s.data[i] >= 0 AND s.data[i - 1] >= 0
-          AND EXISTS (SELECT 1 FROM map_ids m WHERE m.slot = s.slot AND m.id = s.data[i])
+        from ash.sample s, generate_subscripts(s.data, 1) i
+        where s.slot = any(ash._active_slots())
+          and s.sample_ts >= v_start and s.sample_ts < v_end
+          and i > 1
+          and s.data[i] >= 0 and s.data[i - 1] >= 0
+          and exists (select 1 from map_ids m where m.slot = s.slot and m.id = s.data[i])
     ),
-    totals AS (
-        SELECT wait_id, count(*) as cnt FROM hits WHERE wait_id IS NOT NULL GROUP BY wait_id
+    totals as (
+        select wait_id, count(*) as cnt from hits where wait_id is not null group by wait_id
     ),
-    grand_total AS (
-        SELECT sum(cnt) as total FROM totals
+    grand_total as (
+        select sum(cnt) as total from totals
     )
-    SELECT CASE WHEN wm.event = wm.type THEN wm.event ELSE wm.type || ':' || wm.event END, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
-    FROM totals t
-    JOIN ash.wait_event_map wm ON wm.id = t.wait_id
-    CROSS JOIN grand_total gt
-    ORDER BY t.cnt DESC;
-END;
+    select case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+    from totals t
+    join ash.wait_event_map wm on wm.id = t.wait_id
+    cross join grand_total gt
+    order by t.cnt desc;
+end;
 $$;
 
 -------------------------------------------------------------------------------
@@ -1559,18 +1559,18 @@ $$;
 
 -- Activity summary — one-call overview of a time period
 -- Returns key-value pairs: sample count, peak backends, top waits, top queries.
-CREATE OR REPLACE FUNCTION ash.activity_summary(
-    p_interval interval DEFAULT '24 hours'
+create or replace function ash.activity_summary(
+    p_interval interval default '24 hours'
 )
-RETURNS TABLE (
+returns table (
     metric text,
     value text
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-DECLARE
+language plpgsql
+stable
+set jit = off
+as $$
+declare
     v_total_samples bigint;
     v_total_backends bigint;
     v_peak_backends smallint;
@@ -1579,142 +1579,142 @@ DECLARE
     v_min_ts int4;
     r record;
     v_rank int;
-BEGIN
-    v_min_ts := extract(epoch FROM now() - p_interval - ash.epoch())::int4;
+begin
+    v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
 
     -- Basic counts
-    SELECT count(*), COALESCE(sum(active_count), 0), max(active_count)
-    INTO v_total_samples, v_total_backends, v_peak_backends
-    FROM ash.sample
-    WHERE slot = ANY(ash._active_slots())
-      AND sample_ts >= v_min_ts;
+    select count(*), coalesce(sum(active_count), 0), max(active_count)
+    into v_total_samples, v_total_backends, v_peak_backends
+    from ash.sample
+    where slot = any(ash._active_slots())
+      and sample_ts >= v_min_ts;
 
-    IF v_total_samples = 0 THEN
-        RETURN QUERY SELECT 'status'::text, 'no data in this time range'::text;
-        RETURN;
-    END IF;
+    if v_total_samples = 0 then
+        return query select 'status'::text, 'no data in this time range'::text;
+        return;
+    end if;
 
     -- Peak time
-    SELECT ash.epoch() + sample_ts * interval '1 second'
-    INTO v_peak_ts
-    FROM ash.sample
-    WHERE slot = ANY(ash._active_slots())
-      AND sample_ts >= v_min_ts
-    ORDER BY active_count DESC
-    LIMIT 1;
+    select ash.epoch() + sample_ts * interval '1 second'
+    into v_peak_ts
+    from ash.sample
+    where slot = any(ash._active_slots())
+      and sample_ts >= v_min_ts
+    order by active_count desc
+    limit 1;
 
     -- Distinct databases
-    SELECT count(DISTINCT datid) INTO v_databases
-    FROM ash.sample
-    WHERE slot = ANY(ash._active_slots())
-      AND sample_ts >= v_min_ts;
+    select count(distinct datid) into v_databases
+    from ash.sample
+    where slot = any(ash._active_slots())
+      and sample_ts >= v_min_ts;
 
-    RETURN QUERY SELECT 'time_range'::text, p_interval::text;
-    RETURN QUERY SELECT 'total_samples', v_total_samples::text;
-    RETURN QUERY SELECT 'avg_active_backends', round(v_total_backends::numeric / v_total_samples, 1)::text;
-    RETURN QUERY SELECT 'peak_active_backends', v_peak_backends::text;
-    RETURN QUERY SELECT 'peak_time', v_peak_ts::text;
-    RETURN QUERY SELECT 'databases_active', v_databases::text;
+    return query select 'time_range'::text, p_interval::text;
+    return query select 'total_samples', v_total_samples::text;
+    return query select 'avg_active_backends', round(v_total_backends::numeric / v_total_samples, 1)::text;
+    return query select 'peak_active_backends', v_peak_backends::text;
+    return query select 'peak_time', v_peak_ts::text;
+    return query select 'databases_active', v_databases::text;
 
     -- Top 3 waits
     v_rank := 0;
-    FOR r IN SELECT tw.wait_event || ' (' || tw.pct || '%)' as desc
-             FROM ash.top_waits(p_interval, 4) tw
-             WHERE tw.wait_event != 'Other'
-    LOOP
+    for r in select tw.wait_event || ' (' || tw.pct || '%)' as desc
+             from ash.top_waits(p_interval, 4) tw
+             where tw.wait_event != 'Other'
+    loop
         v_rank := v_rank + 1;
-        RETURN QUERY SELECT 'top_wait_' || v_rank, r.desc;
-    END LOOP;
+        return query select 'top_wait_' || v_rank, r.desc;
+    end loop;
 
     -- Top 3 queries
     v_rank := 0;
-    FOR r IN SELECT tq.query_id::text || COALESCE(' — ' || left(tq.query_text, 60), '') || ' (' || tq.pct || '%)' as desc
-             FROM ash.top_queries(p_interval, 3) tq
-    LOOP
+    for r in select tq.query_id::text || coalesce(' — ' || left(tq.query_text, 60), '') || ' (' || tq.pct || '%)' as desc
+             from ash.top_queries(p_interval, 3) tq
+    loop
         v_rank := v_rank + 1;
-        RETURN QUERY SELECT 'top_query_' || v_rank, r.desc;
-    END LOOP;
+        return query select 'top_query_' || v_rank, r.desc;
+    end loop;
 
-    RETURN;
-END;
+    return;
+end;
 $$;
 
 -------------------------------------------------------------------------------
 -- Histogram — visual wait event distribution in your terminal
 -------------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION ash.histogram(
-    p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 10,
-    p_width int DEFAULT 40
+create or replace function ash.histogram(
+    p_interval interval default '1 hour',
+    p_limit int default 10,
+    p_width int default 40
 )
-RETURNS TABLE (
+returns table (
     wait_event text,
     samples bigint,
     pct numeric,
     bar text
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH data AS (
-        SELECT tw.wait_event, tw.samples, tw.pct
-        FROM ash.top_waits(p_interval, p_limit) tw
+language sql
+stable
+set jit = off
+as $$
+    with data as (
+        select tw.wait_event, tw.samples, tw.pct
+        from ash.top_waits(p_interval, p_limit) tw
     ),
-    max_pct AS (
-        SELECT max(d.pct) as m FROM data d
+    max_pct as (
+        select max(d.pct) as m from data d
     )
-    SELECT
+    select
         rpad(d.wait_event, 20) as wait_event,
         d.samples,
         d.pct,
         repeat('█', greatest(1, (d.pct / nullif(mp.m, 0) * p_width)::int))
             || ' ' || d.pct || '%' as bar
-    FROM data d, max_pct mp
+    from data d, max_pct mp
 $$;
 
-CREATE OR REPLACE FUNCTION ash.histogram_at(
+create or replace function ash.histogram_at(
     p_start timestamptz,
     p_end timestamptz,
-    p_limit int DEFAULT 10,
-    p_width int DEFAULT 40
+    p_limit int default 10,
+    p_width int default 40
 )
-RETURNS TABLE (
+returns table (
     wait_event text,
     samples bigint,
     pct numeric,
     bar text
 )
-LANGUAGE sql
-STABLE
-SET jit = off
-AS $$
-    WITH data AS (
-        SELECT tw.wait_event, tw.samples, tw.pct
-        FROM ash.top_waits_at(p_start, p_end, p_limit) tw
+language sql
+stable
+set jit = off
+as $$
+    with data as (
+        select tw.wait_event, tw.samples, tw.pct
+        from ash.top_waits_at(p_start, p_end, p_limit) tw
     ),
-    max_pct AS (
-        SELECT max(d.pct) as m FROM data d
+    max_pct as (
+        select max(d.pct) as m from data d
     )
-    SELECT
+    select
         rpad(d.wait_event, 20) as wait_event,
         d.samples,
         d.pct,
         repeat('█', greatest(1, (d.pct / nullif(mp.m, 0) * p_width)::int))
             || ' ' || d.pct || '%' as bar
-    FROM data d, max_pct mp
+    from data d, max_pct mp
 $$;
 
 -------------------------------------------------------------------------------
 -- Raw samples — fully decoded sample data with timestamps and query text
 -------------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION ash.samples(
-    p_interval interval DEFAULT '1 hour',
-    p_limit int DEFAULT 100
+create or replace function ash.samples(
+    p_interval interval default '1 hour',
+    p_limit int default 100
 )
-RETURNS TABLE (
+returns table (
     sample_time timestamptz,
     database_name text,
     active_backends smallint,
@@ -1722,101 +1722,101 @@ RETURNS TABLE (
     query_id bigint,
     query_text text
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-DECLARE
+language plpgsql
+stable
+set jit = off
+as $$
+declare
     v_has_pgss boolean := false;
     v_min_ts int4;
-BEGIN
-    v_min_ts := extract(epoch FROM now() - p_interval - ash.epoch())::int4;
+begin
+    v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
 
-    BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 1;
+    begin
+        perform 1 from pg_stat_statements limit 1;
         v_has_pgss := true;
-    EXCEPTION WHEN OTHERS THEN
+    exception when others then
         v_has_pgss := false;
-    END;
+    end;
 
-    IF v_has_pgss THEN
-        RETURN QUERY
-        WITH decoded AS (
-            SELECT
+    if v_has_pgss then
+        return query
+        with decoded as (
+            select
                 s.sample_ts,
                 s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
                 s.data[i + 2 + gs.n] as map_id
-            FROM ash.sample s,
+            from ash.sample s,
                  generate_subscripts(s.data, 1) i,
-                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= v_min_ts
-              AND s.data[i] < 0
-              AND i + 1 <= array_length(s.data, 1)
-              AND i + 2 + gs.n <= array_length(s.data, 1)
+                 generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= v_min_ts
+              and s.data[i] < 0
+              and i + 1 <= array_length(s.data, 1)
+              and i + 2 + gs.n <= array_length(s.data, 1)
         )
-        SELECT
+        select
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
+            coalesce(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END,
+            case when wm.event = wm.type then wm.event
+                 else wm.type || ':' || wm.event end,
             qm.query_id,
             left(pgss.query, 80)
-        FROM decoded d
-        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
-        LEFT JOIN pg_database db ON db.oid = d.datid
-        LEFT JOIN pg_stat_statements pgss ON pgss.queryid = qm.query_id
-            AND pgss.dbid = d.datid
-        ORDER BY d.sample_ts DESC, wm.type, wm.event
-        LIMIT p_limit;
-    ELSE
-        RETURN QUERY
-        WITH decoded AS (
-            SELECT
+        from decoded d
+        join ash.wait_event_map wm on wm.id = d.wait_id
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join pg_database db on db.oid = d.datid
+        left join pg_stat_statements pgss on pgss.queryid = qm.query_id
+            and pgss.dbid = d.datid
+        order by d.sample_ts desc, wm.type, wm.event
+        limit p_limit;
+    else
+        return query
+        with decoded as (
+            select
                 s.sample_ts,
                 s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
                 s.data[i + 2 + gs.n] as map_id
-            FROM ash.sample s,
+            from ash.sample s,
                  generate_subscripts(s.data, 1) i,
-                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= v_min_ts
-              AND s.data[i] < 0
-              AND i + 1 <= array_length(s.data, 1)
-              AND i + 2 + gs.n <= array_length(s.data, 1)
+                 generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= v_min_ts
+              and s.data[i] < 0
+              and i + 1 <= array_length(s.data, 1)
+              and i + 2 + gs.n <= array_length(s.data, 1)
         )
-        SELECT
+        select
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
+            coalesce(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END,
+            case when wm.event = wm.type then wm.event
+                 else wm.type || ':' || wm.event end,
             qm.query_id,
-            NULL::text
-        FROM decoded d
-        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
-        LEFT JOIN pg_database db ON db.oid = d.datid
-        ORDER BY d.sample_ts DESC, wm.type, wm.event
-        LIMIT p_limit;
-    END IF;
-END;
+            null::text
+        from decoded d
+        join ash.wait_event_map wm on wm.id = d.wait_id
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join pg_database db on db.oid = d.datid
+        order by d.sample_ts desc, wm.type, wm.event
+        limit p_limit;
+    end if;
+end;
 $$;
 
-CREATE OR REPLACE FUNCTION ash.samples_at(
+create or replace function ash.samples_at(
     p_start timestamptz,
     p_end timestamptz,
-    p_limit int DEFAULT 100
+    p_limit int default 100
 )
-RETURNS TABLE (
+returns table (
     sample_time timestamptz,
     database_name text,
     active_backends smallint,
@@ -1824,93 +1824,93 @@ RETURNS TABLE (
     query_id bigint,
     query_text text
 )
-LANGUAGE plpgsql
-STABLE
-SET jit = off
-AS $$
-DECLARE
+language plpgsql
+stable
+set jit = off
+as $$
+declare
     v_has_pgss boolean := false;
     v_start int4;
     v_end int4;
-BEGIN
+begin
     v_start := ash._to_sample_ts(p_start);
     v_end := ash._to_sample_ts(p_end);
 
-    BEGIN
-        PERFORM 1 FROM pg_stat_statements LIMIT 1;
+    begin
+        perform 1 from pg_stat_statements limit 1;
         v_has_pgss := true;
-    EXCEPTION WHEN OTHERS THEN
+    exception when others then
         v_has_pgss := false;
-    END;
+    end;
 
-    IF v_has_pgss THEN
-        RETURN QUERY
-        WITH decoded AS (
-            SELECT
+    if v_has_pgss then
+        return query
+        with decoded as (
+            select
                 s.sample_ts,
                 s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
                 s.data[i + 2 + gs.n] as map_id
-            FROM ash.sample s,
+            from ash.sample s,
                  generate_subscripts(s.data, 1) i,
-                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= v_start AND s.sample_ts < v_end
-              AND s.data[i] < 0
-              AND i + 1 <= array_length(s.data, 1)
-              AND i + 2 + gs.n <= array_length(s.data, 1)
+                 generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= v_start and s.sample_ts < v_end
+              and s.data[i] < 0
+              and i + 1 <= array_length(s.data, 1)
+              and i + 2 + gs.n <= array_length(s.data, 1)
         )
-        SELECT
+        select
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
+            coalesce(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END,
+            case when wm.event = wm.type then wm.event
+                 else wm.type || ':' || wm.event end,
             qm.query_id,
             left(pgss.query, 80)
-        FROM decoded d
-        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
-        LEFT JOIN pg_database db ON db.oid = d.datid
-        LEFT JOIN pg_stat_statements pgss ON pgss.queryid = qm.query_id
-            AND pgss.dbid = d.datid
-        ORDER BY d.sample_ts DESC, wm.type, wm.event
-        LIMIT p_limit;
-    ELSE
-        RETURN QUERY
-        WITH decoded AS (
-            SELECT
+        from decoded d
+        join ash.wait_event_map wm on wm.id = d.wait_id
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join pg_database db on db.oid = d.datid
+        left join pg_stat_statements pgss on pgss.queryid = qm.query_id
+            and pgss.dbid = d.datid
+        order by d.sample_ts desc, wm.type, wm.event
+        limit p_limit;
+    else
+        return query
+        with decoded as (
+            select
                 s.sample_ts,
                 s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
                 s.data[i + 2 + gs.n] as map_id
-            FROM ash.sample s,
+            from ash.sample s,
                  generate_subscripts(s.data, 1) i,
-                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
-            WHERE s.slot = ANY(ash._active_slots())
-              AND s.sample_ts >= v_start AND s.sample_ts < v_end
-              AND s.data[i] < 0
-              AND i + 1 <= array_length(s.data, 1)
-              AND i + 2 + gs.n <= array_length(s.data, 1)
+                 generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
+            where s.slot = any(ash._active_slots())
+              and s.sample_ts >= v_start and s.sample_ts < v_end
+              and s.data[i] < 0
+              and i + 1 <= array_length(s.data, 1)
+              and i + 2 + gs.n <= array_length(s.data, 1)
         )
-        SELECT
+        select
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
+            coalesce(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END,
+            case when wm.event = wm.type then wm.event
+                 else wm.type || ':' || wm.event end,
             qm.query_id,
-            NULL::text
-        FROM decoded d
-        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
-        LEFT JOIN pg_database db ON db.oid = d.datid
-        ORDER BY d.sample_ts DESC, wm.type, wm.event
-        LIMIT p_limit;
-    END IF;
-END;
+            null::text
+        from decoded d
+        join ash.wait_event_map wm on wm.id = d.wait_id
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join pg_database db on db.oid = d.datid
+        order by d.sample_ts desc, wm.type, wm.event
+        limit p_limit;
+    end if;
+end;
 $$;
