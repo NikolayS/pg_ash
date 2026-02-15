@@ -8,7 +8,7 @@ pg_ash samples `pg_stat_activity` every second via pg_cron and stores wait event
 
 ## Design philosophy
 
-**The anti-extension.** pg_ash is pure SQL/plpgsql — no C code, no `shared_preload_libraries`, no restart required. Install with `\i ash--1.0.sql` on any Postgres 14+ instance with pg_cron 1.5+, including managed providers: RDS, Cloud SQL, AlloyDB, Supabase, Neon.
+**The anti-extension.** pg_ash is pure SQL + PL/pgSQL — no C code, no `shared_preload_libraries`, no restart required. Install with `\i ash--1.0.sql` on any Postgres 14+ instance with pg_cron 1.5+, including managed providers: RDS, Cloud SQL, AlloyDB, Supabase, Neon.
 
 Key design decisions:
 
