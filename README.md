@@ -364,14 +364,26 @@ select * from ash.status();
 
 ### pg_cron run history
 
-pg_cron logs every job execution to `cron.job_run_details`. At 1-second sampling, this adds ~12 MiB/day of unbounded growth. Limit it:
+pg_cron logs every job execution to `cron.job_run_details`. At 1-second sampling, this adds ~12 MiB/day of unbounded growth. pg_cron has no built-in purge — two options:
+
+**Option 1: Disable logging entirely** (recommended if you don't need pg_cron troubleshooting):
 
 ```sql
-alter system set cron.max_run_history = 100000;
+alter system set cron.log_run = off;
 select pg_reload_conf();
 ```
 
-This keeps ~27 hours of run history (~15 MiB) — enough for debugging while preventing bloat. `ash.start()` will warn if this is not set.
+**Option 2: Schedule periodic cleanup** (keeps recent history for debugging):
+
+```sql
+select cron.schedule(
+  'ash_purge_cron_log',
+  '0 * * * *',
+  $$delete from cron.job_run_details where end_time < now() - interval '1 day'$$
+);
+```
+
+`ash.start()` will warn about this overhead.
 
 ## Known limitations
 
