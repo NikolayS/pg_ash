@@ -1761,7 +1761,7 @@ BEGIN
         )
         SELECT
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
             CASE WHEN wm.event = wm.type THEN wm.event
                  ELSE wm.type || ':' || wm.event END,
@@ -1795,7 +1795,7 @@ BEGIN
         )
         SELECT
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
             CASE WHEN wm.event = wm.type THEN wm.event
                  ELSE wm.type || ':' || wm.event END,
@@ -1863,7 +1863,7 @@ BEGIN
         )
         SELECT
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
             CASE WHEN wm.event = wm.type THEN wm.event
                  ELSE wm.type || ':' || wm.event END,
@@ -1897,7 +1897,7 @@ BEGIN
         )
         SELECT
             ash.epoch() + make_interval(secs => d.sample_ts),
-            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            COALESCE(db.datname, '<oid:' || d.datid || '>')::text,
             d.active_count,
             CASE WHEN wm.event = wm.type THEN wm.event
                  ELSE wm.type || ':' || wm.event END,
