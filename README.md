@@ -137,10 +137,10 @@ select * from ash.wait_timeline_at(
 );
 ```
 
-### Visual histogram
+### Visual bar chart
 
 ```sql
-select * from ash.histogram('1 hour');
+select * from ash.top_waits('1 hour');
 ```
 
 ```
@@ -158,10 +158,6 @@ select * from ash.histogram('1 hour');
  Other                |     432 |  0.80 | █ 0.80%
 ```
 
-```sql
--- histogram for a specific incident window
-select * from ash.histogram_at('2026-02-14 03:00', '2026-02-14 03:10');
-```
 
 ### Browse raw samples
 
@@ -232,7 +228,6 @@ select * from ash.status();
 | Function | Description |
 |----------|-------------|
 | `ash.top_waits(interval, limit)` | Top wait events ranked by sample count |
-| `ash.histogram(interval, limit, width)` | Visual bar chart of wait event distribution |
 | `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
 | `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join |
 | `ash.query_waits(query_id, interval)` | Wait profile for a specific query |
@@ -250,7 +245,6 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 | Function | Description |
 |----------|-------------|
 | `ash.top_waits_at(start, end, limit)` | Top waits in a time range |
-| `ash.histogram_at(start, end, limit, width)` | Visual bar chart in a time range |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
 | `ash.query_waits_at(query_id, start, end)` | Query wait profile in a time range |
 | `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |

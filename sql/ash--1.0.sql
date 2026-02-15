@@ -888,12 +888,14 @@ $$;
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
 create or replace function ash.top_waits(
   p_interval interval default '1 hour',
-  p_limit int default 10
+  p_limit int default 10,
+  p_width int default 40
 )
 returns table (
   wait_event text,
   samples bigint,
-  pct numeric
+  pct numeric,
+  bar text
 )
 language sql
 stable
@@ -929,13 +931,21 @@ as $$
     select 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
     from ranked where rn > p_limit
     having sum(cnt) > 0
+  ),
+  max_pct as (
+    select max(round(r.cnt::numeric / gt.total * 100, 2)) as m
+    from (select * from top_rows union all select * from other) r
+    cross join grand_total gt
   )
   select
     r.wait_event,
     r.cnt as samples,
-    round(r.cnt::numeric / gt.total * 100, 2) as pct
+    round(r.cnt::numeric / gt.total * 100, 2) as pct,
+    repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
   from (select * from top_rows union all select * from other) r
   cross join grand_total gt
+  cross join max_pct mp
   order by r.rn
 $$;
 
@@ -1314,12 +1324,14 @@ $$;
 create or replace function ash.top_waits_at(
   p_start timestamptz,
   p_end timestamptz,
-  p_limit int default 10
+  p_limit int default 10,
+  p_width int default 40
 )
 returns table (
   wait_event text,
   samples bigint,
-  pct numeric
+  pct numeric,
+  bar text
 )
 language sql
 stable
@@ -1356,13 +1368,21 @@ as $$
     select 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
     from ranked where rn > p_limit
     having sum(cnt) > 0
+  ),
+  max_pct as (
+    select max(round(r.cnt::numeric / gt.total * 100, 2)) as m
+    from (select * from top_rows union all select * from other) r
+    cross join grand_total gt
   )
   select
     r.wait_event,
     r.cnt as samples,
-    round(r.cnt::numeric / gt.total * 100, 2) as pct
+    round(r.cnt::numeric / gt.total * 100, 2) as pct,
+    repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
   from (select * from top_rows union all select * from other) r
   cross join grand_total gt
+  cross join max_pct mp
   order by r.rn
 $$;
 
@@ -1662,69 +1682,6 @@ $$;
 -------------------------------------------------------------------------------
 -- Histogram — visual wait event distribution in your terminal
 -------------------------------------------------------------------------------
-
-create or replace function ash.histogram(
-  p_interval interval default '1 hour',
-  p_limit int default 10,
-  p_width int default 40
-)
-returns table (
-  wait_event text,
-  samples bigint,
-  pct numeric,
-  bar text
-)
-language sql
-stable
-set jit = off
-as $$
-  with data as (
-    select tw.wait_event, tw.samples, tw.pct
-    from ash.top_waits(p_interval, p_limit) tw
-  ),
-  max_pct as (
-    select max(d.pct) as m from data d
-  )
-  select
-    rpad(d.wait_event, 20) as wait_event,
-    d.samples,
-    d.pct,
-    repeat('█', greatest(1, (d.pct / nullif(mp.m, 0) * p_width)::int))
-      || ' ' || d.pct || '%' as bar
-  from data d, max_pct mp
-$$;
-
-create or replace function ash.histogram_at(
-  p_start timestamptz,
-  p_end timestamptz,
-  p_limit int default 10,
-  p_width int default 40
-)
-returns table (
-  wait_event text,
-  samples bigint,
-  pct numeric,
-  bar text
-)
-language sql
-stable
-set jit = off
-as $$
-  with data as (
-    select tw.wait_event, tw.samples, tw.pct
-    from ash.top_waits_at(p_start, p_end, p_limit) tw
-  ),
-  max_pct as (
-    select max(d.pct) as m from data d
-  )
-  select
-    rpad(d.wait_event, 20) as wait_event,
-    d.samples,
-    d.pct,
-    repeat('█', greatest(1, (d.pct / nullif(mp.m, 0) * p_width)::int))
-      || ' ' || d.pct || '%' as bar
-  from data d, max_pct mp
-$$;
 
 -------------------------------------------------------------------------------
 -- Timeline chart — stacked bar visualization of wait events over time

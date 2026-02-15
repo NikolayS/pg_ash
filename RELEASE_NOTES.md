@@ -32,10 +32,9 @@ Key design decisions:
 | `wait_timeline(interval, bucket)` | Time-bucketed wait event breakdown |
 | `samples_by_database(interval)` | Per-database sample counts |
 | `activity_summary(interval)` | One-call overview — peak backends, top waits, top queries |
-| `histogram(interval, buckets, width)` | Visual bar chart using Unicode blocks |
 | `samples(interval, limit)` | Fully decoded raw sample browser |
 
-Absolute-time variants (`_at` suffix): `top_waits_at`, `top_queries_at`, `query_waits_at`, `waits_by_type_at`, `wait_timeline_at`, `histogram_at`, `samples_at`.
+Absolute-time variants (`_at` suffix): `top_waits_at`, `top_queries_at`, `query_waits_at`, `waits_by_type_at`, `wait_timeline_at`, `samples_at`.
 
 ## Examples
 
@@ -63,7 +62,7 @@ select * from ash.activity_summary('8 hours');
 
 ```sql
 -- visual wait event distribution
-select * from ash.histogram('1 hour');
+select * from ash.top_waits('1 hour');
 ```
 
 ```

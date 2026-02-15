@@ -204,7 +204,7 @@ jobs:
           SELECT count(*) FROM ash.samples_by_database();
           SELECT count(*) FROM ash.samples('1 hour', 10);
           SELECT count(*) FROM ash.samples_at(now() - interval '1 hour', now(), 10);
-          SELECT count(*) FROM ash.histogram('1 hour');
+          SELECT count(*) FROM ash.top_waits('1 hour');
 
           DO $$
           BEGIN
