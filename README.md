@@ -362,6 +362,17 @@ update ash.config set rotation_period = '12 hours';
 select * from ash.status();
 ```
 
+### pg_cron run history
+
+pg_cron logs every job execution to `cron.job_run_details`. At 1-second sampling, this adds ~12 MiB/day of unbounded growth. Limit it:
+
+```sql
+alter system set cron.max_run_history = 10000;
+select pg_reload_conf();
+```
+
+This keeps ~2.7 hours of run history (~1.5 MiB) — enough for debugging while preventing bloat. `ash.start()` will warn if this is not set.
+
 ## Known limitations
 
 - **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](ROLLUP_DESIGN.md).

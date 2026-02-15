@@ -705,6 +705,17 @@ begin
   -- Update sample_interval in config
   update ash.config set sample_interval = p_interval where singleton;
 
+  -- Warn if pg_cron keeps unlimited run history (default: -1).
+  -- At 1s sampling, cron.job_run_details grows ~12 MiB/day unbounded.
+  begin
+    if current_setting('cron.max_run_history', true)::int < 0 then
+      raise notice 'hint: cron.max_run_history is unlimited — pg_cron will log every sample.';
+      raise notice 'recommended: alter system set cron.max_run_history = 10000; select pg_reload_conf();';
+    end if;
+  exception when others then
+    null; -- GUC not available in older pg_cron versions
+  end;
+
   return;
 end;
 $$;
