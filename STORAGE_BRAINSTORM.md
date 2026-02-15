@@ -105,9 +105,9 @@ header (24 bytes).
 
 Marginal win. Harder to work with — need stride-2 `unnest` logic.
 
-### 7. Encoded `smallint[]` — `[-wait, count, qid, qid, ...]`
+### 7. Encoded `integer[]` — `[-wait, count, qid, qid, ...]`
 
-**Winner.** Run-length encode by wait event in a single array:
+**Winner.** (Note: implementation uses `integer[]` not `smallint[]` — `query_map.id` is `int4` to support >32k distinct queries.) Run-length encode by wait event in a single array:
 
 ```
 {-5, 3, 101, 102, 101, -1, 2, 103, 104, -0, 1, 105}
@@ -126,11 +126,11 @@ Benefits:
 create table sample_encoded (
   sample_ts   int not null,
   datid       oid not null,
-  data        smallint[] not null
+  data        integer[] not null  -- int4, not smallint (query_map needs >32k capacity)
 );
 ```
 
-**Result: 221 bytes/row, 1.9 MiB/day**
+**Result: ~378 bytes/row with integer[], ~30 MiB/day** (original smallint[] estimate was 221 bytes/row)
 
 ### 8. Encoded `bytea` — compact binary
 

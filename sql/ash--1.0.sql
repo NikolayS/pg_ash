@@ -9,6 +9,8 @@
 CREATE SCHEMA IF NOT EXISTS ash;
 
 -- Epoch function: 2026-01-01 00:00:00 UTC
+-- WARNING: This value must NEVER change after installation. All sample_ts
+-- values are seconds since this epoch. Changing it corrupts all timestamps.
 CREATE OR REPLACE FUNCTION ash.epoch()
 RETURNS timestamptz
 LANGUAGE sql
@@ -121,50 +123,8 @@ BEGIN
 END;
 $$;
 
--- Register query function (upsert, returns int4 id)
-CREATE OR REPLACE FUNCTION ash._register_query(p_query_id int8)
-RETURNS int4
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_id int4;
-    v_now_ts int4;
-    v_max_queries int4 := 50000;  -- hard cap: prevents unbounded growth
-                                   -- from volatile comments (PG14-15) or
-                                   -- unnormalized utility statements
-BEGIN
-    v_now_ts := extract(epoch FROM now() - ash.epoch())::int4;
-
-    -- Try to get existing
-    SELECT id INTO v_id
-    FROM ash.query_map
-    WHERE query_id = p_query_id;
-
-    IF v_id IS NOT NULL THEN
-        -- Update last_seen
-        UPDATE ash.query_map SET last_seen = v_now_ts WHERE query_id = p_query_id;
-        RETURN v_id;
-    END IF;
-
-    -- Check hard cap before inserting new entry.
-    -- On PG14-15, volatile comments in queries produce unique query_ids
-    -- (not normalized until PG16). This cap prevents query_map from
-    -- growing unboundedly. Unregistered queries map to 0 (unknown).
-    -- reltuples is a cheap estimate updated by autovacuum/analyze — O(1).
-    IF (SELECT reltuples FROM pg_class
-        WHERE oid = 'ash.query_map'::regclass) >= v_max_queries THEN
-        RETURN 0;  -- sentinel: unknown query_id
-    END IF;
-
-    -- Insert new entry
-    INSERT INTO ash.query_map (query_id, last_seen)
-    VALUES (p_query_id, v_now_ts)
-    ON CONFLICT (query_id) DO UPDATE SET last_seen = v_now_ts
-    RETURNING id INTO v_id;
-
-    RETURN v_id;
-END;
-$$;
+-- (_register_query removed — bulk registration in take_sample() handles
+-- query_map inserts directly with hard cap protection)
 
 -- Validate data array structure
 CREATE OR REPLACE FUNCTION ash._validate_data(p_data integer[])
@@ -298,12 +258,18 @@ BEGIN
            OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
     ON CONFLICT DO NOTHING;
 
-    -- Bulk insert new query_ids into query_map
-    INSERT INTO ash.query_map (query_id, last_seen)
-    SELECT q.query_id, v_sample_ts
-    FROM _ash_qids q
-    WHERE NOT EXISTS (SELECT 1 FROM ash.query_map m WHERE m.query_id = q.query_id)
-    ON CONFLICT (query_id) DO UPDATE SET last_seen = v_sample_ts;
+    -- Bulk insert new query_ids into query_map (with hard cap).
+    -- On PG14-15, volatile SQL comments produce unique query_ids that
+    -- bypass normalization. Cap at 50k to prevent unbounded growth.
+    -- reltuples is O(1) — reads pg_class catalog cache.
+    IF (SELECT reltuples FROM pg_class
+        WHERE oid = 'ash.query_map'::regclass) < 50000 THEN
+        INSERT INTO ash.query_map (query_id, last_seen)
+        SELECT q.query_id, v_sample_ts
+        FROM _ash_qids q
+        WHERE NOT EXISTS (SELECT 1 FROM ash.query_map m WHERE m.query_id = q.query_id)
+        ON CONFLICT (query_id) DO UPDATE SET last_seen = v_sample_ts;
+    END IF;
 
     -- Bulk update last_seen for existing query_ids
     UPDATE ash.query_map m
