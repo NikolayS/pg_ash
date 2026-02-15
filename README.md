@@ -163,6 +163,27 @@ select * from ash.histogram('1 hour');
 select * from ash.histogram_at('2026-02-14 03:00', '2026-02-14 03:10');
 ```
 
+### Browse raw samples
+
+```sql
+-- see the last 20 decoded samples with query text
+select * from ash.samples('10 minutes', 20);
+```
+
+```
+       sample_time        | database_name | active_backends |   wait_event    |  query_id  |                query_text
+--------------------------+---------------+-----------------+-----------------+------------+------------------------------------------
+ 2026-02-14 20:40:10+00   | mydb          |              12 | CPU*            | 1234567890 | select * from orders where created_at > ...
+ 2026-02-14 20:40:10+00   | mydb          |              12 | IO:DataFileRead | 9876543210 | update inventory set quantity = quantit...
+ 2026-02-14 20:40:10+00   | mydb          |              12 | Lock:tuple      | 5555555555 | insert into events (type, payload) valu...
+ 2026-02-14 20:40:09+00   | mydb          |              11 | CPU*            | 1234567890 | select * from orders where created_at > ...
+```
+
+```sql
+-- raw samples during an incident
+select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 50);
+```
+
 ### Analyze a specific query
 
 ```sql
@@ -219,6 +240,7 @@ select * from ash.status();
 | `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
 | `ash.samples_by_database(interval)` | Per-database activity |
 | `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
+| `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
 | `ash.status()` | Sampling status and partition info |
 
 All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
@@ -231,6 +253,7 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 | `ash.histogram_at(start, end, limit, width)` | Visual bar chart in a time range |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
 | `ash.query_waits_at(query_id, start, end)` | Query wait profile in a time range |
+| `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
 | `ash.waits_by_type_at(start, end)` | Breakdown by wait event type in a time range |
 | `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |
 
