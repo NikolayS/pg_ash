@@ -44,12 +44,30 @@ CREATE TABLE IF NOT EXISTS ash.wait_event_map (
     UNIQUE (state, type, event)
 );
 
--- Query ID dictionary with last_seen for GC
-CREATE TABLE IF NOT EXISTS ash.query_map (
+-- Query ID dictionaries — one per sample partition, TRUNCATE together.
+-- Each has its own identity sequence (explicit, not LIKE INCLUDING ALL,
+-- because PG14-15 shares sequences with LIKE INCLUDING ALL).
+CREATE TABLE IF NOT EXISTS ash.query_map_0 (
     id        int4 PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 1),
-    query_id  int8 NOT NULL UNIQUE,
-    last_seen int4 NOT NULL DEFAULT extract(epoch FROM now() - ash.epoch())::int4
+    query_id  int8 NOT NULL UNIQUE
 );
+CREATE TABLE IF NOT EXISTS ash.query_map_1 (
+    id        int4 PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 1),
+    query_id  int8 NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS ash.query_map_2 (
+    id        int4 PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 1),
+    query_id  int8 NOT NULL UNIQUE
+);
+
+-- Unified view for readers — planner eliminates non-matching partitions
+-- when slot is a constant (which it is, from s.slot in reader queries).
+CREATE OR REPLACE VIEW ash.query_map_all AS
+    SELECT 0::smallint AS slot, id, query_id FROM ash.query_map_0
+    UNION ALL
+    SELECT 1::smallint, id, query_id FROM ash.query_map_1
+    UNION ALL
+    SELECT 2::smallint, id, query_id FROM ash.query_map_2;
 
 -- Current slot function
 CREATE OR REPLACE FUNCTION ash.current_slot()
@@ -124,7 +142,7 @@ END;
 $$;
 
 -- (_register_query removed — bulk registration in take_sample() handles
--- query_map inserts directly with hard cap protection)
+-- query_map inserts directly via per-partition INSERT ON CONFLICT)
 
 -- Validate data array structure
 CREATE OR REPLACE FUNCTION ash._validate_data(p_data integer[])
@@ -213,6 +231,7 @@ DECLARE
     v_data integer[];
     v_active_count smallint;
     v_current_wait_id smallint;
+    v_current_slot smallint;
     v_rows_inserted int := 0;
     v_state text;
     v_type text;
@@ -262,30 +281,36 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Bulk upsert query_ids into query_map (with 50k hard cap).
-    -- On PG14-15, volatile SQL comments produce unique query_ids.
-    IF (SELECT reltuples FROM pg_class
-        WHERE oid = 'ash.query_map'::regclass) < 50000 THEN
-        INSERT INTO ash.query_map (query_id, last_seen)
-        SELECT DISTINCT sa.query_id, v_sample_ts
+    -- Register query_ids into the current slot's query_map partition.
+    -- Partitioned query_map: no GC, no hard cap — TRUNCATE resets on rotation.
+    v_current_slot := ash.current_slot();
+    IF v_current_slot = 0 THEN
+        INSERT INTO ash.query_map_0 (query_id)
+        SELECT DISTINCT sa.query_id
         FROM pg_stat_activity sa
         WHERE sa.query_id IS NOT NULL
           AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
           AND (sa.backend_type = 'client backend'
                OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-        ON CONFLICT (query_id) DO UPDATE SET last_seen = EXCLUDED.last_seen;
+        ON CONFLICT (query_id) DO NOTHING;
+    ELSIF v_current_slot = 1 THEN
+        INSERT INTO ash.query_map_1 (query_id)
+        SELECT DISTINCT sa.query_id
+        FROM pg_stat_activity sa
+        WHERE sa.query_id IS NOT NULL
+          AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          AND (sa.backend_type = 'client backend'
+               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+        ON CONFLICT (query_id) DO NOTHING;
     ELSE
-        -- At cap: only update last_seen for existing entries
-        UPDATE ash.query_map m
-        SET last_seen = v_sample_ts
-        FROM (SELECT DISTINCT sa.query_id
-              FROM pg_stat_activity sa
-              WHERE sa.query_id IS NOT NULL
-                AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
-                AND (sa.backend_type = 'client backend'
-                     OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-             ) q
-        WHERE m.query_id = q.query_id;
+        INSERT INTO ash.query_map_2 (query_id)
+        SELECT DISTINCT sa.query_id
+        FROM pg_stat_activity sa
+        WHERE sa.query_id IS NOT NULL
+          AND sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
+          AND (sa.backend_type = 'client backend'
+               OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+        ON CONFLICT (query_id) DO NOTHING;
     END IF;
 
     -- Build and insert encoded arrays — one per database.
@@ -313,7 +338,7 @@ BEGIN
                  AND wm.event = COALESCE(sa.wait_event,
                         CASE WHEN sa.state = 'active' THEN 'CPU*'
                              WHEN sa.state LIKE 'idle in transaction%' THEN 'IdleTx' END)
-                LEFT JOIN ash.query_map m ON m.query_id = sa.query_id
+                LEFT JOIN ash.query_map_all m ON m.slot = v_current_slot AND m.query_id = sa.query_id
                 WHERE sa.state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
                   AND (sa.backend_type = 'client backend'
                        OR (v_include_bg AND sa.backend_type IN ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
@@ -360,7 +385,9 @@ END;
 $$;
 
 -- Decode sample function
-CREATE OR REPLACE FUNCTION ash.decode_sample(p_data integer[])
+-- p_slot: when provided, look up query_ids from that partition only.
+-- When NULL (default), search all partitions via query_map_all view.
+CREATE OR REPLACE FUNCTION ash.decode_sample(p_data integer[], p_slot smallint DEFAULT NULL)
 RETURNS TABLE (
     wait_event text,
     query_id int8,
@@ -433,10 +460,16 @@ BEGIN
             -- Handle sentinel (0 = NULL query_id)
             IF v_map_id = 0 THEN
                 v_query_id := NULL;
-            ELSE
+            ELSIF p_slot IS NOT NULL THEN
                 SELECT m.query_id INTO v_query_id
-                FROM ash.query_map m
-                WHERE m.id = v_map_id;
+                FROM ash.query_map_all m
+                WHERE m.slot = p_slot AND m.id = v_map_id;
+            ELSE
+                -- No slot context — search all partitions (less efficient)
+                SELECT m.query_id INTO v_query_id
+                FROM ash.query_map_all m
+                WHERE m.id = v_map_id
+                LIMIT 1;
             END IF;
 
             wait_event := CASE WHEN v_event = v_type THEN v_event ELSE v_type || ':' || v_event END;
@@ -456,6 +489,7 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Rotate partitions: advance current_slot, truncate the old previous partition
+-- and its matching query_map partition (lockstep TRUNCATE — zero bloat everywhere).
 CREATE OR REPLACE FUNCTION ash.rotate()
 RETURNS text
 LANGUAGE plpgsql
@@ -466,8 +500,6 @@ DECLARE
     v_truncate_slot smallint;
     v_rotation_period interval;
     v_rotated_at timestamptz;
-    v_min_sample_ts int4;
-    v_deleted_queries int;
 BEGIN
     -- Try to acquire advisory lock to prevent concurrent rotation
     IF NOT pg_try_advisory_lock(hashtext('ash_rotate')) THEN
@@ -504,32 +536,27 @@ BEGIN
             rotated_at = now()
         WHERE singleton = true;
 
-        -- Truncate the recycled partition by explicit name
+        -- Lockstep TRUNCATE: sample partition + matching query_map partition.
+        -- Zero bloat everywhere — no DELETE, no dead tuples, no GC needed.
         CASE v_truncate_slot
-            WHEN 0 THEN TRUNCATE ash.sample_0;
-            WHEN 1 THEN TRUNCATE ash.sample_1;
-            WHEN 2 THEN TRUNCATE ash.sample_2;
+            WHEN 0 THEN
+                TRUNCATE ash.sample_0;
+                TRUNCATE ash.query_map_0;
+                ALTER TABLE ash.query_map_0 ALTER COLUMN id RESTART;
+            WHEN 1 THEN
+                TRUNCATE ash.sample_1;
+                TRUNCATE ash.query_map_1;
+                ALTER TABLE ash.query_map_1 ALTER COLUMN id RESTART;
+            WHEN 2 THEN
+                TRUNCATE ash.sample_2;
+                TRUNCATE ash.query_map_2;
+                ALTER TABLE ash.query_map_2 ALTER COLUMN id RESTART;
         END CASE;
-
-        -- Automatic query_map garbage collection
-        -- Find minimum sample_ts across all live partitions (current and previous)
-        SELECT min(sample_ts) INTO v_min_sample_ts
-        FROM ash.sample
-        WHERE slot IN (v_new_slot, v_old_slot);
-
-        -- Delete query_map entries not seen in 2× rotation periods.
-        -- Conservative: ensures no surviving partition can reference a gc'd entry,
-        -- even if a query stopped running just before the previous rotation.
-        DELETE FROM ash.query_map
-        WHERE last_seen < extract(epoch FROM now()
-            - 2 * (SELECT rotation_period FROM ash.config)
-            - ash.epoch())::int4;
-        GET DIAGNOSTICS v_deleted_queries = ROW_COUNT;
 
         PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
 
-        RETURN format('rotated: slot %s -> %s, truncated slot %s, gc''d %s query_map entries',
-                      v_old_slot, v_new_slot, v_truncate_slot, v_deleted_queries);
+        RETURN format('rotated: slot %s -> %s, truncated slot %s (sample + query_map)',
+                      v_old_slot, v_new_slot, v_truncate_slot);
 
     EXCEPTION WHEN lock_not_available THEN
         PERFORM pg_advisory_unlock(hashtext('ash_rotate'));
@@ -764,7 +791,7 @@ BEGIN
 
     -- Dictionary sizes
     SELECT count(*) INTO v_wait_events FROM ash.wait_event_map;
-    SELECT count(*) INTO v_query_ids FROM ash.query_map;
+    SELECT count(*) INTO v_query_ids FROM ash.query_map_all;
 
     metric := 'current_slot'; value := v_config.current_slot::text; RETURN NEXT;
     metric := 'sample_interval'; value := v_config.sample_interval::text; RETURN NEXT;
@@ -929,7 +956,7 @@ BEGIN
     IF v_has_pg_stat_statements THEN
         RETURN QUERY
         WITH qids AS (
-            SELECT s.data[i] as map_id
+            SELECT s.slot, s.data[i] as map_id
             FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
@@ -937,30 +964,30 @@ BEGIN
               AND s.data[i] >= 0          -- not a wait_id marker
               AND s.data[i - 1] >= 0      -- not a count (count follows negative marker)
         ),
-        totals AS (
-            SELECT map_id, count(*) as cnt
-            FROM qids
-            WHERE map_id > 0  -- skip sentinel 0 (NULL query_id)
-            GROUP BY map_id
+        resolved AS (
+            SELECT qm.query_id, count(*) as cnt
+            FROM qids q
+            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
+            WHERE q.map_id > 0  -- skip sentinel 0 (NULL query_id)
+            GROUP BY qm.query_id
         ),
         grand_total AS (
-            SELECT sum(cnt) as total FROM totals
+            SELECT sum(cnt) as total FROM resolved
         )
         SELECT
-            qm.query_id,
-            t.cnt as samples,
-            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            r.query_id,
+            r.cnt as samples,
+            round(r.cnt::numeric / gt.total * 100, 2) as pct,
             left(pss.query, 100) as query_text
-        FROM totals t
-        JOIN ash.query_map qm ON qm.id = t.map_id
+        FROM resolved r
         CROSS JOIN grand_total gt
-        LEFT JOIN pg_stat_statements pss ON pss.queryid = qm.query_id
-        ORDER BY t.cnt DESC
+        LEFT JOIN pg_stat_statements pss ON pss.queryid = r.query_id
+        ORDER BY r.cnt DESC
         LIMIT p_limit;
     ELSE
         RETURN QUERY
         WITH qids AS (
-            SELECT s.data[i] as map_id
+            SELECT s.slot, s.data[i] as map_id
             FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
@@ -968,24 +995,24 @@ BEGIN
               AND s.data[i] >= 0
               AND s.data[i - 1] >= 0
         ),
-        totals AS (
-            SELECT map_id, count(*) as cnt
-            FROM qids
-            WHERE map_id > 0
-            GROUP BY map_id
+        resolved AS (
+            SELECT qm.query_id, count(*) as cnt
+            FROM qids q
+            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
+            WHERE q.map_id > 0
+            GROUP BY qm.query_id
         ),
         grand_total AS (
-            SELECT sum(cnt) as total FROM totals
+            SELECT sum(cnt) as total FROM resolved
         )
         SELECT
-            qm.query_id,
-            t.cnt as samples,
-            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            r.query_id,
+            r.cnt as samples,
+            round(r.cnt::numeric / gt.total * 100, 2) as pct,
             NULL::text as query_text
-        FROM totals t
-        JOIN ash.query_map qm ON qm.id = t.map_id
+        FROM resolved r
         CROSS JOIN grand_total gt
-        ORDER BY t.cnt DESC
+        ORDER BY r.cnt DESC
         LIMIT p_limit;
     END IF;
 END;
@@ -1064,7 +1091,7 @@ BEGIN
     IF v_has_pgss THEN
         RETURN QUERY
         WITH qids AS (
-            SELECT s.data[i] as map_id
+            SELECT s.slot, s.data[i] as map_id
             FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
@@ -1072,32 +1099,32 @@ BEGIN
               AND s.data[i] >= 0
               AND s.data[i - 1] >= 0
         ),
-        totals AS (
-            SELECT map_id, count(*) as cnt
-            FROM qids
-            WHERE map_id > 0
-            GROUP BY map_id
+        resolved AS (
+            SELECT qm.query_id, count(*) as cnt
+            FROM qids q
+            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
+            WHERE q.map_id > 0
+            GROUP BY qm.query_id
         ),
         grand_total AS (
-            SELECT sum(cnt) as total FROM totals
+            SELECT sum(cnt) as total FROM resolved
         )
         SELECT
-            qm.query_id,
-            t.cnt as samples,
-            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            r.query_id,
+            r.cnt as samples,
+            round(r.cnt::numeric / gt.total * 100, 2) as pct,
             pss.calls,
             round(pss.mean_exec_time::numeric, 2) as mean_time_ms,
             left(pss.query, 200) as query_text
-        FROM totals t
-        JOIN ash.query_map qm ON qm.id = t.map_id
+        FROM resolved r
         CROSS JOIN grand_total gt
-        LEFT JOIN pg_stat_statements pss ON pss.queryid = qm.query_id
-        ORDER BY t.cnt DESC
+        LEFT JOIN pg_stat_statements pss ON pss.queryid = r.query_id
+        ORDER BY r.cnt DESC
         LIMIT p_limit;
     ELSE
         RETURN QUERY
         WITH qids AS (
-            SELECT s.data[i] as map_id
+            SELECT s.slot, s.data[i] as map_id
             FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
@@ -1105,26 +1132,26 @@ BEGIN
               AND s.data[i] >= 0
               AND s.data[i - 1] >= 0
         ),
-        totals AS (
-            SELECT map_id, count(*) as cnt
-            FROM qids
-            WHERE map_id > 0
-            GROUP BY map_id
+        resolved AS (
+            SELECT qm.query_id, count(*) as cnt
+            FROM qids q
+            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
+            WHERE q.map_id > 0
+            GROUP BY qm.query_id
         ),
         grand_total AS (
-            SELECT sum(cnt) as total FROM totals
+            SELECT sum(cnt) as total FROM resolved
         )
         SELECT
-            qm.query_id,
-            t.cnt as samples,
-            round(t.cnt::numeric / gt.total * 100, 2) as pct,
+            r.query_id,
+            r.cnt as samples,
+            round(r.cnt::numeric / gt.total * 100, 2) as pct,
             NULL::bigint as calls,
             NULL::numeric as mean_time_ms,
             NULL::text as query_text
-        FROM totals t
-        JOIN ash.query_map qm ON qm.id = t.map_id
+        FROM resolved r
         CROSS JOIN grand_total gt
-        ORDER BY t.cnt DESC
+        ORDER BY r.cnt DESC
         LIMIT p_limit;
     END IF;
 END;
@@ -1146,16 +1173,18 @@ LANGUAGE plpgsql
 STABLE
 SET jit = off
 AS $$
-DECLARE
-    v_map_id int4;
 BEGIN
-    SELECT id INTO v_map_id FROM ash.query_map WHERE query_id = p_query_id;
-    IF v_map_id IS NULL THEN
+    -- Check if this query_id exists in any partition
+    IF NOT EXISTS (SELECT 1 FROM ash.query_map_all WHERE query_id = p_query_id) THEN
         RETURN;
     END IF;
 
     RETURN QUERY
-    WITH hits AS (
+    WITH map_ids AS (
+        -- All (slot, id) pairs for this query across partitions
+        SELECT slot, id FROM ash.query_map_all WHERE query_id = p_query_id
+    ),
+    hits AS (
         -- Find every position where the query appears in a sample,
         -- then walk backwards to find the wait group marker
         SELECT
@@ -1168,9 +1197,9 @@ BEGIN
         WHERE s.slot = ANY(ash._active_slots())
           AND s.sample_ts >= extract(epoch FROM now() - p_interval - ash.epoch())::int4
           AND i > 1
-          AND s.data[i] = v_map_id
           AND s.data[i] >= 0
           AND s.data[i - 1] >= 0  -- it's a query_id position, not a count
+          AND EXISTS (SELECT 1 FROM map_ids m WHERE m.slot = s.slot AND m.id = s.data[i])
     ),
     totals AS (
         SELECT wait_id, count(*) as cnt
@@ -1319,46 +1348,52 @@ BEGIN
     IF v_has_pgss THEN
         RETURN QUERY
         WITH qids AS (
-            SELECT s.data[i] as map_id
+            SELECT s.slot, s.data[i] as map_id
             FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= v_start AND s.sample_ts < v_end
               AND i > 1 AND s.data[i] >= 0 AND s.data[i - 1] >= 0
         ),
-        totals AS (
-            SELECT map_id, count(*) as cnt FROM qids WHERE map_id > 0 GROUP BY map_id
+        resolved AS (
+            SELECT qm.query_id, count(*) as cnt
+            FROM qids q
+            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
+            WHERE q.map_id > 0
+            GROUP BY qm.query_id
         ),
         grand_total AS (
-            SELECT sum(cnt) as total FROM totals
+            SELECT sum(cnt) as total FROM resolved
         )
-        SELECT qm.query_id, t.cnt, round(t.cnt::numeric / gt.total * 100, 2),
+        SELECT r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
                left(pss.query, 100)
-        FROM totals t
-        JOIN ash.query_map qm ON qm.id = t.map_id
+        FROM resolved r
         CROSS JOIN grand_total gt
-        LEFT JOIN pg_stat_statements pss ON pss.queryid = qm.query_id
-        ORDER BY t.cnt DESC LIMIT p_limit;
+        LEFT JOIN pg_stat_statements pss ON pss.queryid = r.query_id
+        ORDER BY r.cnt DESC LIMIT p_limit;
     ELSE
         RETURN QUERY
         WITH qids AS (
-            SELECT s.data[i] as map_id
+            SELECT s.slot, s.data[i] as map_id
             FROM ash.sample s, generate_subscripts(s.data, 1) i
             WHERE s.slot = ANY(ash._active_slots())
               AND s.sample_ts >= v_start AND s.sample_ts < v_end
               AND i > 1 AND s.data[i] >= 0 AND s.data[i - 1] >= 0
         ),
-        totals AS (
-            SELECT map_id, count(*) as cnt FROM qids WHERE map_id > 0 GROUP BY map_id
+        resolved AS (
+            SELECT qm.query_id, count(*) as cnt
+            FROM qids q
+            JOIN ash.query_map_all qm ON qm.slot = q.slot AND qm.id = q.map_id
+            WHERE q.map_id > 0
+            GROUP BY qm.query_id
         ),
         grand_total AS (
-            SELECT sum(cnt) as total FROM totals
+            SELECT sum(cnt) as total FROM resolved
         )
-        SELECT qm.query_id, t.cnt, round(t.cnt::numeric / gt.total * 100, 2),
+        SELECT r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
                NULL::text
-        FROM totals t
-        JOIN ash.query_map qm ON qm.id = t.map_id
+        FROM resolved r
         CROSS JOIN grand_total gt
-        ORDER BY t.cnt DESC LIMIT p_limit;
+        ORDER BY r.cnt DESC LIMIT p_limit;
     END IF;
 END;
 $$;
@@ -1450,15 +1485,18 @@ STABLE
 SET jit = off
 AS $$
 DECLARE
-    v_map_id int4;
     v_start int4 := ash._to_sample_ts(p_start);
     v_end int4 := ash._to_sample_ts(p_end);
 BEGIN
-    SELECT id INTO v_map_id FROM ash.query_map WHERE query_id = p_query_id;
-    IF v_map_id IS NULL THEN RETURN; END IF;
+    IF NOT EXISTS (SELECT 1 FROM ash.query_map_all WHERE query_id = p_query_id) THEN
+        RETURN;
+    END IF;
 
     RETURN QUERY
-    WITH hits AS (
+    WITH map_ids AS (
+        SELECT slot, id FROM ash.query_map_all WHERE query_id = p_query_id
+    ),
+    hits AS (
         SELECT
             (SELECT (- s.data[j])::smallint
              FROM generate_series(i, 1, -1) j
@@ -1467,8 +1505,9 @@ BEGIN
         FROM ash.sample s, generate_subscripts(s.data, 1) i
         WHERE s.slot = ANY(ash._active_slots())
           AND s.sample_ts >= v_start AND s.sample_ts < v_end
-          AND i > 1 AND s.data[i] = v_map_id
+          AND i > 1
           AND s.data[i] >= 0 AND s.data[i - 1] >= 0
+          AND EXISTS (SELECT 1 FROM map_ids m WHERE m.slot = s.slot AND m.id = s.data[i])
     ),
     totals AS (
         SELECT wait_id, count(*) as cnt FROM hits WHERE wait_id IS NOT NULL GROUP BY wait_id
@@ -1675,6 +1714,7 @@ BEGIN
         WITH decoded AS (
             SELECT
                 s.sample_ts,
+                s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
@@ -1698,7 +1738,7 @@ BEGIN
             left(pgss.query, 80)
         FROM decoded d
         JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
         LEFT JOIN pg_database db ON db.oid = d.datid
         LEFT JOIN pg_stat_statements pgss ON pgss.queryid = qm.query_id
             AND pgss.dbid = d.datid
@@ -1709,6 +1749,7 @@ BEGIN
         WITH decoded AS (
             SELECT
                 s.sample_ts,
+                s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
@@ -1732,7 +1773,7 @@ BEGIN
             NULL::text
         FROM decoded d
         JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
         LEFT JOIN pg_database db ON db.oid = d.datid
         ORDER BY d.sample_ts DESC, wm.type, wm.event
         LIMIT p_limit;
@@ -1777,6 +1818,7 @@ BEGIN
         WITH decoded AS (
             SELECT
                 s.sample_ts,
+                s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
@@ -1800,7 +1842,7 @@ BEGIN
             left(pgss.query, 80)
         FROM decoded d
         JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
         LEFT JOIN pg_database db ON db.oid = d.datid
         LEFT JOIN pg_stat_statements pgss ON pgss.queryid = qm.query_id
             AND pgss.dbid = d.datid
@@ -1811,6 +1853,7 @@ BEGIN
         WITH decoded AS (
             SELECT
                 s.sample_ts,
+                s.slot,
                 s.datid,
                 s.active_count,
                 (-s.data[i])::smallint as wait_id,
@@ -1834,7 +1877,7 @@ BEGIN
             NULL::text
         FROM decoded d
         JOIN ash.wait_event_map wm ON wm.id = d.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN ash.query_map_all qm ON qm.slot = d.slot AND qm.id = d.map_id AND d.map_id != 0
         LEFT JOIN pg_database db ON db.oid = d.datid
         ORDER BY d.sample_ts DESC, wm.type, wm.event
         LIMIT p_limit;
