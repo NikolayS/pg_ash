@@ -204,7 +204,7 @@ begin
             v_idx := v_idx + 1;
         end loop;
 
-        if v_qid_count != v_count then
+        if v_qid_count <> v_count then
             return false;
         end if;
     end loop;
@@ -279,7 +279,7 @@ begin
         where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
           and (sa.backend_type = 'client backend'
                or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          and sa.pid != pg_backend_pid()
+          and sa.pid <> pg_backend_pid()
     loop
         if not exists (
             select 1 from ash.wait_event_map
@@ -302,7 +302,7 @@ begin
           and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
           and (sa.backend_type = 'client backend'
                or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          and sa.pid != pg_backend_pid()
+          and sa.pid <> pg_backend_pid()
           and (select reltuples from pg_class
                where oid = 'ash.query_map_0'::regclass) < 50000
         on conflict (query_id) do nothing;
@@ -314,7 +314,7 @@ begin
           and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
           and (sa.backend_type = 'client backend'
                or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          and sa.pid != pg_backend_pid()
+          and sa.pid <> pg_backend_pid()
           and (select reltuples from pg_class
                where oid = 'ash.query_map_1'::regclass) < 50000
         on conflict (query_id) do nothing;
@@ -326,7 +326,7 @@ begin
           and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
           and (sa.backend_type = 'client backend'
                or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          and sa.pid != pg_backend_pid()
+          and sa.pid <> pg_backend_pid()
           and (select reltuples from pg_class
                where oid = 'ash.query_map_2'::regclass) < 50000
         on conflict (query_id) do nothing;
@@ -341,7 +341,7 @@ begin
         where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
           and (sa.backend_type = 'client backend'
                or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-          and sa.pid != pg_backend_pid()
+          and sa.pid <> pg_backend_pid()
     loop
         begin
             -- Single query: snapshot → group by wait → encode → flatten
@@ -362,7 +362,7 @@ begin
                 where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
                   and (sa.backend_type = 'client backend'
                        or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-                  and sa.pid != pg_backend_pid()
+                  and sa.pid <> pg_backend_pid()
                   and coalesce(sa.datid, 0::oid) = v_datid_rec.datid
             ),
             groups as (
@@ -975,7 +975,7 @@ as $$
 declare
     v_has_pg_stat_statements boolean := false;
 begin
-    -- Probe the view directly — extension installed != shared library loaded
+    -- Probe the view directly — extension installed <> shared library loaded
     begin
         perform 1 from pg_stat_statements limit 1;
         v_has_pg_stat_statements := true;
@@ -1110,7 +1110,7 @@ as $$
 declare
     v_has_pgss boolean := false;
 begin
-    -- Probe the view directly — extension installed != shared library loaded
+    -- Probe the view directly — extension installed <> shared library loaded
     begin
         perform 1 from pg_stat_statements limit 1;
         v_has_pgss := true;
@@ -1367,7 +1367,7 @@ declare
     v_start int4 := ash._to_sample_ts(p_start);
     v_end int4 := ash._to_sample_ts(p_end);
 begin
-    -- Probe the view directly — extension installed != shared library loaded
+    -- Probe the view directly — extension installed <> shared library loaded
     begin
         perform 1 from pg_stat_statements limit 1;
         v_has_pgss := true;
@@ -1620,7 +1620,7 @@ begin
     v_rank := 0;
     for r in select tw.wait_event || ' (' || tw.pct || '%)' as desc
              from ash.top_waits(p_interval, 4) tw
-             where tw.wait_event != 'Other'
+             where tw.wait_event <> 'Other'
     loop
         v_rank := v_rank + 1;
         return query select 'top_wait_' || v_rank, r.desc;
@@ -1768,7 +1768,7 @@ begin
             left(pgss.query, 80)
         from decoded d
         join ash.wait_event_map wm on wm.id = d.wait_id
-        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
         left join pg_database db on db.oid = d.datid
         left join pg_stat_statements pgss on pgss.queryid = qm.query_id
             and pgss.dbid = d.datid
@@ -1803,7 +1803,7 @@ begin
             null::text
         from decoded d
         join ash.wait_event_map wm on wm.id = d.wait_id
-        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
         left join pg_database db on db.oid = d.datid
         order by d.sample_ts desc, wm.type, wm.event
         limit p_limit;
@@ -1872,7 +1872,7 @@ begin
             left(pgss.query, 80)
         from decoded d
         join ash.wait_event_map wm on wm.id = d.wait_id
-        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
         left join pg_database db on db.oid = d.datid
         left join pg_stat_statements pgss on pgss.queryid = qm.query_id
             and pgss.dbid = d.datid
@@ -1907,7 +1907,7 @@ begin
             null::text
         from decoded d
         join ash.wait_event_map wm on wm.id = d.wait_id
-        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id != 0
+        left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
         left join pg_database db on db.oid = d.datid
         order by d.sample_ts desc, wm.type, wm.event
         limit p_limit;
