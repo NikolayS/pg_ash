@@ -1730,61 +1730,69 @@ BEGIN
 
     IF v_has_pgss THEN
         RETURN QUERY
-        SELECT
-            ash.epoch() + make_interval(secs => s.sample_ts) as sample_time,
-            COALESCE(d.datname, '<oid:' || s.datid || '>') as database_name,
-            s.active_count as active_backends,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END as wait_event,
-            qm.query_id,
-            left(pgss.query, 80) as query_text
-        FROM ash.sample s,
-        LATERAL (
+        WITH decoded AS (
             SELECT
+                s.sample_ts,
+                s.datid,
+                s.active_count,
                 (-s.data[i])::smallint as wait_id,
-                s.data[i + 1 + gs.n] as map_id
-            FROM generate_subscripts(s.data, 1) i,
-                 generate_series(0, s.data[i + 1] - 1) gs(n)
-            WHERE s.data[i] < 0
+                s.data[i + 2 + gs.n] as map_id
+            FROM ash.sample s,
+                 generate_subscripts(s.data, 1) i,
+                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= v_min_ts
+              AND s.data[i] < 0
               AND i + 1 <= array_length(s.data, 1)
-              AND i + 1 + gs.n <= array_length(s.data, 1)
-        ) decoded
-        JOIN ash.wait_event_map wm ON wm.id = decoded.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = decoded.map_id AND decoded.map_id != 0
-        LEFT JOIN pg_database d ON d.oid = s.datid
+              AND i + 2 + gs.n <= array_length(s.data, 1)
+        )
+        SELECT
+            ash.epoch() + make_interval(secs => d.sample_ts),
+            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            d.active_count,
+            CASE WHEN wm.event = wm.type THEN wm.event
+                 ELSE wm.type || ':' || wm.event END,
+            qm.query_id,
+            left(pgss.query, 80)
+        FROM decoded d
+        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
+        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN pg_database db ON db.oid = d.datid
         LEFT JOIN pg_stat_statements pgss ON pgss.queryid = qm.query_id
-            AND pgss.dbid = s.datid
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= v_min_ts
-        ORDER BY s.sample_ts DESC, wm.type, wm.event
+            AND pgss.dbid = d.datid
+        ORDER BY d.sample_ts DESC, wm.type, wm.event
         LIMIT p_limit;
     ELSE
         RETURN QUERY
-        SELECT
-            ash.epoch() + make_interval(secs => s.sample_ts) as sample_time,
-            COALESCE(d.datname, '<oid:' || s.datid || '>') as database_name,
-            s.active_count as active_backends,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END as wait_event,
-            qm.query_id,
-            NULL::text as query_text
-        FROM ash.sample s,
-        LATERAL (
+        WITH decoded AS (
             SELECT
+                s.sample_ts,
+                s.datid,
+                s.active_count,
                 (-s.data[i])::smallint as wait_id,
-                s.data[i + 1 + gs.n] as map_id
-            FROM generate_subscripts(s.data, 1) i,
-                 generate_series(0, s.data[i + 1] - 1) gs(n)
-            WHERE s.data[i] < 0
+                s.data[i + 2 + gs.n] as map_id
+            FROM ash.sample s,
+                 generate_subscripts(s.data, 1) i,
+                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= v_min_ts
+              AND s.data[i] < 0
               AND i + 1 <= array_length(s.data, 1)
-              AND i + 1 + gs.n <= array_length(s.data, 1)
-        ) decoded
-        JOIN ash.wait_event_map wm ON wm.id = decoded.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = decoded.map_id AND decoded.map_id != 0
-        LEFT JOIN pg_database d ON d.oid = s.datid
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= v_min_ts
-        ORDER BY s.sample_ts DESC, wm.type, wm.event
+              AND i + 2 + gs.n <= array_length(s.data, 1)
+        )
+        SELECT
+            ash.epoch() + make_interval(secs => d.sample_ts),
+            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            d.active_count,
+            CASE WHEN wm.event = wm.type THEN wm.event
+                 ELSE wm.type || ':' || wm.event END,
+            qm.query_id,
+            NULL::text
+        FROM decoded d
+        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
+        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN pg_database db ON db.oid = d.datid
+        ORDER BY d.sample_ts DESC, wm.type, wm.event
         LIMIT p_limit;
     END IF;
 END;
@@ -1824,61 +1832,69 @@ BEGIN
 
     IF v_has_pgss THEN
         RETURN QUERY
-        SELECT
-            ash.epoch() + make_interval(secs => s.sample_ts) as sample_time,
-            COALESCE(d.datname, '<oid:' || s.datid || '>') as database_name,
-            s.active_count as active_backends,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END as wait_event,
-            qm.query_id,
-            left(pgss.query, 80) as query_text
-        FROM ash.sample s,
-        LATERAL (
+        WITH decoded AS (
             SELECT
+                s.sample_ts,
+                s.datid,
+                s.active_count,
                 (-s.data[i])::smallint as wait_id,
-                s.data[i + 1 + gs.n] as map_id
-            FROM generate_subscripts(s.data, 1) i,
-                 generate_series(0, s.data[i + 1] - 1) gs(n)
-            WHERE s.data[i] < 0
+                s.data[i + 2 + gs.n] as map_id
+            FROM ash.sample s,
+                 generate_subscripts(s.data, 1) i,
+                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= v_start AND s.sample_ts < v_end
+              AND s.data[i] < 0
               AND i + 1 <= array_length(s.data, 1)
-              AND i + 1 + gs.n <= array_length(s.data, 1)
-        ) decoded
-        JOIN ash.wait_event_map wm ON wm.id = decoded.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = decoded.map_id AND decoded.map_id != 0
-        LEFT JOIN pg_database d ON d.oid = s.datid
+              AND i + 2 + gs.n <= array_length(s.data, 1)
+        )
+        SELECT
+            ash.epoch() + make_interval(secs => d.sample_ts),
+            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            d.active_count,
+            CASE WHEN wm.event = wm.type THEN wm.event
+                 ELSE wm.type || ':' || wm.event END,
+            qm.query_id,
+            left(pgss.query, 80)
+        FROM decoded d
+        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
+        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN pg_database db ON db.oid = d.datid
         LEFT JOIN pg_stat_statements pgss ON pgss.queryid = qm.query_id
-            AND pgss.dbid = s.datid
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= v_start AND s.sample_ts < v_end
-        ORDER BY s.sample_ts DESC, wm.type, wm.event
+            AND pgss.dbid = d.datid
+        ORDER BY d.sample_ts DESC, wm.type, wm.event
         LIMIT p_limit;
     ELSE
         RETURN QUERY
-        SELECT
-            ash.epoch() + make_interval(secs => s.sample_ts) as sample_time,
-            COALESCE(d.datname, '<oid:' || s.datid || '>') as database_name,
-            s.active_count as active_backends,
-            CASE WHEN wm.event = wm.type THEN wm.event
-                 ELSE wm.type || ':' || wm.event END as wait_event,
-            qm.query_id,
-            NULL::text as query_text
-        FROM ash.sample s,
-        LATERAL (
+        WITH decoded AS (
             SELECT
+                s.sample_ts,
+                s.datid,
+                s.active_count,
                 (-s.data[i])::smallint as wait_id,
-                s.data[i + 1 + gs.n] as map_id
-            FROM generate_subscripts(s.data, 1) i,
-                 generate_series(0, s.data[i + 1] - 1) gs(n)
-            WHERE s.data[i] < 0
+                s.data[i + 2 + gs.n] as map_id
+            FROM ash.sample s,
+                 generate_subscripts(s.data, 1) i,
+                 generate_series(0, GREATEST(s.data[i + 1] - 1, -1)) gs(n)
+            WHERE s.slot = ANY(ash._active_slots())
+              AND s.sample_ts >= v_start AND s.sample_ts < v_end
+              AND s.data[i] < 0
               AND i + 1 <= array_length(s.data, 1)
-              AND i + 1 + gs.n <= array_length(s.data, 1)
-        ) decoded
-        JOIN ash.wait_event_map wm ON wm.id = decoded.wait_id
-        LEFT JOIN ash.query_map qm ON qm.id = decoded.map_id AND decoded.map_id != 0
-        LEFT JOIN pg_database d ON d.oid = s.datid
-        WHERE s.slot = ANY(ash._active_slots())
-          AND s.sample_ts >= v_start AND s.sample_ts < v_end
-        ORDER BY s.sample_ts DESC, wm.type, wm.event
+              AND i + 2 + gs.n <= array_length(s.data, 1)
+        )
+        SELECT
+            ash.epoch() + make_interval(secs => d.sample_ts),
+            COALESCE(db.datname, '<oid:' || d.datid || '>'),
+            d.active_count,
+            CASE WHEN wm.event = wm.type THEN wm.event
+                 ELSE wm.type || ':' || wm.event END,
+            qm.query_id,
+            NULL::text
+        FROM decoded d
+        JOIN ash.wait_event_map wm ON wm.id = d.wait_id
+        LEFT JOIN ash.query_map qm ON qm.id = d.map_id AND d.map_id != 0
+        LEFT JOIN pg_database db ON db.oid = d.datid
+        ORDER BY d.sample_ts DESC, wm.type, wm.event
         LIMIT p_limit;
     END IF;
 END;
