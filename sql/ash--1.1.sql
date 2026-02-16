@@ -1,5 +1,12 @@
 -- pg_ash: Active Session History for Postgres
--- Steps 1-2: Core schema, infrastructure, sampler, and decoder
+-- Version 1.1
+--
+-- Safe to run on top of 1.0 — all objects use IF NOT EXISTS / CREATE OR REPLACE.
+-- Upgrade: \i ash--1.1.sql
+
+-- Drop functions removed in 1.1 (histogram folded into top_waits)
+drop function if exists ash.histogram(interval, int, int);
+drop function if exists ash.histogram_at(timestamptz, timestamptz, int, int);
 
 --------------------------------------------------------------------------------
 -- STEP 1: Core schema and infrastructure
