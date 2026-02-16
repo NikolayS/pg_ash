@@ -1745,7 +1745,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_other_color text := E'\033[36m';  -- cyan for Other
-  i int;
+  v_i int;
 begin
   v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
@@ -1784,8 +1784,8 @@ begin
 
   -- Build color array for each event
   v_event_colors := array[]::text[];
-  for i in 1..array_length(v_top_events, 1) loop
-    v_event_colors := v_event_colors || ash._wait_color(v_top_events[i]);
+  for v_i in 1..array_length(v_top_events, 1) loop
+    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i]);
   end loop;
 
   -- Find max average active sessions across all buckets for bar scaling
@@ -1808,9 +1808,9 @@ begin
 
   -- Emit legend header row with colored blocks
   v_legend := '';
-  for i in 1..array_length(v_top_events, 1) loop
-    if i > 1 then v_legend := v_legend || '  '; end if;
-    v_legend := v_legend || v_event_colors[i] || '█' || v_reset || ' ' || v_top_events[i];
+  for v_i in 1..array_length(v_top_events, 1) loop
+    if v_i > 1 then v_legend := v_legend || '  '; end if;
+    v_legend := v_legend || v_event_colors[v_i] || '█' || v_reset || ' ' || v_top_events[v_i];
   end loop;
   v_legend := v_legend || '  ' || v_other_color || '█' || v_reset || ' Other';
   bucket_start := null;
@@ -1940,7 +1940,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_other_color text := E'\033[36m';  -- cyan for Other
-  i int;
+  v_i int;
 begin
   v_start_ts := ash._to_sample_ts(p_start);
   v_end_ts := ash._to_sample_ts(p_end);
@@ -1980,8 +1980,8 @@ begin
 
   -- Build color array for each event
   v_event_colors := array[]::text[];
-  for i in 1..array_length(v_top_events, 1) loop
-    v_event_colors := v_event_colors || ash._wait_color(v_top_events[i]);
+  for v_i in 1..array_length(v_top_events, 1) loop
+    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i]);
   end loop;
 
   select max(avg_total) into v_max_active
@@ -2003,9 +2003,9 @@ begin
 
   -- Emit legend header row with colored blocks
   v_legend := '';
-  for i in 1..array_length(v_top_events, 1) loop
-    if i > 1 then v_legend := v_legend || '  '; end if;
-    v_legend := v_legend || v_event_colors[i] || '█' || v_reset || ' ' || v_top_events[i];
+  for v_i in 1..array_length(v_top_events, 1) loop
+    if v_i > 1 then v_legend := v_legend || '  '; end if;
+    v_legend := v_legend || v_event_colors[v_i] || '█' || v_reset || ' ' || v_top_events[v_i];
   end loop;
   v_legend := v_legend || '  ' || v_other_color || '█' || v_reset || ' Other';
   bucket_start := null;
