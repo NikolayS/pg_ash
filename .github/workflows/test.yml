@@ -179,7 +179,7 @@ jobs:
 
             -- Verify decoded fields
             SELECT * INTO v_result
-            FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[], 0)
+            FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[], 0::smallint)
             LIMIT 1;
             ASSERT v_result.state = 'active', 'wrong state: ' || v_result.state;
             ASSERT v_result.wait_type = 'CPU*', 'wrong wait_type: ' || v_result.wait_type;
@@ -698,7 +698,7 @@ jobs:
             SELECT count(*) INTO v_count FROM ash.status();
             ASSERT v_count > 0, 'status failed';
 
-            SELECT ash.take_sample();
+            PERFORM ash.take_sample();
 
             SELECT count(*) INTO v_count FROM ash.top_waits('1 hour');
             ASSERT v_count > 0, 'top_waits failed';
