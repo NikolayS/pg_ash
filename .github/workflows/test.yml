@@ -69,7 +69,7 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -f sql/ash--1.0.sql
+          psql -h localhost -U postgres -d postgres -f sql/ash--1.1.sql
 
       - name: Test Step 1 - Schema and infrastructure
         env:
@@ -232,7 +232,7 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -f sql/ash--1.0.sql
+          psql -h localhost -U postgres -d postgres -f sql/ash--1.1.sql
           psql -h localhost -U postgres -d postgres -c "SELECT * FROM ash.status() LIMIT 5;"
           echo "All tests passed for PostgreSQL ${{ matrix.postgres }}"
 
@@ -250,7 +250,7 @@ jobs:
 
       - name: Install pg_ash
         run: |
-          psql -d postgres -f sql/ash--1.0.sql
+          psql -d postgres -f sql/ash--1.1.sql
 
       - name: Run tests
         run: |

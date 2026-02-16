@@ -26,7 +26,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 
 ```sql
 -- install (just run the SQL file — works on RDS, Cloud SQL, AlloyDB, etc.)
-\i ash--1.0.sql
+\i ash--1.1.sql
 
 -- start sampling (1 sample/second via pg_cron)
 select ash.start('1 second');
