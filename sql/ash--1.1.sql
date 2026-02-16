@@ -919,7 +919,7 @@ as $$
     case
       when p_event like 'CPU%' then E'\033[38;2;80;250;123m'           -- green (RGB)
       when p_event = 'IdleTx' then E'\033[38;2;241;250;140m'        -- yellow (RGB)
-      when p_event like 'IO:%' then E'\033[38;2;98;114;164m'        -- blue (RGB)
+      when p_event like 'IO:%' then E'\033[38;2;30;100;255m'        -- vivid blue (RGB)
       when p_event like 'Lock:%' then E'\033[38;2;255;85;85m'       -- red (RGB)
       when p_event like 'LWLock:%' then E'\033[38;2;255;184;108m'   -- orange (RGB)
       when p_event like 'Client:%'
