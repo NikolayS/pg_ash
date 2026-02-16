@@ -1745,7 +1745,6 @@ declare
   v_bar text;
   v_legend text;
   v_char_count int;
-  v_total_chars int;
   v_val numeric;
   v_top_events text[];
   v_event_colors text[];
@@ -1871,7 +1870,6 @@ begin
   loop
     v_bar := '';
     v_legend := '';
-    v_total_chars := 0;
 
     -- Colored stacked bar for each top event
     for v_i in 1..array_length(v_top_events, 1) loop
@@ -1880,7 +1878,6 @@ begin
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
           v_bar := v_bar || v_event_colors[v_i] || repeat('█', v_char_count) || v_reset;
-          v_total_chars := v_total_chars + v_char_count;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
@@ -1936,7 +1933,6 @@ declare
   v_bar text;
   v_legend text;
   v_char_count int;
-  v_total_chars int;
   v_val numeric;
   v_top_events text[];
   v_event_colors text[];
@@ -2061,7 +2057,6 @@ begin
   loop
     v_bar := '';
     v_legend := '';
-    v_total_chars := 0;
 
     -- Colored stacked bar for each top event
     for v_i in 1..array_length(v_top_events, 1) loop
@@ -2070,7 +2065,6 @@ begin
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
           v_bar := v_bar || v_event_colors[v_i] || repeat('█', v_char_count) || v_reset;
-          v_total_chars := v_total_chars + v_char_count;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
