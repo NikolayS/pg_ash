@@ -529,7 +529,7 @@ jobs:
           DO $$
           DECLARE
             v_bright_green text := E'\033[92m';
-            v_bright_blue text := E'\033[94m';
+            v_blue text := E'\033[34m';
             v_red text := E'\033[31m';
             v_yellow text := E'\033[33m';
             v_bright_yellow text := E'\033[93m';
@@ -538,8 +538,8 @@ jobs:
           BEGIN
             ASSERT ash._wait_color('CPU*') = v_bright_green, 'CPU* should be bright green';
             ASSERT ash._wait_color('IdleTx') = v_yellow, 'IdleTx should be yellow';
-            ASSERT ash._wait_color('IO:DataFileRead') = v_bright_blue, 'IO should be bright blue';
-            ASSERT ash._wait_color('IO:WALWrite') = v_bright_blue, 'IO:WALWrite should be bright blue';
+            ASSERT ash._wait_color('IO:DataFileRead') = v_blue, 'IO should be blue';
+            ASSERT ash._wait_color('IO:WALWrite') = v_blue, 'IO:WALWrite should be blue';
             ASSERT ash._wait_color('Lock:tuple') = v_red, 'Lock should be red';
             ASSERT ash._wait_color('Lock:transactionid') = v_red, 'Lock:transactionid should be red';
             ASSERT ash._wait_color('LWLock:WALWrite') = v_bright_yellow, 'LWLock should be bright yellow';
