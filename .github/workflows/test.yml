@@ -207,7 +207,7 @@ jobs:
 
             -- Force rotation
             UPDATE ash.config SET rotated_at = now() - interval '2 days';
-            SELECT ash.rotate();
+            PERFORM ash.rotate();
 
             SELECT current_slot INTO v_slot_after FROM ash.config;
             ASSERT v_slot_after <> v_slot_before,
