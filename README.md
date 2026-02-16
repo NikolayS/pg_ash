@@ -162,7 +162,9 @@ select * from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
  2026-02-16 08:39:00+00  |    5.3 | Client:ClientRead=3.3 LWLock:WALWrite=0.3 IdleTx=0.7 Other=1.0 | ███████████████████▓▓░░░░······
 ```
 
-Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other.
+Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color.
+
+**Experimental: ANSI colors.** Pass `p_color => true` to enable ANSI color-coded bars (bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other). Note: psql's table formatter escapes ANSI codes — colors only render in clients that pass raw bytes (pgcli, DataGrip, unaligned mode, or piped output).
 
 Example data generated with `pgbench -c 8 -T 65` on Postgres 17 with concurrent lock contention and idle-in-transaction sessions.
 

@@ -910,7 +910,7 @@ end;
 $$;
 
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
-create or replace function ash._wait_color(p_event text, p_color boolean default true)
+create or replace function ash._wait_color(p_event text, p_color boolean default false)
 returns text
 language sql
 immutable
@@ -930,7 +930,7 @@ as $$
 $$;
 
 -- Convenience: reset code, empty when color off
-create or replace function ash._reset(p_color boolean default true)
+create or replace function ash._reset(p_color boolean default false)
 returns text
 language sql
 immutable
@@ -942,7 +942,7 @@ create or replace function ash.top_waits(
   p_interval interval default '1 hour',
   p_limit int default 10,
   p_width int default 40,
-  p_color boolean default true
+  p_color boolean default false
 )
 returns table (
   wait_event text,
@@ -1388,7 +1388,7 @@ create or replace function ash.top_waits_at(
   p_end timestamptz,
   p_limit int default 10,
   p_width int default 40,
-  p_color boolean default true
+  p_color boolean default false
 )
 returns table (
   wait_event text,
@@ -1770,7 +1770,7 @@ create or replace function ash.timeline_chart(
   p_bucket interval default '1 minute',
   p_top int default 3,
   p_width int default 40,
-  p_color boolean default true
+  p_color boolean default false
 )
 returns table (
   bucket_start timestamptz,
@@ -1963,7 +1963,7 @@ create or replace function ash.timeline_chart_at(
   p_bucket interval default '1 minute',
   p_top int default 3,
   p_width int default 40,
-  p_color boolean default true
+  p_color boolean default false
 )
 returns table (
   bucket_start timestamptz,

@@ -6,20 +6,20 @@ Upgrade from 1.0: `\i sql/ash--1.1.sql` — safe to run on top of a running 1.0 
 
 ### New: timeline chart
 
-`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other.
+`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. ANSI colors are available as an experimental feature via `p_color => true` (bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other). Note: psql's table formatter escapes ANSI codes; colors work in pgcli, DataGrip, unaligned mode, or piped output.
 
 ```sql
 select * from ash.timeline_chart('1 hour', '5 minutes');
 select * from ash.timeline_chart_at('2026-02-14 19:50', '2026-02-14 20:10', '1 minute', 5, 50);
 ```
 
-Output: 4 columns — `bucket_start | active | detail | chart`. First row is a color legend. `p_top` controls how many events get individual bars (the rest roll into "Other"). Default `p_top = 3`.
+Output: 4 columns — `bucket_start | active | detail | chart`. First row is a legend. `p_top` controls how many events get individual bars (the rest roll into "Other"). Default `p_top = 3`.
 
 ### Changed: histogram folded into top_waits
 
 `histogram()` and `histogram_at()` removed. The `bar` column is now part of `top_waits()` and `top_waits_at()`, controlled by the `p_width` parameter (default 40). Same visualization, fewer functions.
 
-### Changed: IdleTx gets its own color
+### Changed: ANSI colors (experimental, off by default)
 
 `IdleTx` (idle-in-transaction) now renders as yellow (`\033[33m`) in timeline charts, distinguishable from CPU\* (bright green, `\033[92m`).
 
@@ -39,9 +39,9 @@ CI expanded from 16 assertions to 151. All 32 functions are directly tested acro
 
 | Function | Description |
 |---|---|
-| `timeline_chart(interval, bucket, top, width)` | **New** — stacked bar chart with ANSI colors |
+| `timeline_chart(interval, bucket, top, width, color)` | **New** — stacked bar chart (ANSI colors opt-in) |
 | `timeline_chart_at(start, end, bucket, top, width)` | **New** — absolute-time variant |
-| `_wait_color(event)` | **New** — ANSI color mapper for wait event types |
+| `_wait_color(event, color)` | **New** — ANSI color mapper (experimental) |
 | `top_waits(interval, limit, width)` | Top wait events with bar chart (was without `width` in 1.0) |
 | `top_waits_at(start, end, limit, width)` | Absolute-time variant with bar chart |
 
