@@ -6,7 +6,7 @@ Upgrade from 1.0: `\i sql/ash--1.1.sql` — safe to run on top of a running 1.0 
 
 ### New: timeline chart
 
-`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. ANSI color-coded in `psql`: green = CPU\*, bright green = IdleTx, red = Lock, blue = IO, yellow = LWLock, magenta = Client/Extension, cyan = Other.
+`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: green = CPU\*, bright green = IdleTx, red = Lock, blue = IO, yellow = LWLock, magenta = Client/Extension, cyan = Other.
 
 ```sql
 select * from ash.timeline_chart('1 hour', '5 minutes');

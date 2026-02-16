@@ -175,18 +175,18 @@ select * from ash.timeline_chart('1 hour', '5 minutes');
 
 ```
       bucket_start       | active | detail                                                  | chart
--------------------------+--------+---------------------------------------------------------+------------------------------------------
-                         |        |                                                         | █ CPU*  █ Lock:tuple  █ IO:DataFileRead  █ Other
- 2026-02-14 19:45:00+00  |    3.2 | CPU*=2.1 Lock:tuple=0.5 IO:DataFileRead=0.3 Other=0.3  | ██████████████████████████████████████████████
- 2026-02-14 19:50:00+00  |    3.4 | CPU*=2.0 Lock:tuple=0.8 IO:DataFileRead=0.3 Other=0.3  | █████████████████████████████████████████████████
- 2026-02-14 19:55:00+00  |   12.8 | CPU*=2.2 Lock:tuple=9.1 IO:DataFileRead=0.8 Other=0.7  | ██████████████████████████████████████████████████
- 2026-02-14 20:00:00+00  |   14.1 | CPU*=1.8 Lock:tuple=11.2 IO:DataFileRead=0.6 Other=0.5 | ██████████████████████████████████████████████████
- 2026-02-14 20:05:00+00  |   13.5 | CPU*=2.0 Lock:tuple=10.1 IO:DataFileRead=0.7 Other=0.7 | ██████████████████████████████████████████████████
- 2026-02-14 20:10:00+00  |    4.5 | CPU*=2.3 Lock:tuple=1.2 IO:DataFileRead=0.5 Other=0.5  | ███████████████████████████████████████████████
- 2026-02-14 20:15:00+00  |    3.1 | CPU*=2.0 Lock:tuple=0.4 IO:DataFileRead=0.4 Other=0.3  | █████████████████████████████████████████████
+-------------------------+--------+---------------------------------------------------------+--------------------------------------------------
+                         |        |                                                         | █ CPU*  ▓ Lock:tuple  ░ IO:DataFileRead  · Other
+ 2026-02-14 19:45:00+00  |    3.2 | CPU*=2.1 Lock:tuple=0.5 IO:DataFileRead=0.3 Other=0.3  | ██████████████████████████████████████████▓▓▓░░··
+ 2026-02-14 19:50:00+00  |    3.4 | CPU*=2.0 Lock:tuple=0.8 IO:DataFileRead=0.3 Other=0.3  | ████████████████████████████████████▓▓▓▓▓▓▓░░░··
+ 2026-02-14 19:55:00+00  |   12.8 | CPU*=2.2 Lock:tuple=9.1 IO:DataFileRead=0.8 Other=0.7  | ████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░··
+ 2026-02-14 20:00:00+00  |   14.1 | CPU*=1.8 Lock:tuple=11.2 IO:DataFileRead=0.6 Other=0.5 | ██████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░··
+ 2026-02-14 20:05:00+00  |   13.5 | CPU*=2.0 Lock:tuple=10.1 IO:DataFileRead=0.7 Other=0.7 | ███████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░··
+ 2026-02-14 20:10:00+00  |    4.5 | CPU*=2.3 Lock:tuple=1.2 IO:DataFileRead=0.5 Other=0.5  | ████████████████████████████████████▓▓▓▓░░░░░···
+ 2026-02-14 20:15:00+00  |    3.1 | CPU*=2.0 Lock:tuple=0.4 IO:DataFileRead=0.4 Other=0.3  | █████████████████████████████████████████████▓░░·
 ```
 
-In `psql`, bars are ANSI color-coded: green = CPU\*, red = Lock, blue = IO, bright green = IdleTx, yellow = LWLock, magenta = Client/Extension, cyan = Other. Each event type always gets the same color regardless of rank. Lock:tuple spike from 19:55 to 20:05 — classic row-level contention. Bar width scales to the peak bucket.
+Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: green = CPU\*, red = Lock, blue = IO, bright green = IdleTx, yellow = LWLock, magenta = Client/Extension, cyan = Other. Lock:tuple spike from 19:55 to 20:05 — classic row-level contention. Bar width scales to the peak bucket.
 
 ```sql
 -- zoom into yesterday's deploy window

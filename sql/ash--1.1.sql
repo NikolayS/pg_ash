@@ -1746,7 +1746,10 @@ declare
   v_val numeric;
   v_top_events text[];
   v_event_colors text[];
+  v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
   v_other_color text := E'\033[36m';  -- cyan for Other
+  v_other_char text := '·';
+  v_ch text;
   v_i int;
 begin
   v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
@@ -1808,13 +1811,14 @@ begin
     return;
   end if;
 
-  -- Emit legend header row with colored blocks
+  -- Emit legend header row with colored blocks (distinct chars per rank)
   v_legend := '';
   for v_i in 1..array_length(v_top_events, 1) loop
+    v_ch := coalesce(v_event_chars[v_i], v_event_chars[array_length(v_event_chars, 1)]);
     if v_i > 1 then v_legend := v_legend || '  '; end if;
-    v_legend := v_legend || v_event_colors[v_i] || '█' || v_reset || ' ' || v_top_events[v_i];
+    v_legend := v_legend || v_event_colors[v_i] || v_ch || v_reset || ' ' || v_top_events[v_i];
   end loop;
-  v_legend := v_legend || '  ' || v_other_color || '█' || v_reset || ' Other';
+  v_legend := v_legend || '  ' || v_other_color || v_other_char || v_reset || ' Other';
   bucket_start := null;
   active := null;
   detail := null;
@@ -1869,13 +1873,14 @@ begin
     v_bar := '';
     v_legend := '';
 
-    -- Colored stacked bar for each top event
+    -- Colored stacked bar for each top event (distinct char per rank)
     for v_i in 1..array_length(v_top_events, 1) loop
       v_val := coalesce((v_rec.events ->> v_top_events[v_i])::numeric, 0);
+      v_ch := coalesce(v_event_chars[v_i], v_event_chars[array_length(v_event_chars, 1)]);
       if v_val > 0 then
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
-          v_bar := v_bar || v_event_colors[v_i] || repeat('█', v_char_count) || v_reset;
+          v_bar := v_bar || v_event_colors[v_i] || repeat(v_ch, v_char_count) || v_reset;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
@@ -1889,7 +1894,7 @@ begin
     if v_val > 0 then
       v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
       if v_char_count > 0 then
-        v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
+        v_bar := v_bar || v_other_color || repeat(v_other_char, v_char_count) || v_reset;
       end if;
       v_legend := v_legend || ' Other=' || v_val;
     end if;
@@ -1934,7 +1939,10 @@ declare
   v_val numeric;
   v_top_events text[];
   v_event_colors text[];
+  v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
   v_other_color text := E'\033[36m';  -- cyan for Other
+  v_other_char text := '·';
+  v_ch text;
   v_i int;
 begin
   v_start_ts := ash._to_sample_ts(p_start);
@@ -1996,13 +2004,14 @@ begin
     return;
   end if;
 
-  -- Emit legend header row with colored blocks
+  -- Emit legend header row with colored blocks (distinct chars per rank)
   v_legend := '';
   for v_i in 1..array_length(v_top_events, 1) loop
+    v_ch := coalesce(v_event_chars[v_i], v_event_chars[array_length(v_event_chars, 1)]);
     if v_i > 1 then v_legend := v_legend || '  '; end if;
-    v_legend := v_legend || v_event_colors[v_i] || '█' || v_reset || ' ' || v_top_events[v_i];
+    v_legend := v_legend || v_event_colors[v_i] || v_ch || v_reset || ' ' || v_top_events[v_i];
   end loop;
-  v_legend := v_legend || '  ' || v_other_color || '█' || v_reset || ' Other';
+  v_legend := v_legend || '  ' || v_other_color || v_other_char || v_reset || ' Other';
   bucket_start := null;
   active := null;
   detail := null;
@@ -2056,13 +2065,14 @@ begin
     v_bar := '';
     v_legend := '';
 
-    -- Colored stacked bar for each top event
+    -- Colored stacked bar for each top event (distinct char per rank)
     for v_i in 1..array_length(v_top_events, 1) loop
       v_val := coalesce((v_rec.events ->> v_top_events[v_i])::numeric, 0);
+      v_ch := coalesce(v_event_chars[v_i], v_event_chars[array_length(v_event_chars, 1)]);
       if v_val > 0 then
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
-          v_bar := v_bar || v_event_colors[v_i] || repeat('█', v_char_count) || v_reset;
+          v_bar := v_bar || v_event_colors[v_i] || repeat(v_ch, v_char_count) || v_reset;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
@@ -2076,7 +2086,7 @@ begin
     if v_val > 0 then
       v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
       if v_char_count > 0 then
-        v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
+        v_bar := v_bar || v_other_color || repeat(v_other_char, v_char_count) || v_reset;
       end if;
       v_legend := v_legend || ' Other=' || v_val;
     end if;
