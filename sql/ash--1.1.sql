@@ -917,14 +917,14 @@ immutable
 as $$
   select case when not p_color then '' else
     case
-      when p_event like 'CPU%' then E'\033[92m'                       -- bright green
-      when p_event = 'IdleTx' then E'\033[33m'                       -- yellow
-      when p_event like 'IO:%' then E'\033[34m'                      -- blue
-      when p_event like 'Lock:%' then E'\033[31m'                    -- red
-      when p_event like 'LWLock:%' then E'\033[93m'                  -- bright yellow
+      when p_event like 'CPU%' then E'\033[38;2;80;250;123m'           -- green (RGB)
+      when p_event = 'IdleTx' then E'\033[38;2;241;250;140m'        -- yellow (RGB)
+      when p_event like 'IO:%' then E'\033[38;2;98;114;164m'        -- blue (RGB)
+      when p_event like 'Lock:%' then E'\033[38;2;255;85;85m'       -- red (RGB)
+      when p_event like 'LWLock:%' then E'\033[38;2;255;184;108m'   -- orange (RGB)
       when p_event like 'Client:%'
-        or p_event like 'Extension:%' then E'\033[35m'               -- magenta
-      else E'\033[36m'                                                -- cyan
+        or p_event like 'Extension:%' then E'\033[38;2;255;121;198m' -- pink (RGB)
+      else E'\033[38;2;139;233;253m'                                 -- cyan (RGB)
     end
   end;
 $$;
@@ -1795,7 +1795,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := case when p_color then E'\033[36m' else '' end;  -- cyan for Other
+  v_other_color text := case when p_color then E'\033[38;2;139;233;253m' else '' end;  -- cyan (RGB) for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;
@@ -1989,7 +1989,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := case when p_color then E'\033[36m' else '' end;  -- cyan for Other
+  v_other_color text := case when p_color then E'\033[38;2;139;233;253m' else '' end;  -- cyan (RGB) for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;

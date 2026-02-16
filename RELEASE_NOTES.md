@@ -21,7 +21,7 @@ Output: 4 columns — `bucket_start | active | detail | chart`. First row is a l
 
 ### Changed: ANSI colors (experimental, off by default)
 
-`IdleTx` (idle-in-transaction) now renders as yellow (`\033[33m`) in timeline charts, distinguishable from CPU\* (bright green, `\033[92m`).
+`IdleTx` (idle-in-transaction) now renders as yellow in timeline charts, distinguishable from CPU\* (green). All colors use 24-bit RGB escape codes for consistent rendering across terminal themes.
 
 ### Fixed: pg_cron version comparison
 
