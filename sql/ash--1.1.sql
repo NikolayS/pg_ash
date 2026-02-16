@@ -896,6 +896,23 @@ end;
 $$;
 
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
+create or replace function ash._wait_color(p_event text)
+returns text
+language sql
+immutable
+as $$
+  select case
+    when p_event like 'CPU%' then E'\033[92m'                         -- bright green
+    when p_event = 'IdleTx' then E'\033[33m'                         -- yellow
+    when p_event like 'IO:%' then E'\033[34m'                        -- blue
+    when p_event like 'Lock:%' then E'\033[31m'                      -- red
+    when p_event like 'LWLock:%' then E'\033[93m'                    -- bright yellow
+    when p_event like 'Client:%'
+      or p_event like 'Extension:%' then E'\033[35m'                 -- magenta
+    else E'\033[36m'                                                  -- cyan
+  end;
+$$;
+
 create or replace function ash.top_waits(
   p_interval interval default '1 hour',
   p_limit int default 10,
@@ -1720,22 +1737,6 @@ $$;
 -------------------------------------------------------------------------------
 
 -- Map wait event type prefix to ANSI color code
-create or replace function ash._wait_color(p_event text)
-returns text
-language sql
-immutable
-as $$
-  select case
-    when p_event like 'CPU%' then E'\033[92m'                         -- bright green
-    when p_event = 'IdleTx' then E'\033[33m'                         -- yellow
-    when p_event like 'IO:%' then E'\033[34m'                        -- blue
-    when p_event like 'Lock:%' then E'\033[31m'                      -- red
-    when p_event like 'LWLock:%' then E'\033[93m'                    -- bright yellow
-    when p_event like 'Client:%'
-      or p_event like 'Extension:%' then E'\033[35m'                 -- magenta
-    else E'\033[36m'                                                  -- cyan
-  end;
-$$;
 
 create or replace function ash.timeline_chart(
   p_interval interval default '1 hour',
