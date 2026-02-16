@@ -937,7 +937,7 @@ as $$
     select wait_event, cnt, rn from ranked where rn <= p_limit
   ),
   other as (
-    select 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
+    select 'Other'::text as wait_event, sum(cnt) as cnt, (p_limit + 1)::bigint as rn
     from ranked where rn > p_limit
     having sum(cnt) > 0
   ),
@@ -1374,7 +1374,7 @@ as $$
     select wait_event, cnt, rn from ranked where rn <= p_limit
   ),
   other as (
-    select 'Other'::text as wait_event, sum(cnt) as cnt, p_limit::bigint as rn
+    select 'Other'::text as wait_event, sum(cnt) as cnt, (p_limit + 1)::bigint as rn
     from ranked where rn > p_limit
     having sum(cnt) > 0
   ),
@@ -1668,7 +1668,7 @@ begin
   -- Top 3 waits
   v_rank := 0;
   for r in select tw.wait_event || ' (' || tw.pct || '%)' as desc
-      from ash.top_waits(p_interval, 4) tw
+      from ash.top_waits(p_interval, 3) tw
       where tw.wait_event <> 'Other'
   loop
     v_rank := v_rank + 1;
@@ -1697,7 +1697,6 @@ $$;
 -- ANSI color-coded bars by wait event type:
 --   Green=CPU*  Blue=IO  Red=Lock  Yellow=LWLock  Magenta=Client/Extension
 --   Cyan=Other
--- Falls back to █▓░▒ characters when p_color is false.
 -------------------------------------------------------------------------------
 
 -- Map wait event type prefix to ANSI color code
