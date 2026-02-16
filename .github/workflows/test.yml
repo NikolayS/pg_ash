@@ -536,7 +536,7 @@ jobs:
             v_cyan text := E'\033[36m';
           BEGIN
             ASSERT ash._wait_color('CPU*') = v_green, 'CPU* should be green';
-            ASSERT ash._wait_color('IdleTx') = v_green, 'IdleTx should be green';
+            ASSERT ash._wait_color('IdleTx') = E'\033[92m', 'IdleTx should be bright green';
             ASSERT ash._wait_color('IO:DataFileRead') = v_blue, 'IO should be blue';
             ASSERT ash._wait_color('IO:WALWrite') = v_blue, 'IO:WALWrite should be blue';
             ASSERT ash._wait_color('Lock:tuple') = v_red, 'Lock should be red';
@@ -922,7 +922,7 @@ jobs:
             -- Exact boundary matches
             ASSERT ash._wait_color('CPU*') = E'\033[32m', 'CPU* green';
             ASSERT ash._wait_color('CPUsomething') = E'\033[32m', 'CPU prefix green';
-            ASSERT ash._wait_color('IdleTx') = E'\033[32m', 'IdleTx green';
+            ASSERT ash._wait_color('IdleTx') = E'\033[92m', 'IdleTx bright green';
             ASSERT ash._wait_color('IO:DataFileRead') = E'\033[34m', 'IO blue';
             ASSERT ash._wait_color('IO:WALSync') = E'\033[34m', 'IO:WALSync blue';
             ASSERT ash._wait_color('Lock:tuple') = E'\033[31m', 'Lock red';
