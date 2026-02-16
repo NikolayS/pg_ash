@@ -1694,9 +1694,28 @@ $$;
 
 -------------------------------------------------------------------------------
 -- Timeline chart — stacked bar visualization of wait events over time
--- Uses different Unicode block characters for top N wait events:
--- █ = #1, ▓ = #2, ░ = #3, ▒ = Other
+-- ANSI color-coded bars by wait event type:
+--   Green=CPU*  Blue=IO  Red=Lock  Yellow=LWLock  Magenta=Client/Extension
+--   Cyan=Other
+-- Falls back to █▓░▒ characters when p_color is false.
 -------------------------------------------------------------------------------
+
+-- Map wait event type prefix to ANSI color code
+create or replace function ash._wait_color(p_event text)
+returns text
+language sql
+immutable
+as $$
+  select case
+    when p_event like 'CPU%' or p_event = 'IdleTx' then E'\033[32m'  -- green
+    when p_event like 'IO:%' then E'\033[34m'                        -- blue
+    when p_event like 'Lock:%' then E'\033[31m'                      -- red
+    when p_event like 'LWLock:%' then E'\033[33m'                    -- yellow
+    when p_event like 'Client:%'
+      or p_event like 'Extension:%' then E'\033[35m'                 -- magenta
+    else E'\033[36m'                                                  -- cyan
+  end;
+$$;
 
 create or replace function ash.timeline_chart(
   p_interval interval default '1 hour',
@@ -1715,7 +1734,7 @@ stable
 set jit = off
 as $$
 declare
-  v_chars text[] := array['█', '▓', '░', '▒'];
+  v_reset text := E'\033[0m';
   v_max_active numeric;
   v_start_ts int4;
   v_bucket_secs int4;
@@ -1724,13 +1743,14 @@ declare
   v_legend text;
   v_char_count int;
   v_top_events text[];
+  v_event_colors text[];
+  v_other_color text := E'\033[36m';  -- cyan for Other
+  i int;
 begin
   v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
-  -- Find top N wait events globally (by average active sessions)
-  -- Rank by avg active sessions, but weight by bucket presence so bursty
-  -- events don't steal legend slots from consistently-present ones.
+  -- Rank by avg active sessions weighted by bucket presence
   select array_agg(t.wait_event order by t.score desc)
   into v_top_events
   from (
@@ -1762,6 +1782,12 @@ begin
     return;
   end if;
 
+  -- Build color array for each event
+  v_event_colors := array[]::text[];
+  for i in 1..array_length(v_top_events, 1) loop
+    v_event_colors := v_event_colors || ash._wait_color(v_top_events[i]);
+  end loop;
+
   -- Find max average active sessions across all buckets for bar scaling
   select max(avg_total) into v_max_active
   from (
@@ -1780,22 +1806,20 @@ begin
     return;
   end if;
 
-  -- Emit legend header row — fixed mapping of characters to wait types
-  v_legend := v_chars[1] || '=' || v_top_events[1];
-  if p_top >= 2 and v_top_events[2] is not null then
-    v_legend := v_legend || '  ' || v_chars[2] || '=' || v_top_events[2];
-  end if;
-  if p_top >= 3 and v_top_events[3] is not null then
-    v_legend := v_legend || '  ' || v_chars[3] || '=' || v_top_events[3];
-  end if;
-  v_legend := v_legend || '  ' || v_chars[4] || '=Other';
+  -- Emit legend header row with colored blocks
+  v_legend := '';
+  for i in 1..array_length(v_top_events, 1) loop
+    if i > 1 then v_legend := v_legend || '  '; end if;
+    v_legend := v_legend || v_event_colors[i] || '█' || v_reset || ' ' || v_top_events[i];
+  end loop;
+  v_legend := v_legend || '  ' || v_other_color || '█' || v_reset || ' Other';
   bucket_start := null;
   active := null;
   detail := null;
   chart := v_legend;
   return next;
 
-  -- Build chart row by row — all counts normalized to avg active sessions
+  -- Build chart row by row
   for v_rec in
     with buckets as (
       select
@@ -1836,24 +1860,32 @@ begin
   loop
     v_bar := '';
 
-    -- Build stacked bar — characters always map to the same wait type
+    -- Colored stacked bar
     v_char_count := greatest(0, round(v_rec.c1 / v_max_active * p_width)::int);
-    v_bar := v_bar || repeat(v_chars[1], v_char_count);
+    if v_char_count > 0 then
+      v_bar := v_bar || v_event_colors[1] || repeat('█', v_char_count) || v_reset;
+    end if;
 
     if p_top >= 2 then
       v_char_count := greatest(0, round(v_rec.c2 / v_max_active * p_width)::int);
-      v_bar := v_bar || repeat(v_chars[2], v_char_count);
+      if v_char_count > 0 then
+        v_bar := v_bar || v_event_colors[2] || repeat('█', v_char_count) || v_reset;
+      end if;
     end if;
 
     if p_top >= 3 then
       v_char_count := greatest(0, round(v_rec.c3 / v_max_active * p_width)::int);
-      v_bar := v_bar || repeat(v_chars[3], v_char_count);
+      if v_char_count > 0 then
+        v_bar := v_bar || v_event_colors[3] || repeat('█', v_char_count) || v_reset;
+      end if;
     end if;
 
     v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
-    v_bar := v_bar || repeat(v_chars[4], v_char_count);
+    if v_char_count > 0 then
+      v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
+    end if;
 
-    -- Per-event breakdown in separate column
+    -- Per-event breakdown
     v_legend := '';
     if v_rec.c1 > 0 then
       v_legend := v_top_events[1] || '=' || v_rec.c1;
@@ -1896,7 +1928,7 @@ stable
 set jit = off
 as $$
 declare
-  v_chars text[] := array['█', '▓', '░', '▒'];
+  v_reset text := E'\033[0m';
   v_max_active numeric;
   v_start_ts int4;
   v_end_ts int4;
@@ -1906,12 +1938,14 @@ declare
   v_legend text;
   v_char_count int;
   v_top_events text[];
+  v_event_colors text[];
+  v_other_color text := E'\033[36m';  -- cyan for Other
+  i int;
 begin
   v_start_ts := ash._to_sample_ts(p_start);
   v_end_ts := ash._to_sample_ts(p_end);
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
-  -- Find top N wait events globally (by average active sessions)
   -- Rank by avg active sessions weighted by bucket presence
   select array_agg(t.wait_event order by t.score desc)
   into v_top_events
@@ -1944,6 +1978,12 @@ begin
     return;
   end if;
 
+  -- Build color array for each event
+  v_event_colors := array[]::text[];
+  for i in 1..array_length(v_top_events, 1) loop
+    v_event_colors := v_event_colors || ash._wait_color(v_top_events[i]);
+  end loop;
+
   select max(avg_total) into v_max_active
   from (
     select
@@ -1961,15 +2001,13 @@ begin
     return;
   end if;
 
-  -- Emit legend header row
-  v_legend := v_chars[1] || '=' || v_top_events[1];
-  if p_top >= 2 and v_top_events[2] is not null then
-    v_legend := v_legend || '  ' || v_chars[2] || '=' || v_top_events[2];
-  end if;
-  if p_top >= 3 and v_top_events[3] is not null then
-    v_legend := v_legend || '  ' || v_chars[3] || '=' || v_top_events[3];
-  end if;
-  v_legend := v_legend || '  ' || v_chars[4] || '=Other';
+  -- Emit legend header row with colored blocks
+  v_legend := '';
+  for i in 1..array_length(v_top_events, 1) loop
+    if i > 1 then v_legend := v_legend || '  '; end if;
+    v_legend := v_legend || v_event_colors[i] || '█' || v_reset || ' ' || v_top_events[i];
+  end loop;
+  v_legend := v_legend || '  ' || v_other_color || '█' || v_reset || ' Other';
   bucket_start := null;
   active := null;
   detail := null;
@@ -2017,15 +2055,20 @@ begin
     v_bar := '';
     v_legend := '';
 
+    -- Colored stacked bar
     v_char_count := greatest(0, round(v_rec.c1 / v_max_active * p_width)::int);
-    v_bar := v_bar || repeat(v_chars[1], v_char_count);
+    if v_char_count > 0 then
+      v_bar := v_bar || v_event_colors[1] || repeat('█', v_char_count) || v_reset;
+    end if;
     if v_rec.c1 > 0 then
       v_legend := v_top_events[1] || '=' || v_rec.c1;
     end if;
 
     if p_top >= 2 then
       v_char_count := greatest(0, round(v_rec.c2 / v_max_active * p_width)::int);
-      v_bar := v_bar || repeat(v_chars[2], v_char_count);
+      if v_char_count > 0 then
+        v_bar := v_bar || v_event_colors[2] || repeat('█', v_char_count) || v_reset;
+      end if;
       if v_rec.c2 > 0 then
         v_legend := v_legend || ' ' || v_top_events[2] || '=' || v_rec.c2;
       end if;
@@ -2033,14 +2076,18 @@ begin
 
     if p_top >= 3 then
       v_char_count := greatest(0, round(v_rec.c3 / v_max_active * p_width)::int);
-      v_bar := v_bar || repeat(v_chars[3], v_char_count);
+      if v_char_count > 0 then
+        v_bar := v_bar || v_event_colors[3] || repeat('█', v_char_count) || v_reset;
+      end if;
       if v_rec.c3 > 0 then
         v_legend := v_legend || ' ' || v_top_events[3] || '=' || v_rec.c3;
       end if;
     end if;
 
     v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
-    v_bar := v_bar || repeat(v_chars[4], v_char_count);
+    if v_char_count > 0 then
+      v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
+    end if;
     if v_rec.c_other > 0 then
       v_legend := v_legend || ' Other=' || v_rec.c_other;
     end if;
