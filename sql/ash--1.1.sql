@@ -910,27 +910,39 @@ end;
 $$;
 
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
-create or replace function ash._wait_color(p_event text)
+create or replace function ash._wait_color(p_event text, p_color boolean default true)
 returns text
 language sql
 immutable
 as $$
-  select case
-    when p_event like 'CPU%' then E'\033[92m'                         -- bright green
-    when p_event = 'IdleTx' then E'\033[33m'                         -- yellow
-    when p_event like 'IO:%' then E'\033[34m'                        -- blue
-    when p_event like 'Lock:%' then E'\033[31m'                      -- red
-    when p_event like 'LWLock:%' then E'\033[93m'                    -- bright yellow
-    when p_event like 'Client:%'
-      or p_event like 'Extension:%' then E'\033[35m'                 -- magenta
-    else E'\033[36m'                                                  -- cyan
+  select case when not p_color then '' else
+    case
+      when p_event like 'CPU%' then E'\033[92m'                       -- bright green
+      when p_event = 'IdleTx' then E'\033[33m'                       -- yellow
+      when p_event like 'IO:%' then E'\033[34m'                      -- blue
+      when p_event like 'Lock:%' then E'\033[31m'                    -- red
+      when p_event like 'LWLock:%' then E'\033[93m'                  -- bright yellow
+      when p_event like 'Client:%'
+        or p_event like 'Extension:%' then E'\033[35m'               -- magenta
+      else E'\033[36m'                                                -- cyan
+    end
   end;
+$$;
+
+-- Convenience: reset code, empty when color off
+create or replace function ash._reset(p_color boolean default true)
+returns text
+language sql
+immutable
+as $$
+  select case when p_color then E'\033[0m' else '' end;
 $$;
 
 create or replace function ash.top_waits(
   p_interval interval default '1 hour',
   p_limit int default 10,
-  p_width int default 40
+  p_width int default 40,
+  p_color boolean default true
 )
 returns table (
   wait_event text,
@@ -985,9 +997,9 @@ as $$
     r.wait_event,
     r.cnt as samples,
     round(r.cnt::numeric / gt.total * 100, 2) as pct,
-    ash._wait_color(r.wait_event)
+    ash._wait_color(r.wait_event, p_color)
       || repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || E'\033[0m' || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
+      || ash._reset(p_color) || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
   from (select * from top_rows union all select * from other) r
   cross join grand_total gt
   cross join max_pct mp
@@ -1375,7 +1387,8 @@ create or replace function ash.top_waits_at(
   p_start timestamptz,
   p_end timestamptz,
   p_limit int default 10,
-  p_width int default 40
+  p_width int default 40,
+  p_color boolean default true
 )
 returns table (
   wait_event text,
@@ -1431,9 +1444,9 @@ as $$
     r.wait_event,
     r.cnt as samples,
     round(r.cnt::numeric / gt.total * 100, 2) as pct,
-    ash._wait_color(r.wait_event)
+    ash._wait_color(r.wait_event, p_color)
       || repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || E'\033[0m' || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
+      || ash._reset(p_color) || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
   from (select * from top_rows union all select * from other) r
   cross join grand_total gt
   cross join max_pct mp
@@ -1756,7 +1769,8 @@ create or replace function ash.timeline_chart(
   p_interval interval default '1 hour',
   p_bucket interval default '1 minute',
   p_top int default 3,
-  p_width int default 40
+  p_width int default 40,
+  p_color boolean default true
 )
 returns table (
   bucket_start timestamptz,
@@ -1769,7 +1783,7 @@ stable
 set jit = off
 as $$
 declare
-  v_reset text := E'\033[0m';
+  v_reset text := case when p_color then E'\033[0m' else '' end;
   v_max_active numeric;
   v_start_ts int4;
   v_bucket_secs int4;
@@ -1781,7 +1795,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := E'\033[36m';  -- cyan for Other
+  v_other_color text := case when p_color then E'\033[36m' else '' end;  -- cyan for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;
@@ -1824,7 +1838,7 @@ begin
   -- Build color array for each event
   v_event_colors := array[]::text[];
   for v_i in 1..array_length(v_top_events, 1) loop
-    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i]);
+    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i], p_color);
   end loop;
 
   -- Find max average active sessions across all buckets for bar scaling
@@ -1948,7 +1962,8 @@ create or replace function ash.timeline_chart_at(
   p_end timestamptz,
   p_bucket interval default '1 minute',
   p_top int default 3,
-  p_width int default 40
+  p_width int default 40,
+  p_color boolean default true
 )
 returns table (
   bucket_start timestamptz,
@@ -1961,7 +1976,7 @@ stable
 set jit = off
 as $$
 declare
-  v_reset text := E'\033[0m';
+  v_reset text := case when p_color then E'\033[0m' else '' end;
   v_max_active numeric;
   v_start_ts int4;
   v_end_ts int4;
@@ -1974,7 +1989,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := E'\033[36m';  -- cyan for Other
+  v_other_color text := case when p_color then E'\033[36m' else '' end;  -- cyan for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;
@@ -2018,7 +2033,7 @@ begin
   -- Build color array for each event
   v_event_colors := array[]::text[];
   for v_i in 1..array_length(v_top_events, 1) loop
-    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i]);
+    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i], p_color);
   end loop;
 
   select max(avg_total) into v_max_active
