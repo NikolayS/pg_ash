@@ -198,12 +198,28 @@ jobs:
           DECLARE
             v_slot_before smallint;
             v_slot_after smallint;
+            v_target_slot smallint;
+            v_count int;
+            v_next_id int;
           BEGIN
             SELECT current_slot INTO v_slot_before FROM ash.config;
 
             -- Insert data into current partition
             INSERT INTO ash.sample (sample_ts, datid, active_count, data)
             VALUES (1000, 1, 2, '{-1,2,1,1}');
+
+            -- Determine which partition rotation will TRUNCATE (the one we rotate INTO)
+            v_target_slot := ((v_slot_before + 1) % 3)::smallint;
+
+            -- Seed the target partition with data so we can verify truncation
+            EXECUTE format(
+              'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (999, 1, 1, ''{-1,1,1}'', %s)',
+              v_target_slot, v_target_slot
+            );
+            EXECUTE format(
+              'INSERT INTO ash.query_map_%s (query_id) VALUES (99999)',
+              v_target_slot
+            );
 
             -- Force rotation
             UPDATE ash.config SET rotated_at = now() - interval '2 days';
@@ -212,9 +228,30 @@ jobs:
             SELECT current_slot INTO v_slot_after FROM ash.config;
             ASSERT v_slot_after <> v_slot_before,
               'slot not advanced: before=' || v_slot_before || ' after=' || v_slot_after;
+            ASSERT v_slot_after = v_target_slot,
+              'slot should be target: expected=' || v_target_slot || ' got=' || v_slot_after;
 
-            -- Verify old partition was truncated (the partition we rotated INTO)
-            RAISE NOTICE 'Rotation tests PASSED';
+            -- Verify TRUNCATION: target sample partition should be empty
+            EXECUTE format('SELECT count(*) FROM ash.sample_%s', v_target_slot)
+            INTO v_count;
+            ASSERT v_count = 0,
+              'sample_' || v_target_slot || ' should be empty after rotation, has ' || v_count || ' rows';
+
+            -- Verify TRUNCATION: target query_map partition should be empty
+            EXECUTE format('SELECT count(*) FROM ash.query_map_%s', v_target_slot)
+            INTO v_count;
+            ASSERT v_count = 0,
+              'query_map_' || v_target_slot || ' should be empty after rotation, has ' || v_count || ' rows';
+
+            -- Verify identity sequence was reset: next insert should get a low id
+            EXECUTE format(
+              'INSERT INTO ash.query_map_%s (query_id) VALUES (88888) RETURNING id',
+              v_target_slot
+            ) INTO v_next_id;
+            ASSERT v_next_id = 1,
+              'query_map_' || v_target_slot || ' identity should restart at 1, got ' || v_next_id;
+
+            RAISE NOTICE 'Rotation tests PASSED (truncation + sequence reset verified)';
           END;
           $$;
           EOF
@@ -785,31 +822,85 @@ jobs:
 
             -- === Partition isolation ===
 
-            -- Data in inactive partition should not show in readers
+            -- Data in inactive partition should NOT show in readers
             DECLARE
               v_inactive smallint;
-              v_cpu_id smallint;
+              v_unique_wait_id smallint;
               v_slot smallint;
+              v_count_before int;
+              v_count_after int;
+              v_found boolean;
             BEGIN
               SELECT ash.current_slot() INTO v_slot;
               -- Inactive partition = neither current nor previous
               v_inactive := ((v_slot + 1) % 3)::smallint;
-              SELECT id INTO v_cpu_id FROM ash.wait_event_map WHERE type = 'CPU*' AND event = 'CPU*';
 
-              -- Insert into inactive partition
+              -- Register a unique wait event that only goes into inactive partition
+              SELECT ash._register_wait('active', 'TestIsolation', 'GhostEvent') INTO v_unique_wait_id;
+
+              -- Record current top_waits count
+              SELECT count(*) INTO v_count_before FROM ash.top_waits('1 hour');
+
+              -- Insert into INACTIVE partition with the unique wait event
               EXECUTE format(
-                'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (%s, 1, 1, %L::integer[], %s)',
+                'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (%s, 1, 100, %L::integer[], %s)',
                 v_inactive,
                 extract(epoch FROM now() - ash.epoch())::int4,
-                ARRAY[-v_cpu_id, 1, 1]::integer[],
+                ARRAY[-v_unique_wait_id, 100, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]::integer[],
                 v_inactive
               );
 
-              -- This data should NOT appear in top_waits (filtered by _active_slots)
-              -- We can't easily test this because active_slots includes current+previous,
-              -- and the inactive one is the third. Just verify no error.
-              SELECT count(*) INTO v_count FROM ash.top_waits('1 minute');
-              -- Should not include the inactive partition data
+              -- GhostEvent should NOT appear in readers (filtered by _active_slots)
+              SELECT EXISTS (
+                SELECT 1 FROM ash.top_waits('1 hour', 100)
+                WHERE wait_event = 'TestIsolation:GhostEvent'
+              ) INTO v_found;
+              ASSERT NOT v_found,
+                'GhostEvent from inactive partition should not appear in top_waits';
+
+              -- Also check timeline_chart doesn't show it
+              SELECT EXISTS (
+                SELECT 1 FROM ash.timeline_chart('1 hour', '5 minutes', 100, 40)
+                WHERE detail LIKE '%GhostEvent%'
+              ) INTO v_found;
+              ASSERT NOT v_found,
+                'GhostEvent should not appear in timeline_chart';
+
+              -- Cleanup
+              EXECUTE format('DELETE FROM ash.sample_%s WHERE active_count = 100', v_inactive);
+            END;
+
+            -- === Rotation guard: "rotated too recently" ===
+
+            DECLARE
+              v_result text;
+            BEGIN
+              -- Don't touch rotated_at — should still be recent from earlier rotation
+              SELECT ash.rotate() INTO v_result;
+              ASSERT v_result LIKE 'skipped%',
+                'rotate() should skip when called too soon, got: ' || coalesce(v_result, 'NULL');
+            END;
+
+            -- === Multi-database data ===
+
+            DECLARE
+              v_cpu_id2 smallint;
+              v_db_count int;
+            BEGIN
+              SELECT id INTO v_cpu_id2 FROM ash.wait_event_map WHERE type = 'CPU*' AND event = 'CPU*';
+              -- Insert data with different datid
+              INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
+              VALUES (
+                extract(epoch FROM now() - ash.epoch())::int4 - 120,
+                99999, 2,
+                ARRAY[-v_cpu_id2, 2, 1, 1]::integer[],
+                ash.current_slot()
+              );
+
+              SELECT count(DISTINCT datid) INTO v_db_count
+              FROM ash.samples_by_database('1 hour');
+              ASSERT v_db_count >= 2,
+                'samples_by_database should show at least 2 databases, got: ' || v_db_count;
             END;
 
             RAISE NOTICE 'Edge and corner case tests PASSED';
