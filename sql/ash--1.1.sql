@@ -94,7 +94,7 @@ create table if not exists ash.sample (
   datid        oid not null,
   active_count smallint not null,
   data         integer[] not null
-         check (data[1] < 0 and array_length(data, 1) >= 2),
+         check (data[1] < 0 and array_length(data, 1) >= 3),
   slot         smallint not null default ash.current_slot()
 ) partition by list (slot);
 
@@ -393,7 +393,7 @@ begin
       select f.data, bc.cnt into v_data, v_active_count
       from flat f, backend_count bc;
 
-      if v_data is not null and array_length(v_data, 1) >= 2 then
+      if v_data is not null and array_length(v_data, 1) >= 3 then
         insert into ash.sample (sample_ts, datid, active_count, data)
         values (v_sample_ts, v_datid_rec.datid, v_active_count, v_data);
         v_rows_inserted := v_rows_inserted + 1;
@@ -636,7 +636,7 @@ begin
   select extversion into v_cron_version
   from pg_extension where extname = 'pg_cron';
 
-  if v_cron_version < '1.5' then
+  if string_to_array(v_cron_version, '.')::int[] < '{1,5}'::int[] then
     job_type := 'error';
     job_id := null;
     status := format('pg_cron version %s too old, need >= 1.5', v_cron_version);
@@ -1706,7 +1706,8 @@ language sql
 immutable
 as $$
   select case
-    when p_event like 'CPU%' or p_event = 'IdleTx' then E'\033[32m'  -- green
+    when p_event like 'CPU%' then E'\033[32m'                         -- green
+    when p_event = 'IdleTx' then E'\033[92m'                         -- bright green
     when p_event like 'IO:%' then E'\033[34m'                        -- blue
     when p_event like 'Lock:%' then E'\033[31m'                      -- red
     when p_event like 'LWLock:%' then E'\033[33m'                    -- yellow
@@ -1741,6 +1742,8 @@ declare
   v_bar text;
   v_legend text;
   v_char_count int;
+  v_total_chars int;
+  v_val numeric;
   v_top_events text[];
   v_event_colors text[];
   v_other_color text := E'\033[36m';  -- cyan for Other
@@ -1825,8 +1828,7 @@ begin
         s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
         case when wm.event = wm.type then wm.event
           else wm.type || ':' || wm.event end as wait_event,
-        sum(s.data[i + 1]) as cnt,
-        count(distinct s.sample_ts) as n_samples
+        sum(s.data[i + 1]) as cnt
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
@@ -1835,68 +1837,63 @@ begin
         and s.data[i] < 0
       group by 1, 2
     ),
+    bucket_samples as (
+      select
+        s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
+        count(distinct s.sample_ts) as n_samples
+      from ash.sample s
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_start_ts
+      group by 1
+    ),
     per_bucket as (
       select
         b.bucket_ts,
-        max(b.n_samples) as n_samples,
-        round(sum(b.cnt)::numeric / nullif(max(b.n_samples), 0), 1) as total,
-        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[1]), 0)::numeric
-          / nullif(max(b.n_samples), 0), 1) as c1,
-        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[2]), 0)::numeric
-          / nullif(max(b.n_samples), 0), 1) as c2,
-        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[3]), 0)::numeric
-          / nullif(max(b.n_samples), 0), 1) as c3
+        bs.n_samples,
+        round(sum(b.cnt)::numeric / nullif(bs.n_samples, 0), 1) as total,
+        jsonb_object_agg(
+          b.wait_event,
+          round(b.cnt::numeric / nullif(bs.n_samples, 0), 1)
+        ) as events
       from buckets b
-      group by b.bucket_ts
+      join bucket_samples bs on bs.bucket_ts = b.bucket_ts
+      group by b.bucket_ts, bs.n_samples
     )
     select
       ash.epoch() + pb.bucket_ts * interval '1 second' as ts,
       pb.total,
-      pb.c1, pb.c2, pb.c3,
-      greatest(pb.total - pb.c1 - pb.c2 - pb.c3, 0) as c_other
+      pb.events
     from per_bucket pb
     order by pb.bucket_ts
   loop
     v_bar := '';
-
-    -- Colored stacked bar
-    v_char_count := greatest(0, round(v_rec.c1 / v_max_active * p_width)::int);
-    if v_char_count > 0 then
-      v_bar := v_bar || v_event_colors[1] || repeat('█', v_char_count) || v_reset;
-    end if;
-
-    if p_top >= 2 then
-      v_char_count := greatest(0, round(v_rec.c2 / v_max_active * p_width)::int);
-      if v_char_count > 0 then
-        v_bar := v_bar || v_event_colors[2] || repeat('█', v_char_count) || v_reset;
-      end if;
-    end if;
-
-    if p_top >= 3 then
-      v_char_count := greatest(0, round(v_rec.c3 / v_max_active * p_width)::int);
-      if v_char_count > 0 then
-        v_bar := v_bar || v_event_colors[3] || repeat('█', v_char_count) || v_reset;
-      end if;
-    end if;
-
-    v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
-    if v_char_count > 0 then
-      v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
-    end if;
-
-    -- Per-event breakdown
     v_legend := '';
-    if v_rec.c1 > 0 then
-      v_legend := v_top_events[1] || '=' || v_rec.c1;
-    end if;
-    if p_top >= 2 and v_rec.c2 > 0 then
-      v_legend := v_legend || ' ' || v_top_events[2] || '=' || v_rec.c2;
-    end if;
-    if p_top >= 3 and v_rec.c3 > 0 then
-      v_legend := v_legend || ' ' || v_top_events[3] || '=' || v_rec.c3;
-    end if;
-    if v_rec.c_other > 0 then
-      v_legend := v_legend || ' Other=' || v_rec.c_other;
+    v_total_chars := 0;
+
+    -- Colored stacked bar for each top event
+    for v_i in 1..array_length(v_top_events, 1) loop
+      v_val := coalesce((v_rec.events ->> v_top_events[v_i])::numeric, 0);
+      if v_val > 0 then
+        v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
+        if v_char_count > 0 then
+          v_bar := v_bar || v_event_colors[v_i] || repeat('█', v_char_count) || v_reset;
+          v_total_chars := v_total_chars + v_char_count;
+        end if;
+        v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
+      end if;
+    end loop;
+
+    -- "Other" bar — remainder
+    v_val := greatest(v_rec.total - (
+      select coalesce(sum(coalesce((v_rec.events ->> e)::numeric, 0)), 0)
+      from unnest(v_top_events) e
+    ), 0);
+    if v_val > 0 then
+      v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
+      if v_char_count > 0 then
+        v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
+      end if;
+      v_legend := v_legend || ' Other=' || v_val;
     end if;
 
     bucket_start := v_rec.ts;
@@ -1936,6 +1933,8 @@ declare
   v_bar text;
   v_legend text;
   v_char_count int;
+  v_total_chars int;
+  v_val numeric;
   v_top_events text[];
   v_event_colors text[];
   v_other_color text := E'\033[36m';  -- cyan for Other
@@ -2019,8 +2018,7 @@ begin
         s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
         case when wm.event = wm.type then wm.event
           else wm.type || ':' || wm.event end as wait_event,
-        sum(s.data[i + 1]) as cnt,
-        count(distinct s.sample_ts) as n_samples
+        sum(s.data[i + 1]) as cnt
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
@@ -2029,66 +2027,63 @@ begin
         and s.data[i] < 0
       group by 1, 2
     ),
+    bucket_samples as (
+      select
+        s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
+        count(distinct s.sample_ts) as n_samples
+      from ash.sample s
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
+      group by 1
+    ),
     per_bucket as (
       select
         b.bucket_ts,
-        max(b.n_samples) as n_samples,
-        round(sum(b.cnt)::numeric / nullif(max(b.n_samples), 0), 1) as total,
-        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[1]), 0)::numeric
-          / nullif(max(b.n_samples), 0), 1) as c1,
-        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[2]), 0)::numeric
-          / nullif(max(b.n_samples), 0), 1) as c2,
-        round(coalesce(sum(b.cnt) filter (where b.wait_event = v_top_events[3]), 0)::numeric
-          / nullif(max(b.n_samples), 0), 1) as c3
+        bs.n_samples,
+        round(sum(b.cnt)::numeric / nullif(bs.n_samples, 0), 1) as total,
+        jsonb_object_agg(
+          b.wait_event,
+          round(b.cnt::numeric / nullif(bs.n_samples, 0), 1)
+        ) as events
       from buckets b
-      group by b.bucket_ts
+      join bucket_samples bs on bs.bucket_ts = b.bucket_ts
+      group by b.bucket_ts, bs.n_samples
     )
     select
       ash.epoch() + pb.bucket_ts * interval '1 second' as ts,
       pb.total,
-      pb.c1, pb.c2, pb.c3,
-      greatest(pb.total - pb.c1 - pb.c2 - pb.c3, 0) as c_other
+      pb.events
     from per_bucket pb
     order by pb.bucket_ts
   loop
     v_bar := '';
     v_legend := '';
+    v_total_chars := 0;
 
-    -- Colored stacked bar
-    v_char_count := greatest(0, round(v_rec.c1 / v_max_active * p_width)::int);
-    if v_char_count > 0 then
-      v_bar := v_bar || v_event_colors[1] || repeat('█', v_char_count) || v_reset;
-    end if;
-    if v_rec.c1 > 0 then
-      v_legend := v_top_events[1] || '=' || v_rec.c1;
-    end if;
+    -- Colored stacked bar for each top event
+    for v_i in 1..array_length(v_top_events, 1) loop
+      v_val := coalesce((v_rec.events ->> v_top_events[v_i])::numeric, 0);
+      if v_val > 0 then
+        v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
+        if v_char_count > 0 then
+          v_bar := v_bar || v_event_colors[v_i] || repeat('█', v_char_count) || v_reset;
+          v_total_chars := v_total_chars + v_char_count;
+        end if;
+        v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
+      end if;
+    end loop;
 
-    if p_top >= 2 then
-      v_char_count := greatest(0, round(v_rec.c2 / v_max_active * p_width)::int);
+    -- "Other" bar — remainder
+    v_val := greatest(v_rec.total - (
+      select coalesce(sum(coalesce((v_rec.events ->> e)::numeric, 0)), 0)
+      from unnest(v_top_events) e
+    ), 0);
+    if v_val > 0 then
+      v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
       if v_char_count > 0 then
-        v_bar := v_bar || v_event_colors[2] || repeat('█', v_char_count) || v_reset;
+        v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
       end if;
-      if v_rec.c2 > 0 then
-        v_legend := v_legend || ' ' || v_top_events[2] || '=' || v_rec.c2;
-      end if;
-    end if;
-
-    if p_top >= 3 then
-      v_char_count := greatest(0, round(v_rec.c3 / v_max_active * p_width)::int);
-      if v_char_count > 0 then
-        v_bar := v_bar || v_event_colors[3] || repeat('█', v_char_count) || v_reset;
-      end if;
-      if v_rec.c3 > 0 then
-        v_legend := v_legend || ' ' || v_top_events[3] || '=' || v_rec.c3;
-      end if;
-    end if;
-
-    v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
-    if v_char_count > 0 then
-      v_bar := v_bar || v_other_color || repeat('█', v_char_count) || v_reset;
-    end if;
-    if v_rec.c_other > 0 then
-      v_legend := v_legend || ' Other=' || v_rec.c_other;
+      v_legend := v_legend || ' Other=' || v_val;
     end if;
 
     bucket_start := v_rec.ts;

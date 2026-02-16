@@ -1,3 +1,54 @@
+# pg_ash 1.1 release notes
+
+Upgrade from 1.0: `\i sql/ash--1.1.sql` — safe to run on top of a running 1.0 installation.
+
+## What changed
+
+### New: timeline chart
+
+`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. ANSI color-coded in `psql`: green = CPU\*, bright green = IdleTx, red = Lock, blue = IO, yellow = LWLock, magenta = Client/Extension, cyan = Other.
+
+```sql
+select * from ash.timeline_chart('1 hour', '5 minutes');
+select * from ash.timeline_chart_at('2026-02-14 19:50', '2026-02-14 20:10', '1 minute', 5, 50);
+```
+
+Output: 4 columns — `bucket_start | active | detail | chart`. First row is a color legend. `p_top` controls how many events get individual bars (the rest roll into "Other"). Default `p_top = 3`.
+
+### Changed: histogram folded into top_waits
+
+`histogram()` and `histogram_at()` removed. The `bar` column is now part of `top_waits()` and `top_waits_at()`, controlled by the `p_width` parameter (default 40). Same visualization, fewer functions.
+
+### Changed: IdleTx gets its own color
+
+`IdleTx` (idle-in-transaction) now renders as bright green (`\033[92m`) in timeline charts, distinguishable from CPU\* (green, `\033[32m`).
+
+### Fixed: pg_cron version comparison
+
+Version check now uses `string_to_array()::int[]` comparison instead of lexicographic string comparison. The old code would incorrectly reject pg_cron 1.10+.
+
+### Fixed: check constraint tightened
+
+Minimum valid encoded array is 3 elements (`[-wid, count, qid]`), not 2. The CHECK constraint and sampler guard now enforce `array_length >= 3`.
+
+### Improved: 100% test coverage
+
+CI expanded from 16 assertions to 151. All 32 functions are directly tested across Postgres 14–18.
+
+## Functions (32 total)
+
+| Function | Description |
+|---|---|
+| `timeline_chart(interval, bucket, top, width)` | **New** — stacked bar chart with ANSI colors |
+| `timeline_chart_at(start, end, bucket, top, width)` | **New** — absolute-time variant |
+| `_wait_color(event)` | **New** — ANSI color mapper for wait event types |
+| `top_waits(interval, limit, width)` | Top wait events with bar chart (was without `width` in 1.0) |
+| `top_waits_at(start, end, limit, width)` | Absolute-time variant with bar chart |
+
+All other functions unchanged from 1.0. See README for the full reference.
+
+---
+
 # pg_ash 1.0 release notes
 
 The first release of pg_ash — active session history for Postgres.
@@ -8,7 +59,7 @@ pg_ash samples `pg_stat_activity` every second via pg_cron and stores wait event
 
 ## Design philosophy
 
-**The anti-extension.** pg_ash is pure SQL + PL/pgSQL — no C code, no `shared_preload_libraries`, no restart required. Install with `\i ash--1.0.sql` on any Postgres 14+ instance with pg_cron 1.5+, including managed providers: RDS, Cloud SQL, AlloyDB, Supabase, Neon.
+**The anti-extension.** pg_ash is pure SQL + PL/pgSQL — no C code, no `shared_preload_libraries`, no restart required. Install with `\i sql/ash--1.0.sql` on any Postgres 14+ instance with pg_cron 1.5+, including managed providers: RDS, Cloud SQL, AlloyDB, Supabase, Neon.
 
 Key design decisions:
 
@@ -32,9 +83,10 @@ Key design decisions:
 | `wait_timeline(interval, bucket)` | Time-bucketed wait event breakdown |
 | `samples_by_database(interval)` | Per-database sample counts |
 | `activity_summary(interval)` | One-call overview — peak backends, top waits, top queries |
+| `histogram(interval, limit, width)` | Visual bar chart of wait event distribution |
 | `samples(interval, limit)` | Fully decoded raw sample browser |
 
-Absolute-time variants (`_at` suffix): `top_waits_at`, `top_queries_at`, `query_waits_at`, `waits_by_type_at`, `wait_timeline_at`, `samples_at`.
+Absolute-time variants (`_at` suffix): `top_waits_at`, `top_queries_at`, `query_waits_at`, `waits_by_type_at`, `wait_timeline_at`, `histogram_at`, `samples_at`.
 
 ## Examples
 

@@ -174,19 +174,19 @@ select * from ash.timeline_chart('1 hour', '5 minutes');
 ```
 
 ```
-      bucket_start       | active | detail                                     | chart
--------------------------+--------+--------------------------------------------+---------------------------------------------
-                         |        |                                            | █ CPU*  █ Lock:tuple  █ IO:DataFileRead  █ Other
- 2026-02-14 19:45:00+00  |    3.2 | CPU*=2.1 Lock:tuple=0.5 IO:DataFileRead=0.3 Other=0.3 | ████████████████████████████████████████░░░▒▒
- 2026-02-14 19:50:00+00  |    3.4 | CPU*=2.0 Lock:tuple=0.8 IO:DataFileRead=0.3 Other=0.3 | ███████████████████████████████████░░░░░░░▒▒▒
- 2026-02-14 19:55:00+00  |   12.8 | CPU*=2.2 Lock:tuple=9.1 IO:DataFileRead=0.8 Other=0.7 | ██████████████████████████████████████████████████
+      bucket_start       | active | detail                                                  | chart
+-------------------------+--------+---------------------------------------------------------+------------------------------------------
+                         |        |                                                         | █ CPU*  █ Lock:tuple  █ IO:DataFileRead  █ Other
+ 2026-02-14 19:45:00+00  |    3.2 | CPU*=2.1 Lock:tuple=0.5 IO:DataFileRead=0.3 Other=0.3  | ██████████████████████████████████████████████
+ 2026-02-14 19:50:00+00  |    3.4 | CPU*=2.0 Lock:tuple=0.8 IO:DataFileRead=0.3 Other=0.3  | █████████████████████████████████████████████████
+ 2026-02-14 19:55:00+00  |   12.8 | CPU*=2.2 Lock:tuple=9.1 IO:DataFileRead=0.8 Other=0.7  | ██████████████████████████████████████████████████
  2026-02-14 20:00:00+00  |   14.1 | CPU*=1.8 Lock:tuple=11.2 IO:DataFileRead=0.6 Other=0.5 | ██████████████████████████████████████████████████
  2026-02-14 20:05:00+00  |   13.5 | CPU*=2.0 Lock:tuple=10.1 IO:DataFileRead=0.7 Other=0.7 | ██████████████████████████████████████████████████
- 2026-02-14 20:10:00+00  |    4.5 | CPU*=2.3 Lock:tuple=1.2 IO:DataFileRead=0.5 Other=0.5 | ████████████████████████████████████░░░░▒▒▒▒
- 2026-02-14 20:15:00+00  |    3.1 | CPU*=2.0 Lock:tuple=0.4 IO:DataFileRead=0.4 Other=0.3 | ████████████████████████████████████████░░░▒▒
+ 2026-02-14 20:10:00+00  |    4.5 | CPU*=2.3 Lock:tuple=1.2 IO:DataFileRead=0.5 Other=0.5  | ███████████████████████████████████████████████
+ 2026-02-14 20:15:00+00  |    3.1 | CPU*=2.0 Lock:tuple=0.4 IO:DataFileRead=0.4 Other=0.3  | █████████████████████████████████████████████
 ```
 
-Bars are ANSI color-coded in the terminal: green=CPU*, red=Lock, blue=IO, cyan=Other. Lock:tuple spike from 19:55 to 20:05 — classic row-level contention. Bar width scales to the peak bucket.
+In `psql`, bars are ANSI color-coded: green = CPU\*, red = Lock, blue = IO, bright green = IdleTx, yellow = LWLock, magenta = Client/Extension, cyan = Other. Each event type always gets the same color regardless of rank. Lock:tuple spike from 19:55 to 20:05 — classic row-level contention. Bar width scales to the peak bucket.
 
 ```sql
 -- zoom into yesterday's deploy window
@@ -313,7 +313,7 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 | Table | Purpose |
 |-------|---------|
 | `ash.wait_event_map` | Maps `(state, wait_event_type, wait_event)` to integer IDs |
-| `ash.query_map` | Maps `query_id` (from `pg_stat_activity`) to integer IDs |
+| `ash.query_map_0/1/2` | Maps `query_id` (from `pg_stat_activity`) to integer IDs (partitioned with samples) |
 
 Dictionaries are auto-populated by the sampler. Wait events are stable (~600 entries max across all Postgres versions). Query map grows as new queries appear and is garbage-collected based on `last_seen`.
 
@@ -423,7 +423,7 @@ select cron.schedule(
 - **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](blueprints/ROLLUP_DESIGN.md).
 - **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
-- **query_map hard cap at 50k entries** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. This can flood `query_map`. A hard cap of 50,000 entries prevents unbounded growth — queries beyond the cap are tracked as "unknown." PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
+- **query_map hard cap at 50k entries** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. This can flood the query_map partitions. A hard cap of 50,000 entries per partition prevents unbounded growth — queries beyond the cap are tracked as "unknown." PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
 - **Parallel query workers counted individually** — parallel workers share the same `query_id` as the leader but are counted as separate backends. This inflates the apparent "weight" of parallel queries in `top_queries()`. Track `leader_pid` grouping is a potential future improvement.
 - **WAL overhead** — 1-second sampling generates ~29 KiB WAL per sample (~2.4 GiB/day), dominated by `full_page_writes`. This is significant for WAL-sensitive replication setups. Consider 5-second or 10-second sampling intervals (`ash.start('5 seconds')`) if WAL volume is a concern. The overhead scales linearly with sampling frequency.
 
