@@ -175,10 +175,8 @@ begin
 
   v_len := array_length(p_data, 1);
 
-  -- Minimum: one wait group = [-wid, count, qid] = 3 elements
-  -- But could be [-wid, count] = 2 if count=0... no, count > 0
-  -- Actually minimum is [-wid, 1, qid] = 3
-  if v_len < 2 then
+  -- Minimum valid: [-wid, count, qid] = 3 elements
+  if v_len < 3 then
     return false;
   end if;
 
@@ -442,7 +440,7 @@ begin
   v_len := array_length(p_data, 1);
 
   -- Basic structure check: first element must be negative (wait_id marker)
-  if v_len < 2 or p_data[1] >= 0 then
+  if v_len < 3 or p_data[1] >= 0 then
     raise warning 'ash.decode_sample: invalid data array';
     return;
   end if;
