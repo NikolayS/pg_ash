@@ -9,6 +9,9 @@ drop function if exists ash.histogram(interval, int, int);
 drop function if exists ash.histogram_at(timestamptz, timestamptz, int, int);
 drop function if exists ash.timeline_chart(interval, interval, int, int);
 drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int);
+-- v1.0 top_waits had fewer params — CREATE OR REPLACE won't replace, must drop
+drop function if exists ash.top_waits(interval, int);
+drop function if exists ash.top_waits_at(timestamptz, timestamptz, int);
 
 --------------------------------------------------------------------------------
 -- STEP 1: Core schema and infrastructure
