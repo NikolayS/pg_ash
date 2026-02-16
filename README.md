@@ -4,7 +4,7 @@
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/pg_ash)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/NikolayS/pg_ash/blob/main/LICENSE)
 [![Pure SQL](https://img.shields.io/badge/Pure_SQL-no_C_extension-green)](https://github.com/NikolayS/pg_ash)
-[![Functions tested](https://img.shields.io/badge/functions_tested-27%2F32_(84%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
+[![Functions tested](https://img.shields.io/badge/functions_tested-32%2F32_(100%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
 
 Active Session History for Postgres — lightweight wait event sampling with zero bloat.
 

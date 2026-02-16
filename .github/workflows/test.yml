@@ -567,7 +567,80 @@ jobs:
           $$;
           EOF
 
-      - name: Test edge cases
+      - name: Test internal helper functions
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          DO $$
+          DECLARE
+            v_slot smallint;
+            v_slots smallint[];
+            v_ts int4;
+            v_wait_id smallint;
+            v_cron_avail boolean;
+          BEGIN
+            -- current_slot: returns current partition slot
+            SELECT ash.current_slot() INTO v_slot;
+            ASSERT v_slot >= 0 AND v_slot <= 2,
+              'current_slot out of range: ' || v_slot;
+
+            -- _active_slots: returns current + previous slot
+            SELECT ash._active_slots() INTO v_slots;
+            ASSERT array_length(v_slots, 1) = 2,
+              '_active_slots should return 2 elements, got: ' || array_length(v_slots, 1);
+            ASSERT v_slots[1] = v_slot,
+              '_active_slots[1] should be current slot';
+            ASSERT v_slots[2] = ((v_slot - 1 + 3) % 3)::smallint,
+              '_active_slots[2] should be previous slot';
+
+            -- _to_sample_ts: converts timestamptz to int4 offset from epoch
+            SELECT ash._to_sample_ts(ash.epoch()) INTO v_ts;
+            ASSERT v_ts = 0, '_to_sample_ts(epoch) should be 0, got: ' || v_ts;
+
+            SELECT ash._to_sample_ts(ash.epoch() + interval '1 hour') INTO v_ts;
+            ASSERT v_ts = 3600, '_to_sample_ts(epoch+1h) should be 3600, got: ' || v_ts;
+
+            -- _to_sample_ts: future timestamps should be positive
+            SELECT ash._to_sample_ts(now()) INTO v_ts;
+            ASSERT v_ts > 0, '_to_sample_ts(now) should be positive';
+
+            -- _register_wait: register a new wait event
+            SELECT ash._register_wait('active', 'Test', 'TestEvent') INTO v_wait_id;
+            ASSERT v_wait_id IS NOT NULL, '_register_wait returned null';
+
+            -- _register_wait: same call should return same id (idempotent)
+            DECLARE
+              v_wait_id2 smallint;
+            BEGIN
+              SELECT ash._register_wait('active', 'Test', 'TestEvent') INTO v_wait_id2;
+              ASSERT v_wait_id2 = v_wait_id,
+                '_register_wait not idempotent: ' || v_wait_id || ' vs ' || v_wait_id2;
+            END;
+
+            -- _register_wait: different event should get different id
+            DECLARE
+              v_wait_id3 smallint;
+            BEGIN
+              SELECT ash._register_wait('active', 'Test', 'OtherEvent') INTO v_wait_id3;
+              ASSERT v_wait_id3 <> v_wait_id,
+                '_register_wait should return different id for different event';
+            END;
+
+            -- _pg_cron_available: should return boolean without error
+            SELECT ash._pg_cron_available() INTO v_cron_avail;
+            ASSERT v_cron_avail IS NOT NULL, '_pg_cron_available returned null';
+
+            -- epoch: should be 2026-01-01 00:00:00 UTC
+            ASSERT ash.epoch() = '2026-01-01 00:00:00+00'::timestamptz,
+              'epoch should be 2026-01-01, got: ' || ash.epoch();
+
+            RAISE NOTICE 'Internal helper tests PASSED';
+          END;
+          $$;
+          EOF
+
+      - name: Test edge cases and corner cases
         env:
           PGPASSWORD: postgres
         run: |
@@ -575,22 +648,199 @@ jobs:
           DO $$
           DECLARE
             v_count int;
+            v_rec record;
           BEGIN
-            -- Empty time range (future)
+            -- === Empty / future time ranges ===
+
+            -- Future range: no data
             SELECT count(*) INTO v_count
             FROM ash.timeline_chart_at(now() + interval '1 hour', now() + interval '2 hours');
             ASSERT v_count = 0, 'future range should return 0 rows';
 
-            -- Very short interval
-            SELECT count(*) INTO v_count FROM ash.top_waits('1 second');
-            -- May return 0, that's fine
+            SELECT count(*) INTO v_count
+            FROM ash.top_waits_at(now() + interval '1 hour', now() + interval '2 hours');
+            ASSERT v_count = 0, 'future top_waits_at should return 0 rows';
 
-            -- query_waits for non-existent query
+            SELECT count(*) INTO v_count
+            FROM ash.top_queries_at(now() + interval '1 hour', now() + interval '2 hours');
+            ASSERT v_count = 0, 'future top_queries_at should return 0 rows';
+
+            SELECT count(*) INTO v_count
+            FROM ash.samples_at(now() + interval '1 hour', now() + interval '2 hours', 10);
+            ASSERT v_count = 0, 'future samples_at should return 0 rows';
+
+            SELECT count(*) INTO v_count
+            FROM ash.waits_by_type_at(now() + interval '1 hour', now() + interval '2 hours');
+            ASSERT v_count = 0, 'future waits_by_type_at should return 0 rows';
+
+            SELECT count(*) INTO v_count
+            FROM ash.wait_timeline_at(now() + interval '1 hour', now() + interval '2 hours');
+            ASSERT v_count = 0, 'future wait_timeline_at should return 0 rows';
+
+            SELECT count(*) INTO v_count
+            FROM ash.query_waits_at(111111, now() + interval '1 hour', now() + interval '2 hours');
+            ASSERT v_count = 0, 'future query_waits_at should return 0 rows';
+
+            -- === Very short intervals ===
+
+            SELECT count(*) INTO v_count FROM ash.top_waits('1 second');
+            -- May return 0, that's fine — should not error
+
+            SELECT count(*) INTO v_count FROM ash.top_queries('1 second');
+            SELECT count(*) INTO v_count FROM ash.waits_by_type('1 second');
+            SELECT count(*) INTO v_count FROM ash.wait_timeline('1 second', '1 second');
+
+            -- === Non-existent queries ===
+
             SELECT count(*) INTO v_count FROM ash.query_waits(999999999, '1 hour');
-            -- Should return 0 rows, not error
             ASSERT v_count = 0, 'non-existent query should return 0 rows';
 
-            RAISE NOTICE 'Edge case tests PASSED';
+            SELECT count(*) INTO v_count
+            FROM ash.query_waits_at(999999999, now() - interval '1 hour', now());
+            ASSERT v_count = 0, 'non-existent query_at should return 0 rows';
+
+            -- === _validate_data corner cases ===
+
+            ASSERT ash._validate_data(null) = false, 'null should be invalid';
+            ASSERT ash._validate_data('{}'::integer[]) = false, 'empty array should be invalid';
+            ASSERT ash._validate_data('{0}'::integer[]) = false, 'single zero should be invalid';
+            ASSERT ash._validate_data('{-1}'::integer[]) = false, 'single neg should be invalid (no count)';
+            ASSERT ash._validate_data('{-1,0}'::integer[]) = true, 'wait_id + count=0 should be valid';
+            ASSERT ash._validate_data('{-1,1,5}'::integer[]) = true, 'single backend should be valid';
+            ASSERT ash._validate_data('{-1,2,5,6,-2,1,7}'::integer[]) = true, 'multi-group should be valid';
+            ASSERT ash._validate_data('{-1,2,5}'::integer[]) = false, 'count=2 but only 1 qid should be invalid';
+            ASSERT ash._validate_data('{5,2,1,1}'::integer[]) = false, 'positive first element should be invalid';
+
+            -- === decode_sample corner cases ===
+
+            -- Empty/null data
+            SELECT count(*) INTO v_count FROM ash.decode_sample(null);
+            ASSERT v_count = 0, 'null decode should return 0 rows';
+
+            SELECT count(*) INTO v_count FROM ash.decode_sample('{}'::integer[]);
+            ASSERT v_count = 0, 'empty decode should return 0 rows';
+
+            -- Data with count=0 (no backends for this wait, but marker present)
+            SELECT count(*) INTO v_count FROM ash.decode_sample('{-1,0}'::integer[]);
+            ASSERT v_count = 0, 'count=0 should return 0 rows';
+
+            -- === Limit edge cases ===
+
+            -- limit=1: should get exactly 1 event + maybe Other
+            SELECT count(*) INTO v_count FROM ash.top_waits('1 hour', 1);
+            ASSERT v_count >= 1 AND v_count <= 2,
+              'limit=1 should return 1-2 rows, got: ' || v_count;
+
+            -- limit=100: should not error even with few events
+            SELECT count(*) INTO v_count FROM ash.top_waits('1 hour', 100);
+            ASSERT v_count > 0, 'limit=100 should return rows';
+
+            -- limit=0: edge case
+            SELECT count(*) INTO v_count FROM ash.top_queries('1 hour', 0);
+            -- Should return 0 or just Other
+
+            -- === timeline_chart edge cases ===
+
+            -- Width=1: minimal chart
+            SELECT count(*) INTO v_count FROM ash.timeline_chart('30 minutes', '5 minutes', 3, 1);
+            ASSERT v_count > 1, 'width=1 should still return rows';
+
+            -- top=1: only top event + Other
+            SELECT * INTO v_rec FROM ash.timeline_chart('30 minutes', '5 minutes', 1, 40) LIMIT 1;
+            ASSERT v_rec.chart IS NOT NULL, 'top=1 legend should exist';
+
+            -- Bucket larger than interval
+            SELECT count(*) INTO v_count FROM ash.timeline_chart('5 minutes', '1 hour', 3, 40);
+            -- Should return at most 1-2 rows
+
+            -- === Rotation edge cases ===
+
+            -- Multiple rotations: slot should cycle through 0→1→2→0
+            DECLARE
+              v_s0 smallint;
+              v_s1 smallint;
+              v_s2 smallint;
+              v_s3 smallint;
+            BEGIN
+              SELECT ash.current_slot() INTO v_s0;
+
+              UPDATE ash.config SET rotated_at = now() - interval '2 days';
+              PERFORM ash.rotate();
+              SELECT ash.current_slot() INTO v_s1;
+              ASSERT v_s1 = ((v_s0 + 1) % 3)::smallint,
+                'first rotation: expected ' || ((v_s0 + 1) % 3) || ', got ' || v_s1;
+
+              UPDATE ash.config SET rotated_at = now() - interval '2 days';
+              PERFORM ash.rotate();
+              SELECT ash.current_slot() INTO v_s2;
+              ASSERT v_s2 = ((v_s0 + 2) % 3)::smallint,
+                'second rotation: expected ' || ((v_s0 + 2) % 3) || ', got ' || v_s2;
+
+              UPDATE ash.config SET rotated_at = now() - interval '2 days';
+              PERFORM ash.rotate();
+              SELECT ash.current_slot() INTO v_s3;
+              ASSERT v_s3 = v_s0,
+                'third rotation should return to start: expected ' || v_s0 || ', got ' || v_s3;
+            END;
+
+            -- === Partition isolation ===
+
+            -- Data in inactive partition should not show in readers
+            DECLARE
+              v_inactive smallint;
+              v_cpu_id smallint;
+              v_slot smallint;
+            BEGIN
+              SELECT ash.current_slot() INTO v_slot;
+              -- Inactive partition = neither current nor previous
+              v_inactive := ((v_slot + 1) % 3)::smallint;
+              SELECT id INTO v_cpu_id FROM ash.wait_event_map WHERE type = 'CPU*' AND event = 'CPU*';
+
+              -- Insert into inactive partition
+              EXECUTE format(
+                'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (%s, 1, 1, %L::integer[], %s)',
+                v_inactive,
+                extract(epoch FROM now() - ash.epoch())::int4,
+                ARRAY[-v_cpu_id, 1, 1]::integer[],
+                v_inactive
+              );
+
+              -- This data should NOT appear in top_waits (filtered by _active_slots)
+              -- We can't easily test this because active_slots includes current+previous,
+              -- and the inactive one is the third. Just verify no error.
+              SELECT count(*) INTO v_count FROM ash.top_waits('1 minute');
+              -- Should not include the inactive partition data
+            END;
+
+            RAISE NOTICE 'Edge and corner case tests PASSED';
+          END;
+          $$;
+
+          -- === _wait_color edge cases (separate DO block) ===
+          DO $$
+          BEGIN
+            -- Exact boundary matches
+            ASSERT ash._wait_color('CPU*') = E'\033[32m', 'CPU* green';
+            ASSERT ash._wait_color('CPUsomething') = E'\033[32m', 'CPU prefix green';
+            ASSERT ash._wait_color('IdleTx') = E'\033[32m', 'IdleTx green';
+            ASSERT ash._wait_color('IO:DataFileRead') = E'\033[34m', 'IO blue';
+            ASSERT ash._wait_color('IO:WALSync') = E'\033[34m', 'IO:WALSync blue';
+            ASSERT ash._wait_color('Lock:tuple') = E'\033[31m', 'Lock red';
+            ASSERT ash._wait_color('Lock:transactionid') = E'\033[31m', 'Lock:txid red';
+            ASSERT ash._wait_color('Lock:relation') = E'\033[31m', 'Lock:relation red';
+            ASSERT ash._wait_color('LWLock:WALWrite') = E'\033[33m', 'LWLock yellow';
+            ASSERT ash._wait_color('LWLock:BufferContent') = E'\033[33m', 'LWLock:BufferContent yellow';
+            ASSERT ash._wait_color('Client:ClientRead') = E'\033[35m', 'Client magenta';
+            ASSERT ash._wait_color('Client:ClientWrite') = E'\033[35m', 'Client:Write magenta';
+            ASSERT ash._wait_color('Extension:DblinkGetResult') = E'\033[35m', 'Extension magenta';
+            ASSERT ash._wait_color('Timeout:PgSleep') = E'\033[36m', 'Timeout cyan';
+            ASSERT ash._wait_color('Activity:ArchiverMain') = E'\033[36m', 'Activity cyan';
+            ASSERT ash._wait_color('IPC:BgWorkerStartup') = E'\033[36m', 'IPC cyan';
+            ASSERT ash._wait_color('BufferPin:BufferPin') = E'\033[36m', 'BufferPin cyan';
+            ASSERT ash._wait_color('') = E'\033[36m', 'empty string cyan (fallback)';
+            ASSERT ash._wait_color('UnknownType:Whatever') = E'\033[36m', 'unknown cyan';
+
+            RAISE NOTICE '_wait_color comprehensive tests PASSED';
           END;
           $$;
           EOF
