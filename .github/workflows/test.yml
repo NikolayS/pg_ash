@@ -177,12 +177,12 @@ jobs:
             FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[]);
             ASSERT v_count = 2, 'decode_sample wrong count: ' || v_count;
 
-            -- Verify decoded fields
+            -- Verify decoded fields: 2 backends = 2 rows
             SELECT * INTO v_result
             FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[], 0::smallint)
             LIMIT 1;
             ASSERT v_result.wait_event = 'CPU*', 'wrong wait_event: ' || v_result.wait_event;
-            ASSERT v_result.count = 2, 'wrong count: ' || v_result.count;
+            ASSERT v_result.query_id = 12345, 'wrong query_id: ' || v_result.query_id;
 
             RAISE NOTICE 'Decoder tests PASSED';
           END;
