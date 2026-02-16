@@ -705,7 +705,7 @@ jobs:
             ASSERT ash._validate_data('{}'::integer[]) = false, 'empty array should be invalid';
             ASSERT ash._validate_data('{0}'::integer[]) = false, 'single zero should be invalid';
             ASSERT ash._validate_data('{-1}'::integer[]) = false, 'single neg should be invalid (no count)';
-            ASSERT ash._validate_data('{-1,0}'::integer[]) = true, 'wait_id + count=0 should be valid';
+            ASSERT ash._validate_data('{-1,0}'::integer[]) = false, 'count=0 should be invalid';
             ASSERT ash._validate_data('{-1,1,5}'::integer[]) = true, 'single backend should be valid';
             ASSERT ash._validate_data('{-1,2,5,6,-2,1,7}'::integer[]) = true, 'multi-group should be valid';
             ASSERT ash._validate_data('{-1,2,5}'::integer[]) = false, 'count=2 but only 1 qid should be invalid';
