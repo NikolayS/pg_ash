@@ -6,7 +6,7 @@ Upgrade from 1.0: `\i sql/ash--1.1.sql` — safe to run on top of a running 1.0 
 
 ### New: timeline chart
 
-`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: green = CPU\*, bright green = IdleTx, red = Lock, blue = IO, yellow = LWLock, magenta = Client/Extension, cyan = Other.
+`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other.
 
 ```sql
 select * from ash.timeline_chart('1 hour', '5 minutes');
@@ -21,7 +21,7 @@ Output: 4 columns — `bucket_start | active | detail | chart`. First row is a c
 
 ### Changed: IdleTx gets its own color
 
-`IdleTx` (idle-in-transaction) now renders as bright green (`\033[92m`) in timeline charts, distinguishable from CPU\* (green, `\033[32m`).
+`IdleTx` (idle-in-transaction) now renders as yellow (`\033[33m`) in timeline charts, distinguishable from CPU\* (bright green, `\033[92m`).
 
 ### Fixed: pg_cron version comparison
 
