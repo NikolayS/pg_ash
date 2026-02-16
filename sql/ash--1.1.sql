@@ -4,16 +4,28 @@
 -- Safe to run on top of 1.0 — all objects use IF NOT EXISTS / CREATE OR REPLACE.
 -- Upgrade: \i ash--1.1.sql
 
--- Drop functions removed or changed in 1.1
-drop function if exists ash.histogram(interval, int, int);
-drop function if exists ash.histogram_at(timestamptz, timestamptz, int, int);
-drop function if exists ash.timeline_chart(interval, interval, int, int);
-drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int);
--- Drop ALL top_waits/top_waits_at overloads — param count changed across versions
-drop function if exists ash.top_waits(interval, int);
-drop function if exists ash.top_waits(interval, int, int);
-drop function if exists ash.top_waits_at(timestamptz, timestamptz, int);
-drop function if exists ash.top_waits_at(timestamptz, timestamptz, int, int);
+-- Drop functions removed or changed in 1.1 (handled by DO block below)
+-- Drop ALL overloads of functions whose signatures changed across versions.
+-- Using DO block because DROP FUNCTION requires exact arg types and we can't
+-- predict which stale overloads exist from prior installs.
+do $$
+declare
+  r record;
+begin
+  for r in
+    select p.oid::regprocedure as sig
+    from pg_proc p
+    join pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.proname in (
+        'top_waits', 'top_waits_at',
+        'histogram', 'histogram_at',
+        'timeline_chart', 'timeline_chart_at'
+      )
+  loop
+    execute 'drop function if exists ' || r.sig;
+  end loop;
+end $$;
 
 --------------------------------------------------------------------------------
 -- STEP 1: Core schema and infrastructure
