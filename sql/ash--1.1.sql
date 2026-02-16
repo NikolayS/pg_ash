@@ -912,27 +912,30 @@ stable
 set jit = off
 as $$
   with waits as (
-    select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
-    from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots())
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
+      s.data[i + 1] as cnt
+    from ash.sample s, generate_subscripts(s.data, 1) i,
+         ash.wait_event_map wm
+    where wm.id = (-s.data[i])::smallint
+      and s.slot = any(ash._active_slots())
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
       and s.data[i] < 0
   ),
   totals as (
-    select w.wait_id, sum(w.cnt) as cnt
+    select w.wait_event, sum(w.cnt) as cnt
     from waits w
-    group by w.wait_id
+    group by w.wait_event
   ),
   grand_total as (
     select sum(cnt) as total from totals
   ),
   ranked as (
     select
-      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
+      t.wait_event,
       t.cnt,
       row_number() over (order by t.cnt desc) as rn
     from totals t
-    join ash.wait_event_map wm on wm.id = t.wait_id
   ),
   top_rows as (
     select wait_event, cnt, rn from ranked where rn <= p_limit
@@ -1271,21 +1274,26 @@ begin
       and s.data[i - 1] >= 0  -- it's a query_id position, not a count
       and exists (select from map_ids m where m.slot = s.slot and m.id = s.data[i])
   ),
+  named_hits as (
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
+    from hits h
+    join ash.wait_event_map wm on wm.id = h.wait_id
+    where h.wait_id is not null
+  ),
   totals as (
-    select wait_id, count(*) as cnt
-    from hits
-    where wait_id is not null
-    group by wait_id
+    select evt, count(*) as cnt
+    from named_hits
+    group by evt
   ),
   grand_total as (
     select sum(cnt) as total from totals
   )
   select
-    case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
+    t.evt,
     t.cnt as samples,
     round(t.cnt::numeric / gt.total * 100, 2) as pct
   from totals t
-  join ash.wait_event_map wm on wm.id = t.wait_id
   cross join grand_total gt
   order by t.cnt desc;
 end;
@@ -1348,28 +1356,31 @@ stable
 set jit = off
 as $$
   with waits as (
-    select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
-    from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots())
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
+      s.data[i + 1] as cnt
+    from ash.sample s, generate_subscripts(s.data, 1) i,
+         ash.wait_event_map wm
+    where wm.id = (-s.data[i])::smallint
+      and s.slot = any(ash._active_slots())
       and s.sample_ts >= ash._to_sample_ts(p_start)
       and s.sample_ts < ash._to_sample_ts(p_end)
       and s.data[i] < 0
   ),
   totals as (
-    select w.wait_id, sum(w.cnt) as cnt
+    select w.wait_event, sum(w.cnt) as cnt
     from waits w
-    group by w.wait_id
+    group by w.wait_event
   ),
   grand_total as (
     select sum(cnt) as total from totals
   ),
   ranked as (
     select
-      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
+      t.wait_event,
       t.cnt,
       row_number() over (order by t.cnt desc) as rn
     from totals t
-    join ash.wait_event_map wm on wm.id = t.wait_id
   ),
   top_rows as (
     select wait_event, cnt, rn from ranked where rn <= p_limit
@@ -1589,15 +1600,21 @@ begin
       and s.data[i] >= 0 and s.data[i - 1] >= 0
       and exists (select from map_ids m where m.slot = s.slot and m.id = s.data[i])
   ),
+  named_hits as (
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
+    from hits h
+    join ash.wait_event_map wm on wm.id = h.wait_id
+    where h.wait_id is not null
+  ),
   totals as (
-    select wait_id, count(*) as cnt from hits where wait_id is not null group by wait_id
+    select evt, count(*) as cnt from named_hits group by evt
   ),
   grand_total as (
     select sum(cnt) as total from totals
   )
-  select case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+  select t.evt, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
   from totals t
-  join ash.wait_event_map wm on wm.id = t.wait_id
   cross join grand_total gt
   order by t.cnt desc;
 end;

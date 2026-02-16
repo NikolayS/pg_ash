@@ -55,73 +55,74 @@ select ash.uninstall();
 
 ```sql
 -- morning coffee: what happened overnight?
-select * from ash.activity_summary('8 hours');
+select * from ash.activity_summary('5 minutes');
 ```
 
 ```
-        metric        |            value
-----------------------+------------------------------
- time_range           | 08:00:00
- total_samples        | 28800
- avg_active_backends  | 16.4
- peak_active_backends | 25
- peak_time            | 2026-02-14 03:17:42+00
- databases_active     | 3
- top_wait_1           | CPU* (35.00%)
- top_wait_2           | Lock:tuple (20.00%)
- top_wait_3           | LWLock:WALWrite (13.00%)
- top_query_1          | 1234567890 (36.00%)
- top_query_2          | 9876543210 (22.00%)
- top_query_3          | 5555555555 (19.00%)
+        metric        |                                            value
+----------------------+---------------------------------------------------------------------------------------------
+ time_range           | 00:05:00
+ total_samples        | 56
+ avg_active_backends  | 6.6
+ peak_active_backends | 10
+ peak_time            | 2026-02-16 08:38:16+00
+ databases_active     | 1
+ top_wait_1           | Client:ClientRead (46.77%)
+ top_wait_2           | Timeout:PgSleep (11.83%)
+ top_wait_3           | Lock:transactionid (9.68%)
+ top_query_1          | -2835399305386018931 — COMMIT (29.73%)
+ top_query_2          | 3365820675399133794 — UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE b (23.24%)
+ top_query_3          | -4378765880691287891 — UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE t (11.35%)
 ```
 
 ```sql
--- top wait events in the last hour (default: top 10 + Other)
-select * from ash.top_waits('1 hour');
+-- top wait events (default: top 10 + Other)
+select * from ash.top_waits('5 minutes');
 ```
 
 ```
-    wait_event     | samples |  pct  |                    bar
--------------------+---------+-------+-------------------------------------------
- CPU*              |   18900 | 35.00 | █████████████████████████████████████ 35.00%
- Lock:tuple        |   10800 | 20.00 | █████████████████████ 20.00%
- LWLock:WALWrite   |    7020 | 13.00 | ██████████████ 13.00%
- IO:DataFileWrite  |    5940 | 11.00 | ████████████ 11.00%
- IO:DataFileRead   |    4590 |  8.50 | █████████ 8.50%
- Client:ClientRead |    2700 |  5.00 | █████ 5.00%
- Timeout:PgSleep   |    1890 |  3.50 | ████ 3.50%
- LWLock:BufferIO   |    1080 |  2.00 | ██ 2.00%
- Lock:transactionid|     648 |  1.20 | █ 1.20%
- Other             |     432 |  0.80 | █ 0.80%
+     wait_event     | samples |  pct  |                  bar
+--------------------+---------+-------+---------------------------------------
+ Client:ClientRead  |     174 | 46.77 | ██████████████████████████████ 46.77%
+ Timeout:PgSleep    |      44 | 11.83 | ████████ 11.83%
+ Lock:transactionid |      36 |  9.68 | ██████ 9.68%
+ CPU*               |      35 |  9.41 | ██████ 9.41%
+ LWLock:WALWrite    |      31 |  8.33 | █████ 8.33%
+ IdleTx             |      26 |  6.99 | ████ 6.99%
+ IO:WalSync         |      19 |  5.11 | ███ 5.11%
+ Lock:tuple         |       5 |  1.34 | █ 1.34%
+ LWLock:LockManager |       2 |  0.54 | █ 0.54%
 ```
 
 ```sql
 -- top queries with text from pg_stat_statements
-select * from ash.top_queries_with_text('1 hour', 5);
+select * from ash.top_queries_with_text('5 minutes', 5);
 ```
 
 ```
-   query_id   | samples |  pct  | calls | mean_time_ms | query_text
---------------+---------+-------+-------+--------------+-------------------------------
- 1234567890   |   19440 | 36.00 |  5600 |        12.34 | select * from orders where...
- 9876543210   |   11880 | 22.00 |  3200 |         8.56 | update inventory set quant...
- 5555555555   |   10260 | 19.00 |  1800 |        45.67 | select count(*) from event...
+       query_id       | samples |  pct  | calls  | mean_time_ms |                             query_text
+----------------------+---------+-------+--------+--------------+---------------------------------------------------------------------
+ -2835399305386018931 |     110 | 29.73 | 283202 |         0.00 | commit
+  3365820675399133794 |      86 | 23.24 | 283195 |         1.83 | UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2
+  5457019535816659310 |      44 | 11.89 |     11 |     17747.75 | select pg_sleep($1)
+ -4378765880691287891 |      42 | 11.35 | 283195 |         0.40 | UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2
 ```
 
 ```sql
 -- breakdown by wait event type
-select * from ash.waits_by_type('1 hour');
+select * from ash.waits_by_type('5 minutes');
 ```
 
 ```
  wait_event_type | samples |  pct
 -----------------+---------+-------
- CPU*            |   18900 | 35.00
- Lock            |   11448 | 21.20
- IO              |   10530 | 19.50
- LWLock          |    8100 | 15.00
- Client          |    2700 |  5.00
- Timeout         |    1890 |  3.50
+ Client          |     174 | 46.77
+ Timeout         |      44 | 11.83
+ Lock            |      41 | 11.02
+ CPU*            |      35 |  9.41
+ LWLock          |      33 |  8.87
+ IdleTx          |      26 |  6.99
+ IO              |      19 |  5.11
 ```
 
 ### Investigate an incident
@@ -143,55 +144,32 @@ select * from ash.wait_timeline_at(
 );
 ```
 
-### Visual bar chart
-
-```sql
-select * from ash.top_waits('1 hour');
-```
-
-```
-     wait_event       | samples |  pct  |                    bar
-----------------------+---------+-------+-------------------------------------------
- CPU*                 |   18900 | 35.00 | █████████████████████████████████████ 35.00%
- Lock:tuple           |   10800 | 20.00 | █████████████████████ 20.00%
- LWLock:WALWrite      |    7020 | 13.00 | ██████████████ 13.00%
- IO:DataFileWrite     |    5940 | 11.00 | ████████████ 11.00%
- IO:DataFileRead      |    4590 |  8.50 | █████████ 8.50%
- Client:ClientRead    |    2700 |  5.00 | █████ 5.00%
- Timeout:PgSleep      |    1890 |  3.50 | ████ 3.50%
- LWLock:BufferIO      |    1080 |  2.00 | ██ 2.00%
- Lock:transactionid   |     648 |  1.20 | █ 1.20%
- Other                |     432 |  0.80 | █ 0.80%
-```
-
-
 ### Timeline chart
 
 Visualize wait event patterns over time — spot spikes, correlate with deployments, see what changed.
 
 ```sql
-select * from ash.timeline_chart('1 hour', '5 minutes');
+select * from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
 ```
 
 ```
-      bucket_start       | active | detail                                                  | chart
--------------------------+--------+---------------------------------------------------------+--------------------------------------------------
-                         |        |                                                         | █ CPU*  ▓ Lock:tuple  ░ IO:DataFileRead  · Other
- 2026-02-14 19:45:00+00  |    3.2 | CPU*=2.1 Lock:tuple=0.5 IO:DataFileRead=0.3 Other=0.3  | ██████████████████████████████████████████▓▓▓░░··
- 2026-02-14 19:50:00+00  |    3.4 | CPU*=2.0 Lock:tuple=0.8 IO:DataFileRead=0.3 Other=0.3  | ████████████████████████████████████▓▓▓▓▓▓▓░░░··
- 2026-02-14 19:55:00+00  |   12.8 | CPU*=2.2 Lock:tuple=9.1 IO:DataFileRead=0.8 Other=0.7  | ████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░··
- 2026-02-14 20:00:00+00  |   14.1 | CPU*=1.8 Lock:tuple=11.2 IO:DataFileRead=0.6 Other=0.5 | ██████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░··
- 2026-02-14 20:05:00+00  |   13.5 | CPU*=2.0 Lock:tuple=10.1 IO:DataFileRead=0.7 Other=0.7 | ███████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░··
- 2026-02-14 20:10:00+00  |    4.5 | CPU*=2.3 Lock:tuple=1.2 IO:DataFileRead=0.5 Other=0.5  | ████████████████████████████████████▓▓▓▓░░░░░···
- 2026-02-14 20:15:00+00  |    3.1 | CPU*=2.0 Lock:tuple=0.4 IO:DataFileRead=0.4 Other=0.3  | █████████████████████████████████████████████▓░░·
+      bucket_start       | active |                             detail                             |                           chart
+-------------------------+--------+----------------------------------------------------------------+-----------------------------------------------------------
+                         |        |                                                                | █ Client:ClientRead  ▓ LWLock:WALWrite  ░ IdleTx  · Other
+ 2026-02-16 08:37:30+00  |    2.0 | Other=2.0                                                      | ···········
+ 2026-02-16 08:38:00+00  |    7.0 | Client:ClientRead=2.3 LWLock:WALWrite=0.8 IdleTx=0.4 Other=3.5 | █████████████▓▓▓▓▓░░····················
+ 2026-02-16 08:38:30+00  |    6.6 | Client:ClientRead=4.0 LWLock:WALWrite=0.4 IdleTx=0.5 Other=1.7 | ███████████████████████▓▓░░░··········
+ 2026-02-16 08:39:00+00  |    5.3 | Client:ClientRead=3.3 LWLock:WALWrite=0.3 IdleTx=0.7 Other=1.0 | ███████████████████▓▓░░░░······
 ```
 
-Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: green = CPU\*, red = Lock, blue = IO, bright green = IdleTx, yellow = LWLock, magenta = Client/Extension, cyan = Other. Lock:tuple spike from 19:55 to 20:05 — classic row-level contention. Bar width scales to the peak bucket.
+Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible even without color. In `psql`, bars are also ANSI color-coded by wait type: green = CPU\*, red = Lock, blue = IO, bright green = IdleTx, yellow = LWLock, magenta = Client/Extension, cyan = Other.
+
+Example data generated with `pgbench -c 8 -T 65` on Postgres 17 with concurrent lock contention and idle-in-transaction sessions.
 
 ```sql
--- zoom into yesterday's deploy window
+-- zoom into a specific time window
 select * from ash.timeline_chart_at(
-  '2026-02-14 19:50', '2026-02-14 20:10',
+  now() - interval '10 minutes', now(),
   '1 minute', 3, 50
 );
 ```
@@ -220,23 +198,24 @@ select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 50);
 ### Analyze a specific query
 
 ```sql
--- what is query 1234567890 waiting on?
-select * from ash.query_waits(1234567890, '1 hour');
+-- what is query 3365820675399133794 waiting on?
+select * from ash.query_waits(3365820675399133794, '5 minutes');
 ```
 
 ```
-    wait_event    | samples |  pct
-------------------+---------+-------
- Lock:tuple       |    2880 | 28.57
- IO:DataFileWrite |    2880 | 28.57
- IO:DataFileRead  |    1440 | 14.29
- CPU*             |    1440 | 14.29
- LWLock:WALWrite  |    1440 | 14.29
+     wait_event     | samples |  pct
+--------------------+---------+-------
+ Client:ClientRead  |      32 | 54.24
+ Lock:transactionid |      12 | 20.34
+ LWLock:WALWrite    |       6 | 10.17
+ CPU*               |       4 |  6.78
+ IO:WalSync         |       3 |  5.08
+ IdleTx             |       2 |  3.39
 ```
 
 ```sql
 -- same, but during a specific time window
-select * from ash.query_waits_at(1234567890, '2026-02-14 03:00', '2026-02-14 03:10');
+select * from ash.query_waits_at(3365820675399133794, '2026-02-16 08:38', '2026-02-16 08:40');
 ```
 
 ### Check status
@@ -251,11 +230,13 @@ select * from ash.status();
  current_slot               | 0
  sample_interval            | 00:00:01
  rotation_period            | 1 day
- samples_in_current_slot    | 86400
- last_sample_ts             | 2026-02-14 20:40:10+00
- wait_event_map_count       | 21
- query_map_count            | 200
- pg_cron_available          | yes
+ include_bg_workers         | false
+ samples_in_current_slot    | 56
+ last_sample_ts             | 2026-02-16 08:39:03+00
+ wait_event_map_count       | 11
+ wait_event_map_utilization | 0.03%
+ query_map_count            | 8
+ pg_cron_available          | no
 ```
 
 ## Function reference
