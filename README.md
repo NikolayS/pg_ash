@@ -182,12 +182,14 @@ select * from ash.samples('10 minutes', 20);
 ```
 
 ```
-       sample_time        | database_name | active_backends |   wait_event    |  query_id  |                query_text
---------------------------+---------------+-----------------+-----------------+------------+------------------------------------------
- 2026-02-14 20:40:10+00   | mydb          |              12 | CPU*            | 1234567890 | select * from orders where created_at > ...
- 2026-02-14 20:40:10+00   | mydb          |              12 | IO:DataFileRead | 9876543210 | update inventory set quantity = quantit...
- 2026-02-14 20:40:10+00   | mydb          |              12 | Lock:tuple      | 5555555555 | insert into events (type, payload) valu...
- 2026-02-14 20:40:09+00   | mydb          |              11 | CPU*            | 1234567890 | select * from orders where created_at > ...
+      sample_time       | database_name | active_backends |     wait_event     |       query_id       |                          query_text
+------------------------+---------------+-----------------+--------------------+----------------------+--------------------------------------------------------------
+ 2026-02-16 11:18:51+00 | postgres      |               7 | CPU*               | -2835399305386018931 | END
+ 2026-02-16 11:18:51+00 | postgres      |               7 | CPU*               |  3365820675399133794 | UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE ...
+ 2026-02-16 11:18:49+00 | postgres      |               5 | Client:ClientRead  |  9144568883098003499 | SELECT abalance FROM pgbench_accounts WHERE aid = $1
+ 2026-02-16 11:18:49+00 | postgres      |               5 | IO:WalSync         | -2835399305386018931 | END
+ 2026-02-16 11:18:49+00 | postgres      |               3 | Lock:transactionid | -2835399305386018931 | END
+ 2026-02-16 11:18:49+00 | postgres      |               5 | LWLock:WALWrite    | -2835399305386018931 | END
 ```
 
 ```sql
