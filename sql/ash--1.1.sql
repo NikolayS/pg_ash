@@ -954,8 +954,9 @@ as $$
     r.wait_event,
     r.cnt as samples,
     round(r.cnt::numeric / gt.total * 100, 2) as pct,
-    repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
+    ash._wait_color(r.wait_event)
+      || repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || E'\033[0m' || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
   from (select * from top_rows union all select * from other) r
   cross join grand_total gt
   cross join max_pct mp
@@ -1399,8 +1400,9 @@ as $$
     r.wait_event,
     r.cnt as samples,
     round(r.cnt::numeric / gt.total * 100, 2) as pct,
-    repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
+    ash._wait_color(r.wait_event)
+      || repeat('█', greatest(1, (round(r.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || E'\033[0m' || ' ' || round(r.cnt::numeric / gt.total * 100, 2) || '%' as bar
   from (select * from top_rows union all select * from other) r
   cross join grand_total gt
   cross join max_pct mp
