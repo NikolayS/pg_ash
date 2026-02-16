@@ -1727,22 +1727,32 @@ begin
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
   -- Find top N wait events globally (by average active sessions)
-  select array_agg(t.wait_event order by t.avg_active desc)
+  -- Rank by avg active sessions, but weight by bucket presence so bursty
+  -- events don't steal legend slots from consistently-present ones.
+  select array_agg(t.wait_event order by t.score desc)
   into v_top_events
   from (
     select
-      case when wm.event = wm.type then wm.event
-        else wm.type || ':' || wm.event end as wait_event,
-      sum(s.data[i + 1])::numeric
-        / nullif(count(distinct s.sample_ts), 0) as avg_active
-    from ash.sample s, generate_subscripts(s.data, 1) i,
-         ash.wait_event_map wm
-    where wm.id = (-s.data[i])::smallint
-      and s.slot = any(ash._active_slots())
-      and s.sample_ts >= v_start_ts
-      and s.data[i] < 0
-    group by 1
-    order by 2 desc
+      wait_event,
+      avg_active * bucket_fraction as score
+    from (
+      select
+        case when wm.event = wm.type then wm.event
+          else wm.type || ':' || wm.event end as wait_event,
+        sum(s.data[i + 1])::numeric
+          / nullif(count(distinct s.sample_ts), 0) as avg_active,
+        count(distinct s.sample_ts - (s.sample_ts % v_bucket_secs))::numeric
+          / nullif(greatest(1, (extract(epoch from p_interval)::int4 / v_bucket_secs)), 0)
+          as bucket_fraction
+      from ash.sample s, generate_subscripts(s.data, 1) i,
+           ash.wait_event_map wm
+      where wm.id = (-s.data[i])::smallint
+        and s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_start_ts
+        and s.data[i] < 0
+      group by 1
+    ) sub
+    order by score desc
     limit p_top
   ) t;
 
@@ -1900,22 +1910,31 @@ begin
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
   -- Find top N wait events globally (by average active sessions)
-  select array_agg(t.wait_event order by t.avg_active desc)
+  -- Rank by avg active sessions weighted by bucket presence
+  select array_agg(t.wait_event order by t.score desc)
   into v_top_events
   from (
     select
-      case when wm.event = wm.type then wm.event
-        else wm.type || ':' || wm.event end as wait_event,
-      sum(s.data[i + 1])::numeric
-        / nullif(count(distinct s.sample_ts), 0) as avg_active
-    from ash.sample s, generate_subscripts(s.data, 1) i,
-         ash.wait_event_map wm
-    where wm.id = (-s.data[i])::smallint
-      and s.slot = any(ash._active_slots())
-      and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
-      and s.data[i] < 0
-    group by 1
-    order by 2 desc
+      wait_event,
+      avg_active * bucket_fraction as score
+    from (
+      select
+        case when wm.event = wm.type then wm.event
+          else wm.type || ':' || wm.event end as wait_event,
+        sum(s.data[i + 1])::numeric
+          / nullif(count(distinct s.sample_ts), 0) as avg_active,
+        count(distinct s.sample_ts - (s.sample_ts % v_bucket_secs))::numeric
+          / nullif(greatest(1, ((v_end_ts - v_start_ts) / v_bucket_secs)), 0)
+          as bucket_fraction
+      from ash.sample s, generate_subscripts(s.data, 1) i,
+           ash.wait_event_map wm
+      where wm.id = (-s.data[i])::smallint
+        and s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
+        and s.data[i] < 0
+      group by 1
+    ) sub
+    order by score desc
     limit p_top
   ) t;
 
