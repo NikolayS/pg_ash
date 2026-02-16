@@ -167,8 +167,12 @@ Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (r
 **Experimental: ANSI colors.** Pass `p_color => true` to enable ANSI color-coded bars (bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other). Note: psql's table formatter escapes ANSI codes — to render colors in psql, pipe through sed:
 
 ```sql
-select * from ash.top_waits('1 hour', p_color => true) \g | sed 's/\\x1B/\x1b/g' | less -R
-select * from ash.timeline_chart('1 hour', p_color => true) \g | sed 's/\\x1B/\x1b/g' | less -R
+-- add to ~/.psqlrc for a reusable :color command
+\set color '\\g | sed ''s/\\\\x1B/\\x1b/g'' | less -R'
+
+-- then use it
+select * from ash.top_waits('1 hour', p_color => true) :color
+select * from ash.timeline_chart('1 hour', p_color => true) :color
 ```
 
 Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
