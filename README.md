@@ -1,5 +1,11 @@
 # pg_ash
 
+[![CI](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml/badge.svg)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
+[![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/pg_ash)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/NikolayS/pg_ash/blob/main/LICENSE)
+[![Pure SQL](https://img.shields.io/badge/Pure_SQL-no_C_extension-green)](https://github.com/NikolayS/pg_ash)
+[![Functions tested](https://img.shields.io/badge/functions_tested-27%2F32_(84%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
+
 Active Session History for Postgres — lightweight wait event sampling with zero bloat.
 
 **The anti-extension.** Pure SQL/plpgsql that works on any Postgres 14+ — including RDS, Cloud SQL, AlloyDB, Supabase, Neon, and every other managed provider. No C extension, no `shared_preload_libraries`, no provider approval, no restart. Just `\i` and go.
