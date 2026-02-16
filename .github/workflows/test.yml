@@ -941,7 +941,8 @@ jobs:
             ASSERT ash._wait_color('Activity:ArchiverMain', true) = E'\033[36m', 'Activity cyan';
             ASSERT ash._wait_color('IPC:BgWorkerStartup', true) = E'\033[36m', 'IPC cyan';
             ASSERT ash._wait_color('BufferPin:BufferPin', true) = E'\033[36m', 'BufferPin cyan';
-            ASSERT ash._wait_color('') = E'\033[36m', 'empty string cyan (fallback)';
+            ASSERT ash._wait_color('', true) = E'\033[36m', 'empty string cyan (fallback)';
+            ASSERT ash._wait_color('') = '', 'empty string no-color returns empty';
             ASSERT ash._wait_color('UnknownType:Whatever', true) = E'\033[36m', 'unknown cyan';
 
             RAISE NOTICE '_wait_color comprehensive tests PASSED';
