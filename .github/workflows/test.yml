@@ -528,25 +528,33 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           DO $$
           DECLARE
-            v_bright_green text := E'\033[38;2;80;250;123m';
-            v_blue text := E'\033[38;2;98;114;164m';
+            v_green text := E'\033[38;2;80;250;123m';
+            v_light_yellow text := E'\033[38;2;241;250;140m';
+            v_blue text := E'\033[38;2;30;100;255m';
             v_red text := E'\033[38;2;255;85;85m';
-            v_yellow text := E'\033[38;2;241;250;140m';
-            v_bright_yellow text := E'\033[38;2;255;184;108m';
-            v_magenta text := E'\033[38;2;255;121;198m';
-            v_cyan text := E'\033[38;2;139;233;253m';
+            v_pink text := E'\033[38;2;255;121;198m';
+            v_cyan text := E'\033[38;2;0;200;255m';
+            v_yellow text := E'\033[38;2;255;220;100m';
+            v_orange text := E'\033[38;2;255;165;0m';
+            v_teal text := E'\033[38;2;0;210;180m';
+            v_purple text := E'\033[38;2;150;100;255m';
+            v_light_purple text := E'\033[38;2;190;150;255m';
+            v_gray text := E'\033[38;2;180;180;180m';
           BEGIN
-            ASSERT ash._wait_color('CPU*', true) = v_bright_green, 'CPU* should be bright green';
-            ASSERT ash._wait_color('IdleTx', true) = v_yellow, 'IdleTx should be yellow';
+            ASSERT ash._wait_color('CPU*', true) = v_green, 'CPU* should be green';
+            ASSERT ash._wait_color('IdleTx', true) = v_light_yellow, 'IdleTx should be light yellow';
             ASSERT ash._wait_color('IO:DataFileRead', true) = v_blue, 'IO should be blue';
             ASSERT ash._wait_color('IO:WALWrite', true) = v_blue, 'IO:WALWrite should be blue';
             ASSERT ash._wait_color('Lock:tuple', true) = v_red, 'Lock should be red';
             ASSERT ash._wait_color('Lock:transactionid', true) = v_red, 'Lock:transactionid should be red';
-            ASSERT ash._wait_color('LWLock:WALWrite', true) = v_bright_yellow, 'LWLock should be bright yellow';
-            ASSERT ash._wait_color('Client:ClientRead', true) = v_magenta, 'Client should be magenta';
-            ASSERT ash._wait_color('Extension:DblinkGetResult', true) = v_magenta, 'Extension should be magenta';
-            ASSERT ash._wait_color('Timeout:PgSleep', true) = v_cyan, 'unknown type should be cyan';
-            ASSERT ash._wait_color('Activity:ArchiverMain', true) = v_cyan, 'Activity should be cyan';
+            ASSERT ash._wait_color('LWLock:WALWrite', true) = v_pink, 'LWLock should be pink';
+            ASSERT ash._wait_color('IPC:BgWorkerStartup', true) = v_cyan, 'IPC should be cyan';
+            ASSERT ash._wait_color('Client:ClientRead', true) = v_yellow, 'Client should be yellow';
+            ASSERT ash._wait_color('Timeout:PgSleep', true) = v_orange, 'Timeout should be orange';
+            ASSERT ash._wait_color('BufferPin:BufferPin', true) = v_teal, 'BufferPin should be teal';
+            ASSERT ash._wait_color('Activity:ArchiverMain', true) = v_purple, 'Activity should be purple';
+            ASSERT ash._wait_color('Extension:DblinkGetResult', true) = v_light_purple, 'Extension should be light purple';
+            ASSERT ash._wait_color('UnknownType:Whatever', true) = v_gray, 'unknown should be gray';
             -- color=false returns empty string
             ASSERT ash._wait_color('CPU*', false) = '', 'color=false should return empty';
             ASSERT ash._wait_color('CPU*') = '', 'default color should be off';
@@ -924,26 +932,26 @@ jobs:
           DO $$
           BEGIN
             -- Exact boundary matches
-            ASSERT ash._wait_color('CPU*', true) = E'\033[38;2;80;250;123m', 'CPU* bright green';
-            ASSERT ash._wait_color('CPUsomething', true) = E'\033[38;2;80;250;123m', 'CPU prefix bright green';
-            ASSERT ash._wait_color('IdleTx', true) = E'\033[38;2;241;250;140m', 'IdleTx yellow';
-            ASSERT ash._wait_color('IO:DataFileRead', true) = E'\033[38;2;98;114;164m', 'IO blue';
-            ASSERT ash._wait_color('IO:WALSync', true) = E'\033[38;2;98;114;164m', 'IO:WALSync blue';
+            ASSERT ash._wait_color('CPU*', true) = E'\033[38;2;80;250;123m', 'CPU* green';
+            ASSERT ash._wait_color('CPUsomething', true) = E'\033[38;2;80;250;123m', 'CPU prefix green';
+            ASSERT ash._wait_color('IdleTx', true) = E'\033[38;2;241;250;140m', 'IdleTx light yellow';
+            ASSERT ash._wait_color('IO:DataFileRead', true) = E'\033[38;2;30;100;255m', 'IO blue';
+            ASSERT ash._wait_color('IO:WALSync', true) = E'\033[38;2;30;100;255m', 'IO:WALSync blue';
             ASSERT ash._wait_color('Lock:tuple', true) = E'\033[38;2;255;85;85m', 'Lock red';
             ASSERT ash._wait_color('Lock:transactionid', true) = E'\033[38;2;255;85;85m', 'Lock:txid red';
             ASSERT ash._wait_color('Lock:relation', true) = E'\033[38;2;255;85;85m', 'Lock:relation red';
-            ASSERT ash._wait_color('LWLock:WALWrite', true) = E'\033[38;2;255;184;108m', 'LWLock bright yellow';
-            ASSERT ash._wait_color('LWLock:BufferContent', true) = E'\033[38;2;255;184;108m', 'LWLock:BufferContent bright yellow';
-            ASSERT ash._wait_color('Client:ClientRead', true) = E'\033[38;2;255;121;198m', 'Client magenta';
-            ASSERT ash._wait_color('Client:ClientWrite', true) = E'\033[38;2;255;121;198m', 'Client:Write magenta';
-            ASSERT ash._wait_color('Extension:DblinkGetResult', true) = E'\033[38;2;255;121;198m', 'Extension magenta';
-            ASSERT ash._wait_color('Timeout:PgSleep', true) = E'\033[38;2;139;233;253m', 'Timeout cyan';
-            ASSERT ash._wait_color('Activity:ArchiverMain', true) = E'\033[38;2;139;233;253m', 'Activity cyan';
-            ASSERT ash._wait_color('IPC:BgWorkerStartup', true) = E'\033[38;2;139;233;253m', 'IPC cyan';
-            ASSERT ash._wait_color('BufferPin:BufferPin', true) = E'\033[38;2;139;233;253m', 'BufferPin cyan';
-            ASSERT ash._wait_color('', true) = E'\033[38;2;139;233;253m', 'empty string cyan (fallback)';
+            ASSERT ash._wait_color('LWLock:WALWrite', true) = E'\033[38;2;255;121;198m', 'LWLock pink';
+            ASSERT ash._wait_color('LWLock:BufferContent', true) = E'\033[38;2;255;121;198m', 'LWLock:BufferContent pink';
+            ASSERT ash._wait_color('IPC:BgWorkerStartup', true) = E'\033[38;2;0;200;255m', 'IPC cyan';
+            ASSERT ash._wait_color('Client:ClientRead', true) = E'\033[38;2;255;220;100m', 'Client yellow';
+            ASSERT ash._wait_color('Client:ClientWrite', true) = E'\033[38;2;255;220;100m', 'Client:Write yellow';
+            ASSERT ash._wait_color('Timeout:PgSleep', true) = E'\033[38;2;255;165;0m', 'Timeout orange';
+            ASSERT ash._wait_color('BufferPin:BufferPin', true) = E'\033[38;2;0;210;180m', 'BufferPin teal';
+            ASSERT ash._wait_color('Activity:ArchiverMain', true) = E'\033[38;2;150;100;255m', 'Activity purple';
+            ASSERT ash._wait_color('Extension:DblinkGetResult', true) = E'\033[38;2;190;150;255m', 'Extension light purple';
+            ASSERT ash._wait_color('', true) = E'\033[38;2;180;180;180m', 'empty string gray (fallback)';
             ASSERT ash._wait_color('') = '', 'empty string no-color returns empty';
-            ASSERT ash._wait_color('UnknownType:Whatever', true) = E'\033[38;2;139;233;253m', 'unknown cyan';
+            ASSERT ash._wait_color('UnknownType:Whatever', true) = E'\033[38;2;180;180;180m', 'unknown gray';
 
             RAISE NOTICE '_wait_color comprehensive tests PASSED';
           END;
@@ -1085,7 +1093,7 @@ jobs:
 
             -- _wait_color
             ASSERT ash._wait_color('CPU*', true) = E'\033[38;2;80;250;123m', 'CPU* color wrong';
-            ASSERT ash._wait_color('IO:DataFileRead', true) = E'\033[38;2;98;114;164m', 'IO color check';
+            ASSERT ash._wait_color('IO:DataFileRead', true) = E'\033[38;2;30;100;255m', 'IO color check';
             ASSERT ash._wait_color('Lock:tuple', true) = E'\033[38;2;255;85;85m', 'Lock color wrong';
 
             -- Absolute-time variants

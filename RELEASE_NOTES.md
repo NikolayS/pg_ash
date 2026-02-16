@@ -6,7 +6,7 @@ Upgrade from 1.0: `\i sql/ash--1.1.sql` — safe to run on top of a running 1.0 
 
 ### New: timeline chart
 
-`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. ANSI colors are available as an experimental feature via `p_color => true` (bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other). Note: psql's table formatter escapes ANSI codes; colors work in pgcli, DataGrip, unaligned mode, or piped output.
+`timeline_chart()` and `timeline_chart_at()` — stacked bar chart of wait events over time, showing average active sessions per bucket. Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. ANSI colors are available as an experimental feature via `p_color => true` — green = CPU\*, blue = IO, red = Lock, pink = LWLock, cyan = IPC, yellow = Client, orange = Timeout, teal = BufferPin, purple = Activity, light purple = Extension, light yellow = IdleTx. Colors are aligned with PostgresAI monitoring. Note: psql's table formatter escapes ANSI codes; colors work in pgcli, DataGrip, unaligned mode, or piped output.
 
 ```sql
 select * from ash.timeline_chart('1 hour', '5 minutes');
@@ -21,7 +21,7 @@ Output: 4 columns — `bucket_start | active | detail | chart`. First row is a l
 
 ### Changed: ANSI colors (experimental, off by default)
 
-`IdleTx` (idle-in-transaction) now renders as yellow in timeline charts, distinguishable from CPU\* (green). All colors use 24-bit RGB escape codes for consistent rendering across terminal themes.
+Color scheme aligned with PostgresAI monitoring: green = CPU\*, blue = IO, red = Lock, pink = LWLock, cyan = IPC, yellow = Client, orange = Timeout, teal = BufferPin, purple = Activity, light purple = Extension, light yellow = IdleTx. All colors use 24-bit RGB escape codes for consistent rendering across terminal themes.
 
 ### Fixed: pg_cron version comparison
 

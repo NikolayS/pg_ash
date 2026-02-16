@@ -164,7 +164,7 @@ select * from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
 
 Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color.
 
-**Experimental: ANSI colors.** Pass `p_color => true` to enable ANSI color-coded bars (bright green = CPU\*, red = Lock, blue = IO, yellow = IdleTx, bright yellow = LWLock, magenta = Client/Extension, cyan = Other). Note: psql's table formatter escapes ANSI codes — to render colors in psql, pipe through sed:
+**Experimental: ANSI colors.** Pass `p_color => true` to enable ANSI color-coded bars — green = CPU\*, blue = IO, red = Lock, pink = LWLock, cyan = IPC, yellow = Client, orange = Timeout, teal = BufferPin, purple = Activity, light purple = Extension, light yellow = IdleTx. Note: psql's table formatter escapes ANSI codes — to render colors in psql, pipe through sed:
 
 ```sql
 -- add to ~/.psqlrc for a reusable :color command
