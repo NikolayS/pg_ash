@@ -1839,9 +1839,24 @@ begin
     v_char_count := greatest(0, round(v_rec.c_other / v_max_active * p_width)::int);
     v_bar := v_bar || repeat(v_chars[4], v_char_count);
 
+    -- Append per-event numbers to the right of the bar
+    v_legend := '';
+    if v_rec.c1 > 0 then
+      v_legend := v_legend || v_top_events[1] || '=' || v_rec.c1;
+    end if;
+    if p_top >= 2 and v_rec.c2 > 0 then
+      v_legend := v_legend || ' ' || v_top_events[2] || '=' || v_rec.c2;
+    end if;
+    if p_top >= 3 and v_rec.c3 > 0 then
+      v_legend := v_legend || ' ' || v_top_events[3] || '=' || v_rec.c3;
+    end if;
+    if v_rec.c_other > 0 then
+      v_legend := v_legend || ' Other=' || v_rec.c_other;
+    end if;
+
     bucket_start := v_rec.ts;
     active := v_rec.total;
-    chart := v_bar;
+    chart := v_bar || '  ' || v_legend;
     return next;
   end loop;
 end;
