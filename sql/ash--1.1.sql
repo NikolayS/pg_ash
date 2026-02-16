@@ -4,9 +4,11 @@
 -- Safe to run on top of 1.0 — all objects use IF NOT EXISTS / CREATE OR REPLACE.
 -- Upgrade: \i ash--1.1.sql
 
--- Drop functions removed in 1.1 (histogram folded into top_waits)
+-- Drop functions removed or changed in 1.1
 drop function if exists ash.histogram(interval, int, int);
 drop function if exists ash.histogram_at(timestamptz, timestamptz, int, int);
+drop function if exists ash.timeline_chart(interval, interval, int, int);
+drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int);
 
 --------------------------------------------------------------------------------
 -- STEP 1: Core schema and infrastructure
