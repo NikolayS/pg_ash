@@ -921,16 +921,16 @@ jobs:
           DO $$
           BEGIN
             -- Exact boundary matches
-            ASSERT ash._wait_color('CPU*') = E'\033[32m', 'CPU* green';
-            ASSERT ash._wait_color('CPUsomething') = E'\033[32m', 'CPU prefix green';
-            ASSERT ash._wait_color('IdleTx') = E'\033[92m', 'IdleTx bright green';
+            ASSERT ash._wait_color('CPU*') = E'\033[92m', 'CPU* bright green';
+            ASSERT ash._wait_color('CPUsomething') = E'\033[92m', 'CPU prefix bright green';
+            ASSERT ash._wait_color('IdleTx') = E'\033[33m', 'IdleTx yellow';
             ASSERT ash._wait_color('IO:DataFileRead') = E'\033[34m', 'IO blue';
             ASSERT ash._wait_color('IO:WALSync') = E'\033[34m', 'IO:WALSync blue';
             ASSERT ash._wait_color('Lock:tuple') = E'\033[31m', 'Lock red';
             ASSERT ash._wait_color('Lock:transactionid') = E'\033[31m', 'Lock:txid red';
             ASSERT ash._wait_color('Lock:relation') = E'\033[31m', 'Lock:relation red';
-            ASSERT ash._wait_color('LWLock:WALWrite') = E'\033[33m', 'LWLock yellow';
-            ASSERT ash._wait_color('LWLock:BufferContent') = E'\033[33m', 'LWLock:BufferContent yellow';
+            ASSERT ash._wait_color('LWLock:WALWrite') = E'\033[93m', 'LWLock bright yellow';
+            ASSERT ash._wait_color('LWLock:BufferContent') = E'\033[93m', 'LWLock:BufferContent bright yellow';
             ASSERT ash._wait_color('Client:ClientRead') = E'\033[35m', 'Client magenta';
             ASSERT ash._wait_color('Client:ClientWrite') = E'\033[35m', 'Client:Write magenta';
             ASSERT ash._wait_color('Extension:DblinkGetResult') = E'\033[35m', 'Extension magenta';
@@ -1080,8 +1080,8 @@ jobs:
             ASSERT v_count > 1, 'timeline_chart_at failed';
 
             -- _wait_color
-            ASSERT ash._wait_color('CPU*') = E'\033[32m', 'CPU* color wrong';
-            ASSERT ash._wait_color('IO:DataFileRead') = E'\033[34m', 'IO color wrong';
+            ASSERT ash._wait_color('CPU*') = E'\033[92m', 'CPU* color wrong';
+            ASSERT ash._wait_color('IO:DataFileRead') = E'\033[34m', 'IO color check';
             ASSERT ash._wait_color('Lock:tuple') = E'\033[31m', 'Lock color wrong';
 
             -- Absolute-time variants
