@@ -893,16 +893,18 @@ jobs:
             DECLARE
               v_cpu_id2 smallint;
               v_db_count int;
+              v_cur_slot smallint;
+              v_now_ts int4;
             BEGIN
               SELECT id INTO v_cpu_id2 FROM ash.wait_event_map WHERE type = 'CPU*' AND event = 'CPU*';
-              -- Insert data with different datid
+              v_cur_slot := ash.current_slot();
+              v_now_ts := extract(epoch FROM now() - ash.epoch())::int4;
+
+              -- Insert data for TWO different datids into current slot
               INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
-              VALUES (
-                extract(epoch FROM now() - ash.epoch())::int4 - 120,
-                99999, 2,
-                ARRAY[-v_cpu_id2, 2, 1, 1]::integer[],
-                ash.current_slot()
-              );
+              VALUES
+                (v_now_ts - 60, 1, 1, ARRAY[-v_cpu_id2, 1, 1]::integer[], v_cur_slot),
+                (v_now_ts - 60, 99999, 1, ARRAY[-v_cpu_id2, 1, 1]::integer[], v_cur_slot);
 
               SELECT count(DISTINCT datid) INTO v_db_count
               FROM ash.samples_by_database('1 hour');
