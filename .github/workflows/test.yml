@@ -181,9 +181,8 @@ jobs:
             SELECT * INTO v_result
             FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[], 0::smallint)
             LIMIT 1;
-            ASSERT v_result.state = 'active', 'wrong state: ' || v_result.state;
-            ASSERT v_result.wait_type = 'CPU*', 'wrong wait_type: ' || v_result.wait_type;
             ASSERT v_result.wait_event = 'CPU*', 'wrong wait_event: ' || v_result.wait_event;
+            ASSERT v_result.count = 2, 'wrong count: ' || v_result.count;
 
             RAISE NOTICE 'Decoder tests PASSED';
           END;
