@@ -208,48 +208,55 @@ jobs:
             INSERT INTO ash.sample (sample_ts, datid, active_count, data)
             VALUES (1000, 1, 2, '{-1,2,1,1}');
 
-            -- Determine which partition rotation will TRUNCATE (the one we rotate INTO)
+            -- new_slot = (old + 1) % 3, truncate_slot = (new_slot + 1) % 3
             v_target_slot := ((v_slot_before + 1) % 3)::smallint;
+            DECLARE
+              v_truncate_slot smallint := ((v_target_slot + 1) % 3)::smallint;
+            BEGIN
+              -- Seed the partition that will be TRUNCATED
+              EXECUTE format(
+                'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (999, 1, 1, ''{-1,1,1}'', %s)',
+                v_truncate_slot, v_truncate_slot
+              );
+              EXECUTE format(
+                'INSERT INTO ash.query_map_%s (query_id) VALUES (99999)',
+                v_truncate_slot
+              );
 
-            -- Seed the target partition with data so we can verify truncation
-            EXECUTE format(
-              'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (999, 1, 1, ''{-1,1,1}'', %s)',
-              v_target_slot, v_target_slot
-            );
-            EXECUTE format(
-              'INSERT INTO ash.query_map_%s (query_id) VALUES (99999)',
-              v_target_slot
-            );
+              -- Verify data exists before rotation
+              EXECUTE format('SELECT count(*) FROM ash.sample_%s', v_truncate_slot)
+              INTO v_count;
+              ASSERT v_count > 0,
+                'sample_' || v_truncate_slot || ' should have data before rotation';
 
-            -- Force rotation
-            UPDATE ash.config SET rotated_at = now() - interval '2 days';
-            PERFORM ash.rotate();
+              -- Force rotation
+              UPDATE ash.config SET rotated_at = now() - interval '2 days';
+              PERFORM ash.rotate();
 
-            SELECT current_slot INTO v_slot_after FROM ash.config;
-            ASSERT v_slot_after <> v_slot_before,
-              'slot not advanced: before=' || v_slot_before || ' after=' || v_slot_after;
-            ASSERT v_slot_after = v_target_slot,
-              'slot should be target: expected=' || v_target_slot || ' got=' || v_slot_after;
+              SELECT current_slot INTO v_slot_after FROM ash.config;
+              ASSERT v_slot_after = v_target_slot,
+                'slot should advance to ' || v_target_slot || ', got ' || v_slot_after;
 
-            -- Verify TRUNCATION: target sample partition should be empty
-            EXECUTE format('SELECT count(*) FROM ash.sample_%s', v_target_slot)
-            INTO v_count;
-            ASSERT v_count = 0,
-              'sample_' || v_target_slot || ' should be empty after rotation, has ' || v_count || ' rows';
+              -- Verify TRUNCATION: truncated sample partition should be empty
+              EXECUTE format('SELECT count(*) FROM ash.sample_%s', v_truncate_slot)
+              INTO v_count;
+              ASSERT v_count = 0,
+                'sample_' || v_truncate_slot || ' should be empty after rotation, has ' || v_count || ' rows';
 
-            -- Verify TRUNCATION: target query_map partition should be empty
-            EXECUTE format('SELECT count(*) FROM ash.query_map_%s', v_target_slot)
-            INTO v_count;
-            ASSERT v_count = 0,
-              'query_map_' || v_target_slot || ' should be empty after rotation, has ' || v_count || ' rows';
+              -- Verify TRUNCATION: truncated query_map partition should be empty
+              EXECUTE format('SELECT count(*) FROM ash.query_map_%s', v_truncate_slot)
+              INTO v_count;
+              ASSERT v_count = 0,
+                'query_map_' || v_truncate_slot || ' should be empty after rotation, has ' || v_count || ' rows';
 
-            -- Verify identity sequence was reset: next insert should get a low id
-            EXECUTE format(
-              'INSERT INTO ash.query_map_%s (query_id) VALUES (88888) RETURNING id',
-              v_target_slot
-            ) INTO v_next_id;
-            ASSERT v_next_id = 1,
-              'query_map_' || v_target_slot || ' identity should restart at 1, got ' || v_next_id;
+              -- Verify identity sequence was reset: next insert should get a low id
+              EXECUTE format(
+                'INSERT INTO ash.query_map_%s (query_id) VALUES (88888) RETURNING id',
+                v_truncate_slot
+              ) INTO v_next_id;
+              ASSERT v_next_id = 1,
+                'query_map_' || v_truncate_slot || ' identity should restart at 1, got ' || v_next_id;
+            END;
 
             RAISE NOTICE 'Rotation tests PASSED (truncation + sequence reset verified)';
           END;
