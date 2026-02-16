@@ -1724,11 +1724,11 @@ language sql
 immutable
 as $$
   select case
-    when p_event like 'CPU%' then E'\033[32m'                         -- green
-    when p_event = 'IdleTx' then E'\033[92m'                         -- bright green
-    when p_event like 'IO:%' then E'\033[34m'                        -- blue
+    when p_event like 'CPU%' then E'\033[92m'                         -- bright green
+    when p_event = 'IdleTx' then E'\033[33m'                         -- yellow
+    when p_event like 'IO:%' then E'\033[94m'                        -- bright blue
     when p_event like 'Lock:%' then E'\033[31m'                      -- red
-    when p_event like 'LWLock:%' then E'\033[33m'                    -- yellow
+    when p_event like 'LWLock:%' then E'\033[93m'                    -- bright yellow
     when p_event like 'Client:%'
       or p_event like 'Extension:%' then E'\033[35m'                 -- magenta
     else E'\033[36m'                                                  -- cyan
