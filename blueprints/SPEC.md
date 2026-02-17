@@ -36,7 +36,7 @@ in a single row using a compact encoded `integer[]` (int4):
 ```
 sample_ts   │ 3628080    (seconds since 2026-01-01 = 2026-02-12 03:48:00 UTC)
 datid       │ 16384
-data        │ {1, -5, 3, 101, 102, 101, -1, 2, 103, 104, -1, 1, 105}
+data        │ {-5, 3, 101, 102, 103, -1, 2, 104, 105, -8, 1, 106}
 ```
 
 First element is a negative wait_event_id marker. Format version tracked in ash.config.encoding_version.

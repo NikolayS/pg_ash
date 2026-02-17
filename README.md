@@ -339,14 +339,14 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 `ash.take_sample()` runs every second via pg_cron. It reads `pg_stat_activity`, groups active backends by `(wait_event_type, wait_event, state)`, and encodes the result into a single `integer[]` per database:
 
 ```
-{-5, 3, 101, 102, 101, -1, 2, 103, 104, -8, 1, 105}
+{-5, 3, 101, 102, 103, -1, 2, 104, 105, -8, 1, 106}
  │   │  │              │  │  │           │  │  │
  │   │  └─ query_ids   │  │  └─ qids     │  │  └─ qid
  │   └─ count=3        │  └─ count=2     │  └─ count=1
  └─ wait_event_id=5    └─ weid=1         └─ weid=8
 ```
 
-6 active backends across 3 wait events = 1 row, 12 array elements. Full row size: 24 (tuple header) + 4 (sample_ts) + 4 (datid) + 2 (active_count) + 2 (slot) + 68 (array: 20-byte header + 12 × 4) + alignment = **106 bytes** (measured with `pg_column_size`).
+6 active backends across 3 wait events = 1 row, 12 array elements. Each query_id is one backend — if two backends run the same query, the same map_id appears twice (the count reflects total backends, not distinct queries). Full row size: 24 (tuple header) + 4 (sample_ts) + 4 (datid) + 2 (active_count) + 2 (slot) + 68 (array: 20-byte header + 12 × 4) + alignment = **106 bytes** (measured with `pg_column_size`).
 
 ### Dictionary tables
 

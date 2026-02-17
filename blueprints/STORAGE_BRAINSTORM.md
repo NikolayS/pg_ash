@@ -110,7 +110,7 @@ Marginal win. Harder to work with — need stride-2 `unnest` logic.
 **Winner.** (Note: implementation uses `integer[]` not `smallint[]` — `query_map.id` is `int4` to support >32k distinct queries.) Run-length encode by wait event in a single array:
 
 ```
-{-5, 3, 101, 102, 101, -1, 2, 103, 104, -0, 1, 105}
+{-5, 3, 101, 102, 103, -1, 2, 104, 105, -8, 1, 106}
 ```
 
 - Negative value = wait event id (negated)
