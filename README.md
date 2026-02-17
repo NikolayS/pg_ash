@@ -547,16 +547,16 @@ select * from ash.status();
 
 ### pg_cron run history
 
-pg_cron logs every job execution to `cron.job_run_details`. At 1-second sampling, this adds ~12 MiB/day of unbounded growth. pg_cron has no built-in purge — two options:
+pg_cron logs every job execution to `cron.job_run_details`. At 1-second sampling, this adds ~12 MiB/day of unbounded growth with no built-in purge.
 
-**Option 1: Disable logging entirely** (recommended if you don't need pg_cron troubleshooting):
+**Recommended: disable `cron.log_run`.** Errors from failed jobs still appear in the Postgres server log (`cron.log_min_messages` defaults to `WARNING`) — you lose nothing important, only the `job_run_details` table entries.
 
 ```sql
 alter system set cron.log_run = off;
 select pg_reload_conf();
 ```
 
-**Option 2: Schedule periodic cleanup** (keeps recent history for debugging):
+If you need run history for other pg_cron jobs (unfortunately, as of pg_cron 1.6, per-job logging configuration is not supported), schedule periodic cleanup instead:
 
 ```sql
 select cron.schedule(
