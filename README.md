@@ -247,6 +247,16 @@ select * from ash.query_waits(3365820675399133794, '5 minutes');
 select * from ash.query_waits_at(3365820675399133794, '2026-02-16 08:38', '2026-02-16 08:40');
 ```
 
+### Drill into a wait event
+
+```sql
+-- which queries are stuck on Lock:transactionid?
+select * from ash.event_queries('Lock:transactionid', '1 hour');
+
+-- or by wait type (matches all events of that type)
+select * from ash.event_queries('IO', '1 hour');
+```
+
 ### Check status
 
 ```sql
@@ -295,6 +305,8 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 | `ash.top_waits_at(start, end, limit, width)` | Top waits in a time range, with bar chart |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
 | `ash.query_waits_at(query_id, start, end, width, color)` | Query wait profile in a time range |
+| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
+| `ash.event_queries_at(event, start, end, limit)` | Top queries for a wait event in a time range |
 | `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
 | `ash.waits_by_type_at(start, end, width, color)` | Breakdown by wait event type in a time range |
 | `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |

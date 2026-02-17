@@ -2446,3 +2446,181 @@ begin
 end $$;
 
 update ash.config set version = '1.2' where singleton;
+
+-------------------------------------------------------------------------------
+-- Event queries — top query_ids for a specific wait event
+-------------------------------------------------------------------------------
+
+create or replace function ash.event_queries(
+  p_event text,
+  p_interval interval default '1 hour',
+  p_limit int default 10
+)
+returns table (
+  query_id bigint,
+  samples bigint,
+  pct numeric,
+  query_text text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_has_pgss boolean := false;
+  v_min_ts int4;
+begin
+  v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+
+  begin
+    perform 1 from pg_stat_statements limit 1;
+    v_has_pgss := true;
+  exception when others then
+    v_has_pgss := false;
+  end;
+
+  return query
+  with matching_waits as (
+    select wm.id as wait_id
+    from ash.wait_event_map wm
+    where case
+      when p_event like '%:%' then
+        wm.type || ':' || wm.event = p_event
+        or (wm.event = wm.type and wm.event = p_event)
+      else
+        wm.type = p_event
+        or wm.event = p_event
+    end
+  ),
+  hits as (
+    select
+      s.slot,
+      s.data[i + 1] as cnt,
+      s.data[i + 2 + gs.n] as map_id
+    from ash.sample s,
+      generate_subscripts(s.data, 1) i,
+      matching_waits mw,
+      lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= v_min_ts
+      and s.data[i] < 0
+      and (-s.data[i])::smallint = mw.wait_id
+      and i + 2 + gs.n <= array_length(s.data, 1)
+      and s.data[i + 2 + gs.n] >= 0
+  ),
+  resolved as (
+    select m.query_id
+    from hits h
+    join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
+  ),
+  totals as (
+    select r.query_id, count(*) as cnt
+    from resolved r
+    group by r.query_id
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  )
+  select
+    t.query_id,
+    t.cnt as samples,
+    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    case when v_has_pgss then (
+      select left(p.query, 200)
+      from pg_stat_statements p
+      where p.queryid = t.query_id
+      limit 1
+    ) end as query_text
+  from totals t
+  cross join grand_total gt
+  order by t.cnt desc
+  limit p_limit;
+end;
+$$;
+
+create or replace function ash.event_queries_at(
+  p_event text,
+  p_start timestamptz,
+  p_end timestamptz,
+  p_limit int default 10
+)
+returns table (
+  query_id bigint,
+  samples bigint,
+  pct numeric,
+  query_text text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_has_pgss boolean := false;
+  v_start int4 := ash._to_sample_ts(p_start);
+  v_end int4 := ash._to_sample_ts(p_end);
+begin
+  begin
+    perform 1 from pg_stat_statements limit 1;
+    v_has_pgss := true;
+  exception when others then
+    v_has_pgss := false;
+  end;
+
+  return query
+  with matching_waits as (
+    select wm.id as wait_id
+    from ash.wait_event_map wm
+    where case
+      when p_event like '%:%' then
+        wm.type || ':' || wm.event = p_event
+        or (wm.event = wm.type and wm.event = p_event)
+      else
+        wm.type = p_event
+        or wm.event = p_event
+    end
+  ),
+  hits as (
+    select
+      s.slot,
+      s.data[i + 1] as cnt,
+      s.data[i + 2 + gs.n] as map_id
+    from ash.sample s,
+      generate_subscripts(s.data, 1) i,
+      matching_waits mw,
+      lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= v_start and s.sample_ts < v_end
+      and s.data[i] < 0
+      and (-s.data[i])::smallint = mw.wait_id
+      and i + 2 + gs.n <= array_length(s.data, 1)
+      and s.data[i + 2 + gs.n] >= 0
+  ),
+  resolved as (
+    select m.query_id
+    from hits h
+    join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
+  ),
+  totals as (
+    select r.query_id, count(*) as cnt
+    from resolved r
+    group by r.query_id
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  )
+  select
+    t.query_id,
+    t.cnt as samples,
+    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    case when v_has_pgss then (
+      select left(p.query, 200)
+      from pg_stat_statements p
+      where p.queryid = t.query_id
+      limit 1
+    ) end as query_text
+  from totals t
+  cross join grand_total gt
+  order by t.cnt desc
+  limit p_limit;
+end;
+$$;
