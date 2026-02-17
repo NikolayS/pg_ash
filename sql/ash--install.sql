@@ -1809,6 +1809,7 @@ declare
   v_other_char text := '·';
   v_ch text;
   v_i int;
+  v_visible_width int;
 begin
   v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
@@ -1930,6 +1931,7 @@ begin
   loop
     v_bar := '';
     v_legend := '';
+    v_visible_width := 0;
 
     -- Colored stacked bar for each top event (distinct char per rank)
     for v_i in 1..array_length(v_top_events, 1) loop
@@ -1939,6 +1941,7 @@ begin
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
           v_bar := v_bar || v_event_colors[v_i] || repeat(v_ch, v_char_count) || v_reset;
+          v_visible_width := v_visible_width + v_char_count;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
@@ -1953,8 +1956,14 @@ begin
       v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
       if v_char_count > 0 then
         v_bar := v_bar || v_other_color || repeat(v_other_char, v_char_count) || v_reset;
+        v_visible_width := v_visible_width + v_char_count;
       end if;
       v_legend := v_legend || ' Other=' || v_val;
+    end if;
+
+    -- Pad to fixed visual width so psql column alignment works with ANSI codes
+    if v_visible_width < p_width then
+      v_bar := v_bar || repeat(' ', p_width - v_visible_width);
     end if;
 
     bucket_start := v_rec.ts;
@@ -2003,6 +2012,7 @@ declare
   v_other_char text := '·';
   v_ch text;
   v_i int;
+  v_visible_width int;
 begin
   v_start_ts := ash._to_sample_ts(p_start);
   v_end_ts := ash._to_sample_ts(p_end);
@@ -2123,6 +2133,7 @@ begin
   loop
     v_bar := '';
     v_legend := '';
+    v_visible_width := 0;
 
     -- Colored stacked bar for each top event (distinct char per rank)
     for v_i in 1..array_length(v_top_events, 1) loop
@@ -2132,6 +2143,7 @@ begin
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
           v_bar := v_bar || v_event_colors[v_i] || repeat(v_ch, v_char_count) || v_reset;
+          v_visible_width := v_visible_width + v_char_count;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
@@ -2146,8 +2158,14 @@ begin
       v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
       if v_char_count > 0 then
         v_bar := v_bar || v_other_color || repeat(v_other_char, v_char_count) || v_reset;
+        v_visible_width := v_visible_width + v_char_count;
       end if;
       v_legend := v_legend || ' Other=' || v_val;
+    end if;
+
+    -- Pad to fixed visual width so psql column alignment works with ANSI codes
+    if v_visible_width < p_width then
+      v_bar := v_bar || repeat(' ', p_width - v_visible_width);
     end if;
 
     bucket_start := v_rec.ts;
