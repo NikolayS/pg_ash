@@ -1008,7 +1008,7 @@ as $$
          p_width
        )
     || ash._reset(p_color)
-    || ' ' || p_pct || '%';
+    || lpad(p_pct || '%', 8);
 $$;
 
 create or replace function ash.top_waits(

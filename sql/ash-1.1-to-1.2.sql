@@ -92,7 +92,7 @@ as $$
          p_width
        )
     || ash._reset(p_color)
-    || ' ' || p_pct || '%';
+    || lpad(p_pct || '%', 8);
 $$;
 
 -- Drop + recreate functions with changed signatures or new features.
