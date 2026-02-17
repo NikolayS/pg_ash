@@ -425,7 +425,7 @@ begin
       end if;
 
     exception when others then
-      raise warning 'ash.take_sample: error inserting sample for datid %: %', v_datid_rec.datid, sqlerrm;
+      raise warning 'ash.take_sample: error inserting sample for datid % [%]: %', v_datid_rec.datid, sqlstate, sqlerrm;
     end;
   end loop;
 
@@ -553,7 +553,10 @@ declare
   v_rotation_period interval;
   v_rotated_at timestamptz;
 begin
-  -- Try to acquire advisory lock to prevent concurrent rotation
+  -- Advisory lock prevents concurrent rotation from pg_cron overlap.
+  -- rotate() is already REVOKE'd from PUBLIC — only schema owner can call it.
+  -- A malicious user holding this advisory lock number can delay (not prevent)
+  -- rotation, but they'd need direct DB access first.
   if not pg_try_advisory_lock(hashtext('ash_rotate')) then
     return 'skipped: another rotation in progress';
   end if;
@@ -1140,17 +1143,17 @@ stable
 set jit = off
 as $$
 declare
-  v_has_pg_stat_statements boolean := false;
+  v_has_pgss boolean := false;
 begin
   -- Probe the view directly — extension installed <> shared library loaded
   begin
     perform 1 from pg_stat_statements limit 1;
-    v_has_pg_stat_statements := true;
+    v_has_pgss := true;
   exception when others then
-    v_has_pg_stat_statements := false;
+    v_has_pgss := false;
   end;
 
-  if v_has_pg_stat_statements then
+  if v_has_pgss then
     return query
     with qids as (
       select s.slot, s.data[i] as map_id
@@ -1475,6 +1478,8 @@ $$;
 -------------------------------------------------------------------------------
 
 -- Convert a timestamptz to our internal sample_ts (seconds since epoch)
+-- IMMUTABLE because ash.epoch() is IMMUTABLE (constant after install).
+-- If epoch() ever changes, all sample_ts values become invalid anyway.
 create or replace function ash._to_sample_ts(p_ts timestamptz)
 returns int4
 language sql
@@ -1922,7 +1927,6 @@ declare
   v_other_char text := '·';
   v_ch text;
   v_i int;
-  v_visible_width int;
   v_legend_len int;
 begin
   v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
@@ -2052,7 +2056,6 @@ begin
   loop
     v_bar := '';
     v_legend := '';
-    v_visible_width := 0;
 
     -- Colored stacked bar for each top event (distinct char per rank)
     for v_i in 1..array_length(v_top_events, 1) loop
@@ -2062,7 +2065,6 @@ begin
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
           v_bar := v_bar || v_event_colors[v_i] || repeat(v_ch, v_char_count) || v_reset;
-          v_visible_width := v_visible_width + v_char_count;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
@@ -2077,7 +2079,6 @@ begin
       v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
       if v_char_count > 0 then
         v_bar := v_bar || v_other_color || repeat(v_other_char, v_char_count) || v_reset;
-        v_visible_width := v_visible_width + v_char_count;
       end if;
       v_legend := v_legend || ' Other=' || v_val;
     end if;
@@ -2134,7 +2135,6 @@ declare
   v_other_char text := '·';
   v_ch text;
   v_i int;
-  v_visible_width int;
   v_legend_len int;
 begin
   v_start_ts := ash._to_sample_ts(p_start);
@@ -2262,7 +2262,6 @@ begin
   loop
     v_bar := '';
     v_legend := '';
-    v_visible_width := 0;
 
     -- Colored stacked bar for each top event (distinct char per rank)
     for v_i in 1..array_length(v_top_events, 1) loop
@@ -2272,7 +2271,6 @@ begin
         v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
         if v_char_count > 0 then
           v_bar := v_bar || v_event_colors[v_i] || repeat(v_ch, v_char_count) || v_reset;
-          v_visible_width := v_visible_width + v_char_count;
         end if;
         v_legend := v_legend || ' ' || v_top_events[v_i] || '=' || v_val;
       end if;
@@ -2287,7 +2285,6 @@ begin
       v_char_count := greatest(0, round(v_val / v_max_active * p_width)::int);
       if v_char_count > 0 then
         v_bar := v_bar || v_other_color || repeat(v_other_char, v_char_count) || v_reset;
-        v_visible_width := v_visible_width + v_char_count;
       end if;
       v_legend := v_legend || ' Other=' || v_val;
     end if;
@@ -2585,7 +2582,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         matching_waits mw,
-        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+        lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_min_ts
         and s.data[i] < 0
@@ -2650,7 +2647,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         matching_waits mw,
-        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+        lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_min_ts
         and s.data[i] < 0
@@ -2750,7 +2747,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         matching_waits mw,
-        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+        lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and s.data[i] < 0
@@ -2815,7 +2812,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         matching_waits mw,
-        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+        lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and s.data[i] < 0
