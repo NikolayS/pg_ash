@@ -4,7 +4,7 @@
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/pg_ash)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/NikolayS/pg_ash/blob/main/LICENSE)
 [![Pure SQL](https://img.shields.io/badge/Pure_SQL-no_C_extension-green)](https://github.com/NikolayS/pg_ash)
-[![Functions tested](https://img.shields.io/badge/functions_tested-32%2F32_(100%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
+[![Functions tested](https://img.shields.io/badge/functions_tested-37%2F37_(100%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
 
 Active Session History for Postgres — lightweight wait event sampling with zero bloat.
 
@@ -46,7 +46,7 @@ select * from ash.top_by_type('1 hour');
 select ash.stop();
 
 -- uninstall (drops the ash schema and pg_cron jobs)
-select ash.uninstall();
+select ash.uninstall('yes');
 ```
 
 ### Upgrade
@@ -77,6 +77,7 @@ select * from ash.status();
 | `ash.samples_by_database(interval)` | Per-database activity |
 | `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
 | `ash.timeline_chart(interval, bucket, top, width)` | Stacked bar chart of wait events over time |
+| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
 | `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
 | `ash.status()` | Sampling status and partition info |
 
@@ -89,7 +90,6 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 | `ash.top_waits_at(start, end, limit, width)` | Top waits in a time range, with bar chart |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
 | `ash.query_waits_at(query_id, start, end, width, color)` | Query wait profile in a time range |
-| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
 | `ash.event_queries_at(event, start, end, limit)` | Top queries for a wait event in a time range |
 | `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
 | `ash.top_by_type_at(start, end, width, color)` | Breakdown by wait event type in a time range |
@@ -171,12 +171,12 @@ select * from ash.top_queries_with_text('5 minutes', 5);
 ```
 
 ```
-       query_id       | samples |  pct  | calls  | mean_time_ms |                             query_text
-----------------------+---------+-------+--------+--------------+---------------------------------------------------------------------
- -2835399305386018931 |     110 | 29.73 | 283202 |         0.00 | commit
-  3365820675399133794 |      86 | 23.24 | 283195 |         1.83 | UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2
-  5457019535816659310 |      44 | 11.89 |     11 |     17747.75 | select pg_sleep($1)
- -4378765880691287891 |      42 | 11.35 | 283195 |         0.40 | UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2
+       query_id       | samples |  pct  | calls  | total_exec_time_ms | mean_exec_time_ms |                             query_text
+----------------------+---------+-------+--------+--------------------+-------------------+---------------------------------------------------------------------
+ -2835399305386018931 |     110 | 29.73 | 283202 |            1234.56 |              0.00 | commit
+  3365820675399133794 |      86 | 23.24 | 283195 |          518349.35 |              1.83 | UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2
+  5457019535816659310 |      44 | 11.89 |     11 |          195225.25 |          17747.75 | select pg_sleep($1)
+ -4378765880691287891 |      42 | 11.35 | 283195 |          113278.00 |              0.40 | UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2
 ```
 
 ```sql
