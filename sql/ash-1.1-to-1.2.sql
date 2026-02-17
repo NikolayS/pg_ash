@@ -569,8 +569,8 @@ begin
       coalesce(pb.total, 0) as total,
       coalesce(pb.events, '{}'::jsonb) as events
     from generate_series(
-      v_start - (v_start % v_bucket_secs),
-      v_end - (v_end % v_bucket_secs),
+      v_start_ts - (v_start_ts % v_bucket_secs),
+      v_end_ts - (v_end_ts % v_bucket_secs),
       v_bucket_secs
     ) g(ts)
     left join per_bucket pb on pb.bucket_ts = g.ts
