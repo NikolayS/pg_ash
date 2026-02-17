@@ -23,7 +23,8 @@ begin
         'timeline_chart', 'timeline_chart_at',
         'query_waits', 'query_waits_at',
         'waits_by_type', 'waits_by_type_at',
-        'event_queries', 'event_queries_at'
+        'event_queries', 'event_queries_at',
+        'top_queries_with_text'
       )
   loop
     execute 'drop function if exists ' || r.sig;
@@ -1232,6 +1233,7 @@ $$;
 -- Top queries with text from pg_stat_statements
 -- Returns query text and pgss stats when pg_stat_statements is available,
 -- NULL columns otherwise.
+drop function if exists ash.top_queries_with_text(interval, int);
 create or replace function ash.top_queries_with_text(
   p_interval interval default '1 hour',
   p_limit int default 10
@@ -1241,7 +1243,8 @@ returns table (
   samples bigint,
   pct numeric,
   calls bigint,
-  mean_time_ms numeric,
+  total_exec_time_ms numeric,
+  mean_exec_time_ms numeric,
   query_text text
 )
 language plpgsql
@@ -1285,7 +1288,8 @@ begin
       r.cnt as samples,
       round(r.cnt::numeric / gt.total * 100, 2) as pct,
       pss.calls,
-      round(pss.mean_exec_time::numeric, 2) as mean_time_ms,
+      round(pss.total_exec_time::numeric, 2) as total_exec_time_ms,
+      round(pss.mean_exec_time::numeric, 2) as mean_exec_time_ms,
       left(pss.query, 200) as query_text
     from resolved r
     cross join grand_total gt
@@ -1318,7 +1322,8 @@ begin
       r.cnt as samples,
       round(r.cnt::numeric / gt.total * 100, 2) as pct,
       null::bigint as calls,
-      null::numeric as mean_time_ms,
+      null::numeric as total_exec_time_ms,
+      null::numeric as mean_exec_time_ms,
       null::text as query_text
     from resolved r
     cross join grand_total gt

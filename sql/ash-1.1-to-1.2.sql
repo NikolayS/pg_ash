@@ -59,6 +59,8 @@ as $$
 $$;
 
 -- Drop + recreate functions with changed signatures or new features.
+-- top_queries_with_text: rename mean_time_ms → mean_exec_time_ms, add total_exec_time_ms
+drop function if exists ash.top_queries_with_text(interval, int);
 -- timeline_chart: add chart padding for psql alignment
 drop function if exists ash.timeline_chart(interval, interval, int, int, boolean);
 drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int, boolean);
@@ -67,6 +69,104 @@ drop function if exists ash.query_waits(bigint, interval);
 drop function if exists ash.query_waits_at(bigint, timestamptz, timestamptz);
 drop function if exists ash.waits_by_type(interval);
 drop function if exists ash.waits_by_type_at(timestamptz, timestamptz);
+
+create or replace function ash.top_queries_with_text(
+  p_interval interval default '1 hour',
+  p_limit int default 10
+)
+returns table (
+  query_id bigint,
+  samples bigint,
+  pct numeric,
+  calls bigint,
+  total_exec_time_ms numeric,
+  mean_exec_time_ms numeric,
+  query_text text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_has_pgss boolean := false;
+begin
+  begin
+    perform 1 from pg_stat_statements limit 1;
+    v_has_pgss := true;
+  exception when others then
+    v_has_pgss := false;
+  end;
+
+  if v_has_pgss then
+    return query
+    with qids as (
+      select s.slot, s.data[i] as map_id
+      from ash.sample s, generate_subscripts(s.data, 1) i
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and i > 1
+        and s.data[i] >= 0
+        and s.data[i - 1] >= 0
+    ),
+    resolved as (
+      select qm.query_id, count(*) as cnt
+      from qids q
+      join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+      where q.map_id > 0
+      group by qm.query_id
+    ),
+    grand_total as (
+      select sum(cnt) as total from resolved
+    )
+    select
+      r.query_id,
+      r.cnt as samples,
+      round(r.cnt::numeric / gt.total * 100, 2) as pct,
+      pss.calls,
+      round(pss.total_exec_time::numeric, 2) as total_exec_time_ms,
+      round(pss.mean_exec_time::numeric, 2) as mean_exec_time_ms,
+      left(pss.query, 200) as query_text
+    from resolved r
+    cross join grand_total gt
+    left join pg_stat_statements pss on pss.queryid = r.query_id
+    order by r.cnt desc
+    limit p_limit;
+  else
+    return query
+    with qids as (
+      select s.slot, s.data[i] as map_id
+      from ash.sample s, generate_subscripts(s.data, 1) i
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and i > 1
+        and s.data[i] >= 0
+        and s.data[i - 1] >= 0
+    ),
+    resolved as (
+      select qm.query_id, count(*) as cnt
+      from qids q
+      join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
+      where q.map_id > 0
+      group by qm.query_id
+    ),
+    grand_total as (
+      select sum(cnt) as total from resolved
+    )
+    select
+      r.query_id,
+      r.cnt as samples,
+      round(r.cnt::numeric / gt.total * 100, 2) as pct,
+      null::bigint as calls,
+      null::numeric as total_exec_time_ms,
+      null::numeric as mean_exec_time_ms,
+      null::text as query_text
+    from resolved r
+    cross join grand_total gt
+    order by r.cnt desc
+    limit p_limit;
+  end if;
+end;
+$$;
 
 create or replace function ash.timeline_chart(
   p_interval interval default '1 hour',
