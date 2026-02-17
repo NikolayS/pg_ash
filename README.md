@@ -460,6 +460,8 @@ select cron.schedule(
 
 ## Known limitations
 
+- **Primary only** — pg_ash requires writes (`INSERT` into sample tables, `TRUNCATE` on rotation) and pg_cron, so it cannot run on physical standbys or read replicas. Install it on the primary; it samples all databases from there.
+- **Observer-effect protection** — the sampler pg_cron command includes `SET statement_timeout = '500ms'` to prevent `take_sample()` from becoming a problem on overloaded servers. If `pg_stat_activity` is slow (thousands of backends), the sample is canceled rather than piling up. Normal execution is ~50ms — the 500ms cap gives 10× headroom. Adjust in `cron.job` if needed.
 - **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](blueprints/ROLLUP_DESIGN.md).
 - **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
