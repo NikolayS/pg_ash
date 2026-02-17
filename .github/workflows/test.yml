@@ -497,11 +497,10 @@ jobs:
             ASSERT v_rec.bucket_start IS NULL, 'first row should be legend (null bucket_start)';
             ASSERT v_rec.chart IS NOT NULL AND v_rec.chart <> '', 'legend chart is empty';
 
-            -- Data rows should have bucket_start, active, chart
+            -- Data rows should have bucket_start and chart; find one with samples
             SELECT * INTO v_rec FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40)
-            OFFSET 1 LIMIT 1;
-            ASSERT v_rec.bucket_start IS NOT NULL, 'data row has null bucket_start';
-            ASSERT v_rec.active > 0, 'data row has zero active';
+            WHERE bucket_start IS NOT NULL AND active > 0 LIMIT 1;
+            ASSERT v_rec.bucket_start IS NOT NULL, 'no data row with active > 0';
             ASSERT v_rec.chart IS NOT NULL, 'data row has null chart';
 
             -- timeline_chart_at: absolute time
@@ -513,9 +512,9 @@ jobs:
             ASSERT v_rec.bucket_start IS NULL, 'at: first row should be legend';
             ASSERT v_rec.chart IS NOT NULL AND v_rec.chart <> '', 'at: legend chart is empty';
 
-            -- detail column should exist and have values
+            -- detail column should exist and have values on rows with samples
             SELECT * INTO v_rec FROM ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40)
-            OFFSET 1 LIMIT 1;
+            WHERE bucket_start IS NOT NULL AND active > 0 LIMIT 1;
             ASSERT v_rec.detail IS NOT NULL, 'detail column is null on data row';
 
             RAISE NOTICE 'Timeline chart tests PASSED';
