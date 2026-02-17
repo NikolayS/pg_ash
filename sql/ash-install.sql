@@ -1002,13 +1002,20 @@ returns text
 language sql
 stable
 as $$
-  select ash._wait_color(p_event, p_color)
+  -- Build bar, then pad entire result to fixed raw length.
+  -- ANSI escapes vary 17-19 bytes; fixed visible width = p_width + 8.
+  -- Target raw length = 19 (color) + p_width (blocks) + 4 (reset) + 8 (pct) = p_width + 31
+  -- When color off: target = p_width + 8 (no invisible bytes).
+  select rpad(
+    ash._wait_color(p_event, p_color)
     || rpad(
          repeat('█', greatest(1, (p_pct / nullif(p_max_pct, 0) * p_width)::int)),
          p_width
        )
     || ash._reset(p_color)
-    || lpad(p_pct || '%', 8);
+    || lpad(p_pct || '%', 8),
+    p_width + case when ash._color_on(p_color) then 31 else 8 end
+  );
 $$;
 
 create or replace function ash.top_waits(

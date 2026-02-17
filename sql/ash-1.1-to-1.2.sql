@@ -86,13 +86,16 @@ returns text
 language sql
 stable
 as $$
-  select ash._wait_color(p_event, p_color)
+  select rpad(
+    ash._wait_color(p_event, p_color)
     || rpad(
          repeat('█', greatest(1, (p_pct / nullif(p_max_pct, 0) * p_width)::int)),
          p_width
        )
     || ash._reset(p_color)
-    || lpad(p_pct || '%', 8);
+    || lpad(p_pct || '%', 8),
+    p_width + case when ash._color_on(p_color) then 31 else 8 end
+  );
 $$;
 
 -- Drop + recreate functions with changed signatures or new features.
