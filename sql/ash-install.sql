@@ -916,6 +916,28 @@ end;
 $$;
 
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
+-------------------------------------------------------------------------------
+-- Wait event color mapping (24-bit RGB, aligned with PostgresAI monitoring)
+--
+--   Wait type       Color          RGB
+--   ─────────────   ─────────────  ───────────────
+--   CPU*            green          80, 250, 123
+--   IdleTx          light yellow   241, 250, 140
+--   IO              vivid blue     30, 100, 255
+--   Lock            red            255, 85, 85
+--   LWLock          pink           255, 121, 198
+--   IPC             cyan           0, 200, 255
+--   Client          yellow         255, 220, 100
+--   Timeout         orange         255, 165, 0
+--   BufferPin       teal           0, 210, 180
+--   Activity        purple         150, 100, 255
+--   Extension       light purple   190, 150, 255
+--   Unknown/Other   gray           180, 180, 180
+--
+-- Uses 24-bit RGB escape codes (\033[38;2;R;G;Bm) for consistent rendering
+-- across terminal themes (light, dark, solarized, etc.).
+-- Colors are experimental, off by default (p_color parameter).
+-------------------------------------------------------------------------------
 create or replace function ash._wait_color(p_event text, p_color boolean default false)
 returns text
 language sql
