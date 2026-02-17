@@ -1,7 +1,7 @@
 -- pg_ash: Active Session History for Postgres
 -- Steps 1-2: Core schema, infrastructure, sampler, and decoder
 
-BEGIN;
+begin;
 
 --------------------------------------------------------------------------------
 -- STEP 1: Core schema and infrastructure
@@ -1917,4 +1917,4 @@ begin
 end;
 $$;
 
-COMMIT;
+commit;

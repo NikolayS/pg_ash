@@ -4,10 +4,10 @@
 -- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql then \i sql/ash-1.1-to-1.2.sql
 -- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql
 --
--- This file is wrapped in BEGIN/COMMIT for atomicity — a failed install
+-- This file is wrapped in begin/commit for atomicity — a failed install
 -- leaves no partial schema behind.
 
-BEGIN;
+begin;
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
 -- Drop ALL overloads of functions whose signatures changed across versions.
@@ -696,7 +696,7 @@ begin
     select cron.schedule(
       'ash_sampler',
       v_schedule,
-      'SET statement_timeout = ''500ms''; SELECT ash.take_sample()'
+      'set statement_timeout = ''500ms''; select ash.take_sample()'
     ) into v_sampler_job;
 
     -- Clear nodename so pg_cron uses Unix socket instead of TCP.
@@ -725,7 +725,7 @@ begin
     select cron.schedule(
       'ash_rotation',
       '0 0 * * *',
-      'SELECT ash.rotate()'
+      'select ash.rotate()'
     ) into v_rotation_job;
 
     update cron.job set nodename = '' where jobid = v_rotation_job;
@@ -943,7 +943,7 @@ $$;
 -- Uses 24-bit RGB escape codes (\033[38;2;R;G;Bm) for consistent rendering
 -- across terminal themes (light, dark, solarized, etc.).
 -- Colors: off by default. Enable per-call (p_color := true) or per-session:
---   SET ash.color = on;
+--   set ash.color = on;
 -- The session GUC avoids passing p_color to every function call.
 -------------------------------------------------------------------------------
 
@@ -2726,4 +2726,4 @@ begin
 end;
 $$;
 
-COMMIT;
+commit;

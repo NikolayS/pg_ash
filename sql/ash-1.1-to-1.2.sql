@@ -3,7 +3,7 @@
 -- Changes: bar column on query_waits/waits_by_type, event_queries(),
 -- chart padding for psql alignment, version tracking.
 
-BEGIN;
+begin;
 
 -- Add version column if missing
 do $$
@@ -23,7 +23,7 @@ do $$
 begin
   if exists (select from cron.job where jobname = 'ash_sampler') then
     update cron.job
-    set command = 'SET statement_timeout = ''500ms''; SELECT ash.take_sample()'
+    set command = 'set statement_timeout = ''500ms''; select ash.take_sample()'
     where jobname = 'ash_sampler';
   end if;
 exception when others then
@@ -33,7 +33,7 @@ end $$;
 -- Update version
 update ash.config set version = '1.2' where singleton;
 
--- Session-level color toggle: SET ash.color = on;
+-- Session-level color toggle: set ash.color = on;
 -- Avoids passing p_color := true to every function call.
 create or replace function ash._color_on(p_color boolean default false)
 returns boolean
@@ -1062,4 +1062,4 @@ begin
 end;
 $$;
 
-COMMIT;
+commit;

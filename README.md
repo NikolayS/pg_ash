@@ -182,7 +182,7 @@ Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (r
 
 ```sql
 -- Option 1: enable once for the session (recommended)
-SET ash.color = on;
+set ash.color = on;
 
 -- Option 2: per-call
 select * from ash.top_waits('1 hour', p_color => true);
