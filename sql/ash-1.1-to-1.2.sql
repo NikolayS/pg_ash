@@ -1,6 +1,6 @@
 -- pg_ash: upgrade from 1.1 to 1.2
 -- Safe to re-run (idempotent).
--- Changes: bar column on query_waits/waits_by_type, event_queries(),
+-- Changes: bar column on query_waits/top_by_type, event_queries(),
 -- chart padding for psql alignment, version tracking.
 
 begin;
@@ -104,11 +104,13 @@ drop function if exists ash.top_queries_with_text(interval, int);
 -- timeline_chart: add chart padding for psql alignment
 drop function if exists ash.timeline_chart(interval, interval, int, int, boolean);
 drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int, boolean);
--- query_waits, waits_by_type: add bar column + p_width/p_color params
+-- query_waits, top_by_type: add bar column + p_width/p_color params
 drop function if exists ash.query_waits(bigint, interval);
 drop function if exists ash.query_waits_at(bigint, timestamptz, timestamptz);
 drop function if exists ash.waits_by_type(interval);
 drop function if exists ash.waits_by_type_at(timestamptz, timestamptz);
+drop function if exists ash.top_by_type(interval);
+drop function if exists ash.top_by_type_at(timestamptz, timestamptz);
 
 create or replace function ash.top_queries_with_text(
   p_interval interval default '1 hour',
@@ -612,7 +614,7 @@ begin
   end loop;
 end;
 $$;
-create or replace function ash.waits_by_type(
+create or replace function ash.top_by_type(
   p_interval interval default '1 hour',
   p_width int default 40,
   p_color boolean default false
@@ -658,7 +660,7 @@ as $$
   order by t.cnt desc
 $$;
 
-create or replace function ash.waits_by_type_at(
+create or replace function ash.top_by_type_at(
   p_start timestamptz,
   p_end timestamptz,
   p_width int default 40,

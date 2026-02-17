@@ -27,6 +27,7 @@ begin
         'histogram', 'histogram_at',
         'timeline_chart', 'timeline_chart_at',
         'query_waits', 'query_waits_at',
+        'top_by_type', 'top_by_type_at',
         'waits_by_type', 'waits_by_type_at',
         'event_queries', 'event_queries_at',
         'top_queries_with_text'
@@ -1214,7 +1215,7 @@ end;
 $$;
 
 -- Wait event type distribution
-create or replace function ash.waits_by_type(
+create or replace function ash.top_by_type(
   p_interval interval default '1 hour',
   p_width int default 40,
   p_color boolean default false
@@ -1669,7 +1670,7 @@ as $$
 $$;
 
 -- Wait event type distribution in an absolute time range
-create or replace function ash.waits_by_type_at(
+create or replace function ash.top_by_type_at(
   p_start timestamptz,
   p_end timestamptz,
   p_width int default 40,
