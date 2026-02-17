@@ -1,5 +1,7 @@
 -- pg_ash: upgrade from 1.1 to 1.2
 -- Safe to re-run (idempotent).
+-- Changes: bar column on query_waits/waits_by_type, event_queries(),
+-- chart padding for psql alignment, version tracking.
 
 -- Add version column if missing
 do $$
@@ -15,8 +17,8 @@ end $$;
 -- Update version
 update ash.config set version = '1.2' where singleton;
 
--- Drop old signatures (return type changed — can't use CREATE OR REPLACE).
--- timeline_chart: swap detail/chart column order
+-- Drop + recreate functions with changed signatures or new features.
+-- timeline_chart: add chart padding for psql alignment
 drop function if exists ash.timeline_chart(interval, interval, int, int, boolean);
 drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int, boolean);
 -- query_waits, waits_by_type: add bar column + p_width/p_color params
@@ -35,8 +37,8 @@ create or replace function ash.timeline_chart(
 returns table (
   bucket_start timestamptz,
   active numeric,
-  chart text,
-  detail text
+  detail text,
+  chart text
 )
 language plpgsql
 stable
@@ -238,8 +240,8 @@ create or replace function ash.timeline_chart_at(
 returns table (
   bucket_start timestamptz,
   active numeric,
-  chart text,
-  detail text
+  detail text,
+  chart text
 )
 language plpgsql
 stable

@@ -3,10 +3,6 @@
 -- Fresh install: \i sql/ash-install.sql
 -- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql then \i sql/ash-1.1-to-1.2.sql
 -- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql
--- Version 1.1
---
--- Safe to run on top of 1.0 — all objects use IF NOT EXISTS / CREATE OR REPLACE.
--- Upgrade: \i ash-1.1.sql
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
 -- Drop ALL overloads of functions whose signatures changed across versions.
@@ -1855,8 +1851,8 @@ create or replace function ash.timeline_chart(
 returns table (
   bucket_start timestamptz,
   active numeric,
-  chart text,
-  detail text
+  detail text,
+  chart text
 )
 language plpgsql
 stable
@@ -2060,8 +2056,8 @@ create or replace function ash.timeline_chart_at(
 returns table (
   bucket_start timestamptz,
   active numeric,
-  chart text,
-  detail text
+  detail text,
+  chart text
 )
 language plpgsql
 stable
