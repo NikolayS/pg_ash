@@ -157,6 +157,115 @@ select * from ash.wait_timeline_at(
 );
 ```
 
+### LLM-assisted investigation
+
+pg_ash functions chain naturally for how an LLM investigates a problem — each answer tells it what to ask next.
+
+**Prompt:** *"There was a performance issue about 5 minutes ago. Investigate."*
+
+Step 1 — the LLM checks the big picture:
+
+```sql
+select * from ash.activity_summary('10 minutes');
+```
+
+```
+       metric        |  value
+---------------------+---------
+ samples             | 600
+ avg_active_sessions | 4.2
+ max_active_sessions | 12
+ top_wait_event      | Lock:tuple
+ top_query_id        | 7283901445
+```
+
+*"Average 4.2 active sessions but peak 12 — something spiked. And Lock:tuple is the top wait event."*
+
+Step 2 — drill into the waits:
+
+```sql
+select * from ash.top_waits('10 minutes');
+```
+
+```
+   wait_event   | samples | pct  |         bar
+----------------+---------+------+---------------------
+ Lock:tuple     |    2810 |  68% | ████████████████████
+ CPU*           |     830 |  20% | ██████
+ IO:DataFileRead|     290 |   7% | ██
+ Client:ClientRe|     125 |   3% | █
+ Other          |      83 |   2% |
+```
+
+*"Lock:tuple is 68% of all waits. Multiple sessions fighting over the same rows."*
+
+Step 3 — see the timeline:
+
+```sql
+select * from ash.timeline_chart('10 minutes', '30 seconds', 5, 60);
+```
+
+```
+      bucket_start       | active |                              chart                              |              detail
+-------------------------+--------+-----------------------------------------------------------------+----------------------------------
+                         |        | █ Lock:tuple  ▓ CPU*  ░ IO:DataFileRead  ▒ Client:ClientRead     |
+ 2026-02-17 14:00:00+00  |    2.1 | ▓▓▓▓░░···                                                      | CPU*=1.2 IO=0.5 Other=0.4
+ 2026-02-17 14:00:30+00  |    2.3 | ▓▓▓▓▓░░···                                                     | CPU*=1.4 IO=0.5 Other=0.4
+ 2026-02-17 14:01:00+00  |    3.8 | ██▓▓▓▓░░····                                                   | Lock=0.6 CPU*=1.5 IO=0.5 Other=1.2
+ 2026-02-17 14:01:30+00  |    8.5 | █████████████████▓▓▓░░···                                      | Lock=5.8 CPU*=1.3 IO=0.5 Other=0.9
+ 2026-02-17 14:02:00+00  |   12.0 | █████████████████████████████▓▓░░··                             | Lock=9.8 CPU*=1.1 IO=0.4 Other=0.7
+ 2026-02-17 14:02:30+00  |   11.2 | ███████████████████████████▓▓░░··                               | Lock=9.0 CPU*=1.0 IO=0.5 Other=0.7
+ 2026-02-17 14:03:00+00  |    4.1 | ███▓▓▓▓░░····                                                  | Lock=1.2 CPU*=1.5 IO=0.6 Other=0.8
+ 2026-02-17 14:03:30+00  |    2.0 | ▓▓▓▓░···                                                       | CPU*=1.1 IO=0.4 Other=0.5
+ 2026-02-17 14:04:00+00  |    2.2 | ▓▓▓▓░░···                                                      | CPU*=1.3 IO=0.5 Other=0.4
+```
+
+*"The spike is clearly 14:01:30 to 14:02:30 — Lock:tuple dominates. Let me find which queries."*
+
+Step 4 — find the guilty queries:
+
+```sql
+select * from ash.event_queries_at(
+  'Lock:tuple',
+  '2026-02-17 14:01:30', '2026-02-17 14:02:30'
+);
+```
+
+```
+  query_id   | samples | pct  |         bar
+-------------+---------+------+---------------------
+  7283901445 |     412 |  85% | ████████████████████
+  9102384756 |      53 |  11% | ███
+  Other       |      19 |   4% | █
+```
+
+*"Query 7283901445 accounts for 85% of the lock waits."*
+
+Step 5 — get the SQL text:
+
+```sql
+select * from ash.top_queries_with_text('10 minutes');
+```
+
+```
+  query_id   | samples | pct  | mean_exec_time_ms | total_exec_time_ms |                    query_text
+-------------+---------+------+-------------------+--------------------+--------------------------------------------------
+  7283901445 |    2395 |  58% |            842.30 |          534120.50 | UPDATE orders SET status = $1 WHERE id = $2
+  9102384756 |     530 |  13% |            215.60 |           42347.20 | UPDATE orders SET shipped_at = $1 WHERE id = $2
+```
+
+**LLM's conclusion:**
+
+> Root cause: multiple concurrent `UPDATE orders ... WHERE id = $2` statements are contending
+> on the same rows (`Lock:tuple`). Two different update patterns hit the `orders` table —
+> status updates and shipping updates — and when they target overlapping rows, they serialize
+> on tuple locks.
+>
+> Mitigation options:
+> 1. Use `SELECT ... FOR UPDATE SKIP LOCKED` to skip already-locked rows and process them later
+> 2. Batch the status and shipping updates into a single statement to reduce lock duration
+> 3. If these run from a queue worker, reduce concurrency or partition the work by order ID range
+
 ### Timeline chart
 
 Visualize wait event patterns over time — spot spikes, correlate with deployments, see what changed.
