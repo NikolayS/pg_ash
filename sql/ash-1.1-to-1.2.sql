@@ -49,15 +49,15 @@ stable
 as $$
   select case when not ash._color_on(p_color) then '' else
     case
-      when p_event like 'CPU%' then E'\033[38;2;80;250;123m'           -- green
+      when p_event like 'CPU%' then E'\033[38;2;080;250;123m'         -- green
       when p_event = 'IdleTx' then E'\033[38;2;241;250;140m'          -- light yellow
-      when p_event like 'IO:%' then E'\033[38;2;30;100;255m'          -- vivid blue
-      when p_event like 'Lock:%' then E'\033[38;2;255;85;85m'         -- red
+      when p_event like 'IO:%' then E'\033[38;2;030;100;255m'         -- vivid blue
+      when p_event like 'Lock:%' then E'\033[38;2;255;085;085m'       -- red
       when p_event like 'LWLock:%' then E'\033[38;2;255;121;198m'     -- pink
-      when p_event like 'IPC:%' then E'\033[38;2;0;200;255m'          -- cyan
+      when p_event like 'IPC:%' then E'\033[38;2;000;200;255m'        -- cyan
       when p_event like 'Client:%' then E'\033[38;2;255;220;100m'     -- yellow
-      when p_event like 'Timeout:%' then E'\033[38;2;255;165;0m'      -- orange
-      when p_event like 'BufferPin:%' then E'\033[38;2;0;210;180m'    -- teal
+      when p_event like 'Timeout:%' then E'\033[38;2;255;165;000m'    -- orange
+      when p_event like 'BufferPin:%' then E'\033[38;2;000;210;180m'  -- teal
       when p_event like 'Activity:%' then E'\033[38;2;150;100;255m'   -- purple
       when p_event like 'Extension:%' then E'\033[38;2;190;150;255m'  -- light purple
       else E'\033[38;2;180;180;180m'                                   -- gray (unknown)
@@ -85,16 +85,13 @@ returns text
 language sql
 stable
 as $$
-  select rpad(
-    ash._wait_color(p_event, p_color)
+  select ash._wait_color(p_event, p_color)
     || rpad(
          repeat('█', greatest(1, (p_pct / nullif(p_max_pct, 0) * p_width)::int)),
          p_width
        )
     || ash._reset(p_color)
-    || lpad(p_pct || '%', 8),
-    p_width + case when ash._color_on(p_color) then 31 else 8 end
-  );
+    || lpad(p_pct || '%', 8);
 $$;
 
 -- Drop + recreate functions with changed signatures or new features.
