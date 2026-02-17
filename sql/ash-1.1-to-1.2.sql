@@ -3,7 +3,6 @@
 -- Changes: bar column on query_waits/top_by_type, event_queries(),
 -- chart padding for psql alignment, version tracking.
 
-begin;
 
 -- Add version column if missing
 do $$
@@ -1064,4 +1063,3 @@ begin
 end;
 $$;
 
-commit;
