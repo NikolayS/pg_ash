@@ -1,4 +1,8 @@
 -- pg_ash: Active Session History for Postgres
+-- Version: 1.2 (latest)
+-- Fresh install: \i sql/ash--install.sql
+-- Upgrade from 1.0: \i sql/ash--1.0--1.1.sql then \i sql/ash--1.1--1.2.sql
+-- Upgrade from 1.1: \i sql/ash--1.1--1.2.sql
 -- Version 1.1
 --
 -- Safe to run on top of 1.0 — all objects use IF NOT EXISTS / CREATE OR REPLACE.
@@ -54,7 +58,7 @@ create table if not exists ash.config (
   rotation_period    interval not null default '1 day',
   include_bg_workers bool not null default false,
   encoding_version   smallint not null default 1,
-  version            text not null default '1.1',
+  version            text not null default '1.2',
   rotated_at         timestamptz not null default clock_timestamp(),
   installed_at       timestamptz not null default clock_timestamp()
 );
@@ -1781,8 +1785,8 @@ create or replace function ash.timeline_chart(
 returns table (
   bucket_start timestamptz,
   active numeric,
-  detail text,
-  chart text
+  chart text,
+  detail text
 )
 language plpgsql
 stable
@@ -1974,8 +1978,8 @@ create or replace function ash.timeline_chart_at(
 returns table (
   bucket_start timestamptz,
   active numeric,
-  detail text,
-  chart text
+  chart text,
+  detail text
 )
 language plpgsql
 stable
@@ -2364,15 +2368,15 @@ begin
 end;
 $$;
 
--- Migration: add version column if upgrading from 1.0
+-- Migration: add version column if upgrading from older version
 do $$
 begin
   if not exists (
     select from information_schema.columns
     where table_schema = 'ash' and table_name = 'config' and column_name = 'version'
   ) then
-    alter table ash.config add column version text not null default '1.1';
+    alter table ash.config add column version text not null default '1.2';
   end if;
 end $$;
 
-update ash.config set version = '1.1' where singleton;
+update ash.config set version = '1.2' where singleton;

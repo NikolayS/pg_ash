@@ -1,7 +1,22 @@
--- pg_ash v1.2 (development)
--- Upgrade from v1.1: swap chart/detail column order in timeline_chart functions
+-- pg_ash: upgrade from 1.1 to 1.2
+-- Safe to re-run (idempotent).
 
--- Drop old signatures (return type changed — CREATE OR REPLACE can't do that)
+-- Add version column if missing
+do $$
+begin
+  if not exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'version'
+  ) then
+    alter table ash.config add column version text not null default '1.2';
+  end if;
+end $$;
+
+-- Update version
+update ash.config set version = '1.2' where singleton;
+
+-- Swap column order in timeline_chart: chart before detail.
+-- Must DROP + CREATE (can't change OUT parameter order with CREATE OR REPLACE).
 drop function if exists ash.timeline_chart(interval, interval, int, int, boolean);
 drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int, boolean);
 
