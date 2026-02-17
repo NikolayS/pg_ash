@@ -964,7 +964,7 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          SELECT ash.uninstall();
+          SELECT ash.uninstall('yes');
           DO $$
           BEGIN
             ASSERT NOT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'ash'),
@@ -1026,7 +1026,7 @@ jobs:
           $$;
 
           -- Uninstall after upgrade test
-          SELECT ash.uninstall();
+          SELECT ash.uninstall('yes');
           EOF
 
       - name: "Upgrade path: 1.1 → 1.2 (direct)"
@@ -1060,7 +1060,7 @@ jobs:
           $$;
 
           -- Uninstall
-          SELECT ash.uninstall();
+          SELECT ash.uninstall('yes');
           EOF
 
       - name: "Dev workflow: re-apply 1.2 migration (idempotent)"
@@ -1097,7 +1097,7 @@ jobs:
           END;
           $$;
 
-          SELECT ash.uninstall();
+          SELECT ash.uninstall('yes');
           EOF
 
       - name: Final summary
@@ -1226,7 +1226,7 @@ jobs:
         run: |
           psql -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           -- Uninstall
-          SELECT ash.uninstall();
+          SELECT ash.uninstall('yes');
           DO $$
           BEGIN
             ASSERT NOT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'ash'),
@@ -1269,5 +1269,5 @@ jobs:
           END;
           $$;
 
-          SELECT ash.uninstall();
+          SELECT ash.uninstall('yes');
           EOF

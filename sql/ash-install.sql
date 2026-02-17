@@ -28,7 +28,8 @@ begin
         'top_by_type', 'top_by_type_at',
         'waits_by_type', 'waits_by_type_at',
         'event_queries', 'event_queries_at',
-        'top_queries_with_text'
+        'top_queries_with_text',
+        'uninstall'
       )
   loop
     execute 'drop function if exists ' || r.sig;
@@ -803,7 +804,7 @@ end;
 $$;
 
 -- Uninstall: stop jobs and drop schema
-create or replace function ash.uninstall()
+create or replace function ash.uninstall(p_confirm text default null)
 returns text
 language plpgsql
 as $$
@@ -811,6 +812,10 @@ declare
   v_rec record;
   v_jobs_removed int := 0;
 begin
+  if p_confirm is distinct from 'yes' then
+    raise exception 'to uninstall pg_ash, call: select ash.uninstall(''yes'')';
+  end if;
+
   -- Stop pg_cron jobs first
   for v_rec in select * from ash.stop() loop
     if v_rec.status = 'removed' then
@@ -852,6 +857,7 @@ returns table (
 )
 language plpgsql
 stable
+set jit = off
 as $$
 declare
   v_config record;
@@ -2870,4 +2876,26 @@ begin
   end if;
 exception when others then
   null; -- pg_cron not installed, skip
+end $$;
+
+-------------------------------------------------------------------------------
+-- Security: restrict write/admin functions to the installing role.
+-- Reader functions remain PUBLIC (read-only, no side effects).
+-------------------------------------------------------------------------------
+do $$
+declare
+  v_owner text := (select nspowner::regrole::text from pg_namespace where nspname = 'ash');
+begin
+  -- Admin functions: only the schema owner
+  execute format('revoke all on function ash.start(interval) from public');
+  execute format('revoke all on function ash.stop() from public');
+  execute format('revoke all on function ash.uninstall(text) from public');
+  execute format('revoke all on function ash.rotate() from public');
+  execute format('revoke all on function ash.take_sample() from public');
+
+  execute format('grant execute on function ash.start(interval) to %I', v_owner);
+  execute format('grant execute on function ash.stop() to %I', v_owner);
+  execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
+  execute format('grant execute on function ash.rotate() to %I', v_owner);
+  execute format('grant execute on function ash.take_sample() to %I', v_owner);
 end $$;

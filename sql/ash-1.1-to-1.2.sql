@@ -1321,6 +1321,7 @@ returns table (
 )
 language plpgsql
 stable
+set jit = off
 as $$
 declare
   v_config record;
@@ -1391,3 +1392,46 @@ $$;
 
 -- Update version (must be last)
 update ash.config set version = '1.2' where singleton;
+
+-- Uninstall confirmation guard
+drop function if exists ash.uninstall();
+create or replace function ash.uninstall(p_confirm text default null)
+returns text
+language plpgsql
+as $$
+declare
+  v_rec record;
+  v_jobs_removed int := 0;
+begin
+  if p_confirm is distinct from 'yes' then
+    raise exception 'to uninstall pg_ash, call: select ash.uninstall(''yes'')';
+  end if;
+
+  for v_rec in select * from ash.stop() loop
+    if v_rec.status = 'removed' then
+      v_jobs_removed := v_jobs_removed + 1;
+    end if;
+  end loop;
+
+  drop schema ash cascade;
+  return format('uninstalled: removed %s pg_cron jobs, dropped ash schema', v_jobs_removed);
+end;
+$$;
+
+-- Security: restrict write/admin functions to the installing role.
+do $$
+declare
+  v_owner text := (select nspowner::regrole::text from pg_namespace where nspname = 'ash');
+begin
+  execute format('revoke all on function ash.start(interval) from public');
+  execute format('revoke all on function ash.stop() from public');
+  execute format('revoke all on function ash.uninstall(text) from public');
+  execute format('revoke all on function ash.rotate() from public');
+  execute format('revoke all on function ash.take_sample() from public');
+
+  execute format('grant execute on function ash.start(interval) to %I', v_owner);
+  execute format('grant execute on function ash.stop() to %I', v_owner);
+  execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
+  execute format('grant execute on function ash.rotate() to %I', v_owner);
+  execute format('grant execute on function ash.take_sample() to %I', v_owner);
+end $$;
