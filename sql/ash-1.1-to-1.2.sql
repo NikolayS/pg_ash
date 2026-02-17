@@ -14,6 +14,9 @@ begin
   end if;
 end $$;
 
+-- Sampler observer-effect mitigation: cap at 500ms to prevent stacking
+alter function ash.take_sample() set statement_timeout = '500ms';
+
 -- Update version
 update ash.config set version = '1.2' where singleton;
 

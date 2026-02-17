@@ -251,6 +251,7 @@ $$;
 create or replace function ash.take_sample()
 returns int
 language plpgsql
+set statement_timeout = '500ms'
 as $$
 declare
   v_sample_ts int4;
