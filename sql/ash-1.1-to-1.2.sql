@@ -14,8 +14,19 @@ begin
   end if;
 end $$;
 
--- Sampler observer-effect mitigation: cap at 500ms to prevent stacking
-alter function ash.take_sample() set statement_timeout = '500ms';
+-- Sampler observer-effect mitigation: add statement_timeout to pg_cron command.
+-- statement_timeout inside plpgsql SET clause doesn't cancel sub-statements,
+-- so we set it at session level in the cron command itself.
+do $$
+begin
+  if exists (select from cron.job where jobname = 'ash_sampler') then
+    update cron.job
+    set command = 'SET statement_timeout = ''500ms''; SELECT ash.take_sample()'
+    where jobname = 'ash_sampler';
+  end if;
+exception when others then
+  null; -- pg_cron not installed, skip
+end $$;
 
 -- Update version
 update ash.config set version = '1.2' where singleton;

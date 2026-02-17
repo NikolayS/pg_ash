@@ -251,7 +251,6 @@ $$;
 create or replace function ash.take_sample()
 returns int
 language plpgsql
-set statement_timeout = '500ms'
 as $$
 declare
   v_sample_ts int4;
@@ -692,7 +691,7 @@ begin
     select cron.schedule(
       'ash_sampler',
       v_schedule,
-      'SELECT ash.take_sample()'
+      'SET statement_timeout = ''500ms''; SELECT ash.take_sample()'
     ) into v_sampler_job;
 
     -- Clear nodename so pg_cron uses Unix socket instead of TCP.
