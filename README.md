@@ -8,6 +8,8 @@
 
 Active Session History for Postgres — lightweight wait event sampling with zero bloat.
 
+> **Experimental.** Part of the [SAMO project](https://samo.sh/) — self-driving Postgres.
+
 **The anti-extension.** Pure SQL + PL/pgSQL that works on any Postgres 14+ — including RDS, Cloud SQL, AlloyDB, Supabase, Neon, and every other managed provider. No C extension, no `shared_preload_libraries`, no provider approval, no restart. Just `\i` and go.
 
 ## Why
