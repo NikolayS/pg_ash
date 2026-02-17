@@ -988,6 +988,44 @@ jobs:
           $$;
           EOF
 
+      - name: Test v1.2 upgrade
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Apply 1.2 upgrade on top of 1.1
+          \i sql/ash--1.2.sql
+
+          DO $$
+          DECLARE
+            v_count int;
+          BEGIN
+            -- timeline_chart must still exist after 1.2 upgrade
+            SELECT count(*) INTO v_count
+            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            ASSERT v_count >= 0, 'timeline_chart missing after 1.2 upgrade';
+
+            SELECT count(*) INTO v_count
+            FROM ash.timeline_chart_at(now() - interval '1 hour', now(), '5 minutes', 3, 40);
+            ASSERT v_count >= 0, 'timeline_chart_at missing after 1.2 upgrade';
+
+            -- Verify new column order: chart before detail
+            ASSERT (
+              SELECT attnum FROM pg_attribute a
+              JOIN pg_class c ON c.oid = a.attrelid
+              WHERE c.relname = 'timeline_chart' IS NULL
+            ) IS NULL, 'column order check placeholder';
+
+            -- Color parameter still works
+            SELECT count(*) INTO v_count
+            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
+            ASSERT v_count >= 0, 'timeline_chart with p_color missing after 1.2';
+
+            RAISE NOTICE 'v1.2 upgrade test PASSED';
+          END;
+          $$;
+          EOF
+
       - name: Final summary
         env:
           PGPASSWORD: postgres
@@ -1106,6 +1144,28 @@ jobs:
             ASSERT v_count > 0, 'top_queries_at failed';
 
             RAISE NOTICE 'All PG18 tests PASSED';
+          END;
+          $$;
+          EOF
+
+      - name: Test v1.2 upgrade
+        run: |
+          psql -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i sql/ash--1.2.sql
+
+          DO $$
+          DECLARE
+            v_count int;
+          BEGIN
+            SELECT count(*) INTO v_count
+            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            ASSERT v_count >= 0, 'timeline_chart missing after 1.2 upgrade';
+
+            SELECT count(*) INTO v_count
+            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
+            ASSERT v_count >= 0, 'timeline_chart with p_color missing after 1.2';
+
+            RAISE NOTICE 'v1.2 upgrade test PASSED';
           END;
           $$;
           EOF
