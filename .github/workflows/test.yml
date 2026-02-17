@@ -388,9 +388,9 @@ jobs:
             SELECT count(*) INTO v_count FROM ash.top_queries('1 hour');
             ASSERT v_count > 0, 'top_queries returned 0 rows';
 
-            -- waits_by_type: should have CPU* and IO at minimum
-            SELECT count(*) INTO v_count FROM ash.waits_by_type('1 hour');
-            ASSERT v_count >= 2, 'waits_by_type returned fewer than 2 types';
+            -- top_by_type: should have CPU* and IO at minimum
+            SELECT count(*) INTO v_count FROM ash.top_by_type('1 hour');
+            ASSERT v_count >= 2, 'top_by_type returned fewer than 2 types';
 
             -- wait_timeline
             SELECT count(*) INTO v_count FROM ash.wait_timeline('1 hour', '5 minutes');
@@ -434,8 +434,8 @@ jobs:
             SELECT count(*) INTO v_count FROM ash.top_queries_at(v_start, v_end);
             ASSERT v_count > 0, 'top_queries_at returned 0 rows';
 
-            SELECT count(*) INTO v_count FROM ash.waits_by_type_at(v_start, v_end);
-            ASSERT v_count >= 2, 'waits_by_type_at returned fewer than 2 types';
+            SELECT count(*) INTO v_count FROM ash.top_by_type_at(v_start, v_end);
+            ASSERT v_count >= 2, 'top_by_type_at returned fewer than 2 types';
 
             SELECT count(*) INTO v_count FROM ash.wait_timeline_at(v_start, v_end, '5 minutes');
             ASSERT v_count > 0, 'wait_timeline_at returned 0 rows';
@@ -728,8 +728,8 @@ jobs:
             ASSERT v_count = 0, 'future samples_at should return 0 rows';
 
             SELECT count(*) INTO v_count
-            FROM ash.waits_by_type_at(now() + interval '1 hour', now() + interval '2 hours');
-            ASSERT v_count = 0, 'future waits_by_type_at should return 0 rows';
+            FROM ash.top_by_type_at(now() + interval '1 hour', now() + interval '2 hours');
+            ASSERT v_count = 0, 'future top_by_type_at should return 0 rows';
 
             SELECT count(*) INTO v_count
             FROM ash.wait_timeline_at(now() + interval '1 hour', now() + interval '2 hours');
@@ -745,7 +745,7 @@ jobs:
             -- May return 0, that's fine — should not error
 
             SELECT count(*) INTO v_count FROM ash.top_queries('1 second');
-            SELECT count(*) INTO v_count FROM ash.waits_by_type('1 second');
+            SELECT count(*) INTO v_count FROM ash.top_by_type('1 second');
             SELECT count(*) INTO v_count FROM ash.wait_timeline('1 second', '1 second');
 
             -- === Non-existent queries ===
@@ -1181,8 +1181,8 @@ jobs:
             SELECT count(*) INTO v_count FROM ash.top_queries('1 hour');
             ASSERT v_count > 0, 'top_queries failed';
 
-            SELECT count(*) INTO v_count FROM ash.waits_by_type('1 hour');
-            ASSERT v_count > 0, 'waits_by_type failed';
+            SELECT count(*) INTO v_count FROM ash.top_by_type('1 hour');
+            ASSERT v_count > 0, 'top_by_type failed';
 
             SELECT count(*) INTO v_count FROM ash.wait_timeline('1 hour', '5 minutes');
             ASSERT v_count > 0, 'wait_timeline failed';
