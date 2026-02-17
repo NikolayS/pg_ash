@@ -20,7 +20,9 @@ begin
       and p.proname in (
         'top_waits', 'top_waits_at',
         'histogram', 'histogram_at',
-        'timeline_chart', 'timeline_chart_at'
+        'timeline_chart', 'timeline_chart_at',
+        'query_waits', 'query_waits_at',
+        'waits_by_type', 'waits_by_type_at'
       )
   loop
     execute 'drop function if exists ' || r.sig;
@@ -871,6 +873,7 @@ begin
   select count(*) into v_query_ids from ash.query_map_all;
 
   metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
+  metric := 'color'; value := case when ash._color_on() then 'on' else 'off' end; return next;
   metric := 'current_slot'; value := v_config.current_slot::text; return next;
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
@@ -932,14 +935,26 @@ $$;
 --
 -- Uses 24-bit RGB escape codes (\033[38;2;R;G;Bm) for consistent rendering
 -- across terminal themes (light, dark, solarized, etc.).
--- Colors are experimental, off by default (p_color parameter).
+-- Colors: off by default. Enable per-call (p_color := true) or per-session:
+--   SET ash.color = on;
+-- The session GUC avoids passing p_color to every function call.
 -------------------------------------------------------------------------------
+
+-- Resolve effective color state: explicit param wins, then session GUC.
+create or replace function ash._color_on(p_color boolean default false)
+returns boolean
+language sql
+stable
+as $$
+  select p_color or coalesce(current_setting('ash.color', true), '') in ('on', 'true', '1');
+$$;
+
 create or replace function ash._wait_color(p_event text, p_color boolean default false)
 returns text
 language sql
-immutable
+stable
 as $$
-  select case when not p_color then '' else
+  select case when not ash._color_on(p_color) then '' else
     case
       when p_event like 'CPU%' then E'\033[38;2;80;250;123m'           -- green
       when p_event = 'IdleTx' then E'\033[38;2;241;250;140m'          -- light yellow
@@ -961,9 +976,9 @@ $$;
 create or replace function ash._reset(p_color boolean default false)
 returns text
 language sql
-immutable
+stable
 as $$
-  select case when p_color then E'\033[0m' else '' end;
+  select case when ash._color_on(p_color) then E'\033[0m' else '' end;
 $$;
 
 create or replace function ash.top_waits(
@@ -1859,7 +1874,7 @@ stable
 set jit = off
 as $$
 declare
-  v_reset text := case when p_color then E'\033[0m' else '' end;
+  v_reset text := ash._reset(p_color);
   v_max_active numeric;
   v_start_ts int4;
   v_bucket_secs int4;
@@ -1871,7 +1886,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := case when p_color then E'\033[38;2;180;180;180m' else '' end;  -- gray for Other
+  v_other_color text := ash._wait_color('Other', p_color);  -- gray for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;
@@ -2064,7 +2079,7 @@ stable
 set jit = off
 as $$
 declare
-  v_reset text := case when p_color then E'\033[0m' else '' end;
+  v_reset text := ash._reset(p_color);
   v_max_active numeric;
   v_start_ts int4;
   v_end_ts int4;
@@ -2077,7 +2092,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := case when p_color then E'\033[38;2;180;180;180m' else '' end;  -- gray for Other
+  v_other_color text := ash._wait_color('Other', p_color);  -- gray for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;

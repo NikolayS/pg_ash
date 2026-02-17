@@ -17,6 +17,47 @@ end $$;
 -- Update version
 update ash.config set version = '1.2' where singleton;
 
+-- Session-level color toggle: SET ash.color = on;
+-- Avoids passing p_color := true to every function call.
+create or replace function ash._color_on(p_color boolean default false)
+returns boolean
+language sql
+stable
+as $$
+  select p_color or coalesce(current_setting('ash.color', true), '') in ('on', 'true', '1');
+$$;
+
+create or replace function ash._wait_color(p_event text, p_color boolean default false)
+returns text
+language sql
+stable
+as $$
+  select case when not ash._color_on(p_color) then '' else
+    case
+      when p_event like 'CPU%' then E'\033[38;2;80;250;123m'           -- green
+      when p_event = 'IdleTx' then E'\033[38;2;241;250;140m'          -- light yellow
+      when p_event like 'IO:%' then E'\033[38;2;30;100;255m'          -- vivid blue
+      when p_event like 'Lock:%' then E'\033[38;2;255;85;85m'         -- red
+      when p_event like 'LWLock:%' then E'\033[38;2;255;121;198m'     -- pink
+      when p_event like 'IPC:%' then E'\033[38;2;0;200;255m'          -- cyan
+      when p_event like 'Client:%' then E'\033[38;2;255;220;100m'     -- yellow
+      when p_event like 'Timeout:%' then E'\033[38;2;255;165;0m'      -- orange
+      when p_event like 'BufferPin:%' then E'\033[38;2;0;210;180m'    -- teal
+      when p_event like 'Activity:%' then E'\033[38;2;150;100;255m'   -- purple
+      when p_event like 'Extension:%' then E'\033[38;2;190;150;255m'  -- light purple
+      else E'\033[38;2;180;180;180m'                                   -- gray (unknown)
+    end
+  end;
+$$;
+
+create or replace function ash._reset(p_color boolean default false)
+returns text
+language sql
+stable
+as $$
+  select case when ash._color_on(p_color) then E'\033[0m' else '' end;
+$$;
+
 -- Drop + recreate functions with changed signatures or new features.
 -- timeline_chart: add chart padding for psql alignment
 drop function if exists ash.timeline_chart(interval, interval, int, int, boolean);
@@ -45,7 +86,7 @@ stable
 set jit = off
 as $$
 declare
-  v_reset text := case when p_color then E'\033[0m' else '' end;
+  v_reset text := ash._reset(p_color);
   v_max_active numeric;
   v_start_ts int4;
   v_bucket_secs int4;
@@ -57,7 +98,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := case when p_color then E'\033[38;2;180;180;180m' else '' end;  -- gray for Other
+  v_other_color text := ash._wait_color('Other', p_color);  -- gray for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;
@@ -248,7 +289,7 @@ stable
 set jit = off
 as $$
 declare
-  v_reset text := case when p_color then E'\033[0m' else '' end;
+  v_reset text := ash._reset(p_color);
   v_max_active numeric;
   v_start_ts int4;
   v_end_ts int4;
@@ -261,7 +302,7 @@ declare
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];  -- distinct chars per rank
-  v_other_color text := case when p_color then E'\033[38;2;180;180;180m' else '' end;  -- gray for Other
+  v_other_color text := ash._wait_color('Other', p_color);  -- gray for Other
   v_other_char text := '·';
   v_ch text;
   v_i int;

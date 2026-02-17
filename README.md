@@ -178,15 +178,25 @@ from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
 
 Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color.
 
-**Experimental: ANSI colors.** Pass `p_color => true` to enable ANSI color-coded bars — green = CPU\*, blue = IO, red = Lock, pink = LWLock, cyan = IPC, yellow = Client, orange = Timeout, teal = BufferPin, purple = Activity, light purple = Extension, light yellow = IdleTx. Note: psql's table formatter escapes ANSI codes — to render colors in psql, pipe through sed:
+**Experimental: ANSI colors.** Enable per-session or per-call — green = CPU\*, blue = IO, red = Lock, pink = LWLock, cyan = IPC, yellow = Client, orange = Timeout, teal = BufferPin, purple = Activity, light purple = Extension, light yellow = IdleTx.
+
+```sql
+-- Option 1: enable once for the session (recommended)
+SET ash.color = on;
+
+-- Option 2: per-call
+select * from ash.top_waits('1 hour', p_color => true);
+```
+
+psql's table formatter escapes ANSI codes — to render colors, pipe through sed:
 
 ```sql
 -- add to ~/.psqlrc for a reusable :color command
 \set color '\\g | sed ''s/\\\\x1B/\\x1b/g'' | less -R'
 
 -- then use it
-select * from ash.top_waits('1 hour', p_color => true) :color
-select * from ash.timeline_chart('1 hour', p_color => true) :color
+select * from ash.top_waits('1 hour') :color
+select * from ash.timeline_chart('1 hour') :color
 ```
 
 Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
