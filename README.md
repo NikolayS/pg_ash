@@ -201,6 +201,14 @@ select * from ash.timeline_chart('1 hour') :color
 
 Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
 
+`top_waits` with colors:
+
+![top_waits with ANSI colors](assets/top_waits_color.jpg)
+
+`timeline_chart` with colors:
+
+![timeline_chart with ANSI colors](assets/timeline_chart_color.jpg)
+
 Example data generated with `pgbench -c 8 -T 65` on Postgres 17 with concurrent lock contention and idle-in-transaction sessions.
 
 ```sql
