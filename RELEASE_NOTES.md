@@ -1,3 +1,97 @@
+# pg_ash 1.2 release notes
+
+51 commits since v1.1. Upgrade from 1.1: `\i sql/ash-1.1-to-1.2.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`.
+
+## What changed
+
+### New: event_queries
+
+`event_queries()` and `event_queries_at()` — find which queries are responsible for a specific wait event. Flexible matching: `'Lock:tuple'` (exact event), `'IO'` (all events of a type), or `'CPU*'` (synthetic). Includes bar column.
+
+```sql
+-- which queries are causing Lock:tuple?
+select * from ash.event_queries('Lock:tuple', '1 hour');
+
+-- all IO-related queries in a time window
+select * from ash.event_queries_at('IO', '2026-02-17 14:00', '2026-02-17 14:05');
+```
+
+### New: session-level color toggle
+
+Enable ANSI colors for the whole session without passing `p_color` to every call:
+
+```sql
+set ash.color = on;
+select * from ash.top_waits('1 hour');
+select * from ash.timeline_chart('1 hour');
+```
+
+Uses a custom GUC — works on any Postgres 9.2+ without `postgresql.conf` changes. `ash.status()` now shows the current color state.
+
+### New: bar visualization on all wait-showing functions
+
+Every function that shows `pct` now has a `bar` column — `query_waits`, `top_by_type`, `event_queries` (plus all `_at` variants). Bar width controlled by `p_width` (default 20), colors by `p_color` or `set ash.color = on`.
+
+### Changed: waits_by_type renamed to top_by_type
+
+Consistent naming with `top_waits`, `top_queries`. The old name is dropped on install/upgrade.
+
+### Changed: top_queries_with_text columns
+
+`mean_time_ms` renamed to `mean_exec_time_ms`. New column `total_exec_time_ms` added.
+
+### Improved: pspg-compatible bar alignment
+
+ANSI color escapes are zero-padded to uniform 19-byte length (`\033[38;2;080;250;123m` not `\033[38;2;80;250;123m`). The `_bar()` helper pads the full bar string to a fixed raw byte length, preventing right-border misalignment in pspg and similar tools.
+
+### Improved: timeline_chart shows empty buckets
+
+Quiet periods now show rows with `active = 0` instead of being omitted, so you can see the full time range.
+
+### Improved: observer-effect protection
+
+The sampler pg_cron command now includes `SET statement_timeout = '500ms'` to prevent `take_sample()` from becoming a problem on overloaded servers. The 500ms cap gives 10× headroom over normal ~50ms execution. Existing cron jobs are updated automatically on upgrade.
+
+### Improved: version tracking
+
+`ash.config` now has a `version` column. `ash.status()` shows it as the first metric. The install and migration files set it automatically.
+
+### Improved: dynamic overload cleanup
+
+`ash-install.sql` discovers and drops all stale function overloads by name, making it safe to run on any prior version without "function is not unique" errors.
+
+### Fixed: event_queries crash without pg_stat_statements
+
+Both `event_queries()` and `event_queries_at()` would crash on Postgres instances without `pg_stat_statements` loaded — the table reference was validated at plan time even in the `false` branch. Split into two `RETURN QUERY` branches.
+
+### Fixed: IdleTx color in top_by_type
+
+`top_by_type()` passed `'IdleTx:*'` to `_wait_color()` which used exact match. Changed to `LIKE 'IdleTx%'`.
+
+### Fixed: upgrade path completeness
+
+`start()` and `status()` are now re-created in the 1.1→1.2 migration, ensuring upgraded installs get the statement_timeout protection and color/version metrics.
+
+## Functions (37 total)
+
+| Function | Description |
+|---|---|
+| `event_queries(event, interval, limit, width, color)` | **New** — top queries for a wait event |
+| `event_queries_at(event, start, end, limit, width, color)` | **New** — absolute-time variant |
+| `_bar(event, pct, max_pct, width, color)` | **New** — shared bar rendering helper |
+| `_color_on(color)` | **New** — resolve effective color state (param or session GUC) |
+| `top_by_type(interval, width, color)` | **Renamed** from `waits_by_type` — now with bar |
+| `top_by_type_at(start, end, width, color)` | **Renamed** from `waits_by_type_at` — now with bar |
+| `query_waits(query_id, interval, width, color)` | **Enhanced** — added bar column |
+| `query_waits_at(query_id, start, end, width, color)` | **Enhanced** — added bar column |
+| `top_queries_with_text(interval, limit)` | **Enhanced** — renamed/added columns |
+| `start(interval)` | **Enhanced** — statement_timeout in cron command |
+| `status()` | **Enhanced** — shows version, color state |
+
+All other functions unchanged from 1.1. See README for the full reference.
+
+---
+
 # pg_ash 1.1 release notes
 
 Upgrade from 1.0: `\i sql/ash-1.1.sql` — safe to run on top of a running 1.0 installation.
