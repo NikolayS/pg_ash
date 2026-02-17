@@ -72,6 +72,18 @@ Both `event_queries()` and `event_queries_at()` would crash on Postgres instance
 
 `start()` and `status()` are now re-created in the 1.1→1.2 migration, ensuring upgraded installs get the statement_timeout protection and color/version metrics.
 
+### Security: admin functions restricted
+
+`start()`, `stop()`, `uninstall()`, `rotate()`, and `take_sample()` are now `REVOKE`d from PUBLIC and `GRANT`ed only to the schema owner. Reader functions remain PUBLIC.
+
+### Security: uninstall confirmation guard
+
+`ash.uninstall()` now requires a confirmation parameter: `ash.uninstall('yes')`. Calling without the argument raises an error with usage instructions.
+
+### Fixed: status() missing SET jit = off
+
+`status()` was the only reader function without JIT protection. Fixed.
+
 ## Functions (37 total)
 
 | Function | Description |
