@@ -722,16 +722,19 @@ update ash.config set version = '1.2' where singleton;
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
 -------------------------------------------------------------------------------
-
+drop function if exists ash.event_queries(text, interval, int);
 create or replace function ash.event_queries(
   p_event text,
   p_interval interval default '1 hour',
-  p_limit int default 10
+  p_limit int default 10,
+  p_width int default 20,
+  p_color boolean default false
 )
 returns table (
   query_id bigint,
   samples bigint,
   pct numeric,
+  bar text,
   query_text text
 )
 language plpgsql
@@ -792,34 +795,53 @@ begin
   ),
   grand_total as (
     select sum(cnt) as total from totals
+  ),
+  ranked as (
+    select
+      t.query_id,
+      t.cnt as samples,
+      round(t.cnt::numeric / gt.total * 100, 2) as pct
+    from totals t
+    cross join grand_total gt
+    order by t.cnt desc
+    limit p_limit
+  ),
+  max_pct as (
+    select max(r.pct) as m from ranked r
   )
   select
-    t.query_id,
-    t.cnt as samples,
-    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    r.query_id,
+    r.samples,
+    r.pct,
+    ash._wait_color(p_event, p_color)
+      || repeat('█', greatest(1, (r.pct / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || r.pct || '%' as bar,
     case when v_has_pgss then (
       select left(p.query, 200)
       from pg_stat_statements p
-      where p.queryid = t.query_id
+      where p.queryid = r.query_id
       limit 1
     ) end as query_text
-  from totals t
-  cross join grand_total gt
-  order by t.cnt desc
-  limit p_limit;
+  from ranked r
+  cross join max_pct mp
+  order by r.samples desc;
 end;
 $$;
 
+drop function if exists ash.event_queries_at(text, timestamptz, timestamptz, int);
 create or replace function ash.event_queries_at(
   p_event text,
   p_start timestamptz,
   p_end timestamptz,
-  p_limit int default 10
+  p_limit int default 10,
+  p_width int default 20,
+  p_color boolean default false
 )
 returns table (
   query_id bigint,
   samples bigint,
   pct numeric,
+  bar text,
   query_text text
 )
 language plpgsql
@@ -879,20 +901,35 @@ begin
   ),
   grand_total as (
     select sum(cnt) as total from totals
+  ),
+  ranked as (
+    select
+      t.query_id,
+      t.cnt as samples,
+      round(t.cnt::numeric / gt.total * 100, 2) as pct
+    from totals t
+    cross join grand_total gt
+    order by t.cnt desc
+    limit p_limit
+  ),
+  max_pct as (
+    select max(r.pct) as m from ranked r
   )
   select
-    t.query_id,
-    t.cnt as samples,
-    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    r.query_id,
+    r.samples,
+    r.pct,
+    ash._wait_color(p_event, p_color)
+      || repeat('█', greatest(1, (r.pct / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || r.pct || '%' as bar,
     case when v_has_pgss then (
       select left(p.query, 200)
       from pg_stat_statements p
-      where p.queryid = t.query_id
+      where p.queryid = r.query_id
       limit 1
     ) end as query_text
-  from totals t
-  cross join grand_total gt
-  order by t.cnt desc
-  limit p_limit;
+  from ranked r
+  cross join max_pct mp
+  order by r.samples desc;
 end;
 $$;
