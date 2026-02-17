@@ -50,7 +50,7 @@ as $$
   select case when not ash._color_on(p_color) then '' else
     case
       when p_event like 'CPU%' then E'\033[38;2;080;250;123m'         -- green
-      when p_event = 'IdleTx' then E'\033[38;2;241;250;140m'          -- light yellow
+      when p_event like 'IdleTx%' then E'\033[38;2;241;250;140m'      -- light yellow
       when p_event like 'IO:%' then E'\033[38;2;030;100;255m'         -- vivid blue
       when p_event like 'Lock:%' then E'\033[38;2;255;085;085m'       -- red
       when p_event like 'LWLock:%' then E'\033[38;2;255;121;198m'     -- pink
@@ -895,75 +895,136 @@ begin
     v_has_pgss := false;
   end;
 
-  return query
-  with matching_waits as (
-    select wm.id as wait_id
-    from ash.wait_event_map wm
-    where case
-      when p_event like '%:%' then
-        wm.type || ':' || wm.event = p_event
-        or (wm.event = wm.type and wm.event = p_event)
-      else
-        wm.type = p_event
-        or wm.event = p_event
-    end
-  ),
-  hits as (
+  if v_has_pgss then
+    return query
+    with matching_waits as (
+      select wm.id as wait_id
+      from ash.wait_event_map wm
+      where case
+        when p_event like '%:%' then
+          wm.type || ':' || wm.event = p_event
+          or (wm.event = wm.type and wm.event = p_event)
+        else
+          wm.type = p_event
+          or wm.event = p_event
+      end
+    ),
+    hits as (
+      select
+        s.slot,
+        s.data[i + 2 + gs.n] as map_id
+      from ash.sample s,
+        generate_subscripts(s.data, 1) i,
+        matching_waits mw,
+        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_min_ts
+        and s.data[i] < 0
+        and (-s.data[i])::smallint = mw.wait_id
+        and i + 2 + gs.n <= array_length(s.data, 1)
+        and s.data[i + 2 + gs.n] >= 0
+    ),
+    resolved as (
+      select m.query_id
+      from hits h
+      join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
+    ),
+    totals as (
+      select r.query_id, count(*) as cnt
+      from resolved r
+      group by r.query_id
+    ),
+    grand_total as (
+      select sum(cnt) as total from totals
+    ),
+    ranked as (
+      select
+        t.query_id,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+      from totals t
+      cross join grand_total gt
+      order by t.cnt desc
+      limit p_limit
+    ),
+    max_pct as (
+      select max(r.pct) as m from ranked r
+    )
     select
-      s.slot,
-      s.data[i + 1] as cnt,
-      s.data[i + 2 + gs.n] as map_id
-    from ash.sample s,
-      generate_subscripts(s.data, 1) i,
-      matching_waits mw,
-      lateral generate_series(0, s.data[i + 1] - 1) gs(n)
-    where s.slot = any(ash._active_slots())
-      and s.sample_ts >= v_min_ts
-      and s.data[i] < 0
-      and (-s.data[i])::smallint = mw.wait_id
-      and i + 2 + gs.n <= array_length(s.data, 1)
-      and s.data[i + 2 + gs.n] >= 0
-  ),
-  resolved as (
-    select m.query_id
-    from hits h
-    join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
-  ),
-  totals as (
-    select r.query_id, count(*) as cnt
-    from resolved r
-    group by r.query_id
-  ),
-  grand_total as (
-    select sum(cnt) as total from totals
-  ),
-  ranked as (
+      r.query_id,
+      r.samples,
+      r.pct,
+      ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
+      left(pgss.query, 200) as query_text
+    from ranked r
+    cross join max_pct mp
+    left join pg_stat_statements pgss on pgss.queryid = r.query_id
+    order by r.samples desc;
+  else
+    return query
+    with matching_waits as (
+      select wm.id as wait_id
+      from ash.wait_event_map wm
+      where case
+        when p_event like '%:%' then
+          wm.type || ':' || wm.event = p_event
+          or (wm.event = wm.type and wm.event = p_event)
+        else
+          wm.type = p_event
+          or wm.event = p_event
+      end
+    ),
+    hits as (
+      select
+        s.slot,
+        s.data[i + 2 + gs.n] as map_id
+      from ash.sample s,
+        generate_subscripts(s.data, 1) i,
+        matching_waits mw,
+        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_min_ts
+        and s.data[i] < 0
+        and (-s.data[i])::smallint = mw.wait_id
+        and i + 2 + gs.n <= array_length(s.data, 1)
+        and s.data[i + 2 + gs.n] >= 0
+    ),
+    resolved as (
+      select m.query_id
+      from hits h
+      join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
+    ),
+    totals as (
+      select r.query_id, count(*) as cnt
+      from resolved r
+      group by r.query_id
+    ),
+    grand_total as (
+      select sum(cnt) as total from totals
+    ),
+    ranked as (
+      select
+        t.query_id,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+      from totals t
+      cross join grand_total gt
+      order by t.cnt desc
+      limit p_limit
+    ),
+    max_pct as (
+      select max(r.pct) as m from ranked r
+    )
     select
-      t.query_id,
-      t.cnt as samples,
-      round(t.cnt::numeric / gt.total * 100, 2) as pct
-    from totals t
-    cross join grand_total gt
-    order by t.cnt desc
-    limit p_limit
-  ),
-  max_pct as (
-    select max(r.pct) as m from ranked r
-  )
-  select
-    r.query_id,
-    r.samples,
-    r.pct,
-    ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
-    case when v_has_pgss then (
-      select left(p.query, 200)
-      from pg_stat_statements p
-      where p.queryid = r.query_id
-      limit 1
-    ) end as query_text
-  from ranked r
-  cross join max_pct mp
-  order by r.samples desc;
+      r.query_id,
+      r.samples,
+      r.pct,
+      ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
+      null::text as query_text
+    from ranked r
+    cross join max_pct mp
+    order by r.samples desc;
+  end if;
 end;
 $$;
 
@@ -999,75 +1060,136 @@ begin
     v_has_pgss := false;
   end;
 
-  return query
-  with matching_waits as (
-    select wm.id as wait_id
-    from ash.wait_event_map wm
-    where case
-      when p_event like '%:%' then
-        wm.type || ':' || wm.event = p_event
-        or (wm.event = wm.type and wm.event = p_event)
-      else
-        wm.type = p_event
-        or wm.event = p_event
-    end
-  ),
-  hits as (
+  if v_has_pgss then
+    return query
+    with matching_waits as (
+      select wm.id as wait_id
+      from ash.wait_event_map wm
+      where case
+        when p_event like '%:%' then
+          wm.type || ':' || wm.event = p_event
+          or (wm.event = wm.type and wm.event = p_event)
+        else
+          wm.type = p_event
+          or wm.event = p_event
+      end
+    ),
+    hits as (
+      select
+        s.slot,
+        s.data[i + 2 + gs.n] as map_id
+      from ash.sample s,
+        generate_subscripts(s.data, 1) i,
+        matching_waits mw,
+        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_start and s.sample_ts < v_end
+        and s.data[i] < 0
+        and (-s.data[i])::smallint = mw.wait_id
+        and i + 2 + gs.n <= array_length(s.data, 1)
+        and s.data[i + 2 + gs.n] >= 0
+    ),
+    resolved as (
+      select m.query_id
+      from hits h
+      join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
+    ),
+    totals as (
+      select r.query_id, count(*) as cnt
+      from resolved r
+      group by r.query_id
+    ),
+    grand_total as (
+      select sum(cnt) as total from totals
+    ),
+    ranked as (
+      select
+        t.query_id,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+      from totals t
+      cross join grand_total gt
+      order by t.cnt desc
+      limit p_limit
+    ),
+    max_pct as (
+      select max(r.pct) as m from ranked r
+    )
     select
-      s.slot,
-      s.data[i + 1] as cnt,
-      s.data[i + 2 + gs.n] as map_id
-    from ash.sample s,
-      generate_subscripts(s.data, 1) i,
-      matching_waits mw,
-      lateral generate_series(0, s.data[i + 1] - 1) gs(n)
-    where s.slot = any(ash._active_slots())
-      and s.sample_ts >= v_start and s.sample_ts < v_end
-      and s.data[i] < 0
-      and (-s.data[i])::smallint = mw.wait_id
-      and i + 2 + gs.n <= array_length(s.data, 1)
-      and s.data[i + 2 + gs.n] >= 0
-  ),
-  resolved as (
-    select m.query_id
-    from hits h
-    join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
-  ),
-  totals as (
-    select r.query_id, count(*) as cnt
-    from resolved r
-    group by r.query_id
-  ),
-  grand_total as (
-    select sum(cnt) as total from totals
-  ),
-  ranked as (
+      r.query_id,
+      r.samples,
+      r.pct,
+      ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
+      left(pgss.query, 200) as query_text
+    from ranked r
+    cross join max_pct mp
+    left join pg_stat_statements pgss on pgss.queryid = r.query_id
+    order by r.samples desc;
+  else
+    return query
+    with matching_waits as (
+      select wm.id as wait_id
+      from ash.wait_event_map wm
+      where case
+        when p_event like '%:%' then
+          wm.type || ':' || wm.event = p_event
+          or (wm.event = wm.type and wm.event = p_event)
+        else
+          wm.type = p_event
+          or wm.event = p_event
+      end
+    ),
+    hits as (
+      select
+        s.slot,
+        s.data[i + 2 + gs.n] as map_id
+      from ash.sample s,
+        generate_subscripts(s.data, 1) i,
+        matching_waits mw,
+        lateral generate_series(0, s.data[i + 1] - 1) gs(n)
+      where s.slot = any(ash._active_slots())
+        and s.sample_ts >= v_start and s.sample_ts < v_end
+        and s.data[i] < 0
+        and (-s.data[i])::smallint = mw.wait_id
+        and i + 2 + gs.n <= array_length(s.data, 1)
+        and s.data[i + 2 + gs.n] >= 0
+    ),
+    resolved as (
+      select m.query_id
+      from hits h
+      join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
+    ),
+    totals as (
+      select r.query_id, count(*) as cnt
+      from resolved r
+      group by r.query_id
+    ),
+    grand_total as (
+      select sum(cnt) as total from totals
+    ),
+    ranked as (
+      select
+        t.query_id,
+        t.cnt as samples,
+        round(t.cnt::numeric / gt.total * 100, 2) as pct
+      from totals t
+      cross join grand_total gt
+      order by t.cnt desc
+      limit p_limit
+    ),
+    max_pct as (
+      select max(r.pct) as m from ranked r
+    )
     select
-      t.query_id,
-      t.cnt as samples,
-      round(t.cnt::numeric / gt.total * 100, 2) as pct
-    from totals t
-    cross join grand_total gt
-    order by t.cnt desc
-    limit p_limit
-  ),
-  max_pct as (
-    select max(r.pct) as m from ranked r
-  )
-  select
-    r.query_id,
-    r.samples,
-    r.pct,
-    ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
-    case when v_has_pgss then (
-      select left(p.query, 200)
-      from pg_stat_statements p
-      where p.queryid = r.query_id
-      limit 1
-    ) end as query_text
-  from ranked r
-  cross join max_pct mp
-  order by r.samples desc;
+      r.query_id,
+      r.samples,
+      r.pct,
+      ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
+      null::text as query_text
+    from ranked r
+    cross join max_pct mp
+    order by r.samples desc;
+  end if;
 end;
 $$;
 
