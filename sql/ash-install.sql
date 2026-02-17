@@ -2856,3 +2856,18 @@ begin
 end;
 $$;
 
+
+-- If upgrading an existing install, update the sampler cron command to include
+-- statement_timeout (observer-effect protection). New installs via ash.start()
+-- already use the updated command.
+do $$
+begin
+  if exists (select from cron.job where jobname = 'ash_sampler') then
+    update cron.job
+    set command = 'set statement_timeout = ''500ms''; select ash.take_sample()'
+    where jobname = 'ash_sampler'
+      and command <> 'set statement_timeout = ''500ms''; select ash.take_sample()';
+  end if;
+exception when others then
+  null; -- pg_cron not installed, skip
+end $$;
