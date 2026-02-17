@@ -15,10 +15,15 @@ end $$;
 -- Update version
 update ash.config set version = '1.2' where singleton;
 
--- Swap column order in timeline_chart: chart before detail.
--- Must DROP + CREATE (can't change OUT parameter order with CREATE OR REPLACE).
+-- Drop old signatures (return type changed — can't use CREATE OR REPLACE).
+-- timeline_chart: swap detail/chart column order
 drop function if exists ash.timeline_chart(interval, interval, int, int, boolean);
 drop function if exists ash.timeline_chart_at(timestamptz, timestamptz, interval, int, int, boolean);
+-- query_waits, waits_by_type: add bar column + p_width/p_color params
+drop function if exists ash.query_waits(bigint, interval);
+drop function if exists ash.query_waits_at(bigint, timestamptz, timestamptz);
+drop function if exists ash.waits_by_type(interval);
+drop function if exists ash.waits_by_type_at(timestamptz, timestamptz);
 
 create or replace function ash.timeline_chart(
   p_interval interval default '1 hour',
@@ -418,5 +423,249 @@ begin
     chart := v_bar;
     return next;
   end loop;
+end;
+$$;
+create or replace function ash.waits_by_type(
+  p_interval interval default '1 hour',
+  p_width int default 40,
+  p_color boolean default false
+)
+returns table (
+  wait_event_type text,
+  samples bigint,
+  pct numeric,
+  bar text
+)
+language sql
+stable
+set jit = off
+as $$
+  with waits as (
+    select
+      (-s.data[i])::smallint as wait_id,
+      s.data[i + 1] as cnt
+    from ash.sample s, generate_subscripts(s.data, 1) i
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.data[i] < 0
+  ),
+  totals as (
+    select wm.type as wait_type, sum(w.cnt) as cnt
+    from waits w
+    join ash.wait_event_map wm on wm.id = w.wait_id
+    group by wm.type
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
+  )
+  select
+    t.wait_type as wait_event_type,
+    t.cnt as samples,
+    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    ash._wait_color(t.wait_type || ':*', p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%' as bar
+  from totals t, grand_total gt, max_pct mp
+  order by t.cnt desc
+$$;
+
+create or replace function ash.waits_by_type_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_width int default 40,
+  p_color boolean default false
+)
+returns table (
+  wait_event_type text,
+  samples bigint,
+  pct numeric,
+  bar text
+)
+language sql
+stable
+set jit = off
+as $$
+  with waits as (
+    select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+    from ash.sample s, generate_subscripts(s.data, 1) i
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= ash._to_sample_ts(p_start)
+      and s.sample_ts < ash._to_sample_ts(p_end)
+      and s.data[i] < 0
+  ),
+  totals as (
+    select wm.type as wait_type, sum(w.cnt) as cnt
+    from waits w join ash.wait_event_map wm on wm.id = w.wait_id
+    group by wm.type
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
+  )
+  select
+    t.wait_type,
+    t.cnt,
+    round(t.cnt::numeric / gt.total * 100, 2),
+    ash._wait_color(t.wait_type || ':*', p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%'
+  from totals t, grand_total gt, max_pct mp
+  order by t.cnt desc
+$$;
+
+create or replace function ash.query_waits(
+  p_query_id bigint,
+  p_interval interval default '1 hour',
+  p_width int default 40,
+  p_color boolean default false
+)
+returns table (
+  wait_event text,
+  samples bigint,
+  pct numeric,
+  bar text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+begin
+  -- Check if this query_id exists in any partition
+  if not exists (select from ash.query_map_all where query_id = p_query_id) then
+    return;
+  end if;
+
+  return query
+  with map_ids as (
+    -- All (slot, id) pairs for this query across partitions
+    select slot, id from ash.query_map_all where query_id = p_query_id
+  ),
+  hits as (
+    -- Find every position where the query appears in a sample,
+    -- then walk backwards to find the wait group marker
+    select
+      (select (- s.data[j])::smallint
+      from generate_series(i, 1, -1) j
+      where s.data[j] < 0
+      limit 1
+      ) as wait_id
+    from ash.sample s, generate_subscripts(s.data, 1) i
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and i > 1
+      and s.data[i] >= 0
+      and s.data[i - 1] >= 0  -- it's a query_id position, not a count
+      and exists (select from map_ids m where m.slot = s.slot and m.id = s.data[i])
+  ),
+  named_hits as (
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
+    from hits h
+    join ash.wait_event_map wm on wm.id = h.wait_id
+    where h.wait_id is not null
+  ),
+  totals as (
+    select evt, count(*) as cnt
+    from named_hits
+    group by evt
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
+  )
+  select
+    t.evt,
+    t.cnt as samples,
+    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    ash._wait_color(t.evt, p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%' as bar
+  from totals t
+  cross join grand_total gt
+  cross join max_pct mp
+  order by t.cnt desc;
+end;
+$$;
+
+create or replace function ash.query_waits_at(
+  p_query_id bigint,
+  p_start timestamptz,
+  p_end timestamptz,
+  p_width int default 40,
+  p_color boolean default false
+)
+returns table (
+  wait_event text,
+  samples bigint,
+  pct numeric,
+  bar text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start int4 := ash._to_sample_ts(p_start);
+  v_end int4 := ash._to_sample_ts(p_end);
+begin
+  if not exists (select from ash.query_map_all where query_id = p_query_id) then
+    return;
+  end if;
+
+  return query
+  with map_ids as (
+    select slot, id from ash.query_map_all where query_id = p_query_id
+  ),
+  hits as (
+    select
+      (select (- s.data[j])::smallint
+      from generate_series(i, 1, -1) j
+      where s.data[j] < 0 limit 1
+      ) as wait_id
+    from ash.sample s, generate_subscripts(s.data, 1) i
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= v_start and s.sample_ts < v_end
+      and i > 1
+      and s.data[i] >= 0 and s.data[i - 1] >= 0
+      and exists (select from map_ids m where m.slot = s.slot and m.id = s.data[i])
+  ),
+  named_hits as (
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
+    from hits h
+    join ash.wait_event_map wm on wm.id = h.wait_id
+    where h.wait_id is not null
+  ),
+  totals as (
+    select evt, count(*) as cnt from named_hits group by evt
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
+  )
+  select
+    t.evt,
+    t.cnt,
+    round(t.cnt::numeric / gt.total * 100, 2),
+    ash._wait_color(t.evt, p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%'
+  from totals t
+  cross join grand_total gt
+  cross join max_pct mp
+  order by t.cnt desc;
 end;
 $$;

@@ -127,15 +127,15 @@ select * from ash.waits_by_type('5 minutes');
 ```
 
 ```
- wait_event_type | samples |  pct
------------------+---------+-------
- Client          |     174 | 46.77
- Timeout         |      44 | 11.83
- Lock            |      41 | 11.02
- CPU*            |      35 |  9.41
- LWLock          |      33 |  8.87
- IdleTx          |      26 |  6.99
- IO              |      19 |  5.11
+ wait_event_type | samples |  pct  |                       bar
+-----------------+---------+-------+-------------------------------------------------
+ Client          |     174 | 46.77 | ████████████████████████████████████████ 46.77%
+ Timeout         |      44 | 11.83 | ██████████ 11.83%
+ Lock            |      41 | 11.02 | █████████ 11.02%
+ CPU*            |      35 |  9.41 | ████████ 9.41%
+ LWLock          |      33 |  8.87 | ████████ 8.87%
+ IdleTx          |      26 |  6.99 | ██████ 6.99%
+ IO              |      19 |  5.11 | ████ 5.11%
 ```
 
 ### Investigate an incident
@@ -232,14 +232,14 @@ select * from ash.query_waits(3365820675399133794, '5 minutes');
 ```
 
 ```
-     wait_event     | samples |  pct
---------------------+---------+-------
- Client:ClientRead  |      32 | 54.24
- Lock:transactionid |      12 | 20.34
- LWLock:WALWrite    |       6 | 10.17
- CPU*               |       4 |  6.78
- IO:WalSync         |       3 |  5.08
- IdleTx             |       2 |  3.39
+     wait_event     | samples |  pct  |                       bar
+--------------------+---------+-------+-------------------------------------------------
+ Client:ClientRead  |      32 | 54.24 | ████████████████████████████████████████ 54.24%
+ Lock:transactionid |      12 | 20.34 | ███████████████ 20.34%
+ LWLock:WALWrite    |       6 | 10.17 | ████████ 10.17%
+ CPU*               |       4 |  6.78 | █████ 6.78%
+ IO:WalSync         |       3 |  5.08 | ████ 5.08%
+ IdleTx             |       2 |  3.39 | ██ 3.39%
 ```
 
 ```sql
@@ -277,8 +277,8 @@ select * from ash.status();
 | `ash.top_waits(interval, limit, width)` | Top wait events ranked by sample count, with bar chart |
 | `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
 | `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join |
-| `ash.query_waits(query_id, interval)` | Wait profile for a specific query |
-| `ash.waits_by_type(interval)` | Breakdown by wait event type |
+| `ash.query_waits(query_id, interval, width, color)` | Wait profile for a specific query |
+| `ash.waits_by_type(interval, width, color)` | Breakdown by wait event type |
 | `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
 | `ash.samples_by_database(interval)` | Per-database activity |
 | `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
@@ -294,9 +294,9 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 |----------|-------------|
 | `ash.top_waits_at(start, end, limit, width)` | Top waits in a time range, with bar chart |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
-| `ash.query_waits_at(query_id, start, end)` | Query wait profile in a time range |
+| `ash.query_waits_at(query_id, start, end, width, color)` | Query wait profile in a time range |
 | `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
-| `ash.waits_by_type_at(start, end)` | Breakdown by wait event type in a time range |
+| `ash.waits_by_type_at(start, end, width, color)` | Breakdown by wait event type in a time range |
 | `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |
 | `ash.timeline_chart_at(start, end, bucket, top, width)` | Stacked bar chart in a time range |
 

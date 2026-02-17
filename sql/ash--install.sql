@@ -1147,12 +1147,15 @@ $$;
 
 -- Wait event type distribution
 create or replace function ash.waits_by_type(
-  p_interval interval default '1 hour'
+  p_interval interval default '1 hour',
+  p_width int default 40,
+  p_color boolean default false
 )
 returns table (
   wait_event_type text,
   samples bigint,
-  pct numeric
+  pct numeric,
+  bar text
 )
 language sql
 stable
@@ -1175,12 +1178,19 @@ as $$
   ),
   grand_total as (
     select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
   )
   select
     t.wait_type as wait_event_type,
     t.cnt as samples,
-    round(t.cnt::numeric / gt.total * 100, 2) as pct
-  from totals t, grand_total gt
+    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    ash._wait_color(t.wait_type || ':*', p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%' as bar
+  from totals t, grand_total gt, max_pct mp
   order by t.cnt desc
 $$;
 
@@ -1289,12 +1299,15 @@ $$;
 -- which wait group it belongs to (the nearest preceding negative element).
 create or replace function ash.query_waits(
   p_query_id bigint,
-  p_interval interval default '1 hour'
+  p_interval interval default '1 hour',
+  p_width int default 40,
+  p_color boolean default false
 )
 returns table (
   wait_event text,
   samples bigint,
-  pct numeric
+  pct numeric,
+  bar text
 )
 language plpgsql
 stable
@@ -1342,13 +1355,21 @@ begin
   ),
   grand_total as (
     select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
   )
   select
     t.evt,
     t.cnt as samples,
-    round(t.cnt::numeric / gt.total * 100, 2) as pct
+    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    ash._wait_color(t.evt, p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%' as bar
   from totals t
   cross join grand_total gt
+  cross join max_pct mp
   order by t.cnt desc;
 end;
 $$;
@@ -1584,12 +1605,15 @@ $$;
 -- Wait event type distribution in an absolute time range
 create or replace function ash.waits_by_type_at(
   p_start timestamptz,
-  p_end timestamptz
+  p_end timestamptz,
+  p_width int default 40,
+  p_color boolean default false
 )
 returns table (
   wait_event_type text,
   samples bigint,
-  pct numeric
+  pct numeric,
+  bar text
 )
 language sql
 stable
@@ -1610,9 +1634,19 @@ as $$
   ),
   grand_total as (
     select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
   )
-  select t.wait_type, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
-  from totals t, grand_total gt
+  select
+    t.wait_type,
+    t.cnt,
+    round(t.cnt::numeric / gt.total * 100, 2),
+    ash._wait_color(t.wait_type || ':*', p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%'
+  from totals t, grand_total gt, max_pct mp
   order by t.cnt desc
 $$;
 
@@ -1620,12 +1654,15 @@ $$;
 create or replace function ash.query_waits_at(
   p_query_id bigint,
   p_start timestamptz,
-  p_end timestamptz
+  p_end timestamptz,
+  p_width int default 40,
+  p_color boolean default false
 )
 returns table (
   wait_event text,
   samples bigint,
-  pct numeric
+  pct numeric,
+  bar text
 )
 language plpgsql
 stable
@@ -1668,10 +1705,21 @@ begin
   ),
   grand_total as (
     select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
   )
-  select t.evt, t.cnt, round(t.cnt::numeric / gt.total * 100, 2)
+  select
+    t.evt,
+    t.cnt,
+    round(t.cnt::numeric / gt.total * 100, 2),
+    ash._wait_color(t.evt, p_color)
+      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
+      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%'
   from totals t
   cross join grand_total gt
+  cross join max_pct mp
   order by t.cnt desc;
 end;
 $$;
