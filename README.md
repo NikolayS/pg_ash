@@ -62,7 +62,65 @@ select ash.uninstall();
 select * from ash.status();
 ```
 
+## Function reference
+
+### Relative time (last N hours)
+
+| Function | Description |
+|----------|-------------|
+| `ash.top_waits(interval, limit, width)` | Top wait events ranked by sample count, with bar chart |
+| `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
+| `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join |
+| `ash.query_waits(query_id, interval, width, color)` | Wait profile for a specific query |
+| `ash.top_by_type(interval, width, color)` | Breakdown by wait event type |
+| `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
+| `ash.samples_by_database(interval)` | Per-database activity |
+| `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
+| `ash.timeline_chart(interval, bucket, top, width)` | Stacked bar chart of wait events over time |
+| `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
+| `ash.status()` | Sampling status and partition info |
+
+All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
+
+### Absolute time (incident investigation)
+
+| Function | Description |
+|----------|-------------|
+| `ash.top_waits_at(start, end, limit, width)` | Top waits in a time range, with bar chart |
+| `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
+| `ash.query_waits_at(query_id, start, end, width, color)` | Query wait profile in a time range |
+| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
+| `ash.event_queries_at(event, start, end, limit)` | Top queries for a wait event in a time range |
+| `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
+| `ash.top_by_type_at(start, end, width, color)` | Breakdown by wait event type in a time range |
+| `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |
+| `ash.timeline_chart_at(start, end, bucket, top, width)` | Stacked bar chart in a time range |
+
+Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
+
 ## Usage
+
+### Check status
+
+```sql
+select * from ash.status();
+```
+
+```
+           metric           |             value
+----------------------------+-------------------------------
+ version                    | 1.2
+ current_slot               | 0
+ sample_interval            | 00:00:01
+ rotation_period            | 1 day
+ include_bg_workers         | false
+ samples_in_current_slot    | 56
+ last_sample_ts             | 2026-02-16 08:39:03+00
+ wait_event_map_count       | 11
+ wait_event_map_utilization | 0.03%
+ query_map_count            | 8
+ pg_cron_available          | no
+```
 
 ### What hurt recently?
 
@@ -137,6 +195,124 @@ select * from ash.top_by_type('5 minutes');
  IdleTx          |      26 |  6.99 | ██████ 6.99%
  IO              |      19 |  5.11 | ████ 5.11%
 ```
+
+### Analyze a specific query
+
+```sql
+-- what is query 3365820675399133794 waiting on?
+select * from ash.query_waits(3365820675399133794, '5 minutes');
+```
+
+```
+     wait_event     | samples |  pct  |                       bar
+--------------------+---------+-------+-------------------------------------------------
+ Client:ClientRead  |      32 | 54.24 | ████████████████████████████████████████ 54.24%
+ Lock:transactionid |      12 | 20.34 | ███████████████ 20.34%
+ LWLock:WALWrite    |       6 | 10.17 | ████████ 10.17%
+ CPU*               |       4 |  6.78 | █████ 6.78%
+ IO:WalSync         |       3 |  5.08 | ████ 5.08%
+ IdleTx             |       2 |  3.39 | ██ 3.39%
+```
+
+```sql
+-- same, but during a specific time window
+select * from ash.query_waits_at(3365820675399133794, '2026-02-16 08:38', '2026-02-16 08:40');
+```
+
+### Drill into a wait event
+
+```sql
+-- which queries are stuck on Lock:transactionid?
+select * from ash.event_queries('Lock:transactionid', '1 hour');
+
+-- or by wait type (matches all events of that type)
+select * from ash.event_queries('IO', '1 hour');
+```
+
+### Browse raw samples
+
+```sql
+-- see the last 20 decoded samples with query text
+select * from ash.samples('10 minutes', 20);
+```
+
+```
+      sample_time       | database_name | active_backends |     wait_event     |       query_id       |                          query_text
+------------------------+---------------+-----------------+--------------------+----------------------+--------------------------------------------------------------
+ 2026-02-16 11:18:51+00 | postgres      |               7 | CPU*               | -2835399305386018931 | END
+ 2026-02-16 11:18:51+00 | postgres      |               7 | CPU*               |  3365820675399133794 | UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE ...
+ 2026-02-16 11:18:49+00 | postgres      |               5 | Client:ClientRead  |  9144568883098003499 | SELECT abalance FROM pgbench_accounts WHERE aid = $1
+ 2026-02-16 11:18:49+00 | postgres      |               5 | IO:WalSync         | -2835399305386018931 | END
+ 2026-02-16 11:18:49+00 | postgres      |               3 | Lock:transactionid | -2835399305386018931 | END
+ 2026-02-16 11:18:49+00 | postgres      |               5 | LWLock:WALWrite    | -2835399305386018931 | END
+```
+
+```sql
+-- raw samples during an incident
+select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 50);
+```
+
+### Timeline chart
+
+Visualize wait event patterns over time — spot spikes, correlate with deployments, see what changed.
+
+```sql
+select bucket_start, active, detail, chart
+from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
+```
+
+```
+      bucket_start       | active |                             detail                             |                           chart
+-------------------------+--------+-----------------------------------------------------------------+-----------------------------------------------------------
+                         |        |                                                                 | █ Client:ClientRead  ▓ LWLock:WALWrite  ░ IdleTx  · Other
+ 2026-02-16 08:37:30+00  |    2.0 | Other=2.0                                                      | ···········
+ 2026-02-16 08:38:00+00  |    7.0 | Client:ClientRead=2.3 LWLock:WALWrite=0.8 IdleTx=0.4 Other=3.5 | █████████████▓▓▓▓▓░░····················
+ 2026-02-16 08:38:30+00  |    6.6 | Client:ClientRead=4.0 LWLock:WALWrite=0.4 IdleTx=0.5 Other=1.7 | ███████████████████████▓▓░░░··········
+ 2026-02-16 08:39:00+00  |    5.3 | Client:ClientRead=3.3 LWLock:WALWrite=0.3 IdleTx=0.7 Other=1.0 | ███████████████████▓▓░░░░······
+```
+
+Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color.
+
+```sql
+-- zoom into a specific time window
+select * from ash.timeline_chart_at(
+  now() - interval '10 minutes', now(),
+  '1 minute', 3, 50
+);
+```
+
+**Experimental: ANSI colors.** Enable per-session or per-call — green = CPU\*, blue = IO, red = Lock, pink = LWLock, cyan = IPC, yellow = Client, orange = Timeout, teal = BufferPin, purple = Activity, light purple = Extension, light yellow = IdleTx.
+
+```sql
+-- Option 1: enable once for the session (recommended)
+set ash.color = on;
+
+-- Option 2: per-call
+select * from ash.top_waits('1 hour', p_color => true);
+```
+
+psql's table formatter escapes ANSI codes — to render colors, pipe through sed:
+
+```sql
+-- add to ~/.psqlrc for a reusable :color command
+\set color '\\g | sed ''s/\\\\x1B/\\x1b/g'' | less -R'
+
+-- then use it
+select * from ash.top_waits('1 hour') :color
+select * from ash.timeline_chart('1 hour') :color
+```
+
+Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
+
+`top_waits` with colors:
+
+![top_waits with ANSI colors](assets/top_waits_color.jpg)
+
+`timeline_chart` with colors:
+
+![timeline_chart with ANSI colors](assets/timeline_chart_color.jpg)
+
+Example data generated with `pgbench -c 8 -T 65` on Postgres 17 with concurrent lock contention and idle-in-transaction sessions.
 
 ### Investigate an incident
 
@@ -265,181 +441,6 @@ select * from ash.top_queries_with_text('10 minutes');
 > 1. Use `SELECT ... FOR UPDATE SKIP LOCKED` to skip already-locked rows and process them later
 > 2. Batch the status and shipping updates into a single statement to reduce lock duration
 > 3. If these run from a queue worker, reduce concurrency or partition the work by order ID range
-
-### Timeline chart
-
-Visualize wait event patterns over time — spot spikes, correlate with deployments, see what changed.
-
-```sql
-select bucket_start, active, chart, detail
-from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
-```
-
-```
-      bucket_start       | active |                           chart                           |                             detail
--------------------------+--------+-----------------------------------------------------------+----------------------------------------------------------------
-                         |        | █ Client:ClientRead  ▓ LWLock:WALWrite  ░ IdleTx  · Other |
- 2026-02-16 08:37:30+00  |    2.0 | ···········                                               | Other=2.0
- 2026-02-16 08:38:00+00  |    7.0 | █████████████▓▓▓▓▓░░····················                  | Client:ClientRead=2.3 LWLock:WALWrite=0.8 IdleTx=0.4 Other=3.5
- 2026-02-16 08:38:30+00  |    6.6 | ███████████████████████▓▓░░░··········                    | Client:ClientRead=4.0 LWLock:WALWrite=0.4 IdleTx=0.5 Other=1.7
- 2026-02-16 08:39:00+00  |    5.3 | ███████████████████▓▓░░░░······                           | Client:ClientRead=3.3 LWLock:WALWrite=0.3 IdleTx=0.7 Other=1.0
-```
-
-Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color.
-
-**Experimental: ANSI colors.** Enable per-session or per-call — green = CPU\*, blue = IO, red = Lock, pink = LWLock, cyan = IPC, yellow = Client, orange = Timeout, teal = BufferPin, purple = Activity, light purple = Extension, light yellow = IdleTx.
-
-```sql
--- Option 1: enable once for the session (recommended)
-set ash.color = on;
-
--- Option 2: per-call
-select * from ash.top_waits('1 hour', p_color => true);
-```
-
-psql's table formatter escapes ANSI codes — to render colors, pipe through sed:
-
-```sql
--- add to ~/.psqlrc for a reusable :color command
-\set color '\\g | sed ''s/\\\\x1B/\\x1b/g'' | less -R'
-
--- then use it
-select * from ash.top_waits('1 hour') :color
-select * from ash.timeline_chart('1 hour') :color
-```
-
-Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
-
-`top_waits` with colors:
-
-![top_waits with ANSI colors](assets/top_waits_color.jpg)
-
-`timeline_chart` with colors:
-
-![timeline_chart with ANSI colors](assets/timeline_chart_color.jpg)
-
-Example data generated with `pgbench -c 8 -T 65` on Postgres 17 with concurrent lock contention and idle-in-transaction sessions.
-
-```sql
--- zoom into a specific time window
-select * from ash.timeline_chart_at(
-  now() - interval '10 minutes', now(),
-  '1 minute', 3, 50
-);
-```
-
-### Browse raw samples
-
-```sql
--- see the last 20 decoded samples with query text
-select * from ash.samples('10 minutes', 20);
-```
-
-```
-      sample_time       | database_name | active_backends |     wait_event     |       query_id       |                          query_text
-------------------------+---------------+-----------------+--------------------+----------------------+--------------------------------------------------------------
- 2026-02-16 11:18:51+00 | postgres      |               7 | CPU*               | -2835399305386018931 | END
- 2026-02-16 11:18:51+00 | postgres      |               7 | CPU*               |  3365820675399133794 | UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE ...
- 2026-02-16 11:18:49+00 | postgres      |               5 | Client:ClientRead  |  9144568883098003499 | SELECT abalance FROM pgbench_accounts WHERE aid = $1
- 2026-02-16 11:18:49+00 | postgres      |               5 | IO:WalSync         | -2835399305386018931 | END
- 2026-02-16 11:18:49+00 | postgres      |               3 | Lock:transactionid | -2835399305386018931 | END
- 2026-02-16 11:18:49+00 | postgres      |               5 | LWLock:WALWrite    | -2835399305386018931 | END
-```
-
-```sql
--- raw samples during an incident
-select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 50);
-```
-
-### Analyze a specific query
-
-```sql
--- what is query 3365820675399133794 waiting on?
-select * from ash.query_waits(3365820675399133794, '5 minutes');
-```
-
-```
-     wait_event     | samples |  pct  |                       bar
---------------------+---------+-------+-------------------------------------------------
- Client:ClientRead  |      32 | 54.24 | ████████████████████████████████████████ 54.24%
- Lock:transactionid |      12 | 20.34 | ███████████████ 20.34%
- LWLock:WALWrite    |       6 | 10.17 | ████████ 10.17%
- CPU*               |       4 |  6.78 | █████ 6.78%
- IO:WalSync         |       3 |  5.08 | ████ 5.08%
- IdleTx             |       2 |  3.39 | ██ 3.39%
-```
-
-```sql
--- same, but during a specific time window
-select * from ash.query_waits_at(3365820675399133794, '2026-02-16 08:38', '2026-02-16 08:40');
-```
-
-### Drill into a wait event
-
-```sql
--- which queries are stuck on Lock:transactionid?
-select * from ash.event_queries('Lock:transactionid', '1 hour');
-
--- or by wait type (matches all events of that type)
-select * from ash.event_queries('IO', '1 hour');
-```
-
-### Check status
-
-```sql
-select * from ash.status();
-```
-
-```
-           metric           |             value
-----------------------------+-------------------------------
- current_slot               | 0
- sample_interval            | 00:00:01
- rotation_period            | 1 day
- include_bg_workers         | false
- samples_in_current_slot    | 56
- last_sample_ts             | 2026-02-16 08:39:03+00
- wait_event_map_count       | 11
- wait_event_map_utilization | 0.03%
- query_map_count            | 8
- pg_cron_available          | no
-```
-
-## Function reference
-
-### Relative time (last N hours)
-
-| Function | Description |
-|----------|-------------|
-| `ash.top_waits(interval, limit, width)` | Top wait events ranked by sample count, with bar chart |
-| `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
-| `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join |
-| `ash.query_waits(query_id, interval, width, color)` | Wait profile for a specific query |
-| `ash.top_by_type(interval, width, color)` | Breakdown by wait event type |
-| `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
-| `ash.samples_by_database(interval)` | Per-database activity |
-| `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
-| `ash.timeline_chart(interval, bucket, top, width)` | Stacked bar chart of wait events over time |
-| `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
-| `ash.status()` | Sampling status and partition info |
-
-All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
-
-### Absolute time (incident investigation)
-
-| Function | Description |
-|----------|-------------|
-| `ash.top_waits_at(start, end, limit, width)` | Top waits in a time range, with bar chart |
-| `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
-| `ash.query_waits_at(query_id, start, end, width, color)` | Query wait profile in a time range |
-| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
-| `ash.event_queries_at(event, start, end, limit)` | Top queries for a wait event in a time range |
-| `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
-| `ash.top_by_type_at(start, end, width, color)` | Breakdown by wait event type in a time range |
-| `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |
-| `ash.timeline_chart_at(start, end, bucket, top, width)` | Stacked bar chart in a time range |
-
-Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 
 ## How it works
 
