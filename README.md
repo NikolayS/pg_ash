@@ -18,7 +18,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 
 | | pg_ash | pg_wait_sampling | pgsentinel | External sampling |
 |---|---|---|---|---|
-| Install | `\i` (pure SQL) | shared_preload_libraries | Compile + shared_preload_libraries | Separate infra |
+| Install | `\i` (pure SQL) | shared_preload_libraries | shared_preload_libraries (Debian/Ubuntu: `apt install`, others: compile) | Separate infra |
 | Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of early 2026) | Not known to be supported | Yes, with effort |
 | Sampling rate | 1s (via pg_cron) | 10ms (in-process) | 10ms (in-process) | 15-60s typical |
 | Visibility | Inside Postgres | Inside Postgres | Inside Postgres | Outside only |
@@ -412,7 +412,7 @@ See [issue #1](https://github.com/NikolayS/pg_ash/issues/1) for full benchmarks 
 
 - Postgres 14+ (requires `query_id` in `pg_stat_activity`)
 - pg_cron 1.5+ (for sub-minute scheduling)
-- pg_stat_statements (optional — enables query text in `top_queries_with_text()`)
+- pg_stat_statements (optional — enables query text, `calls`, `total_exec_time_ms`, `mean_exec_time_ms` in `top_queries_with_text()` and `event_queries()`; all other functions work without it)
 
 **Note on `query_id`**: The default `compute_query_id = auto` only populates `query_id` when pg_stat_statements is in `shared_preload_libraries`. If `query_id` is NULL in `pg_stat_activity`, set:
 
