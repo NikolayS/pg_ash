@@ -64,7 +64,7 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash--install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql
 
       - name: Test schema and infrastructure
         env:
@@ -981,7 +981,7 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           -- Start from 1.0
-          \i sql/ash--1.0.sql
+          \i sql/ash-1.0.sql
 
           DO $$
           BEGIN
@@ -991,7 +991,7 @@ jobs:
           $$;
 
           -- Upgrade to 1.1
-          \i sql/ash--1.1.sql
+          \i sql/ash-1.1.sql
 
           DO $$
           BEGIN
@@ -1007,7 +1007,7 @@ jobs:
           $$;
 
           -- Upgrade to 1.2
-          \i sql/ash--1.1--1.2.sql
+          \i sql/ash-1.1-to-1.2.sql
 
           DO $$
           DECLARE
@@ -1035,7 +1035,7 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          \i sql/ash--1.1.sql
+          \i sql/ash-1.1.sql
 
           DO $$
           BEGIN
@@ -1045,7 +1045,7 @@ jobs:
           END;
           $$;
 
-          \i sql/ash--1.1--1.2.sql
+          \i sql/ash-1.1-to-1.2.sql
 
           DO $$
           DECLARE
@@ -1069,10 +1069,10 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          \i sql/ash--install.sql
+          \i sql/ash-install.sql
 
           -- Apply 1.1--1.2 migration on top of install (should be idempotent)
-          \i sql/ash--1.1--1.2.sql
+          \i sql/ash-1.1-to-1.2.sql
 
           DO $$
           BEGIN
@@ -1083,7 +1083,7 @@ jobs:
           $$;
 
           -- Apply again
-          \i sql/ash--1.1--1.2.sql
+          \i sql/ash-1.1-to-1.2.sql
 
           DO $$
           DECLARE
@@ -1121,7 +1121,7 @@ jobs:
 
       - name: Install pg_ash (fresh install)
         run: |
-          psql -d postgres -v ON_ERROR_STOP=1 -f sql/ash--install.sql
+          psql -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql
 
       - name: Seed test data and run tests
         run: |
@@ -1237,7 +1237,7 @@ jobs:
           $$;
 
           -- Test upgrade: 1.1 → 1.2
-          \i sql/ash--1.1.sql
+          \i sql/ash-1.1.sql
           DO $$
           BEGIN
             ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.1',
@@ -1246,7 +1246,7 @@ jobs:
           END;
           $$;
 
-          \i sql/ash--1.1--1.2.sql
+          \i sql/ash-1.1-to-1.2.sql
           DO $$
           DECLARE
             v_count int;
@@ -1261,7 +1261,7 @@ jobs:
           $$;
 
           -- Re-apply (idempotent)
-          \i sql/ash--1.1--1.2.sql
+          \i sql/ash-1.1-to-1.2.sql
           DO $$
           BEGIN
             ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',

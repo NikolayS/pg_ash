@@ -32,7 +32,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 
 ```sql
 -- install (just run the SQL file — works on RDS, Cloud SQL, AlloyDB, etc.)
-\i sql/ash--install.sql
+\i sql/ash-install.sql
 
 -- start sampling (1 sample/second via pg_cron)
 select ash.start('1 second');
@@ -53,10 +53,10 @@ select ash.uninstall();
 
 ```sql
 -- from 1.0 to 1.1
-\i sql/ash--1.1.sql
+\i sql/ash-1.1.sql
 
 -- from 1.1 to 1.2
-\i sql/ash--1.1--1.2.sql
+\i sql/ash-1.1-to-1.2.sql
 
 -- check version
 select * from ash.status();

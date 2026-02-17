@@ -1,6 +1,6 @@
 # pg_ash 1.1 release notes
 
-Upgrade from 1.0: `\i sql/ash--1.1.sql` — safe to run on top of a running 1.0 installation.
+Upgrade from 1.0: `\i sql/ash-1.1.sql` — safe to run on top of a running 1.0 installation.
 
 ## What changed
 
@@ -59,7 +59,7 @@ pg_ash samples `pg_stat_activity` every second via pg_cron and stores wait event
 
 ## Design philosophy
 
-**The anti-extension.** pg_ash is pure SQL + PL/pgSQL — no C code, no `shared_preload_libraries`, no restart required. Install with `\i sql/ash--1.0.sql` on any Postgres 14+ instance with pg_cron 1.5+, including managed providers: RDS, Cloud SQL, AlloyDB, Supabase, Neon.
+**The anti-extension.** pg_ash is pure SQL + PL/pgSQL — no C code, no `shared_preload_libraries`, no restart required. Install with `\i sql/ash-1.0.sql` on any Postgres 14+ instance with pg_cron 1.5+, including managed providers: RDS, Cloud SQL, AlloyDB, Supabase, Neon.
 
 Key design decisions:
 
