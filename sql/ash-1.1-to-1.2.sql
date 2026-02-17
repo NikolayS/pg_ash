@@ -74,6 +74,27 @@ as $$
   select case when ash._color_on(p_color) then E'\033[0m' else '' end;
 $$;
 
+-- Build a bar string with fixed visible width (for pspg/column alignment).
+create or replace function ash._bar(
+  p_event text,
+  p_pct numeric,
+  p_max_pct numeric,
+  p_width int,
+  p_color boolean default false
+)
+returns text
+language sql
+stable
+as $$
+  select ash._wait_color(p_event, p_color)
+    || rpad(
+         repeat('█', greatest(1, (p_pct / nullif(p_max_pct, 0) * p_width)::int)),
+         p_width
+       )
+    || ash._reset(p_color)
+    || ' ' || p_pct || '%';
+$$;
+
 -- Drop + recreate functions with changed signatures or new features.
 -- top_queries_with_text: rename mean_time_ms → mean_exec_time_ms, add total_exec_time_ms
 drop function if exists ash.top_queries_with_text(interval, int);
@@ -629,9 +650,7 @@ as $$
     t.wait_type as wait_event_type,
     t.cnt as samples,
     round(t.cnt::numeric / gt.total * 100, 2) as pct,
-    ash._wait_color(t.wait_type || ':*', p_color)
-      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%' as bar
+    ash._bar(t.wait_type || ':*', round(t.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color) as bar
   from totals t, grand_total gt, max_pct mp
   order by t.cnt desc
 $$;
@@ -676,9 +695,7 @@ as $$
     t.wait_type,
     t.cnt,
     round(t.cnt::numeric / gt.total * 100, 2),
-    ash._wait_color(t.wait_type || ':*', p_color)
-      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%'
+    ash._bar(t.wait_type || ':*', round(t.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color)
   from totals t, grand_total gt, max_pct mp
   order by t.cnt desc
 $$;
@@ -750,9 +767,7 @@ begin
     t.evt,
     t.cnt as samples,
     round(t.cnt::numeric / gt.total * 100, 2) as pct,
-    ash._wait_color(t.evt, p_color)
-      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%' as bar
+    ash._bar(t.evt, round(t.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color) as bar
   from totals t
   cross join grand_total gt
   cross join max_pct mp
@@ -823,9 +838,7 @@ begin
     t.evt,
     t.cnt,
     round(t.cnt::numeric / gt.total * 100, 2),
-    ash._wait_color(t.evt, p_color)
-      || repeat('█', greatest(1, (round(t.cnt::numeric / gt.total * 100, 2) / nullif(mp.m, 0) * p_width)::int))
-      || ash._reset(p_color) || ' ' || round(t.cnt::numeric / gt.total * 100, 2) || '%'
+    ash._bar(t.evt, round(t.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color)
   from totals t
   cross join grand_total gt
   cross join max_pct mp
@@ -929,9 +942,7 @@ begin
     r.query_id,
     r.samples,
     r.pct,
-    ash._wait_color(p_event, p_color)
-      || repeat('█', greatest(1, (r.pct / nullif(mp.m, 0) * p_width)::int))
-      || ash._reset(p_color) || ' ' || r.pct || '%' as bar,
+    ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
     case when v_has_pgss then (
       select left(p.query, 200)
       from pg_stat_statements p
@@ -1035,9 +1046,7 @@ begin
     r.query_id,
     r.samples,
     r.pct,
-    ash._wait_color(p_event, p_color)
-      || repeat('█', greatest(1, (r.pct / nullif(mp.m, 0) * p_width)::int))
-      || ash._reset(p_color) || ' ' || r.pct || '%' as bar,
+    ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
     case when v_has_pgss then (
       select left(p.query, 200)
       from pg_stat_statements p
