@@ -356,11 +356,17 @@ begin
       group by b.bucket_ts, bs.n_samples
     )
     select
-      ash.epoch() + pb.bucket_ts * interval '1 second' as ts,
-      pb.total,
-      pb.events
-    from per_bucket pb
-    order by pb.bucket_ts
+      ash.epoch() + g.ts * interval '1 second' as ts,
+      coalesce(pb.total, 0) as total,
+      coalesce(pb.events, '{}'::jsonb) as events
+    from generate_series(
+      v_start_ts - (v_start_ts % v_bucket_secs) + v_bucket_secs,
+      extract(epoch from now() - ash.epoch())::int4
+        - ((extract(epoch from now() - ash.epoch())::int4) % v_bucket_secs),
+      v_bucket_secs
+    ) g(ts)
+    left join per_bucket pb on pb.bucket_ts = g.ts
+    order by g.ts
   loop
     v_bar := '';
     v_legend := '';
@@ -559,11 +565,16 @@ begin
       group by b.bucket_ts, bs.n_samples
     )
     select
-      ash.epoch() + pb.bucket_ts * interval '1 second' as ts,
-      pb.total,
-      pb.events
-    from per_bucket pb
-    order by pb.bucket_ts
+      ash.epoch() + g.ts * interval '1 second' as ts,
+      coalesce(pb.total, 0) as total,
+      coalesce(pb.events, '{}'::jsonb) as events
+    from generate_series(
+      v_start - (v_start % v_bucket_secs),
+      v_end - (v_end % v_bucket_secs),
+      v_bucket_secs
+    ) g(ts)
+    left join per_bucket pb on pb.bucket_ts = g.ts
+    order by g.ts
   loop
     v_bar := '';
     v_legend := '';
