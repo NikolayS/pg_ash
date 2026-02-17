@@ -60,6 +60,7 @@ declare
   v_ch text;
   v_i int;
   v_visible_width int;
+  v_legend_len int;
 begin
   v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
@@ -128,6 +129,7 @@ begin
     v_legend := v_legend || v_event_colors[v_i] || v_ch || v_reset || ' ' || v_top_events[v_i];
   end loop;
   v_legend := v_legend || '  ' || v_other_color || v_other_char || v_reset || ' Other';
+  v_legend_len := length(v_legend);
   bucket_start := null;
   active := null;
   detail := null;
@@ -211,9 +213,9 @@ begin
       v_legend := v_legend || ' Other=' || v_val;
     end if;
 
-    -- Pad to fixed visual width so psql column alignment works with ANSI codes
-    if v_visible_width < p_width then
-      v_bar := v_bar || repeat(' ', p_width - v_visible_width);
+    -- Pad to match legend row length so psql column alignment is consistent.
+    if length(v_bar) < v_legend_len then
+      v_bar := v_bar || repeat(' ', v_legend_len - length(v_bar));
     end if;
 
     bucket_start := v_rec.ts;
@@ -262,6 +264,7 @@ declare
   v_ch text;
   v_i int;
   v_visible_width int;
+  v_legend_len int;
 begin
   v_start_ts := ash._to_sample_ts(p_start);
   v_end_ts := ash._to_sample_ts(p_end);
@@ -330,6 +333,7 @@ begin
     v_legend := v_legend || v_event_colors[v_i] || v_ch || v_reset || ' ' || v_top_events[v_i];
   end loop;
   v_legend := v_legend || '  ' || v_other_color || v_other_char || v_reset || ' Other';
+  v_legend_len := length(v_legend);
   bucket_start := null;
   active := null;
   detail := null;
@@ -412,9 +416,9 @@ begin
       v_legend := v_legend || ' Other=' || v_val;
     end if;
 
-    -- Pad to fixed visual width so psql column alignment works with ANSI codes
-    if v_visible_width < p_width then
-      v_bar := v_bar || repeat(' ', p_width - v_visible_width);
+    -- Pad to match legend row length so psql column alignment is consistent.
+    if length(v_bar) < v_legend_len then
+      v_bar := v_bar || repeat(' ', v_legend_len - length(v_bar));
     end if;
 
     bucket_start := v_rec.ts;
