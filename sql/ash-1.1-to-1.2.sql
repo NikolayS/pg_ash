@@ -29,9 +29,6 @@ exception when others then
   null; -- pg_cron not installed, skip
 end $$;
 
--- Update version
-update ash.config set version = '1.2' where singleton;
-
 -- Session-level color toggle: set ash.color = on;
 -- Avoids passing p_color := true to every function call.
 create or replace function ash._color_on(p_color boolean default false)
@@ -858,8 +855,6 @@ begin
 end;
 $$;
 
-update ash.config set version = '1.2' where singleton;
-
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
 -------------------------------------------------------------------------------
@@ -1193,3 +1188,206 @@ begin
 end;
 $$;
 
+
+-------------------------------------------------------------------------------
+-- Re-create start() with statement_timeout in cron command
+-------------------------------------------------------------------------------
+create or replace function ash.start(p_interval interval default '1 second')
+returns table (job_type text, job_id bigint, status text)
+language plpgsql
+as $$
+declare
+  v_sampler_job bigint;
+  v_rotation_job bigint;
+  v_cron_version text;
+  v_seconds int;
+  v_schedule text;
+begin
+  -- Check if pg_cron is available
+  if not ash._pg_cron_available() then
+    job_type := 'error';
+    job_id := null;
+    status := 'pg_cron extension not installed';
+    return next;
+    return;
+  end if;
+
+  -- Check pg_cron version (need >= 1.5 for second granularity)
+  select extversion into v_cron_version
+  from pg_extension where extname = 'pg_cron';
+
+  if string_to_array(v_cron_version, '.')::int[] < '{1,5}'::int[] then
+    job_type := 'error';
+    job_id := null;
+    status := format('pg_cron version %s too old, need >= 1.5', v_cron_version);
+    return next;
+    return;
+  end if;
+
+  -- Convert interval to pg_cron schedule format
+  -- pg_cron expects 'N seconds' (not interval text like '00:00:01')
+  v_seconds := extract(epoch from p_interval)::int;
+  if v_seconds < 1 or v_seconds > 59 then
+    job_type := 'error';
+    job_id := null;
+    status := format('interval must be 1-59 seconds, got %s', p_interval);
+    return next;
+    return;
+  end if;
+  v_schedule := v_seconds || ' seconds';
+
+  -- Check for existing sampler job (idempotent)
+  select jobid into v_sampler_job
+  from cron.job
+  where jobname = 'ash_sampler';
+
+  if v_sampler_job is not null then
+    job_type := 'sampler';
+    job_id := v_sampler_job;
+    status := 'already exists';
+    return next;
+  else
+    -- Create sampler job
+    select cron.schedule(
+      'ash_sampler',
+      v_schedule,
+      'set statement_timeout = ''500ms''; select ash.take_sample()'
+    ) into v_sampler_job;
+
+    -- Clear nodename so pg_cron uses Unix socket instead of TCP.
+    -- cron.schedule() defaults nodename to 'localhost' which forces TCP
+    -- and fails when pg_hba.conf only allows socket connections.
+    update cron.job set nodename = '' where jobid = v_sampler_job;
+
+    job_type := 'sampler';
+    job_id := v_sampler_job;
+    status := 'created';
+    return next;
+  end if;
+
+  -- Check for existing rotation job (idempotent)
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rotation';
+
+  if v_rotation_job is not null then
+    job_type := 'rotation';
+    job_id := v_rotation_job;
+    status := 'already exists';
+    return next;
+  else
+    -- Create rotation job (daily at midnight UTC)
+    select cron.schedule(
+      'ash_rotation',
+      '0 0 * * *',
+      'select ash.rotate()'
+    ) into v_rotation_job;
+
+    update cron.job set nodename = '' where jobid = v_rotation_job;
+
+    job_type := 'rotation';
+    job_id := v_rotation_job;
+    status := 'created';
+    return next;
+  end if;
+
+  -- Update sample_interval in config
+  update ash.config set sample_interval = p_interval where singleton;
+
+  -- Warn about pg_cron run history overhead.
+  -- At 1s sampling, cron.job_run_details grows ~12 MiB/day unbounded.
+  -- pg_cron has no built-in purge — only cron.log_run = off (disables entirely).
+  begin
+    if current_setting('cron.log_run', true)::bool then
+      raise notice 'hint: pg_cron logs every sample to cron.job_run_details (~12 MiB/day).';
+      raise notice 'to disable: alter system set cron.log_run = off; select pg_reload_conf();';
+      raise notice 'or schedule periodic cleanup: delete from cron.job_run_details where end_time < now() - interval ''1 day'';';
+    end if;
+  exception when others then
+    null; -- GUC not available
+  end;
+
+  return;
+end;
+$$;
+
+-------------------------------------------------------------------------------
+-- Re-create status() with color and version metrics
+-------------------------------------------------------------------------------
+create or replace function ash.status()
+returns table (
+  metric text,
+  value text
+)
+language plpgsql
+stable
+as $$
+declare
+  v_config record;
+  v_last_sample_ts int4;
+  v_samples_current int;
+  v_samples_total int;
+  v_wait_events int;
+  v_query_ids int;
+begin
+  -- Get config
+  select * into v_config from ash.config where singleton;
+
+  -- Last sample timestamp
+  select max(sample_ts) into v_last_sample_ts from ash.sample;
+
+  -- Samples in current partition
+  select count(*) into v_samples_current
+  from ash.sample where slot = v_config.current_slot;
+
+  -- Total samples
+  select count(*) into v_samples_total from ash.sample;
+
+  -- Dictionary sizes
+  select count(*) into v_wait_events from ash.wait_event_map;
+  select count(*) into v_query_ids from ash.query_map_all;
+
+  metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
+  metric := 'color'; value := case when ash._color_on() then 'on' else 'off' end; return next;
+  metric := 'current_slot'; value := v_config.current_slot::text; return next;
+  metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
+  metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
+  metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
+  metric := 'installed_at'; value := v_config.installed_at::text; return next;
+  metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
+  metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
+
+  if v_last_sample_ts is not null then
+    metric := 'last_sample_ts'; value := (ash.epoch() + v_last_sample_ts * interval '1 second')::text; return next;
+    metric := 'time_since_last_sample'; value := (now() - (ash.epoch() + v_last_sample_ts * interval '1 second'))::text; return next;
+  else
+    metric := 'last_sample_ts'; value := 'no samples'; return next;
+  end if;
+
+  metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
+  metric := 'samples_total'; value := v_samples_total::text; return next;
+  metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
+  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
+  metric := 'query_map_count'; value := v_query_ids::text; return next;
+
+  -- pg_cron status if available
+  if ash._pg_cron_available() then
+    metric := 'pg_cron_available'; value := 'yes'; return next;
+    for metric, value in
+      select 'cron_job_' || jobname,
+         format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
+      from cron.job
+      where jobname in ('ash_sampler', 'ash_rotation')
+    loop
+      return next;
+    end loop;
+  else
+    metric := 'pg_cron_available'; value := 'no'; return next;
+  end if;
+
+  return;
+end;
+$$;
+
+-- Update version (must be last)
+update ash.config set version = '1.2' where singleton;
