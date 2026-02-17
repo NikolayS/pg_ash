@@ -3,6 +3,11 @@
 -- Fresh install: \i sql/ash-install.sql
 -- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql then \i sql/ash-1.1-to-1.2.sql
 -- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql
+--
+-- This file is wrapped in BEGIN/COMMIT for atomicity — a failed install
+-- leaves no partial schema behind.
+
+BEGIN;
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
 -- Drop ALL overloads of functions whose signatures changed across versions.
@@ -2706,3 +2711,5 @@ begin
   order by r.samples desc;
 end;
 $$;
+
+COMMIT;

@@ -3,6 +3,8 @@
 -- Changes: bar column on query_waits/waits_by_type, event_queries(),
 -- chart padding for psql alignment, version tracking.
 
+BEGIN;
+
 -- Add version column if missing
 do $$
 begin
@@ -1047,3 +1049,5 @@ begin
   order by r.samples desc;
 end;
 $$;
+
+COMMIT;

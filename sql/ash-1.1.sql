@@ -4,6 +4,8 @@
 -- Safe to run on top of 1.0 — all objects use IF NOT EXISTS / CREATE OR REPLACE.
 -- Upgrade: \i ash-1.1.sql
 
+BEGIN;
+
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
 -- Drop ALL overloads of functions whose signatures changed across versions.
 -- Using DO block because DROP FUNCTION requires exact arg types and we can't
@@ -2398,3 +2400,5 @@ begin
 end $$;
 
 update ash.config set version = '1.1' where singleton;
+
+COMMIT;
