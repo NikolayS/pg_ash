@@ -149,17 +149,18 @@ select * from ash.wait_timeline_at(
 Visualize wait event patterns over time — spot spikes, correlate with deployments, see what changed.
 
 ```sql
-select * from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
+select bucket_start, active, chart, detail
+from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
 ```
 
 ```
-      bucket_start       | active |                             detail                             |                           chart
--------------------------+--------+----------------------------------------------------------------+-----------------------------------------------------------
-                         |        |                                                                | █ Client:ClientRead  ▓ LWLock:WALWrite  ░ IdleTx  · Other
- 2026-02-16 08:37:30+00  |    2.0 | Other=2.0                                                      | ···········
- 2026-02-16 08:38:00+00  |    7.0 | Client:ClientRead=2.3 LWLock:WALWrite=0.8 IdleTx=0.4 Other=3.5 | █████████████▓▓▓▓▓░░····················
- 2026-02-16 08:38:30+00  |    6.6 | Client:ClientRead=4.0 LWLock:WALWrite=0.4 IdleTx=0.5 Other=1.7 | ███████████████████████▓▓░░░··········
- 2026-02-16 08:39:00+00  |    5.3 | Client:ClientRead=3.3 LWLock:WALWrite=0.3 IdleTx=0.7 Other=1.0 | ███████████████████▓▓░░░░······
+      bucket_start       | active |                           chart                           |                             detail
+-------------------------+--------+-----------------------------------------------------------+----------------------------------------------------------------
+                         |        | █ Client:ClientRead  ▓ LWLock:WALWrite  ░ IdleTx  · Other |
+ 2026-02-16 08:37:30+00  |    2.0 | ···········                                               | Other=2.0
+ 2026-02-16 08:38:00+00  |    7.0 | █████████████▓▓▓▓▓░░····················                  | Client:ClientRead=2.3 LWLock:WALWrite=0.8 IdleTx=0.4 Other=3.5
+ 2026-02-16 08:38:30+00  |    6.6 | ███████████████████████▓▓░░░··········                    | Client:ClientRead=4.0 LWLock:WALWrite=0.4 IdleTx=0.5 Other=1.7
+ 2026-02-16 08:39:00+00  |    5.3 | ███████████████████▓▓░░░░······                           | Client:ClientRead=3.3 LWLock:WALWrite=0.3 IdleTx=0.7 Other=1.0
 ```
 
 Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color.
