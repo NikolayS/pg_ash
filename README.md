@@ -553,7 +553,7 @@ pg_cron logs every job execution to `cron.job_run_details`. At 1-second sampling
 
 ```sql
 alter system set cron.log_run = off;
-select pg_reload_conf();
+-- requires Postgres restart (postmaster context)
 ```
 
 If you need run history for other pg_cron jobs (unfortunately, as of pg_cron 1.6, per-job logging configuration is not supported), schedule periodic cleanup instead:
