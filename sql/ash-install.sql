@@ -664,7 +664,7 @@ begin
   select extversion into v_cron_version
   from pg_extension where extname = 'pg_cron';
 
-  if string_to_array(v_cron_version, '.')::int[] < '{1,5}'::int[] then
+  if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
     job_type := 'error';
     job_id := null;
     status := format('pg_cron version %s too old, need >= 1.5', v_cron_version);
