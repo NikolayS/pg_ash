@@ -283,6 +283,58 @@ jobs:
           $$;
           EOF
 
+      - name: Test start with minute intervals (regression test for issue #2)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          DO $$
+          DECLARE
+            v_job_id bigint;
+            v_schedule text;
+          BEGIN
+            -- Stop any existing sampler first
+            PERFORM ash.stop();
+
+            -- Test 1: 1 minute interval (60 seconds) - should work, not error
+            SELECT job_id INTO v_job_id
+            FROM ash.start('1 minute')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '1 minute start should create sampler job';
+
+            -- Verify the schedule is correct
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '1 minutes', 'Schedule should be 1 minutes, got: ' || v_schedule;
+
+            PERFORM ash.stop();
+
+            -- Test 2: 5 minute interval (300 seconds)
+            SELECT job_id INTO v_job_id
+            FROM ash.start('5 minutes')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '5 minutes start should create sampler job';
+
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '5 minutes', 'Schedule should be 5 minutes, got: ' || v_schedule;
+
+            PERFORM ash.stop();
+
+            -- Test 3: 30 seconds (original behavior, should still work)
+            SELECT job_id INTO v_job_id
+            FROM ash.start('30 seconds')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '30 seconds start should create sampler job';
+
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '30 seconds', 'Schedule should be 30 seconds, got: ' || v_schedule;
+
+            PERFORM ash.stop();
+
+            RAISE NOTICE 'Minute interval tests PASSED (regression test for issue #2)';
+          END;
+          $$;
+          EOF
+
       - name: Seed test data
         env:
           PGPASSWORD: postgres

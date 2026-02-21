@@ -1217,16 +1217,24 @@ begin
   end if;
 
   -- Convert interval to pg_cron schedule format
-  -- pg_cron expects 'N seconds' (not interval text like '00:00:01')
+  -- pg_cron supports: 'N seconds' (1-59), 'N minutes' (1-59), 'N hours', or cron syntax
   v_seconds := extract(epoch from p_interval)::int;
-  if v_seconds < 1 or v_seconds > 59 then
+  if v_seconds < 1 then
     job_type := 'error';
     job_id := null;
-    status := format('interval must be 1-59 seconds, got %s', p_interval);
+    status := format('interval must be at least 1 second, got %s', p_interval);
     return next;
     return;
   end if;
-  v_schedule := v_seconds || ' seconds';
+  
+  -- Build pg_cron schedule based on interval magnitude
+  if v_seconds <= 59 then
+    v_schedule := v_seconds || ' seconds';
+  elsif v_seconds < 3600 then
+    v_schedule := (v_seconds / 60) || ' minutes';
+  else
+    v_schedule := (v_seconds / 3600) || ' hours';
+  end if;
 
   -- Check for existing sampler job (idempotent)
   select jobid into v_sampler_job
