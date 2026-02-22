@@ -352,7 +352,7 @@ jobs:
             WHERE job_type = 'sampler';
             ASSERT v_job_id IS NOT NULL, '60 minutes should work as 1 hour';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '0 */1 * * *', '60 minutes should be 0 */1 * * *, got: ' || v_schedule;
+            ASSERT v_schedule = '0 * * * *', '60 minutes should be 0 * * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
             -- Test 1+ hours range
