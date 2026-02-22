@@ -49,6 +49,22 @@ select ash.stop();
 select ash.uninstall('yes');
 ```
 
+### Sampling intervals
+
+`ash.start(interval)` accepts PostgreSQL interval values. The interval is converted to a pg_cron schedule:
+
+| Interval range | Example input | pg_cron schedule | Description |
+|----------------|---------------|------------------|-------------|
+| 1–59 seconds | `'1 second'` .. `'59 seconds'` | `N seconds` | Every N seconds (native pg_cron format) |
+| 1–59 minutes | `'1 minute'` .. `'59 minutes'` | `*/N * * * *` | Every N minutes via cron syntax |
+| 1+ hours | `'1 hour'` .. `'24 hours'` | `0 */N * * *` | Every N hours via cron syntax |
+
+**Notes:**
+- Sub-minute intervals must be exact seconds (e.g., `'30 seconds'`)
+- Minute and hour intervals must be exact (e.g., `'5 minutes'` works, `'90 seconds'` does not — use `'1 minute'` instead)
+- The default and recommended interval is `'1 second'` for high-resolution sampling
+- See `select * from ash.status()` for the current sampling interval
+
 ### Upgrade
 
 ```sql
