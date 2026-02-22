@@ -649,6 +649,7 @@ declare
   v_rotation_job bigint;
   v_cron_version text;
   v_seconds int;
+  v_hours int;
   v_schedule text;
 begin
   -- Check if pg_cron is available
@@ -697,15 +698,27 @@ begin
     end if;
     v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
   else
-    -- Convert to cron: every N hours
+    -- Convert to cron: every N hours (limit to 23 hours max for step syntax)
     if v_seconds % 3600 != 0 then
       job_type := 'error';
       job_id := null;
-      status := format('interval must be exact hours (3600s, 7200s, etc.), got %s', p_interval);
+      status := format('interval must be exact hours (3600s, 7200s, etc., up to 23h), got %s', p_interval);
       return next;
       return;
     end if;
-    v_schedule := '0 */' || (v_seconds / 3600) || ' * * *';
+    v_hours := v_seconds / 3600;
+    if v_hours > 23 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval exceeds maximum 23 hours (82800s), got %s = %s hours. Use days or shorter interval.', p_interval, v_hours);
+      return next;
+      return;
+    end if;
+    if v_hours = 1 then
+      v_schedule := '0 * * * *';  -- Every hour at minute 0
+    else
+      v_schedule := '0 */' || v_hours || ' * * *';  -- Every N hours at minute 0
+    end if;
   end if;
 
   -- Check for existing sampler job (idempotent)

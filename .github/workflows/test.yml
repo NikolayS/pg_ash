@@ -372,13 +372,24 @@ jobs:
             ASSERT v_schedule = '0 */2 * * *', '2 hours should be 0 */2 * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
+            -- Test 23 hours (maximum allowed)
             SELECT job_id INTO v_job_id
-            FROM ash.start('24 hours')
+            FROM ash.start('23 hours')
             WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '24 hours should work';
+            ASSERT v_job_id IS NOT NULL, '23 hours should work';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '0 */24 * * *', '24 hours should be 0 */24 * * *, got: ' || v_schedule;
+            ASSERT v_schedule = '0 */23 * * *', '23 hours should be 0 */23 * * *, got: ' || v_schedule;
             PERFORM ash.stop();
+
+            -- Test 24 hours should ERROR (exceeds 23h limit)
+            DECLARE
+              v_error_msg text;
+            BEGIN
+              SELECT status INTO v_error_msg
+              FROM ash.start('24 hours')
+              WHERE job_type = 'error';
+              ASSERT v_error_msg LIKE '%23 hours%', '24 hours should error with 23 hours limit, got: ' || v_error_msg;
+            END;
 
             -- Test error case: non-round interval
             DECLARE
