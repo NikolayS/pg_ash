@@ -283,7 +283,7 @@ jobs:
           $$;
           EOF
 
-      - name: Test minute intervals via cron syntax
+      - name: Test all interval formats (issue #2)
         env:
           PGPASSWORD: postgres
         run: |
@@ -295,40 +295,102 @@ jobs:
           BEGIN
             PERFORM ash.stop();
 
-            -- Test 1 minute interval (converted to cron: '* * * * *')
+            -- Test 1-59 seconds range
+            SELECT job_id INTO v_job_id
+            FROM ash.start('1 second')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '1 second should work';
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '1 seconds', '1 second should be 1 seconds, got: ' || v_schedule;
+            PERFORM ash.stop();
+
+            SELECT job_id INTO v_job_id
+            FROM ash.start('59 seconds')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '59 seconds should work';
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '59 seconds', '59 seconds should be 59 seconds, got: ' || v_schedule;
+            PERFORM ash.stop();
+
+            -- Test boundary: 60 seconds = 1 minute (cron format)
+            SELECT job_id INTO v_job_id
+            FROM ash.start('60 seconds')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '60 seconds should work as 1 minute';
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '*/1 * * * *', '60 seconds should be */1 * * * *, got: ' || v_schedule;
+            PERFORM ash.stop();
+
+            -- Test 1-59 minutes range
             SELECT job_id INTO v_job_id
             FROM ash.start('1 minute')
             WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '1 minute start should create sampler job';
-
+            ASSERT v_job_id IS NOT NULL, '1 minute should work';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/1 * * * *', 'Schedule should be */1 * * * *, got: ' || v_schedule;
-
+            ASSERT v_schedule = '*/1 * * * *', '1 minute should be */1 * * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
-            -- Test 5 minute interval (converted to cron: '*/5 * * * *')
             SELECT job_id INTO v_job_id
             FROM ash.start('5 minutes')
             WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '5 minutes start should create sampler job';
-
+            ASSERT v_job_id IS NOT NULL, '5 minutes should work';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/5 * * * *', 'Schedule should be */5 * * * *, got: ' || v_schedule;
-
+            ASSERT v_schedule = '*/5 * * * *', '5 minutes should be */5 * * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
-            -- Test 30 seconds (original format)
             SELECT job_id INTO v_job_id
-            FROM ash.start('30 seconds')
+            FROM ash.start('59 minutes')
             WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '30 seconds start should create sampler job';
-
+            ASSERT v_job_id IS NOT NULL, '59 minutes should work';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '30 seconds', 'Schedule should be 30 seconds, got: ' || v_schedule;
-
+            ASSERT v_schedule = '*/59 * * * *', '59 minutes should be */59 * * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
-            RAISE NOTICE 'Minute interval tests PASSED (issue #2)';
+            -- Test boundary: 60 minutes = 1 hour (cron format)
+            SELECT job_id INTO v_job_id
+            FROM ash.start('60 minutes')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '60 minutes should work as 1 hour';
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '0 */1 * * *', '60 minutes should be 0 */1 * * *, got: ' || v_schedule;
+            PERFORM ash.stop();
+
+            -- Test 1+ hours range
+            SELECT job_id INTO v_job_id
+            FROM ash.start('1 hour')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '1 hour should work';
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '0 */1 * * *', '1 hour should be 0 */1 * * *, got: ' || v_schedule;
+            PERFORM ash.stop();
+
+            SELECT job_id INTO v_job_id
+            FROM ash.start('2 hours')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '2 hours should work';
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '0 */2 * * *', '2 hours should be 0 */2 * * *, got: ' || v_schedule;
+            PERFORM ash.stop();
+
+            SELECT job_id INTO v_job_id
+            FROM ash.start('24 hours')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '24 hours should work';
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '0 */24 * * *', '24 hours should be 0 */24 * * *, got: ' || v_schedule;
+            PERFORM ash.stop();
+
+            -- Test error case: non-round interval
+            DECLARE
+              v_error_msg text;
+            BEGIN
+              SELECT status INTO v_error_msg
+              FROM ash.start('90 seconds')
+              WHERE job_type = 'error';
+              ASSERT v_error_msg LIKE '%exact minutes%', '90 seconds should error, got: ' || v_error_msg;
+            END;
+
+            RAISE NOTICE 'All interval format tests PASSED';
           END;
           $$;
           EOF
