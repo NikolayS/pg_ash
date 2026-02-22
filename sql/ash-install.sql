@@ -673,16 +673,40 @@ begin
   end if;
 
   -- Convert interval to pg_cron schedule format
-  -- pg_cron ONLY supports '[1-59] seconds' format for intervals
+  -- pg_cron supports: '[1-59] seconds' for sub-minute, or cron syntax for minute+
   v_seconds := extract(epoch from p_interval)::int;
-  if v_seconds < 1 or v_seconds > 59 then
+  if v_seconds < 1 then
     job_type := 'error';
     job_id := null;
-    status := format('interval must be 1-59 seconds (pg_cron limitation), got %s', p_interval);
+    status := format('interval must be at least 1 second, got %s', p_interval);
     return next;
     return;
   end if;
-  v_schedule := v_seconds || ' seconds';
+  
+  -- Build schedule: seconds format for <60s, cron format for 60s+
+  if v_seconds <= 59 then
+    v_schedule := v_seconds || ' seconds';
+  elsif v_seconds < 3600 then
+    -- Convert to cron: every N minutes
+    if v_seconds % 60 != 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact minutes (60s, 120s, etc.), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
+  else
+    -- Convert to cron: every N hours
+    if v_seconds % 3600 != 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact hours (3600s, 7200s, etc.), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_schedule := '0 */' || (v_seconds / 3600) || ' * * *';
+  end if;
 
   -- Check for existing sampler job (idempotent)
   select jobid into v_sampler_job

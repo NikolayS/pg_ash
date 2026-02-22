@@ -283,6 +283,56 @@ jobs:
           $$;
           EOF
 
+      - name: Test minute intervals via cron syntax
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          DO $$
+          DECLARE
+            v_job_id bigint;
+            v_schedule text;
+          BEGIN
+            PERFORM ash.stop();
+
+            -- Test 1 minute interval (converted to cron: '* * * * *')
+            SELECT job_id INTO v_job_id
+            FROM ash.start('1 minute')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '1 minute start should create sampler job';
+
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '* * * * *', 'Schedule should be * * * * *, got: ' || v_schedule;
+
+            PERFORM ash.stop();
+
+            -- Test 5 minute interval (converted to cron: '*/5 * * * *')
+            SELECT job_id INTO v_job_id
+            FROM ash.start('5 minutes')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '5 minutes start should create sampler job';
+
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '*/5 * * * *', 'Schedule should be */5 * * * *, got: ' || v_schedule;
+
+            PERFORM ash.stop();
+
+            -- Test 30 seconds (original format)
+            SELECT job_id INTO v_job_id
+            FROM ash.start('30 seconds')
+            WHERE job_type = 'sampler';
+            ASSERT v_job_id IS NOT NULL, '30 seconds start should create sampler job';
+
+            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
+            ASSERT v_schedule = '30 seconds', 'Schedule should be 30 seconds, got: ' || v_schedule;
+
+            PERFORM ash.stop();
+
+            RAISE NOTICE 'Minute interval tests PASSED (issue #2)';
+          END;
+          $$;
+          EOF
+
       - name: Seed test data
         env:
           PGPASSWORD: postgres
