@@ -338,6 +338,16 @@ jobs:
 
             PERFORM ash.stop();
 
+            -- Test 4: Non-round interval (90 seconds) should ERROR, not silently truncate
+            DECLARE
+              v_error_msg text;
+            BEGIN
+              SELECT status INTO v_error_msg
+              FROM ash.start('90 seconds')
+              WHERE job_type = 'error';
+              ASSERT v_error_msg LIKE '%exact minutes%', '90 seconds should error with "exact minutes" message, got: ' || v_error_msg;
+            END;
+
             RAISE NOTICE 'Minute interval tests PASSED (regression test for issue #2)';
           END;
           $$;

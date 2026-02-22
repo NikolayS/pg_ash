@@ -673,11 +673,28 @@ begin
   end if;
   
   -- Build pg_cron schedule based on interval magnitude
+  -- Only exact round intervals are supported (e.g., '1 minute' = 60s, not 90s)
   if v_seconds <= 59 then
     v_schedule := v_seconds || ' seconds';
   elsif v_seconds < 3600 then
+    -- Check for exact minute intervals
+    if v_seconds % 60 != 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact minutes (e.g., 60s, 120s), got %s = %s seconds', p_interval, v_seconds);
+      return next;
+      return;
+    end if;
     v_schedule := (v_seconds / 60) || ' minutes';
   else
+    -- Check for exact hour intervals
+    if v_seconds % 3600 != 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact hours (e.g., 3600s, 7200s), got %s = %s seconds', p_interval, v_seconds);
+      return next;
+      return;
+    end if;
     v_schedule := (v_seconds / 3600) || ' hours';
   end if;
 
