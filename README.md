@@ -57,11 +57,12 @@ select ash.uninstall('yes');
 |----------------|---------------|------------------|-------------|
 | 1–59 seconds | `'1 second'` .. `'59 seconds'` | `N seconds` | Every N seconds (native pg_cron format) |
 | 1–59 minutes | `'1 minute'` .. `'59 minutes'` | `*/N * * * *` | Every N minutes via cron syntax |
-| 1+ hours | `'1 hour'` .. `'24 hours'` | `0 */N * * *` | Every N hours via cron syntax |
+| 1–23 hours | `'1 hour'` .. `'23 hours'` | `0 */N * * *` (or `0 * * * *` for 1h) | Every N hours via cron syntax (max 23h) |
 
 **Notes:**
 - Sub-minute intervals must be exact seconds (e.g., `'30 seconds'`)
 - Minute and hour intervals must be exact (e.g., `'5 minutes'` works, `'90 seconds'` does not — use `'1 minute'` instead)
+- Hour intervals are limited to 23 hours maximum (cron syntax limitation). For daily sampling, use `'23 hours'` or consider a different approach
 - The default and recommended interval is `'1 second'` for high-resolution sampling
 - See `select * from ash.status()` for the current sampling interval
 
