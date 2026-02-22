@@ -1240,7 +1240,7 @@ begin
       return next;
       return;
     end if;
-    v_schedule := (v_seconds / 60) || ' minutes';
+    v_schedule := (v_seconds / 60) || ' minute';
   else
     -- Check for exact hour intervals
     if v_seconds % 3600 != 0 then
@@ -1250,7 +1250,7 @@ begin
       return next;
       return;
     end if;
-    v_schedule := (v_seconds / 3600) || ' hours';
+    v_schedule := (v_seconds / 3600) || ' hour';
   end if;
 
   -- Check for existing sampler job (idempotent)

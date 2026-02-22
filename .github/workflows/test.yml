@@ -304,7 +304,7 @@ jobs:
 
             -- Verify the schedule is correct
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '1 minutes', 'Schedule should be 1 minutes, got: ' || v_schedule;
+            ASSERT v_schedule = '1 minute', 'Schedule should be 1 minute, got: ' || v_schedule;
 
             PERFORM ash.stop();
 
@@ -315,7 +315,7 @@ jobs:
             ASSERT v_job_id IS NOT NULL, '5 minutes start should create sampler job';
 
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '5 minutes', 'Schedule should be 5 minutes, got: ' || v_schedule;
+            ASSERT v_schedule = '5 minute', 'Schedule should be 5 minute, got: ' || v_schedule;
 
             PERFORM ash.stop();
 
