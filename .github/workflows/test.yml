@@ -361,7 +361,7 @@ jobs:
             WHERE job_type = 'sampler';
             ASSERT v_job_id IS NOT NULL, '1 hour should work';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '0 */1 * * *', '1 hour should be 0 */1 * * *, got: ' || v_schedule;
+            ASSERT v_schedule = '0 * * * *', '1 hour should be 0 * * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
             SELECT job_id INTO v_job_id
