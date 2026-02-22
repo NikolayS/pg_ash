@@ -31,17 +31,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pg_cron
+      - name: Install pg_cron in container
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-${{ matrix.postgres }}-cron || echo "pg_cron package not available"
-
-      - name: Configure pg_cron in container
-        run: |
+          # Install pg_cron inside the PostgreSQL container (not on host)
           docker exec ${{ job.services.postgres.id }} bash -c "
-            if [ -f /usr/share/postgresql/${{ matrix.postgres }}/extension/pg_cron.control ]; then
-              echo \"shared_preload_libraries = 'pg_cron'\" >> /var/lib/postgresql/data/postgresql.conf
-              echo \"cron.database_name = 'postgres'\" >> /var/lib/postgresql/data/postgresql.conf
+            apt-get update && apt-get install -y postgresql-\${PG_MAJOR}-cron || true
+          " || echo "pg_cron install attempted"
+          # Configure pg_cron
+          docker exec ${{ job.services.postgres.id }} bash -c "
+            if [ -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control ]; then
+              echo 'shared_preload_libraries = pg_cron' >> /var/lib/postgresql/data/postgresql.conf
+              echo 'cron.database_name = postgres' >> /var/lib/postgresql/data/postgresql.conf
             fi
           " || true
           docker restart ${{ job.services.postgres.id }} || true
