@@ -318,7 +318,7 @@ jobs:
             WHERE job_type = 'sampler';
             ASSERT v_job_id IS NOT NULL, '60 seconds should work as 1 minute';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/1 * * * *', '60 seconds should be */1 * * * *, got: ' || v_schedule;
+            ASSERT v_schedule = '* * * * *', '60 seconds should be * * * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
             -- Test 1-59 minutes range
@@ -327,7 +327,7 @@ jobs:
             WHERE job_type = 'sampler';
             ASSERT v_job_id IS NOT NULL, '1 minute should work';
             SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/1 * * * *', '1 minute should be */1 * * * *, got: ' || v_schedule;
+            ASSERT v_schedule = '* * * * *', '1 minute should be * * * * *, got: ' || v_schedule;
             PERFORM ash.stop();
 
             SELECT job_id INTO v_job_id
