@@ -292,7 +292,15 @@ jobs:
           DECLARE
             v_job_id bigint;
             v_schedule text;
+            v_pg_cron_available boolean;
           BEGIN
+            -- Check if pg_cron is available (CI may not have it installed)
+            SELECT EXISTS(SELECT FROM pg_extension WHERE extname = 'pg_cron') INTO v_pg_cron_available;
+            IF NOT v_pg_cron_available THEN
+              RAISE NOTICE 'pg_cron not available - skipping minute interval tests';
+              RETURN;
+            END IF;
+
             -- Stop any existing sampler first
             PERFORM ash.stop();
 
