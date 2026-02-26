@@ -2620,11 +2620,29 @@ begin
     select from information_schema.columns
     where table_schema = 'ash' and table_name = 'config' and column_name = 'version'
   ) then
-    alter table ash.config add column version text not null default '1.2';
+    alter table ash.config add column version text not null default '1.3';
   end if;
 end $$;
 
-update ash.config set version = '1.2' where singleton;
+-- Migration: add debug_logging column (1.2 → 1.3); drop logging_level if present
+do $$
+begin
+  if not exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'debug_logging'
+  ) then
+    alter table ash.config add column debug_logging bool not null default false;
+  end if;
+
+  if exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'logging_level'
+  ) then
+    alter table ash.config drop column logging_level;
+  end if;
+end $$;
+
+update ash.config set version = '1.3' where singleton;
 
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
