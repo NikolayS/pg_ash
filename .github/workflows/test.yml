@@ -80,8 +80,8 @@ jobs:
             -- Config table initialized with version
             ASSERT (SELECT count(*) FROM ash.config) = 1,
               'config not initialized';
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should be 1.2 for fresh install';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 for fresh install';
 
             -- Core tables exist
             ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'wait_event_map'),
@@ -122,6 +122,12 @@ jobs:
               'decode_sample() missing';
             ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = '_wait_color' AND pronamespace = 'ash'::regnamespace),
               '_wait_color() missing';
+            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'debug_logging' AND pronamespace = 'ash'::regnamespace),
+              'debug_logging() missing';
+
+            -- debug_logging column exists and defaults to false
+            ASSERT (SELECT debug_logging FROM ash.config WHERE singleton) = false,
+              'debug_logging should default to false';
 
             RAISE NOTICE 'Schema and infrastructure tests PASSED';
           END;
@@ -1217,6 +1223,100 @@ jobs:
             FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
             ASSERT v_count >= 0, 'timeline_chart missing after re-apply';
             RAISE NOTICE 'Second re-apply PASSED';
+          END;
+          $$;
+
+          SELECT ash.uninstall('yes');
+          EOF
+
+      - name: Test debug_logging
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i sql/ash-install.sql
+
+          DO $$
+          DECLARE
+            v_result text;
+            v_enabled bool;
+          BEGIN
+            -- Default is off
+            ASSERT (SELECT debug_logging FROM ash.config WHERE singleton) = false,
+              'debug_logging should default to false';
+
+            -- Enable
+            v_result := ash.debug_logging(true);
+            ASSERT v_result LIKE 'debug_logging enabled%',
+              'enable should return confirmation message';
+            SELECT debug_logging INTO v_enabled FROM ash.config WHERE singleton;
+            ASSERT v_enabled = true,
+              'debug_logging should be true after enable';
+
+            -- take_sample runs without error when debug_logging is on
+            PERFORM ash.take_sample();
+
+            -- Disable
+            v_result := ash.debug_logging(false);
+            ASSERT v_result = 'debug_logging disabled',
+              'disable should return confirmation message';
+            SELECT debug_logging INTO v_enabled FROM ash.config WHERE singleton;
+            ASSERT v_enabled = false,
+              'debug_logging should be false after disable';
+
+            -- Show current state (no argument)
+            v_result := ash.debug_logging();
+            ASSERT v_result = 'debug_logging = false',
+              'show should return current state';
+
+            RAISE NOTICE 'debug_logging tests PASSED';
+          END;
+          $$;
+
+          SELECT ash.uninstall('yes');
+          EOF
+
+      - name: "Upgrade path: 1.2 → 1.3"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Install 1.2 baseline (using current install but force version back)
+          \i sql/ash-install.sql
+          UPDATE ash.config SET version = '1.2' WHERE singleton;
+          -- Simulate missing debug_logging column (pre-1.3 state)
+          ALTER TABLE ash.config DROP COLUMN IF EXISTS debug_logging;
+          ALTER TABLE ash.config ADD COLUMN logging_level text NOT NULL DEFAULT 'off';
+
+          -- Apply upgrade
+          \i sql/ash-1.2-to-1.3.sql
+
+          DO $$
+          BEGIN
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 after upgrade';
+            ASSERT EXISTS (
+              SELECT FROM information_schema.columns
+              WHERE table_schema = 'ash' AND table_name = 'config' AND column_name = 'debug_logging'
+            ), 'debug_logging column missing after upgrade';
+            ASSERT NOT EXISTS (
+              SELECT FROM information_schema.columns
+              WHERE table_schema = 'ash' AND table_name = 'config' AND column_name = 'logging_level'
+            ), 'logging_level column should be dropped after upgrade';
+            ASSERT (SELECT debug_logging FROM ash.config WHERE singleton) = false,
+              'debug_logging should default to false after upgrade';
+            RAISE NOTICE '1.2 -> 1.3 upgrade PASSED';
+          END;
+          $$;
+
+          -- Idempotent re-apply
+          \i sql/ash-1.2-to-1.3.sql
+
+          DO $$
+          BEGIN
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should still be 1.3 after re-apply';
+            RAISE NOTICE '1.2 -> 1.3 idempotent re-apply PASSED';
           END;
           $$;
 
