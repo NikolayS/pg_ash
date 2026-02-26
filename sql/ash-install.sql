@@ -1,5 +1,5 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.2 (latest)
+-- Version: 1.3 (latest)
 -- Fresh install: \i sql/ash-install.sql
 -- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql then \i sql/ash-1.1-to-1.2.sql
 -- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql
@@ -62,8 +62,11 @@ create table if not exists ash.config (
   sample_interval    interval not null default '1 second',
   rotation_period    interval not null default '1 day',
   include_bg_workers bool not null default false,
+  logging_level      text not null default 'off'
+                       check (logging_level in ('off', 'debug5', 'debug4', 'debug3', 'debug2', 'debug1',
+                                                'debug', 'info', 'notice', 'warning', 'log')),
   encoding_version   smallint not null default 1,
-  version            text not null default '1.2',
+  version            text not null default '1.3',
   rotated_at         timestamptz not null default clock_timestamp(),
   installed_at       timestamptz not null default clock_timestamp()
 );
@@ -260,6 +263,7 @@ as $$
 declare
   v_sample_ts int4;
   v_include_bg bool;
+  v_logging_level text;
   v_rec record;
   v_datid_rec record;
   v_data integer[];
@@ -275,7 +279,9 @@ begin
   v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
 
   -- Get config
-  select include_bg_workers into v_include_bg from ash.config where singleton;
+  select include_bg_workers, logging_level
+  into v_include_bg, v_logging_level
+  from ash.config where singleton;
   v_current_slot := ash.current_slot();
 
   -- =========================================================================
@@ -322,6 +328,67 @@ begin
       perform ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
     end if;
   end loop;
+
+  -- ---- Session logging: emit one message per sampled session at configured level ----
+  -- Enable with: select ash.logging_level('debug');
+  -- View in psql:  set client_min_messages = debug;
+  -- View in logs:  set log_min_messages = debug;  (superuser, no restart)
+  -- Each line: pid | state | wait_type | wait_event | backend_type | query_id
+  if v_logging_level <> 'off' then
+    for v_rec in
+      select
+        sa.pid,
+        sa.state,
+        coalesce(sa.wait_event_type,
+          case
+            when sa.state = 'active'                  then 'CPU*'
+            when sa.state like 'idle in transaction%'  then 'IdleTx'
+          end,
+          '(none)'
+        ) as wait_type,
+        coalesce(sa.wait_event,
+          case
+            when sa.state = 'active'                  then 'CPU*'
+            when sa.state like 'idle in transaction%'  then 'IdleTx'
+          end,
+          '(none)'
+        ) as wait_event,
+        sa.backend_type,
+        sa.query_id
+      from pg_stat_activity sa
+      where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+        and (sa.backend_type = 'client backend'
+          or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
+        and sa.pid <> pg_backend_pid()
+      order by sa.pid
+    loop
+      -- RAISE level must be a compile-time literal in PL/pgSQL.
+      -- Branch on level so callers can pick the verbosity they want.
+      case v_logging_level
+        when 'debug5', 'debug4', 'debug3', 'debug2', 'debug1', 'debug' then
+          raise debug 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
+        when 'info' then
+          raise info 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
+        when 'notice' then
+          raise notice 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
+        when 'warning' then
+          raise warning 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
+        when 'log' then
+          raise log 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
+        else null; -- 'off' already guarded above
+      end case;
+    end loop;
+  end if;
 
   -- ---- Read 2: Register query_ids into current slot's query_map ----
   -- Partitioned query_map: TRUNCATE resets on rotation, but between rotations
@@ -843,6 +910,59 @@ begin
 end;
 $$;
 
+-- Set or show the session logging level for take_sample().
+-- When not 'off', every sampled session emits a message at the chosen level:
+--   ash.take_sample: pid=NNN state=active wait_type=Client wait_event=ClientRead ...
+--
+-- Supported levels (matching Postgres): off, debug5, debug4, debug3, debug2,
+--   debug1, debug (alias for debug1), info, notice, warning, log
+--
+-- Usage:
+--   select ash.logging_level('debug');    -- enable at debug level
+--   select ash.logging_level('notice');   -- visible without changing log_min_messages
+--   select ash.logging_level('off');      -- disable
+--   select ash.logging_level();           -- show current level
+--
+-- To see debug output in psql:  set client_min_messages = debug;
+-- To see debug output in logs:  set log_min_messages = debug;  (superuser, no restart)
+-- notice/warning/log appear in logs by default without any GUC changes.
+create or replace function ash.logging_level(p_level text default null)
+returns text
+language plpgsql
+as $$
+declare
+  v_current text;
+  v_valid   text[] := array['off','debug5','debug4','debug3','debug2','debug1',
+                             'debug','info','notice','warning','log'];
+begin
+  select logging_level into v_current from ash.config where singleton;
+
+  if p_level is null then
+    return 'logging_level = ' || v_current;
+  end if;
+
+  if not (lower(p_level) = any(v_valid)) then
+    raise exception 'invalid logging level "%"; valid values: %', p_level, array_to_string(v_valid, ', ');
+  end if;
+
+  update ash.config set logging_level = lower(p_level) where singleton;
+
+  if lower(p_level) = 'off' then
+    return 'logging_level disabled';
+  end if;
+
+  return 'logging_level = ' || lower(p_level)
+    || case
+         when lower(p_level) in ('debug5','debug4','debug3','debug2','debug1','debug')
+           then e'\nhint: to see output in psql: set client_min_messages = debug;'
+             || e'\nhint: to see output in logs: set log_min_messages = debug;'
+         when lower(p_level) = 'info'
+           then e'\nhint: to see output in psql: set client_min_messages = info;'
+         else ''
+       end;
+end;
+$$;
+
 -- Uninstall: stop jobs and drop schema
 create or replace function ash.uninstall(p_confirm text default null)
 returns text
@@ -930,6 +1050,7 @@ begin
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
+  metric := 'logging_level'; value := v_config.logging_level; return next;
   metric := 'installed_at'; value := v_config.installed_at::text; return next;
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
@@ -2926,10 +3047,12 @@ begin
   execute format('revoke all on function ash.uninstall(text) from public');
   execute format('revoke all on function ash.rotate() from public');
   execute format('revoke all on function ash.take_sample() from public');
+  execute format('revoke all on function ash.logging_level(text) from public');
 
   execute format('grant execute on function ash.start(interval) to %I', v_owner);
   execute format('grant execute on function ash.stop() to %I', v_owner);
   execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
+  execute format('grant execute on function ash.logging_level(text) to %I', v_owner);
 end $$;
