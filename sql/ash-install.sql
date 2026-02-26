@@ -303,9 +303,9 @@ begin
   -- The asterisk signals this ambiguity. See https://gaps.wait.events
   --
   -- Session logging (when v_logging_level <> 'off'):
-  --   Enable with: select ash.logging_level('debug');
-  --   View in psql:  set client_min_messages = debug;
-  --   View in logs:  set log_min_messages = debug;  (superuser, no restart)
+  --   Enable with: select ash.logging_level('warning');  -- recommended default
+  --   View in psql:  set client_min_messages = debug;  (for debug level only)
+  --   View in logs:  set log_min_messages = debug;  (for debug level only, superuser, no restart)
   --   Each line: pid | state | wait_type | wait_event | backend_type | query_id
   --
   -- Both tasks share one pg_stat_activity scan. Wait event registration skips
@@ -903,14 +903,14 @@ $$;
 --   debug1, debug (alias for debug1), info, notice, warning, log
 --
 -- Usage:
---   select ash.logging_level('debug');    -- enable at debug level
---   select ash.logging_level('notice');   -- visible without changing log_min_messages
+--   select ash.logging_level('warning');  -- recommended: visible by default, low footprint
+--   select ash.logging_level('debug');    -- verbose: requires set client_min_messages = debug;
 --   select ash.logging_level('off');      -- disable
 --   select ash.logging_level();           -- show current level
 --
 -- To see debug output in psql:  set client_min_messages = debug;
 -- To see debug output in logs:  set log_min_messages = debug;  (superuser, no restart)
--- notice/warning/log appear in logs by default without any GUC changes.
+-- warning/log appear in server logs by default without any GUC changes.
 create or replace function ash.logging_level(p_level text default null)
 returns text
 language plpgsql
