@@ -1344,6 +1344,9 @@ jobs:
                  tc.constraint_type
             FROM information_schema.table_constraints tc
            WHERE tc.table_schema = 'ash'
+             -- exclude auto-generated NOT NULL constraints: their names embed OIDs
+             -- and differ between fresh install and upgrade path (different table OIDs)
+             AND tc.constraint_name !~ '^[0-9]+_[0-9]+_[0-9]+_not_null$'
           UNION ALL
           SELECT 'function',
                  p.proname,
@@ -1377,6 +1380,9 @@ jobs:
                  tc.constraint_type
             FROM information_schema.table_constraints tc
            WHERE tc.table_schema = 'ash'
+             -- exclude auto-generated NOT NULL constraints: their names embed OIDs
+             -- and differ between fresh install and upgrade path (different table OIDs)
+             AND tc.constraint_name !~ '^[0-9]+_[0-9]+_[0-9]+_not_null$'
           UNION ALL
           SELECT 'function',
                  p.proname,
