@@ -1,19 +1,24 @@
 -- pg_ash: upgrade from 1.2 to 1.3
 -- Safe to re-run (idempotent).
--- Changes: ash.logging_level() — configurable session logging in take_sample().
+-- Changes: ash.debug_logging() — binary flag, RAISE LOG only, never to client.
 
--- Add logging_level column to config if missing
+-- Add debug_logging column to config if missing
 do $$
 begin
   if not exists (
     select from information_schema.columns
-    where table_schema = 'ash' and table_name = 'config' and column_name = 'logging_level'
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'debug_logging'
   ) then
     alter table ash.config
-      add column logging_level text not null default 'off'
-        constraint config_logging_level_check
-          check (logging_level in ('off', 'debug5', 'debug4', 'debug3', 'debug2', 'debug1',
-                                   'debug', 'info', 'notice', 'warning', 'log'));
+      add column debug_logging bool not null default false;
+  end if;
+
+  -- Drop old logging_level column if it exists (renamed in 1.3)
+  if exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'logging_level'
+  ) then
+    alter table ash.config drop column logging_level;
   end if;
 end $$;
 

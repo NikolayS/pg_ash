@@ -62,9 +62,7 @@ create table if not exists ash.config (
   sample_interval    interval not null default '1 second',
   rotation_period    interval not null default '1 day',
   include_bg_workers bool not null default false,
-  logging_level      text not null default 'off'
-                       check (logging_level in ('off', 'debug5', 'debug4', 'debug3', 'debug2', 'debug1',
-                                                'debug', 'info', 'notice', 'warning', 'log')),
+  debug_logging      bool not null default false,
   encoding_version   smallint not null default 1,
   version            text not null default '1.3',
   rotated_at         timestamptz not null default clock_timestamp(),
@@ -263,7 +261,7 @@ as $$
 declare
   v_sample_ts int4;
   v_include_bg bool;
-  v_logging_level text;
+  v_debug_logging bool;
   v_rec record;
   v_datid_rec record;
   v_data integer[];
@@ -280,8 +278,8 @@ begin
   v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
 
   -- Get config
-  select include_bg_workers, logging_level
-  into v_include_bg, v_logging_level
+  select include_bg_workers, debug_logging
+  into v_include_bg, v_debug_logging
   from ash.config where singleton;
   v_current_slot := ash.current_slot();
 
@@ -302,11 +300,11 @@ begin
   -- either genuine CPU work or an uninstrumented code path in Postgres.
   -- The asterisk signals this ambiguity. See https://gaps.wait.events
   --
-  -- Session logging (when v_logging_level <> 'off'):
-  --   Enable with: select ash.logging_level('warning');  -- recommended default
-  --   View in psql:  set client_min_messages = debug;  (for debug level only)
-  --   View in logs:  set log_min_messages = debug;  (for debug level only, superuser, no restart)
-  --   Each line: pid | state | wait_type | wait_event | backend_type | query_id
+  -- Debug logging (when v_debug_logging = true):
+  --   Uses RAISE LOG — goes to server log only, never to the client.
+  --   Independent of log_min_messages and client_min_messages.
+  --   Enable:  select ash.debug_logging(true);
+  --   Disable: select ash.debug_logging(false);
   --
   -- Both tasks share one pg_stat_activity scan. Wait event registration skips
   -- duplicates via a seen-set (text[] + ANY check) to avoid repeated lookups.
@@ -346,32 +344,12 @@ begin
       end if;
     end if;
 
-    -- Session logging: emit using data already in v_rec — no extra query.
-    -- RAISE level must be a compile-time literal in PL/pgSQL.
-    if v_logging_level <> 'off' then
-      case v_logging_level
-        when 'debug5', 'debug4', 'debug3', 'debug2', 'debug1', 'debug' then
-          raise debug 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
-            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
-            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
-        when 'info' then
-          raise info 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
-            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
-            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
-        when 'notice' then
-          raise notice 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
-            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
-            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
-        when 'warning' then
-          raise warning 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
-            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
-            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
-        when 'log' then
-          raise log 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
-            v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
-            v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
-        else null; -- 'off' already guarded above
-      end case;
+    -- Debug logging: RAISE LOG goes to server log only, never to the client.
+    -- Independent of log_min_messages and client_min_messages.
+    if v_debug_logging then
+      raise log 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+        v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+        v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
     end if;
   end loop;
 
@@ -895,56 +873,36 @@ begin
 end;
 $$;
 
--- Set or show the session logging level for take_sample().
--- When not 'off', every sampled session emits a message at the chosen level:
+-- Enable or disable debug logging in take_sample().
+-- When enabled, every sampled session emits a RAISE LOG message:
 --   ash.take_sample: pid=NNN state=active wait_type=Client wait_event=ClientRead ...
 --
--- Supported levels (matching Postgres): off, debug5, debug4, debug3, debug2,
---   debug1, debug (alias for debug1), info, notice, warning, log
+-- RAISE LOG goes to the server log only — never to the client.
+-- It is independent of log_min_messages and client_min_messages.
 --
 -- Usage:
---   select ash.logging_level('warning');  -- recommended: visible by default, low footprint
---   select ash.logging_level('debug');    -- verbose: requires set client_min_messages = debug;
---   select ash.logging_level('off');      -- disable
---   select ash.logging_level();           -- show current level
---
--- To see debug output in psql:  set client_min_messages = debug;
--- To see debug output in logs:  set log_min_messages = debug;  (superuser, no restart)
--- warning/log appear in server logs by default without any GUC changes.
-create or replace function ash.logging_level(p_level text default null)
+--   select ash.debug_logging(true);   -- enable
+--   select ash.debug_logging(false);  -- disable
+--   select ash.debug_logging();       -- show current state
+create or replace function ash.debug_logging(p_enabled bool default null)
 returns text
 language plpgsql
 as $$
 declare
-  v_current text;
-  v_valid   text[] := array['off','debug5','debug4','debug3','debug2','debug1',
-                             'debug','info','notice','warning','log'];
+  v_current bool;
 begin
-  select logging_level into v_current from ash.config where singleton;
+  select debug_logging into v_current from ash.config where singleton;
 
-  if p_level is null then
-    return 'logging_level = ' || v_current;
+  if p_enabled is null then
+    return 'debug_logging = ' || v_current::text;
   end if;
 
-  if not (lower(p_level) = any(v_valid)) then
-    raise exception 'invalid logging level "%"; valid values: %', p_level, array_to_string(v_valid, ', ');
-  end if;
+  update ash.config set debug_logging = p_enabled where singleton;
 
-  update ash.config set logging_level = lower(p_level) where singleton;
-
-  if lower(p_level) = 'off' then
-    return 'logging_level disabled';
-  end if;
-
-  return 'logging_level = ' || lower(p_level)
-    || case
-         when lower(p_level) in ('debug5','debug4','debug3','debug2','debug1','debug')
-           then e'\nhint: to see output in psql: set client_min_messages = debug;'
-             || e'\nhint: to see output in logs: set log_min_messages = debug;'
-         when lower(p_level) = 'info'
-           then e'\nhint: to see output in psql: set client_min_messages = info;'
-         else ''
-       end;
+  return case p_enabled
+    when true  then 'debug_logging enabled — RAISE LOG output goes to server log only'
+    when false then 'debug_logging disabled'
+  end;
 end;
 $$;
 
@@ -1035,7 +993,7 @@ begin
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
-  metric := 'logging_level'; value := v_config.logging_level; return next;
+  metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
   metric := 'installed_at'; value := v_config.installed_at::text; return next;
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
@@ -3032,12 +2990,12 @@ begin
   execute format('revoke all on function ash.uninstall(text) from public');
   execute format('revoke all on function ash.rotate() from public');
   execute format('revoke all on function ash.take_sample() from public');
-  execute format('revoke all on function ash.logging_level(text) from public');
+  execute format('revoke all on function ash.debug_logging(bool) from public');
 
   execute format('grant execute on function ash.start(interval) to %I', v_owner);
   execute format('grant execute on function ash.stop() to %I', v_owner);
   execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
-  execute format('grant execute on function ash.logging_level(text) to %I', v_owner);
+  execute format('grant execute on function ash.debug_logging(bool) to %I', v_owner);
 end $$;
