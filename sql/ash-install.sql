@@ -271,6 +271,7 @@ declare
   v_current_wait_id smallint;
   v_current_slot smallint;
   v_rows_inserted int := 0;
+  v_seen_waits text[] := '{}';
   v_state text;
   v_type text;
   v_event text;
@@ -296,74 +297,58 @@ begin
   -- No temp tables — avoids pg_class/pg_attribute catalog churn on every tick.
   -- =========================================================================
 
-  -- ---- Read 1: Register new wait events and query_ids ----
+  -- ---- Read 1: Register new wait events; optionally log each sampled session ----
   -- CPU* means the backend is active with no wait event reported. This is
   -- either genuine CPU work or an uninstrumented code path in Postgres.
   -- The asterisk signals this ambiguity. See https://gaps.wait.events
+  --
+  -- Session logging (when v_logging_level <> 'off'):
+  --   Enable with: select ash.logging_level('debug');
+  --   View in psql:  set client_min_messages = debug;
+  --   View in logs:  set log_min_messages = debug;  (superuser, no restart)
+  --   Each line: pid | state | wait_type | wait_event | backend_type | query_id
+  --
+  -- Both tasks share one pg_stat_activity scan. Wait event registration skips
+  -- duplicates via a seen-set (text[] + ANY check) to avoid repeated lookups.
   for v_rec in
-    select distinct
+    select
+      sa.pid,
       sa.state,
       coalesce(sa.wait_event_type,
         case
-          when sa.state = 'active' then 'CPU*'
-          when sa.state like 'idle in transaction%' then 'IdleTx'
+          when sa.state = 'active'                  then 'CPU*'
+          when sa.state like 'idle in transaction%'  then 'IdleTx'
         end
       ) as wait_type,
       coalesce(sa.wait_event,
         case
-          when sa.state = 'active' then 'CPU*'
-          when sa.state like 'idle in transaction%' then 'IdleTx'
+          when sa.state = 'active'                  then 'CPU*'
+          when sa.state like 'idle in transaction%'  then 'IdleTx'
         end
-      ) as wait_event
+      ) as wait_event,
+      sa.backend_type,
+      sa.query_id
     from pg_stat_activity sa
     where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
       and (sa.backend_type = 'client backend'
        or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
       and sa.pid <> pg_backend_pid()
+    order by sa.pid
   loop
-    if not exists (
-      select from ash.wait_event_map
-      where state = v_rec.state and type = v_rec.wait_type and event = v_rec.wait_event
-    ) then
-      perform ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
+    -- Register wait event if not yet seen this tick (dedup in memory, not per row lookup).
+    if not (v_rec.state || '|' || v_rec.wait_type || '|' || v_rec.wait_event = any(v_seen_waits)) then
+      v_seen_waits := v_seen_waits || (v_rec.state || '|' || v_rec.wait_type || '|' || v_rec.wait_event);
+      if not exists (
+        select from ash.wait_event_map
+        where state = v_rec.state and type = v_rec.wait_type and event = v_rec.wait_event
+      ) then
+        perform ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
+      end if;
     end if;
-  end loop;
 
-  -- ---- Session logging: emit one message per sampled session at configured level ----
-  -- Enable with: select ash.logging_level('debug');
-  -- View in psql:  set client_min_messages = debug;
-  -- View in logs:  set log_min_messages = debug;  (superuser, no restart)
-  -- Each line: pid | state | wait_type | wait_event | backend_type | query_id
-  if v_logging_level <> 'off' then
-    for v_rec in
-      select
-        sa.pid,
-        sa.state,
-        coalesce(sa.wait_event_type,
-          case
-            when sa.state = 'active'                  then 'CPU*'
-            when sa.state like 'idle in transaction%'  then 'IdleTx'
-          end,
-          '(none)'
-        ) as wait_type,
-        coalesce(sa.wait_event,
-          case
-            when sa.state = 'active'                  then 'CPU*'
-            when sa.state like 'idle in transaction%'  then 'IdleTx'
-          end,
-          '(none)'
-        ) as wait_event,
-        sa.backend_type,
-        sa.query_id
-      from pg_stat_activity sa
-      where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
-        and (sa.backend_type = 'client backend'
-          or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-        and sa.pid <> pg_backend_pid()
-      order by sa.pid
-    loop
-      -- RAISE level must be a compile-time literal in PL/pgSQL.
-      -- Branch on level so callers can pick the verbosity they want.
+    -- Session logging: emit using data already in v_rec — no extra query.
+    -- RAISE level must be a compile-time literal in PL/pgSQL.
+    if v_logging_level <> 'off' then
       case v_logging_level
         when 'debug5', 'debug4', 'debug3', 'debug2', 'debug1', 'debug' then
           raise debug 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
@@ -387,8 +372,8 @@ begin
             v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
         else null; -- 'off' already guarded above
       end case;
-    end loop;
-  end if;
+    end if;
+  end loop;
 
   -- ---- Read 2: Register query_ids into current slot's query_map ----
   -- Partitioned query_map: TRUNCATE resets on rotation, but between rotations
