@@ -270,9 +270,6 @@ declare
   v_current_slot smallint;
   v_rows_inserted int := 0;
   v_seen_waits text[] := '{}';
-  v_state text;
-  v_type text;
-  v_event text;
 begin
   -- Get sample timestamp (seconds since epoch, from now())
   v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
@@ -331,7 +328,6 @@ begin
       and (sa.backend_type = 'client backend'
        or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
       and sa.pid <> pg_backend_pid()
-    order by sa.pid
   loop
     -- Register wait event if not yet seen this tick (dedup in memory, not per row lookup).
     if not (v_rec.state || '|' || v_rec.wait_type || '|' || v_rec.wait_event = any(v_seen_waits)) then
