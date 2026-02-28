@@ -80,8 +80,8 @@ jobs:
             -- Config table initialized with version
             ASSERT (SELECT count(*) FROM ash.config) = 1,
               'config not initialized';
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should be 1.2 for fresh install';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 for fresh install';
 
             -- Core tables exist
             ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'wait_event_map'),
@@ -122,6 +122,12 @@ jobs:
               'decode_sample() missing';
             ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = '_wait_color' AND pronamespace = 'ash'::regnamespace),
               '_wait_color() missing';
+            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'debug_logging' AND pronamespace = 'ash'::regnamespace),
+              'debug_logging() missing';
+
+            -- debug_logging column exists and defaults to false
+            ASSERT (SELECT debug_logging FROM ash.config WHERE singleton) = false,
+              'debug_logging should default to false';
 
             RAISE NOTICE 'Schema and infrastructure tests PASSED';
           END;
@@ -1217,6 +1223,214 @@ jobs:
             FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
             ASSERT v_count >= 0, 'timeline_chart missing after re-apply';
             RAISE NOTICE 'Second re-apply PASSED';
+          END;
+          $$;
+
+          SELECT ash.uninstall('yes');
+          EOF
+
+      - name: Test debug_logging
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i sql/ash-install.sql
+
+          DO $$
+          DECLARE
+            v_result text;
+            v_enabled bool;
+          BEGIN
+            -- Default is off
+            ASSERT (SELECT debug_logging FROM ash.config WHERE singleton) = false,
+              'debug_logging should default to false';
+
+            -- Enable
+            v_result := ash.debug_logging(true);
+            ASSERT v_result LIKE 'debug_logging enabled%',
+              'enable should return confirmation message';
+            SELECT debug_logging INTO v_enabled FROM ash.config WHERE singleton;
+            ASSERT v_enabled = true,
+              'debug_logging should be true after enable';
+
+            -- take_sample runs without error when debug_logging is on
+            PERFORM ash.take_sample();
+
+            -- Disable
+            v_result := ash.debug_logging(false);
+            ASSERT v_result = 'debug_logging disabled',
+              'disable should return confirmation message';
+            SELECT debug_logging INTO v_enabled FROM ash.config WHERE singleton;
+            ASSERT v_enabled = false,
+              'debug_logging should be false after disable';
+
+            -- Show current state (no argument)
+            v_result := ash.debug_logging();
+            ASSERT v_result = 'debug_logging = false',
+              'show should return current state';
+
+            RAISE NOTICE 'debug_logging tests PASSED';
+          END;
+          $$;
+
+          SELECT ash.uninstall('yes');
+          EOF
+
+      - name: "Upgrade path: 1.2 → 1.3"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Install 1.2 baseline (using current install but force version back)
+          \i sql/ash-install.sql
+          UPDATE ash.config SET version = '1.2' WHERE singleton;
+          -- Simulate missing debug_logging column (pre-1.3 state)
+          ALTER TABLE ash.config DROP COLUMN IF EXISTS debug_logging;
+          ALTER TABLE ash.config ADD COLUMN logging_level text NOT NULL DEFAULT 'off';
+
+          -- Apply upgrade
+          \i sql/ash-1.2-to-1.3.sql
+
+          DO $$
+          BEGIN
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 after upgrade';
+            ASSERT EXISTS (
+              SELECT FROM information_schema.columns
+              WHERE table_schema = 'ash' AND table_name = 'config' AND column_name = 'debug_logging'
+            ), 'debug_logging column missing after upgrade';
+            ASSERT NOT EXISTS (
+              SELECT FROM information_schema.columns
+              WHERE table_schema = 'ash' AND table_name = 'config' AND column_name = 'logging_level'
+            ), 'logging_level column should be dropped after upgrade';
+            ASSERT (SELECT debug_logging FROM ash.config WHERE singleton) = false,
+              'debug_logging should default to false after upgrade';
+            RAISE NOTICE '1.2 -> 1.3 upgrade PASSED';
+          END;
+          $$;
+
+          -- Idempotent re-apply
+          \i sql/ash-1.2-to-1.3.sql
+
+          DO $$
+          BEGIN
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should still be 1.3 after re-apply';
+            RAISE NOTICE '1.2 -> 1.3 idempotent re-apply PASSED';
+          END;
+          $$;
+
+          SELECT ash.uninstall('yes');
+          EOF
+
+      - name: "Schema parity: fresh install vs upgrade path must be identical"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+
+          -- ---- Path A: fresh install of 1.3 ----
+          \i sql/ash-install.sql
+
+          CREATE TEMP TABLE schema_a AS
+          SELECT 'column' AS kind,
+                 table_name || '.' || column_name AS object,
+                 data_type || coalesce(' default ' || column_default, '') || ' nullable=' || is_nullable AS detail
+            FROM information_schema.columns
+           WHERE table_schema = 'ash'
+          UNION ALL
+          SELECT 'constraint',
+                 tc.table_name || '.' || tc.constraint_name,
+                 tc.constraint_type
+            FROM information_schema.table_constraints tc
+           WHERE tc.table_schema = 'ash'
+             -- exclude auto-generated NOT NULL constraints: their names embed OIDs
+             -- and differ between fresh install and upgrade path (different table OIDs)
+             AND tc.constraint_name !~ '^[0-9]+_[0-9]+_[0-9]+_not_null$'
+          UNION ALL
+          SELECT 'function',
+                 p.proname,
+                 pg_get_function_identity_arguments(p.oid)
+            FROM pg_proc p
+           WHERE p.pronamespace = 'ash'::regnamespace
+          ORDER BY 1, 2, 3;
+
+          SELECT ash.uninstall('yes');
+
+          -- ---- Path B: install 1.2 baseline, then migrate to 1.3 ----
+          \i sql/ash-install.sql
+          -- Simulate 1.2 state: force version back, swap column
+          UPDATE ash.config SET version = '1.2' WHERE singleton;
+          ALTER TABLE ash.config DROP COLUMN IF EXISTS debug_logging;
+          ALTER TABLE ash.config ADD COLUMN logging_level text NOT NULL DEFAULT 'off';
+          -- Replace take_sample and debug_logging function with 1.2 stubs
+          -- (not needed — upgrade script only touches the schema; functions are
+          --  re-applied by ash-install.sql which is what a real upgrade does)
+          \i sql/ash-1.2-to-1.3.sql
+
+          CREATE TEMP TABLE schema_b AS
+          SELECT 'column' AS kind,
+                 table_name || '.' || column_name AS object,
+                 data_type || coalesce(' default ' || column_default, '') || ' nullable=' || is_nullable AS detail
+            FROM information_schema.columns
+           WHERE table_schema = 'ash'
+          UNION ALL
+          SELECT 'constraint',
+                 tc.table_name || '.' || tc.constraint_name,
+                 tc.constraint_type
+            FROM information_schema.table_constraints tc
+           WHERE tc.table_schema = 'ash'
+             -- exclude auto-generated NOT NULL constraints: their names embed OIDs
+             -- and differ between fresh install and upgrade path (different table OIDs)
+             AND tc.constraint_name !~ '^[0-9]+_[0-9]+_[0-9]+_not_null$'
+          UNION ALL
+          SELECT 'function',
+                 p.proname,
+                 pg_get_function_identity_arguments(p.oid)
+            FROM pg_proc p
+           WHERE p.pronamespace = 'ash'::regnamespace
+          ORDER BY 1, 2, 3;
+
+          -- ---- Diff: any row in A not in B or vice versa fails the test ----
+          DO $$
+          DECLARE
+            v_only_in_a int;
+            v_only_in_b int;
+            v_row record;
+          BEGIN
+            SELECT count(*) INTO v_only_in_a
+              FROM schema_a a
+             WHERE NOT EXISTS (SELECT FROM schema_b b WHERE b.kind = a.kind AND b.object = a.object AND b.detail = a.detail);
+
+            SELECT count(*) INTO v_only_in_b
+              FROM schema_b b
+             WHERE NOT EXISTS (SELECT FROM schema_a a WHERE a.kind = b.kind AND a.object = b.object AND a.detail = b.detail);
+
+            IF v_only_in_a > 0 OR v_only_in_b > 0 THEN
+              RAISE NOTICE 'rows only in fresh install (A):';
+              FOR v_row IN
+                SELECT * FROM schema_a a
+                 WHERE NOT EXISTS (SELECT FROM schema_b b WHERE b.kind = a.kind AND b.object = a.object AND b.detail = a.detail)
+                 ORDER BY 1, 2
+              LOOP
+                RAISE NOTICE '  A only: % | % | %', v_row.kind, v_row.object, v_row.detail;
+              END LOOP;
+
+              RAISE NOTICE 'rows only in upgrade path (B):';
+              FOR v_row IN
+                SELECT * FROM schema_b b
+                 WHERE NOT EXISTS (SELECT FROM schema_a a WHERE a.kind = b.kind AND a.object = b.object AND a.detail = b.detail)
+                 ORDER BY 1, 2
+              LOOP
+                RAISE NOTICE '  B only: % | % | %', v_row.kind, v_row.object, v_row.detail;
+              END LOOP;
+
+              ASSERT false,
+                format('schema mismatch: %s row(s) only in fresh install, %s row(s) only in upgrade path',
+                       v_only_in_a, v_only_in_b);
+            END IF;
+
+            RAISE NOTICE 'Schema parity PASSED: fresh install and upgrade path are identical';
           END;
           $$;
 

@@ -1,5 +1,5 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.2 (latest)
+-- Version: 1.3 (latest)
 -- Fresh install: \i sql/ash-install.sql
 -- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql then \i sql/ash-1.1-to-1.2.sql
 -- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql
@@ -62,8 +62,9 @@ create table if not exists ash.config (
   sample_interval    interval not null default '1 second',
   rotation_period    interval not null default '1 day',
   include_bg_workers bool not null default false,
+  debug_logging      bool not null default false,
   encoding_version   smallint not null default 1,
-  version            text not null default '1.2',
+  version            text not null default '1.3',
   rotated_at         timestamptz not null default clock_timestamp(),
   installed_at       timestamptz not null default clock_timestamp()
 );
@@ -260,6 +261,7 @@ as $$
 declare
   v_sample_ts int4;
   v_include_bg bool;
+  v_debug_logging bool;
   v_rec record;
   v_datid_rec record;
   v_data integer[];
@@ -267,15 +269,15 @@ declare
   v_current_wait_id smallint;
   v_current_slot smallint;
   v_rows_inserted int := 0;
-  v_state text;
-  v_type text;
-  v_event text;
+  v_seen_waits text[] := '{}';
 begin
   -- Get sample timestamp (seconds since epoch, from now())
   v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
 
   -- Get config
-  select include_bg_workers into v_include_bg from ash.config where singleton;
+  select include_bg_workers, debug_logging
+  into v_include_bg, v_debug_logging
+  from ash.config where singleton;
   v_current_slot := ash.current_slot();
 
   -- =========================================================================
@@ -290,36 +292,60 @@ begin
   -- No temp tables — avoids pg_class/pg_attribute catalog churn on every tick.
   -- =========================================================================
 
-  -- ---- Read 1: Register new wait events and query_ids ----
+  -- ---- Read 1: Register new wait events; optionally log each sampled session ----
   -- CPU* means the backend is active with no wait event reported. This is
   -- either genuine CPU work or an uninstrumented code path in Postgres.
   -- The asterisk signals this ambiguity. See https://gaps.wait.events
+  --
+  -- Debug logging (when v_debug_logging = true):
+  --   Uses RAISE LOG — goes to server log only, never to the client.
+  --   Independent of log_min_messages and client_min_messages.
+  --   Enable:  select ash.debug_logging(true);
+  --   Disable: select ash.debug_logging(false);
+  --
+  -- Both tasks share one pg_stat_activity scan. Wait event registration skips
+  -- duplicates via a seen-set (text[] + ANY check) to avoid repeated lookups.
   for v_rec in
-    select distinct
+    select
+      sa.pid,
       sa.state,
       coalesce(sa.wait_event_type,
         case
-          when sa.state = 'active' then 'CPU*'
-          when sa.state like 'idle in transaction%' then 'IdleTx'
+          when sa.state = 'active'                  then 'CPU*'
+          when sa.state like 'idle in transaction%'  then 'IdleTx'
         end
       ) as wait_type,
       coalesce(sa.wait_event,
         case
-          when sa.state = 'active' then 'CPU*'
-          when sa.state like 'idle in transaction%' then 'IdleTx'
+          when sa.state = 'active'                  then 'CPU*'
+          when sa.state like 'idle in transaction%'  then 'IdleTx'
         end
-      ) as wait_event
+      ) as wait_event,
+      sa.backend_type,
+      sa.query_id
     from pg_stat_activity sa
     where sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
       and (sa.backend_type = 'client backend'
        or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
       and sa.pid <> pg_backend_pid()
   loop
-    if not exists (
-      select from ash.wait_event_map
-      where state = v_rec.state and type = v_rec.wait_type and event = v_rec.wait_event
-    ) then
-      perform ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
+    -- Register wait event if not yet seen this tick (dedup in memory, not per row lookup).
+    if not (v_rec.state || '|' || v_rec.wait_type || '|' || v_rec.wait_event = any(v_seen_waits)) then
+      v_seen_waits := v_seen_waits || (v_rec.state || '|' || v_rec.wait_type || '|' || v_rec.wait_event);
+      if not exists (
+        select from ash.wait_event_map
+        where state = v_rec.state and type = v_rec.wait_type and event = v_rec.wait_event
+      ) then
+        perform ash._register_wait(v_rec.state, v_rec.wait_type, v_rec.wait_event);
+      end if;
+    end if;
+
+    -- Debug logging: RAISE LOG goes to server log only, never to the client.
+    -- Independent of log_min_messages and client_min_messages.
+    if v_debug_logging then
+      raise log 'ash.take_sample: pid=% state=% wait_type=% wait_event=% backend_type=% query_id=%',
+        v_rec.pid, v_rec.state, v_rec.wait_type, v_rec.wait_event,
+        v_rec.backend_type, coalesce(v_rec.query_id::text, '(null)');
     end if;
   end loop;
 
@@ -843,6 +869,39 @@ begin
 end;
 $$;
 
+-- Enable or disable debug logging in take_sample().
+-- When enabled, every sampled session emits a RAISE LOG message:
+--   ash.take_sample: pid=NNN state=active wait_type=Client wait_event=ClientRead ...
+--
+-- RAISE LOG goes to the server log only — never to the client.
+-- It is independent of log_min_messages and client_min_messages.
+--
+-- Usage:
+--   select ash.debug_logging(true);   -- enable
+--   select ash.debug_logging(false);  -- disable
+--   select ash.debug_logging();       -- show current state
+create or replace function ash.debug_logging(p_enabled bool default null)
+returns text
+language plpgsql
+as $$
+declare
+  v_current bool;
+begin
+  select debug_logging into v_current from ash.config where singleton;
+
+  if p_enabled is null then
+    return 'debug_logging = ' || v_current::text;
+  end if;
+
+  update ash.config set debug_logging = p_enabled where singleton;
+
+  return case p_enabled
+    when true  then 'debug_logging enabled — RAISE LOG output goes to server log only'
+    when false then 'debug_logging disabled'
+  end;
+end;
+$$;
+
 -- Uninstall: stop jobs and drop schema
 create or replace function ash.uninstall(p_confirm text default null)
 returns text
@@ -930,6 +989,7 @@ begin
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
+  metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
   metric := 'installed_at'; value := v_config.installed_at::text; return next;
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
@@ -2556,11 +2616,29 @@ begin
     select from information_schema.columns
     where table_schema = 'ash' and table_name = 'config' and column_name = 'version'
   ) then
-    alter table ash.config add column version text not null default '1.2';
+    alter table ash.config add column version text not null default '1.3';
   end if;
 end $$;
 
-update ash.config set version = '1.2' where singleton;
+-- Migration: add debug_logging column (1.2 → 1.3); drop logging_level if present
+do $$
+begin
+  if not exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'debug_logging'
+  ) then
+    alter table ash.config add column debug_logging bool not null default false;
+  end if;
+
+  if exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'logging_level'
+  ) then
+    alter table ash.config drop column logging_level;
+  end if;
+end $$;
+
+update ash.config set version = '1.3' where singleton;
 
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
@@ -2926,10 +3004,12 @@ begin
   execute format('revoke all on function ash.uninstall(text) from public');
   execute format('revoke all on function ash.rotate() from public');
   execute format('revoke all on function ash.take_sample() from public');
+  execute format('revoke all on function ash.debug_logging(bool) from public');
 
   execute format('grant execute on function ash.start(interval) to %I', v_owner);
   execute format('grant execute on function ash.stop() to %I', v_owner);
   execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
+  execute format('grant execute on function ash.debug_logging(bool) to %I', v_owner);
 end $$;
