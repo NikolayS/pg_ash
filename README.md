@@ -75,6 +75,9 @@ select ash.uninstall('yes');
 -- from 1.1 to 1.2
 \i sql/ash-1.1-to-1.2.sql
 
+-- from 1.2 to 1.3
+\i sql/ash-1.2-to-1.3.sql
+
 -- check version
 select * from ash.status();
 ```
@@ -96,6 +99,7 @@ select * from ash.status();
 | `ash.timeline_chart(interval, bucket, top, width)` | Stacked bar chart of wait events over time |
 | `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
 | `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
+| `ash.debug_logging(bool)` | Enable/disable/show debug logging in `take_sample()` |
 | `ash.status()` | Sampling status and partition info |
 
 All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
@@ -126,11 +130,12 @@ select * from ash.status();
 ```
            metric           |             value
 ----------------------------+-------------------------------
- version                    | 1.2
+ version                    | 1.3
  current_slot               | 0
  sample_interval            | 00:00:01
  rotation_period            | 1 day
  include_bg_workers         | false
+ debug_logging              | false
  samples_in_current_slot    | 56
  last_sample_ts             | 2026-02-16 08:39:03+00
  wait_event_map_count       | 11
@@ -560,6 +565,13 @@ update ash.config set rotation_period = '12 hours';
 
 -- check current configuration
 select * from ash.status();
+
+-- enable debug logging (RAISE LOG per sampled session — server log only)
+select ash.debug_logging(true);
+-- disable
+select ash.debug_logging(false);
+-- show current state
+select ash.debug_logging();
 ```
 
 ### pg_cron run history
