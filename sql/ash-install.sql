@@ -742,7 +742,13 @@ begin
     -- Clear nodename so pg_cron uses Unix socket instead of TCP.
     -- cron.schedule() defaults nodename to 'localhost' which forces TCP
     -- and fails when pg_hba.conf only allows socket connections.
-    update cron.job set nodename = '' where jobid = v_sampler_job;
+    -- Wrapped in exception handler for managed services (e.g. Azure)
+    -- that restrict direct DML on cron.job.
+    begin
+      update cron.job set nodename = '' where jobid = v_sampler_job;
+    exception when insufficient_privilege then
+      null; -- managed service restricts cron.job writes, skip
+    end;
 
     job_type := 'sampler';
     job_id := v_sampler_job;
@@ -768,7 +774,11 @@ begin
       'select ash.rotate()'
     ) into v_rotation_job;
 
-    update cron.job set nodename = '' where jobid = v_rotation_job;
+    begin
+      update cron.job set nodename = '' where jobid = v_rotation_job;
+    exception when insufficient_privilege then
+      null; -- managed service restricts cron.job writes, skip
+    end;
 
     job_type := 'rotation';
     job_id := v_rotation_job;
@@ -2909,7 +2919,7 @@ begin
       and command <> 'set statement_timeout = ''500ms''; select ash.take_sample()';
   end if;
 exception when others then
-  null; -- pg_cron not installed, skip
+  null; -- pg_cron not installed or managed service restricts cron.job writes
 end $$;
 
 -------------------------------------------------------------------------------
