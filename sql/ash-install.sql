@@ -662,11 +662,10 @@ begin
     return;
   end if;
 
-  -- Update sample_interval in config (always, regardless of scheduler)
-  update ash.config set sample_interval = p_interval where singleton;
-
   -- If pg_cron is not available, just record the interval and advise on external scheduling
   if not ash._pg_cron_available() then
+    update ash.config set sample_interval = p_interval where singleton;
+
     job_type := 'sampler';
     job_id := null;
     status := format('interval set to %s — schedule externally (pg_cron not available)', p_interval);
@@ -794,6 +793,9 @@ begin
     status := 'created';
     return next;
   end if;
+
+  -- Update sample_interval in config (after all validation and job creation)
+  update ash.config set sample_interval = p_interval where singleton;
 
   -- Warn about pg_cron run history overhead.
   -- At 1s sampling, cron.job_run_details grows ~12 MiB/day unbounded.

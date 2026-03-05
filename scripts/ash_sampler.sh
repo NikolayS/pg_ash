@@ -46,10 +46,10 @@ while getopts "i:d:U:h:p:" opt; do
 done
 
 run_sql() {
-  psql -qAtX "${PSQL_ARGS[@]}" -c "$1" 2>/dev/null
+  psql -qAtX ${PSQL_ARGS[@]+"${PSQL_ARGS[@]}"} -c "$1" 2>/dev/null
 }
 
-echo "pg_ash sampler: interval=${INTERVAL}s, psql args: ${PSQL_ARGS[*]:-<default>}"
+echo "pg_ash sampler: interval=${INTERVAL}s, psql args: ${PSQL_ARGS[*]:-<libpq defaults>}"
 echo "Press Ctrl-C to stop."
 
 ticks_since_rotation_check=0

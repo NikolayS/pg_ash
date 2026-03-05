@@ -598,7 +598,7 @@ You can call `ash.take_sample()` from any external scheduler:
 * * * * * psql -qAtX -d mydb -c "SET statement_timeout='500ms'; SELECT ash.take_sample();"
 
 # Every second (cron launches a loop each minute)
-* * * * * for i in $(seq 1 59); do psql -qAtX -d mydb -c "SET statement_timeout='500ms'; SELECT ash.take_sample();" & sleep 1; done
+* * * * * for i in $(seq 1 59); do psql -qAtX -d mydb -c "SET statement_timeout='500ms'; SELECT ash.take_sample();"; sleep 1; done
 ```
 
 **Dedicated loop script** (most reliable for 1-second sampling):
