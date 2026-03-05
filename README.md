@@ -20,13 +20,13 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 |---|---|---|---|---|
 | Install | `\i` (pure SQL) | shared_preload_libraries | shared_preload_libraries (package or compile) | Separate infra |
 | Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of early 2026) | Not known to be supported | Yes, with effort |
-| Sampling rate | 1s (via pg_cron) | 10ms (in-process) | 10ms (in-process) | 15-60s typical |
+| Sampling rate | 1s (via pg_cron, system cron, or any scheduler) | 10ms (in-process) | 10ms (in-process) | 15-60s typical |
 | Visibility | Inside Postgres | Inside Postgres | Inside Postgres | Outside only |
 | Storage | Disk (~30 MiB/day) | Memory only | Memory only | External store |
 | Historical queries | Yes (persistent) | Ring buffer (lost on restart) | Ring buffer (lost on restart) | Depends on setup |
 | Pure SQL | Yes | No (C extension) | No (C extension) | No |
 | Maintenance overhead | None | None | None | High |
-| Requirements | pg_cron 1.5+ | shared_preload_libraries (restart required) | shared_preload_libraries (restart required) | Agent + storage |
+| Requirements | None (pg_cron optional) | shared_preload_libraries (restart required) | shared_preload_libraries (restart required) | Agent + storage |
 
 ## Quick start
 
@@ -34,7 +34,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 -- install (just run the SQL file — works on RDS, Cloud SQL, AlloyDB, etc.)
 \i sql/ash-install.sql
 
--- start sampling (1 sample/second via pg_cron)
+-- start sampling (1 sample/second — uses pg_cron if available, otherwise prints external scheduling instructions)
 select ash.start('1 second');
 
 -- wait a few minutes, then query
@@ -538,7 +538,7 @@ See [issue #1](https://github.com/NikolayS/pg_ash/issues/1) for full benchmarks 
 ## Requirements
 
 - Postgres 14+ (requires `query_id` in `pg_stat_activity`)
-- pg_cron 1.5+ (for sub-minute scheduling)
+- pg_cron 1.5+ (optional — for built-in scheduling; see [Scheduling without pg_cron](#scheduling-without-pg_cron) for alternatives)
 - pg_stat_statements (optional — enables query text, `calls`, `total_exec_time_ms`, `mean_exec_time_ms` in `top_queries_with_text()` and `event_queries()`; all other functions work without it)
 
 **Note on `query_id`**: The default `compute_query_id = auto` only populates `query_id` when pg_stat_statements is in `shared_preload_libraries`. If `query_id` is NULL in `pg_stat_activity`, set:
@@ -585,9 +585,81 @@ select cron.schedule(
 
 `ash.start()` will warn about this overhead.
 
+### Scheduling without pg_cron
+
+pg_cron is **optional**. All core functions — `ash.take_sample()`, `ash.rotate()`, and all reporting — work without it. When pg_cron is not installed, `ash.start('1 second')` records the intended interval in `ash.config` and prints instructions for external scheduling.
+
+You can call `ash.take_sample()` from any external scheduler:
+
+**System cron** (1-minute minimum granularity):
+
+```bash
+# Every minute
+* * * * * psql -qAtX -d mydb -c "SET statement_timeout='500ms'; SELECT ash.take_sample();"
+
+# Every second (cron launches a loop each minute)
+* * * * * for i in $(seq 1 59); do psql -qAtX -d mydb -c "SET statement_timeout='500ms'; SELECT ash.take_sample();" & sleep 1; done
+```
+
+**Dedicated loop script** (most reliable for 1-second sampling):
+
+```bash
+#!/bin/bash
+# ash_sampler.sh — run via systemd, screen, tmux, or nohup
+while true; do
+  psql -qAtX -d mydb -c "SET statement_timeout='500ms'; SELECT ash.take_sample();" 2>/dev/null
+  sleep 1
+done
+```
+
+A ready-to-use script is included: [`scripts/ash_sampler.sh`](scripts/ash_sampler.sh).
+
+**systemd timer** (Linux, precise 1-second ticking):
+
+```ini
+# /etc/systemd/system/ash-sampler.service
+[Service]
+Type=oneshot
+ExecStart=psql -qAtX -d mydb -c "SET statement_timeout='500ms'; SELECT ash.take_sample();"
+User=postgres
+
+# /etc/systemd/system/ash-sampler.timer
+[Timer]
+OnActiveSec=0
+OnUnitActiveSec=1s
+AccuracySec=100ms
+[Install]
+WantedBy=timers.target
+```
+
+**psql `\watch`** (quick ad-hoc testing):
+
+```sql
+SELECT ash.take_sample() \watch 1
+```
+
+**Any language** (Python example):
+
+```python
+import psycopg2, time
+conn = psycopg2.connect("dbname=mydb")
+conn.autocommit = True
+while True:
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout='500ms'; SELECT ash.take_sample()")
+    time.sleep(1)
+```
+
+Don't forget to also schedule `ash.rotate()` — once per `rotation_period` (default: daily):
+
+```bash
+# System cron: rotate daily at midnight
+0 0 * * * psql -qAtX -d mydb -c "SELECT ash.rotate();"
+```
+
 ## Known limitations
 
-- **Primary only** — pg_ash requires writes (`INSERT` into sample tables, `TRUNCATE` on rotation) and pg_cron, so it cannot run on physical standbys or read replicas. Install it on the primary; it samples all databases from there.
+- **Primary only** — pg_ash requires writes (`INSERT` into sample tables, `TRUNCATE` on rotation), so it cannot run on physical standbys or read replicas. Install it on the primary; it samples all databases from there.
 - **Observer-effect protection** — the sampler pg_cron command includes `SET statement_timeout = '500ms'` to prevent `take_sample()` from becoming a problem on overloaded servers. If `pg_stat_activity` is slow (thousands of backends), the sample is canceled rather than piling up. Normal execution is ~50ms — the 500ms cap gives 10× headroom. Adjust in `cron.job` if needed.
 - **Sampling gaps under heavy load** — pg_cron runs in a single background worker and under heavy load (lock storms, many concurrent sessions) it can't always keep up with the 1-second schedule. You may see gaps of 8s, 13s, or even 30s+ between samples — ironically during the most interesting moments. This is a fundamental pg_cron limitation, not a bug. If precise 1-second sampling matters, use an external sampler (e.g., a shell loop: `while true; do psql -c "select ash.take_sample()"; sleep 1; done`) which is more reliable under load.
 - **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](blueprints/ROLLUP_DESIGN.md).
