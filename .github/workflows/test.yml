@@ -535,6 +535,14 @@ jobs:
             SELECT count(*) INTO v_count FROM ash.status();
             ASSERT v_count > 0, 'status returned 0 rows';
 
+            -- cost_estimate (auto-detect from data)
+            SELECT count(*) INTO v_count FROM ash.cost_estimate();
+            ASSERT v_count > 0, 'cost_estimate returned 0 rows';
+
+            -- cost_estimate (explicit backends)
+            SELECT count(*) INTO v_count FROM ash.cost_estimate(50);
+            ASSERT v_count > 0, 'cost_estimate(50) returned 0 rows';
+
             RAISE NOTICE 'Relative-time reader tests PASSED';
           END;
           $$;
@@ -1314,6 +1322,12 @@ jobs:
 
             SELECT count(*) INTO v_count FROM ash.activity_summary('1 hour');
             ASSERT v_count > 0, 'activity_summary failed';
+
+            SELECT count(*) INTO v_count FROM ash.cost_estimate();
+            ASSERT v_count > 0, 'cost_estimate failed';
+
+            SELECT count(*) INTO v_count FROM ash.cost_estimate(100);
+            ASSERT v_count > 0, 'cost_estimate(100) failed';
 
             SELECT count(*) INTO v_count FROM ash.query_waits(111111, '1 hour');
             ASSERT v_count > 0, 'query_waits failed';

@@ -96,6 +96,7 @@ select * from ash.status();
 | `ash.timeline_chart(interval, bucket, top, width)` | Stacked bar chart of wait events over time |
 | `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
 | `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
+| `ash.cost_estimate(backends)` | Estimate storage, WAL, and overhead (auto-detects from data or specify backends) |
 | `ash.status()` | Sampling status and partition info |
 
 All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
@@ -348,6 +349,35 @@ select * from ash.wait_timeline_at(
     '2026-02-14 03:10',
     '1 minute'
 );
+```
+
+### Cost estimation
+
+Estimate pg_ash overhead before enabling or after tuning:
+
+```sql
+-- auto-detect from current data (or assume 10 backends if no data yet)
+select * from ash.cost_estimate();
+
+-- what-if: estimate for 50 active backends
+select * from ash.cost_estimate(50);
+```
+
+```
+        metric         |                  value
+-----------------------+------------------------------------------
+ source                | user-specified (50 backends)
+ sample_interval       | 00:00:01
+ rotation_period       | 1 day
+ avg_backends          | 50
+ avg_row_bytes         | 380 bytes
+ samples_per_day       | 86400
+ sampler_calls_per_day | 86400
+ table_size_per_day    | 31 MB
+ index_size_per_day    | 4808 kB
+ total_size_per_day    | 36 MB
+ max_on_disk           | 72 MB (2 × 1 day)
+ wal_per_day           | 47 MB
 ```
 
 ### LLM-assisted investigation
