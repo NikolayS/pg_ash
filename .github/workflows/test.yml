@@ -1238,6 +1238,74 @@ jobs:
           SELECT ash.uninstall('yes');
           EOF
 
+      - name: "Schema equivalence: fresh install vs full upgrade path"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Snapshot helper: deterministic schema fingerprint of the ash schema.
+          # Captures functions (name, args, return type, body), tables (columns,
+          # types, defaults), indexes, views, and config defaults.
+          cat > /tmp/ash_schema_snapshot.sql << 'SNAPSQL'
+          -- Functions: name, argtypes, rettype, prosrc (body)
+          \pset tuples_only on
+          \pset format unaligned
+          SELECT 'FUNC', p.proname,
+                 pg_get_function_identity_arguments(p.oid),
+                 pg_get_function_result(p.oid),
+                 md5(p.prosrc)
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'ash'
+          ORDER BY p.proname, pg_get_function_identity_arguments(p.oid);
+
+          -- Tables & columns: table, column, type, nullable, default
+          SELECT 'COL', c.relname, a.attname,
+                 pg_catalog.format_type(a.atttypid, a.atttypmod),
+                 a.attnotnull,
+                 pg_get_expr(d.adbin, d.adrelid)
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_attribute a ON a.attrelid = c.oid
+          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+          WHERE n.nspname = 'ash' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped
+          ORDER BY c.relname, a.attnum;
+
+          -- Indexes: name, definition
+          SELECT 'IDX', c.relname, pg_get_indexdef(i.indexrelid)
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'ash'
+          ORDER BY c.relname;
+
+          -- Views: name, definition
+          SELECT 'VIEW', viewname, md5(definition)
+          FROM pg_views
+          WHERE schemaname = 'ash'
+          ORDER BY viewname;
+          SNAPSQL
+
+          # 1) Fresh install → snapshot
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/fresh_schema.txt
+          psql -h localhost -U postgres -d postgres -c "SELECT ash.uninstall('yes')"
+
+          # 2) Full upgrade path → snapshot
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.0.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1-to-1.2.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.2-to-1.3.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
+          psql -h localhost -U postgres -d postgres -c "SELECT ash.uninstall('yes')"
+
+          # 3) Compare
+          if diff -u /tmp/fresh_schema.txt /tmp/upgraded_schema.txt; then
+            echo "Schema equivalence test PASSED: fresh install and upgrade path produce identical schemas"
+          else
+            echo "::error::Schema equivalence test FAILED: fresh install and upgrade path differ (see diff above)"
+            exit 1
+          fi
+
       - name: Final summary
         env:
           PGPASSWORD: postgres
@@ -1418,3 +1486,59 @@ jobs:
 
           SELECT ash.uninstall('yes');
           EOF
+
+      - name: "Schema equivalence: fresh install vs full upgrade path"
+        run: |
+          cat > /tmp/ash_schema_snapshot.sql << 'SNAPSQL'
+          \pset tuples_only on
+          \pset format unaligned
+          SELECT 'FUNC', p.proname,
+                 pg_get_function_identity_arguments(p.oid),
+                 pg_get_function_result(p.oid),
+                 md5(p.prosrc)
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'ash'
+          ORDER BY p.proname, pg_get_function_identity_arguments(p.oid);
+
+          SELECT 'COL', c.relname, a.attname,
+                 pg_catalog.format_type(a.atttypid, a.atttypmod),
+                 a.attnotnull,
+                 pg_get_expr(d.adbin, d.adrelid)
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_attribute a ON a.attrelid = c.oid
+          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+          WHERE n.nspname = 'ash' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped
+          ORDER BY c.relname, a.attnum;
+
+          SELECT 'IDX', c.relname, pg_get_indexdef(i.indexrelid)
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'ash'
+          ORDER BY c.relname;
+
+          SELECT 'VIEW', viewname, md5(definition)
+          FROM pg_views
+          WHERE schemaname = 'ash'
+          ORDER BY viewname;
+          SNAPSQL
+
+          psql -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql
+          psql -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/fresh_schema.txt
+          psql -d postgres -c "SELECT ash.uninstall('yes')"
+
+          psql -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.0.sql
+          psql -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1.sql
+          psql -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1-to-1.2.sql
+          psql -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.2-to-1.3.sql
+          psql -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
+          psql -d postgres -c "SELECT ash.uninstall('yes')"
+
+          if diff -u /tmp/fresh_schema.txt /tmp/upgraded_schema.txt; then
+            echo "Schema equivalence test PASSED"
+          else
+            echo "::error::Schema equivalence FAILED: fresh install and upgrade path differ"
+            exit 1
+          fi
