@@ -1,8 +1,9 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.2 (latest)
+-- Version: 1.3 (latest)
 -- Fresh install: \i sql/ash-install.sql
--- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql then \i sql/ash-1.1-to-1.2.sql
--- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql
+-- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql then \i sql/ash-1.1-to-1.2.sql then \i sql/ash-1.2-to-1.3.sql
+-- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql then \i sql/ash-1.2-to-1.3.sql
+-- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql
 --
 -- leaves no partial schema behind.
 
@@ -63,7 +64,7 @@ create table if not exists ash.config (
   rotation_period    interval not null default '1 day',
   include_bg_workers bool not null default false,
   encoding_version   smallint not null default 1,
-  version            text not null default '1.2',
+  version            text not null default '1.3',
   rotated_at         timestamptz not null default clock_timestamp(),
   installed_at       timestamptz not null default clock_timestamp()
 );
@@ -2574,11 +2575,11 @@ begin
     select from information_schema.columns
     where table_schema = 'ash' and table_name = 'config' and column_name = 'version'
   ) then
-    alter table ash.config add column version text not null default '1.2';
+    alter table ash.config add column version text not null default '1.3';
   end if;
 end $$;
 
-update ash.config set version = '1.2' where singleton;
+update ash.config set version = '1.3' where singleton;
 
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event

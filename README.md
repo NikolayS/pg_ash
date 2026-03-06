@@ -75,6 +75,9 @@ select ash.uninstall('yes');
 -- from 1.1 to 1.2
 \i sql/ash-1.1-to-1.2.sql
 
+-- from 1.2 to 1.3
+\i sql/ash-1.2-to-1.3.sql
+
 -- check version
 select * from ash.status();
 ```
@@ -611,8 +614,6 @@ while true; do
   sleep 1
 done
 ```
-
-A ready-to-use script is included: [`scripts/ash_sampler.sh`](scripts/ash_sampler.sh).
 
 **systemd timer** (Linux, precise 1-second ticking):
 
