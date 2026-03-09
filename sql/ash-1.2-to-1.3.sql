@@ -17,8 +17,9 @@ begin
   end if;
 end $$;
 
--- Update version
+-- Update version (both data and column default for schema parity)
 update ash.config set version = '1.3' where singleton;
+alter table ash.config alter column version set default '1.3';
 
 -- Re-create all functions to match fresh install (schema parity).
 -- CREATE OR REPLACE is safe — only the function body changes.
