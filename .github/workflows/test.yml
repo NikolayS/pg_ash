@@ -40,7 +40,7 @@ jobs:
           # Configure pg_cron
           docker exec ${{ job.services.postgres.id }} bash -c "
             if [ -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control ]; then
-              echo 'shared_preload_libraries = pg_cron' >> /var/lib/postgresql/data/postgresql.conf
+              echo "shared_preload_libraries = 'pg_cron,pg_stat_statements'" >> /var/lib/postgresql/data/postgresql.conf
               echo 'cron.database_name = postgres' >> /var/lib/postgresql/data/postgresql.conf
             fi
           " || true
@@ -59,6 +59,7 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron;" || echo "pg_cron not available"
+          psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" || echo "pg_stat_statements not available"
 
       - name: Install pg_ash (fresh install)
         env:
@@ -590,9 +591,9 @@ jobs:
             SELECT count(*) INTO v_count FROM ash.query_waits_at(111111, v_start, v_end);
             ASSERT v_count > 0, 'query_waits_at returned 0 rows';
 
-            -- top_queries_with_text (may return fewer if pg_stat_statements not loaded)
+            -- top_queries_with_text (requires pg_stat_statements — errors without it)
             SELECT count(*) INTO v_count FROM ash.top_queries_with_text('1 hour');
-            -- Don't assert > 0 because pgss may not be available
+            ASSERT v_count >= 0, 'top_queries_with_text should work with pgss installed';
 
             RAISE NOTICE 'Query-specific function tests PASSED';
           END;
@@ -1329,6 +1330,11 @@ jobs:
       - name: Start PostgreSQL 18
         run: |
           pg-start 18 || pg-start 17
+          # Enable pg_stat_statements
+          psql -d postgres -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';"
+          pg_ctlcluster $(pg_lsclusters -h | awk '{print $1, $2}') restart || pg-restart 18 || true
+          sleep 2
+          psql -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" || echo "pgss not available"
 
       - name: Install pg_ash (fresh install)
         run: |
