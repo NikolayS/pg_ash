@@ -80,8 +80,8 @@ jobs:
             -- Config table initialized with version
             ASSERT (SELECT count(*) FROM ash.config) = 1,
               'config not initialized';
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should be 1.2 for fresh install';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 for fresh install';
 
             -- Core tables exist
             ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'wait_event_map'),
@@ -1132,19 +1132,35 @@ jobs:
           \i sql/ash-1.1-to-1.2.sql
 
           DO $$
+          BEGIN
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
+              'version should be 1.2 after 1.1-to-1.2 upgrade';
+            RAISE NOTICE '1.1 -> 1.2 upgrade PASSED';
+          END;
+          $$;
+
+          -- Upgrade to 1.3
+          \i sql/ash-1.2-to-1.3.sql
+
+          DO $$
           DECLARE
             v_count int;
           BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should be 1.2 after upgrade';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 after upgrade';
             -- timeline_chart must exist with new column order
             SELECT count(*) INTO v_count
             FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            ASSERT v_count >= 0, 'timeline_chart missing after 1.2 upgrade';
+            ASSERT v_count >= 0, 'timeline_chart missing after 1.3 upgrade';
             SELECT count(*) INTO v_count
             FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
-            ASSERT v_count >= 0, 'timeline_chart with p_color missing after 1.2';
-            RAISE NOTICE '1.1 -> 1.2 upgrade PASSED';
+            ASSERT v_count >= 0, 'timeline_chart with p_color missing after 1.3';
+            -- debug_logging must exist
+            ASSERT EXISTS (
+              SELECT FROM information_schema.columns
+              WHERE table_schema = 'ash' AND table_name = 'config' AND column_name = 'debug_logging'
+            ), 'debug_logging column missing after 1.3 upgrade';
+            RAISE NOTICE '1.2 -> 1.3 upgrade PASSED';
           END;
           $$;
 
@@ -1170,15 +1186,25 @@ jobs:
           \i sql/ash-1.1-to-1.2.sql
 
           DO $$
+          BEGIN
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
+              'version should be 1.2 after 1.1-to-1.2';
+            RAISE NOTICE '1.1 -> 1.2 direct upgrade PASSED';
+          END;
+          $$;
+
+          \i sql/ash-1.2-to-1.3.sql
+
+          DO $$
           DECLARE
             v_count int;
           BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should be 1.2 after upgrade';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 after upgrade';
             SELECT count(*) INTO v_count
             FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
             ASSERT v_count >= 0, 'timeline_chart missing';
-            RAISE NOTICE '1.1 -> 1.2 direct upgrade PASSED';
+            RAISE NOTICE '1.2 -> 1.3 direct upgrade PASSED';
           END;
           $$;
 
@@ -1186,33 +1212,35 @@ jobs:
           SELECT ash.uninstall('yes');
           EOF
 
-      - name: "Dev workflow: re-apply 1.2 migration (idempotent)"
+      - name: "Dev workflow: re-apply migrations (idempotent)"
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           \i sql/ash-install.sql
 
-          -- Apply 1.1--1.2 migration on top of install (should be idempotent)
+          -- Apply 1.1-to-1.2 and 1.2-to-1.3 on top of fresh install (should be idempotent)
           \i sql/ash-1.1-to-1.2.sql
+          \i sql/ash-1.2-to-1.3.sql
 
           DO $$
           BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should still be 1.2';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should still be 1.3';
             RAISE NOTICE 'Idempotent re-apply PASSED';
           END;
           $$;
 
           -- Apply again
           \i sql/ash-1.1-to-1.2.sql
+          \i sql/ash-1.2-to-1.3.sql
 
           DO $$
           DECLARE
             v_count int;
           BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should still be 1.2 after second apply';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should still be 1.3 after second apply';
             SELECT count(*) INTO v_count
             FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
             ASSERT v_count >= 0, 'timeline_chart missing after re-apply';
@@ -1370,24 +1398,34 @@ jobs:
 
           \i sql/ash-1.1-to-1.2.sql
           DO $$
+          BEGIN
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
+              'version should be 1.2 after 1.1-to-1.2';
+            RAISE NOTICE '1.1 -> 1.2 upgrade PASSED';
+          END;
+          $$;
+
+          \i sql/ash-1.2-to-1.3.sql
+          DO $$
           DECLARE
             v_count int;
           BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should be 1.2 after upgrade';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should be 1.3 after upgrade';
             SELECT count(*) INTO v_count
             FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            ASSERT v_count >= 0, 'timeline_chart missing after 1.2';
-            RAISE NOTICE '1.1 -> 1.2 upgrade PASSED';
+            ASSERT v_count >= 0, 'timeline_chart missing after 1.3';
+            RAISE NOTICE '1.2 -> 1.3 upgrade PASSED';
           END;
           $$;
 
           -- Re-apply (idempotent)
           \i sql/ash-1.1-to-1.2.sql
+          \i sql/ash-1.2-to-1.3.sql
           DO $$
           BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
-              'version should still be 1.2';
+            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+              'version should still be 1.3';
             RAISE NOTICE 'Idempotent re-apply PASSED';
           END;
           $$;
