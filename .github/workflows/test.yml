@@ -590,9 +590,14 @@ jobs:
             SELECT count(*) INTO v_count FROM ash.query_waits_at(111111, v_start, v_end);
             ASSERT v_count > 0, 'query_waits_at returned 0 rows';
 
-            -- top_queries_with_text (may return fewer if pg_stat_statements not loaded)
-            SELECT count(*) INTO v_count FROM ash.top_queries_with_text('1 hour');
-            -- Don't assert > 0 because pgss may not be available
+            -- top_queries_with_text errors when pg_stat_statements not available
+            BEGIN
+              SELECT count(*) INTO v_count FROM ash.top_queries_with_text('1 hour');
+              -- If we get here, pgss is available — result should be valid
+            EXCEPTION WHEN raise_exception THEN
+              -- Expected: pgss not loaded in CI containers
+              RAISE NOTICE 'top_queries_with_text correctly errored without pgss';
+            END;
 
             RAISE NOTICE 'Query-specific function tests PASSED';
           END;
