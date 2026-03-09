@@ -1468,38 +1468,8 @@ begin
     order by r.cnt desc
     limit p_limit;
   else
-    return query
-    with qids as (
-      select s.slot, s.data[i] as map_id
-      from ash.sample s, generate_subscripts(s.data, 1) i
-      where s.slot = any(ash._active_slots())
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
-        and i > 1
-        and s.data[i] >= 0
-        and s.data[i - 1] >= 0
-    ),
-    resolved as (
-      select qm.query_id, count(*) as cnt
-      from qids q
-      join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
-      where q.map_id > 0
-      group by qm.query_id
-    ),
-    grand_total as (
-      select sum(cnt) as total from resolved
-    )
-    select
-      r.query_id,
-      r.cnt as samples,
-      round(r.cnt::numeric / gt.total * 100, 2) as pct,
-      null::bigint as calls,
-      null::numeric as total_exec_time_ms,
-      null::numeric as mean_exec_time_ms,
-      null::text as query_text
-    from resolved r
-    cross join grand_total gt
-    order by r.cnt desc
-    limit p_limit;
+    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+      using hint = 'top_queries_with_text() requires pg_stat_statements for query text and execution metrics. Use top_queries() for sample-only data without pgss.';
   end if;
 end;
 $$;
@@ -2762,69 +2732,8 @@ begin
     left join pg_stat_statements pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
-    return query
-    with matching_waits as (
-      select wm.id as wait_id
-      from ash.wait_event_map wm
-      where case
-        when p_event like '%:%' then
-          wm.type || ':' || wm.event = p_event
-          or (wm.event = wm.type and wm.event = p_event)
-        else
-          wm.type = p_event
-          or wm.event = p_event
-      end
-    ),
-    hits as (
-      select
-        s.slot,
-        s.data[i + 2 + gs.n] as map_id
-      from ash.sample s,
-        generate_subscripts(s.data, 1) i,
-        matching_waits mw,
-        lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots())
-        and s.sample_ts >= v_min_ts
-        and s.data[i] < 0
-        and (-s.data[i])::smallint = mw.wait_id
-        and i + 2 + gs.n <= array_length(s.data, 1)
-        and s.data[i + 2 + gs.n] >= 0
-    ),
-    resolved as (
-      select m.query_id
-      from hits h
-      join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
-    ),
-    totals as (
-      select r.query_id, count(*) as cnt
-      from resolved r
-      group by r.query_id
-    ),
-    grand_total as (
-      select sum(cnt) as total from totals
-    ),
-    ranked as (
-      select
-        t.query_id,
-        t.cnt as samples,
-        round(t.cnt::numeric / gt.total * 100, 2) as pct
-      from totals t
-      cross join grand_total gt
-      order by t.cnt desc
-      limit p_limit
-    ),
-    max_pct as (
-      select max(r.pct) as m from ranked r
-    )
-    select
-      r.query_id,
-      r.samples,
-      r.pct,
-      ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
-      null::text as query_text
-    from ranked r
-    cross join max_pct mp
-    order by r.samples desc;
+    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+      using hint = 'event_queries() requires pg_stat_statements for query text. Use top_queries() or top_waits() for sample-only data without pgss.';
   end if;
 end;
 $$;
@@ -2927,69 +2836,8 @@ begin
     left join pg_stat_statements pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
-    return query
-    with matching_waits as (
-      select wm.id as wait_id
-      from ash.wait_event_map wm
-      where case
-        when p_event like '%:%' then
-          wm.type || ':' || wm.event = p_event
-          or (wm.event = wm.type and wm.event = p_event)
-        else
-          wm.type = p_event
-          or wm.event = p_event
-      end
-    ),
-    hits as (
-      select
-        s.slot,
-        s.data[i + 2 + gs.n] as map_id
-      from ash.sample s,
-        generate_subscripts(s.data, 1) i,
-        matching_waits mw,
-        lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots())
-        and s.sample_ts >= v_start and s.sample_ts < v_end
-        and s.data[i] < 0
-        and (-s.data[i])::smallint = mw.wait_id
-        and i + 2 + gs.n <= array_length(s.data, 1)
-        and s.data[i + 2 + gs.n] >= 0
-    ),
-    resolved as (
-      select m.query_id
-      from hits h
-      join ash.query_map_all m on m.slot = h.slot and m.id = h.map_id
-    ),
-    totals as (
-      select r.query_id, count(*) as cnt
-      from resolved r
-      group by r.query_id
-    ),
-    grand_total as (
-      select sum(cnt) as total from totals
-    ),
-    ranked as (
-      select
-        t.query_id,
-        t.cnt as samples,
-        round(t.cnt::numeric / gt.total * 100, 2) as pct
-      from totals t
-      cross join grand_total gt
-      order by t.cnt desc
-      limit p_limit
-    ),
-    max_pct as (
-      select max(r.pct) as m from ranked r
-    )
-    select
-      r.query_id,
-      r.samples,
-      r.pct,
-      ash._bar(p_event, r.pct, mp.m, p_width, p_color) as bar,
-      null::text as query_text
-    from ranked r
-    cross join max_pct mp
-    order by r.samples desc;
+    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+      using hint = 'event_queries_at() requires pg_stat_statements for query text. Use top_queries_at() or top_waits_at() for sample-only data without pgss.';
   end if;
 end;
 $$;
