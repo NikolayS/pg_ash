@@ -1225,8 +1225,13 @@ begin
     v_has_pgss := false;
   end;
 
-  if v_has_pgss then
-    return query
+  if not v_has_pgss then
+    raise exception 'pg_stat_statements is not available — query text and timing data require it. '
+      'Use ash.top_queries() for sample counts without text, or install pg_stat_statements: '
+      'ALTER SYSTEM SET shared_preload_libraries = ''pg_stat_statements''; then restart PostgreSQL.';
+  end if;
+
+  return query
     with qids as (
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
@@ -1259,40 +1264,6 @@ begin
     left join pg_stat_statements pss on pss.queryid = r.query_id
     order by r.cnt desc
     limit p_limit;
-  else
-    return query
-    with qids as (
-      select s.slot, s.data[i] as map_id
-      from ash.sample s, generate_subscripts(s.data, 1) i
-      where s.slot = any(ash._active_slots())
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
-        and i > 1
-        and s.data[i] >= 0
-        and s.data[i - 1] >= 0
-    ),
-    resolved as (
-      select qm.query_id, count(*) as cnt
-      from qids q
-      join ash.query_map_all qm on qm.slot = q.slot and qm.id = q.map_id
-      where q.map_id > 0
-      group by qm.query_id
-    ),
-    grand_total as (
-      select sum(cnt) as total from resolved
-    )
-    select
-      r.query_id,
-      r.cnt as samples,
-      round(r.cnt::numeric / gt.total * 100, 2) as pct,
-      null::bigint as calls,
-      null::numeric as total_exec_time_ms,
-      null::numeric as mean_exec_time_ms,
-      null::text as query_text
-    from resolved r
-    cross join grand_total gt
-    order by r.cnt desc
-    limit p_limit;
-  end if;
 end;
 $$;
 
