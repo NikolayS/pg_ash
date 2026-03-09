@@ -40,7 +40,7 @@ jobs:
           # Configure pg_cron
           docker exec ${{ job.services.postgres.id }} bash -c "
             if [ -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control ]; then
-              echo "shared_preload_libraries = 'pg_cron,pg_stat_statements'" >> /var/lib/postgresql/data/postgresql.conf
+              echo \"shared_preload_libraries = 'pg_cron,pg_stat_statements'\" >> /var/lib/postgresql/data/postgresql.conf
               echo 'cron.database_name = postgres' >> /var/lib/postgresql/data/postgresql.conf
             fi
           " || true
