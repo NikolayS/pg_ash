@@ -293,7 +293,20 @@ jobs:
           DECLARE
             v_job_id bigint;
             v_schedule text;
+            v_has_pgcron boolean;
           BEGIN
+            -- Skip cron schedule tests if pg_cron not available (e.g., PG18)
+            SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_cron') INTO v_has_pgcron;
+            IF NOT v_has_pgcron THEN
+              -- Just verify start() works without pg_cron (no error)
+              PERFORM ash.start('1 second');
+              PERFORM ash.start('5 minutes');
+              PERFORM ash.start('2 hours');
+              PERFORM ash.stop();
+              RAISE NOTICE 'pg_cron not available — interval schedule tests skipped (pg_cron-optional path verified)';
+              RETURN;
+            END IF;
+
             PERFORM ash.stop();
 
             -- Test 1-59 seconds range
