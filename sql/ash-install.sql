@@ -679,25 +679,51 @@ declare
   v_schedule text;
   v_skip_nodename_update boolean := false;
 begin
-  -- Check if pg_cron is available
-  if not ash._pg_cron_available() then
+  -- Validate interval
+  v_seconds := extract(epoch from p_interval)::int;
+  if v_seconds < 1 then
     job_type := 'error';
     job_id := null;
-    status := 'pg_cron extension not installed';
+    status := format('interval must be at least 1 second, got %s', p_interval);
     return next;
     return;
   end if;
 
-  -- Check pg_cron version (need >= 1.5 for second granularity)
+  -- If pg_cron is not available, just record the interval and advise on external scheduling
+  if not ash._pg_cron_available() then
+    update ash.config set sample_interval = p_interval where singleton;
+
+    job_type := 'sampler';
+    job_id := null;
+    status := format('interval set to %s — schedule externally (pg_cron not available)', p_interval);
+    return next;
+
+    job_type := 'rotation';
+    job_id := null;
+    status := format('rotation_period is %s — schedule ash.rotate() externally', (select rotation_period from ash.config where singleton));
+    return next;
+
+    raise notice 'pg_cron is not installed. To sample, call ash.take_sample() from an external scheduler:';
+    raise notice '  system cron:    * * * * * psql -qAtX -c "select ash.take_sample()" (for per-second, use a loop)';
+    raise notice '  psql:           SELECT ash.take_sample() \watch 1';
+    raise notice '  any language:   execute "SELECT ash.take_sample()" in a loop with sleep';
+    raise notice 'Also schedule ash.rotate() at the rotation_period interval (default: daily).';
+
+    return;
+  end if;
+
+  -- Check pg_cron version (need >= 1.5 for sub-minute scheduling)
   select extversion into v_cron_version
   from pg_extension where extname = 'pg_cron';
 
   if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
-    job_type := 'error';
-    job_id := null;
-    status := format('pg_cron version %s too old, need >= 1.5', v_cron_version);
-    return next;
-    return;
+    if v_seconds < 60 then
+      job_type := 'error';
+      job_id := null;
+      status := format('pg_cron version %s too old for sub-minute scheduling (need >= 1.5). Use external scheduler or upgrade pg_cron.', v_cron_version);
+      return next;
+      return;
+    end if;
   end if;
 
   -- Detect whether we need to UPDATE cron.job.nodename after scheduling.
@@ -714,21 +740,13 @@ begin
 
   -- Convert interval to pg_cron schedule format
   -- pg_cron supports: '[1-59] seconds' for sub-minute, or cron syntax for minute+
-  v_seconds := extract(epoch from p_interval)::int;
-  if v_seconds < 1 then
-    job_type := 'error';
-    job_id := null;
-    status := format('interval must be at least 1 second, got %s', p_interval);
-    return next;
-    return;
-  end if;
-  
+
   -- Build schedule: seconds format for <60s, cron format for 60s+
   if v_seconds <= 59 then
     v_schedule := v_seconds || ' seconds';
   elsif v_seconds < 3600 then
     -- Convert to cron: every N minutes
-    if v_seconds % 60 != 0 then
+    if v_seconds % 60 <> 0 then
       job_type := 'error';
       job_id := null;
       status := format('interval must be exact minutes (60s, 120s, etc.), got %s', p_interval);
@@ -738,7 +756,7 @@ begin
     v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
   else
     -- Convert to cron: every N hours (limit to 23 hours max for step syntax)
-    if v_seconds % 3600 != 0 then
+    if v_seconds % 3600 <> 0 then
       job_type := 'error';
       job_id := null;
       status := format('interval must be exact hours (3600s, 7200s, etc., up to 23h), got %s', p_interval);
@@ -821,7 +839,7 @@ begin
     return next;
   end if;
 
-  -- Update sample_interval in config
+  -- Update sample_interval in config (after all validation and job creation)
   update ash.config set sample_interval = p_interval where singleton;
 
   -- Warn about pg_cron run history overhead.
@@ -849,11 +867,11 @@ as $$
 declare
   v_job_id bigint;
 begin
-  -- Check if pg_cron is available
+  -- If pg_cron is not available, just remind about external scheduler
   if not ash._pg_cron_available() then
     job_type := 'info';
     job_id := null;
-    status := 'pg_cron not installed, no jobs to remove';
+    status := 'pg_cron not installed — remember to stop your external scheduler (cron, systemd timer, loop script, etc.)';
     return next;
     return;
   end if;
@@ -1039,7 +1057,7 @@ begin
       return next;
     end loop;
   else
-    metric := 'pg_cron_available'; value := 'no'; return next;
+    metric := 'pg_cron_available'; value := 'no (use external scheduler)'; return next;
   end if;
 
   return;
