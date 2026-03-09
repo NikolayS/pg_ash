@@ -651,6 +651,7 @@ declare
   v_seconds int;
   v_hours int;
   v_schedule text;
+  v_skip_nodename_update boolean := false;
 begin
   -- Check if pg_cron is available
   if not ash._pg_cron_available() then
@@ -672,6 +673,18 @@ begin
     return next;
     return;
   end if;
+
+  -- Detect whether we need to UPDATE cron.job.nodename after scheduling.
+  -- Skip when cron.use_background_workers = on (nodename irrelevant)
+  -- or cron.host is already '' or a socket path (cron.schedule() inherits it).
+  begin
+    v_skip_nodename_update :=
+      coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
+      or coalesce(current_setting('cron.host', true), 'localhost') = ''
+      or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
+  exception when others then
+    v_skip_nodename_update := false;
+  end;
 
   -- Convert interval to pg_cron schedule format
   -- pg_cron supports: '[1-59] seconds' for sub-minute, or cron syntax for minute+
@@ -740,9 +753,13 @@ begin
     ) into v_sampler_job;
 
     -- Clear nodename so pg_cron uses Unix socket instead of TCP.
-    -- cron.schedule() defaults nodename to 'localhost' which forces TCP
-    -- and fails when pg_hba.conf only allows socket connections.
-    update cron.job set nodename = '' where jobid = v_sampler_job;
+    -- cron.schedule() sets nodename from cron.host GUC (default 'localhost'),
+    -- which forces TCP and fails when pg_hba.conf only allows sockets.
+    -- Skipped when cron.use_background_workers = on (no libpq connections)
+    -- or cron.host is already '' / a socket path (already correct).
+    if not v_skip_nodename_update then
+      update cron.job set nodename = '' where jobid = v_sampler_job;
+    end if;
 
     job_type := 'sampler';
     job_id := v_sampler_job;
@@ -768,7 +785,9 @@ begin
       'select ash.rotate()'
     ) into v_rotation_job;
 
-    update cron.job set nodename = '' where jobid = v_rotation_job;
+    if not v_skip_nodename_update then
+      update cron.job set nodename = '' where jobid = v_rotation_job;
+    end if;
 
     job_type := 'rotation';
     job_id := v_rotation_job;
@@ -2901,15 +2920,23 @@ $$;
 -- statement_timeout (observer-effect protection). New installs via ash.start()
 -- already use the updated command.
 do $$
+declare
+  v_job_id bigint;
 begin
-  if exists (select from cron.job where jobname = 'ash_sampler') then
-    update cron.job
-    set command = 'set statement_timeout = ''500ms''; select ash.take_sample()'
-    where jobname = 'ash_sampler'
-      and command <> 'set statement_timeout = ''500ms''; select ash.take_sample()';
+  select jobid into v_job_id
+  from cron.job
+  where jobname = 'ash_sampler'
+    and command <> 'set statement_timeout = ''500ms''; select ash.take_sample()';
+
+  if v_job_id is not null then
+    -- Use cron.alter_job() instead of direct UPDATE for managed-service compat.
+    perform cron.alter_job(
+      job_id  := v_job_id,
+      command := 'set statement_timeout = ''500ms''; select ash.take_sample()'
+    );
   end if;
 exception when others then
-  null; -- pg_cron not installed, skip
+  null; -- pg_cron not installed or alter_job unavailable, skip
 end $$;
 
 -------------------------------------------------------------------------------
