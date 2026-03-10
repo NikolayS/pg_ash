@@ -465,11 +465,11 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           -- Reset to known state
           update ash.config set current_slot = 0;
-          TRUNCATE ash.sample_0, ash.sample_1, ash.sample_2;
-          TRUNCATE ash.query_map_0, ash.query_map_1, ash.query_map_2;
-          alter table ash.query_map_0 alter COLUMN id RESTART;
-          alter table ash.query_map_1 alter COLUMN id RESTART;
-          alter table ash.query_map_2 alter COLUMN id RESTART;
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+          alter table ash.query_map_0 alter column id restart;
+          alter table ash.query_map_1 alter column id restart;
+          alter table ash.query_map_2 alter column id restart;
 
           -- Seed dictionaries
           insert into ash.wait_event_map (state, type, event) values
