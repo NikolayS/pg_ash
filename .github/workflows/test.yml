@@ -1406,13 +1406,13 @@ jobs:
             ASSERT v_count > 0, 'top_waits should work without pgss';
 
             SELECT count(*) INTO v_count FROM ash.top_queries('1 hour');
-            ASSERT v_count > 0, 'top_queries should work without pgss (query_text = NULL)';
+            ASSERT v_count > 0, 'top_queries should work without pgss (query_text = NULL, fires WARNING)';
 
             SELECT count(*) INTO v_count FROM ash.top_by_type('1 hour');
             ASSERT v_count > 0, 'top_by_type should work without pgss';
 
             SELECT count(*) INTO v_count FROM ash.samples('1 hour');
-            ASSERT v_count > 0, 'samples should work without pgss (query_text = NULL)';
+            ASSERT v_count > 0, 'samples should work without pgss (query_text = NULL, fires WARNING)';
 
             SELECT count(*) INTO v_count FROM ash.activity_summary('1 hour');
             ASSERT v_count > 0, 'activity_summary should work without pgss';
