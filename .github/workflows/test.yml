@@ -60,8 +60,8 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_cron;" || echo "pg_cron not available"
-          psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" || echo "pg_stat_statements not available"
+          psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available"
+          psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_stat_statements;" || echo "pg_stat_statements not available"
 
       - name: Install pg_ash (fresh install)
         env:
@@ -74,60 +74,60 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          BEGIN
+          do $$
+          begin
             -- Schema exists
-            ASSERT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'ash'),
+            assert exists (select from pg_namespace where nspname = 'ash'),
               'ash schema missing';
 
             -- Config table initialized with version
-            ASSERT (SELECT count(*) FROM ash.config) = 1,
+            assert (select count(*) from ash.config) = 1,
               'config not initialized';
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+            assert (select version from ash.config where singleton) = '1.3',
               'version should be 1.3 for fresh install';
 
             -- Core tables exist
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'wait_event_map'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'wait_event_map'),
               'wait_event_map missing';
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'sample'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'sample'),
               'sample missing';
 
             -- Partitioned query_map tables
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'query_map_0'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'query_map_0'),
               'query_map_0 missing';
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'query_map_1'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'query_map_1'),
               'query_map_1 missing';
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'query_map_2'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'query_map_2'),
               'query_map_2 missing';
 
             -- Sample partitions
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'sample_0'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'sample_0'),
               'sample_0 missing';
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'sample_1'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'sample_1'),
               'sample_1 missing';
-            ASSERT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'ash' AND tablename = 'sample_2'),
+            assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'sample_2'),
               'sample_2 missing';
 
             -- query_map_all view
-            ASSERT EXISTS (SELECT FROM pg_views WHERE schemaname = 'ash' AND viewname = 'query_map_all'),
+            assert exists (select from pg_views where schemaname = 'ash' and viewname = 'query_map_all'),
               'query_map_all view missing';
 
             -- Core functions exist
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'epoch' AND pronamespace = 'ash'::regnamespace),
+            assert exists (select from pg_proc where proname = 'epoch' and pronamespace = 'ash'::regnamespace),
               'epoch() missing';
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'current_slot' AND pronamespace = 'ash'::regnamespace),
+            assert exists (select from pg_proc where proname = 'current_slot' and pronamespace = 'ash'::regnamespace),
               'current_slot() missing';
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'take_sample' AND pronamespace = 'ash'::regnamespace),
+            assert exists (select from pg_proc where proname = 'take_sample' and pronamespace = 'ash'::regnamespace),
               'take_sample() missing';
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'rotate' AND pronamespace = 'ash'::regnamespace),
+            assert exists (select from pg_proc where proname = 'rotate' and pronamespace = 'ash'::regnamespace),
               'rotate() missing';
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'decode_sample' AND pronamespace = 'ash'::regnamespace),
+            assert exists (select from pg_proc where proname = 'decode_sample' and pronamespace = 'ash'::regnamespace),
               'decode_sample() missing';
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = '_wait_color' AND pronamespace = 'ash'::regnamespace),
+            assert exists (select from pg_proc where proname = '_wait_color' and pronamespace = 'ash'::regnamespace),
               '_wait_color() missing';
 
-            RAISE NOTICE 'Schema and infrastructure tests PASSED';
-          END;
+            raise notice 'Schema and infrastructure tests PASSED';
+          end;
           $$;
           EOF
 
@@ -137,60 +137,60 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           -- Test take_sample runs without error
-          SELECT ash.take_sample();
+          select ash.take_sample();
 
           -- Test _validate_data
-          DO $$
-          BEGIN
-            ASSERT ash._validate_data('{-1,2,5,6}'::integer[]) = true,
+          do $$
+          begin
+            assert ash._validate_data('{-1,2,5,6}'::integer[]) = true,
               'valid data rejected';
-            ASSERT ash._validate_data('{-1,3,5,6}'::integer[]) = false,
+            assert ash._validate_data('{-1,3,5,6}'::integer[]) = false,
               'invalid count not detected';
-            ASSERT ash._validate_data('{1,-1,2,5,6}'::integer[]) = false,
+            assert ash._validate_data('{1,-1,2,5,6}'::integer[]) = false,
               'positive first element not detected';
-            ASSERT ash._validate_data(null) = false,
+            assert ash._validate_data(null) = false,
               'null data not detected';
-            ASSERT ash._validate_data('{}'::integer[]) = false,
+            assert ash._validate_data('{}'::integer[]) = false,
               'empty array not detected';
 
-            RAISE NOTICE 'Validation tests PASSED';
-          END;
+            raise notice 'Validation tests PASSED';
+          end;
           $$;
 
           -- Test decode_sample round-trip
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_wait_id smallint;
             v_qid_id int4;
             v_result record;
             v_count int;
-          BEGIN
+          begin
             -- Insert test dictionary entries
-            INSERT INTO ash.wait_event_map (state, type, event)
-            VALUES ('active', 'CPU*', 'CPU*') ON CONFLICT DO NOTHING;
-            INSERT INTO ash.wait_event_map (state, type, event)
-            VALUES ('active', 'IO', 'DataFileRead') ON CONFLICT DO NOTHING;
+            insert into ash.wait_event_map (state, type, event)
+            values ('active', 'CPU*', 'CPU*') on conflict do nothing;
+            insert into ash.wait_event_map (state, type, event)
+            values ('active', 'IO', 'DataFileRead') on conflict do nothing;
 
-            SELECT id INTO v_wait_id FROM ash.wait_event_map
-            WHERE state = 'active' AND type = 'CPU*' AND event = 'CPU*';
+            select id into v_wait_id from ash.wait_event_map
+            where state = 'active' and type = 'CPU*' and event = 'CPU*';
 
-            INSERT INTO ash.query_map_0 (query_id) VALUES (12345) ON CONFLICT DO NOTHING;
-            SELECT id INTO v_qid_id FROM ash.query_map_0 WHERE query_id = 12345;
+            insert into ash.query_map_0 (query_id) values (12345) on conflict do nothing;
+            select id into v_qid_id from ash.query_map_0 where query_id = 12345;
 
             -- Decode: 2 backends on CPU*, with query_ids
-            SELECT count(*) INTO v_count
-            FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[]);
-            ASSERT v_count = 2, 'decode_sample wrong count: ' || v_count;
+            select count(*) into v_count
+            from ash.decode_sample(array[-v_wait_id, 2, v_qid_id, 0]::integer[]);
+            assert v_count = 2, 'decode_sample wrong count: ' || v_count;
 
             -- Verify decoded fields: 2 backends = 2 rows
-            SELECT * INTO v_result
-            FROM ash.decode_sample(ARRAY[-v_wait_id, 2, v_qid_id, 0]::integer[], 0::smallint)
-            LIMIT 1;
-            ASSERT v_result.wait_event = 'CPU*', 'wrong wait_event: ' || v_result.wait_event;
-            ASSERT v_result.query_id = 12345, 'wrong query_id: ' || v_result.query_id;
+            select * into v_result
+            from ash.decode_sample(array[-v_wait_id, 2, v_qid_id, 0]::integer[], 0::smallint)
+            limit 1;
+            assert v_result.wait_event = 'CPU*', 'wrong wait_event: ' || v_result.wait_event;
+            assert v_result.query_id = 12345, 'wrong query_id: ' || v_result.query_id;
 
-            RAISE NOTICE 'Decoder tests PASSED';
-          END;
+            raise notice 'Decoder tests PASSED';
+          end;
           $$;
           EOF
 
@@ -199,72 +199,72 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_slot_before smallint;
             v_slot_after smallint;
             v_target_slot smallint;
             v_count int;
             v_next_id int;
-          BEGIN
-            SELECT current_slot INTO v_slot_before FROM ash.config;
+          begin
+            select current_slot into v_slot_before from ash.config;
 
             -- Insert data into current partition
-            INSERT INTO ash.sample (sample_ts, datid, active_count, data)
-            VALUES (1000, 1, 2, '{-1,2,1,1}');
+            insert into ash.sample (sample_ts, datid, active_count, data)
+            values (1000, 1, 2, '{-1,2,1,1}');
 
             -- new_slot = (old + 1) % 3, truncate_slot = (new_slot + 1) % 3
             v_target_slot := ((v_slot_before + 1) % 3)::smallint;
-            DECLARE
+            declare
               v_truncate_slot smallint := ((v_target_slot + 1) % 3)::smallint;
-            BEGIN
+            begin
               -- Seed the partition that will be TRUNCATED
-              EXECUTE format(
-                'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (999, 1, 1, ''{-1,1,1}'', %s)',
+              execute format(
+                'insert into ash.sample_%s (sample_ts, datid, active_count, data, slot) values (999, 1, 1, ''{-1,1,1}'', %s)',
                 v_truncate_slot, v_truncate_slot
               );
-              EXECUTE format(
-                'INSERT INTO ash.query_map_%s (query_id) VALUES (99999)',
+              execute format(
+                'insert into ash.query_map_%s (query_id) values (99999)',
                 v_truncate_slot
               );
 
               -- Verify data exists before rotation
-              EXECUTE format('SELECT count(*) FROM ash.sample_%s', v_truncate_slot)
-              INTO v_count;
-              ASSERT v_count > 0,
+              execute format('select count(*) from ash.sample_%s', v_truncate_slot)
+              into v_count;
+              assert v_count > 0,
                 'sample_' || v_truncate_slot || ' should have data before rotation';
 
               -- Force rotation
-              UPDATE ash.config SET rotated_at = now() - interval '2 days';
-              PERFORM ash.rotate();
+              update ash.config set rotated_at = now() - interval '2 days';
+              perform ash.rotate();
 
-              SELECT current_slot INTO v_slot_after FROM ash.config;
-              ASSERT v_slot_after = v_target_slot,
+              select current_slot into v_slot_after from ash.config;
+              assert v_slot_after = v_target_slot,
                 'slot should advance to ' || v_target_slot || ', got ' || v_slot_after;
 
               -- Verify TRUNCATION: truncated sample partition should be empty
-              EXECUTE format('SELECT count(*) FROM ash.sample_%s', v_truncate_slot)
-              INTO v_count;
-              ASSERT v_count = 0,
+              execute format('select count(*) from ash.sample_%s', v_truncate_slot)
+              into v_count;
+              assert v_count = 0,
                 'sample_' || v_truncate_slot || ' should be empty after rotation, has ' || v_count || ' rows';
 
               -- Verify TRUNCATION: truncated query_map partition should be empty
-              EXECUTE format('SELECT count(*) FROM ash.query_map_%s', v_truncate_slot)
-              INTO v_count;
-              ASSERT v_count = 0,
+              execute format('select count(*) from ash.query_map_%s', v_truncate_slot)
+              into v_count;
+              assert v_count = 0,
                 'query_map_' || v_truncate_slot || ' should be empty after rotation, has ' || v_count || ' rows';
 
               -- Verify identity sequence was reset: next insert should get a low id
-              EXECUTE format(
-                'INSERT INTO ash.query_map_%s (query_id) VALUES (88888) RETURNING id',
+              execute format(
+                'insert into ash.query_map_%s (query_id) values (88888) returning id',
                 v_truncate_slot
-              ) INTO v_next_id;
-              ASSERT v_next_id = 1,
+              ) into v_next_id;
+              assert v_next_id = 1,
                 'query_map_' || v_truncate_slot || ' identity should restart at 1, got ' || v_next_id;
-            END;
+            end;
 
-            RAISE NOTICE 'Rotation tests PASSED (truncation + sequence reset verified)';
-          END;
+            raise notice 'Rotation tests PASSED (truncation + sequence reset verified)';
+          end;
           $$;
           EOF
 
@@ -273,16 +273,16 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          SELECT * FROM ash.start();
-          SELECT * FROM ash.stop();
+          select * from ash.start();
+          select * from ash.stop();
 
-          DO $$
-          BEGIN
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'start' AND pronamespace = 'ash'::regnamespace);
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'stop' AND pronamespace = 'ash'::regnamespace);
-            ASSERT EXISTS (SELECT FROM pg_proc WHERE proname = 'uninstall' AND pronamespace = 'ash'::regnamespace);
-            RAISE NOTICE 'Start/stop tests PASSED';
-          END;
+          do $$
+          begin
+            assert exists (select from pg_proc where proname = 'start' and pronamespace = 'ash'::regnamespace);
+            assert exists (select from pg_proc where proname = 'stop' and pronamespace = 'ash'::regnamespace);
+            assert exists (select from pg_proc where proname = 'uninstall' and pronamespace = 'ash'::regnamespace);
+            raise notice 'Start/stop tests PASSED';
+          end;
           $$;
           EOF
 
@@ -291,34 +291,34 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_result bool;
-          BEGIN
+          begin
             -- Check initial state (should be false)
-            SELECT debug_logging INTO v_result FROM ash.config WHERE singleton;
-            ASSERT v_result = false, 'debug_logging should default to false';
+            select debug_logging into v_result from ash.config where singleton;
+            assert v_result = false, 'debug_logging should default to false';
 
             -- Query current state via function
-            PERFORM ash.debug_logging();
+            perform ash.debug_logging();
 
             -- Enable
-            PERFORM ash.debug_logging(true);
-            SELECT debug_logging INTO v_result FROM ash.config WHERE singleton;
-            ASSERT v_result = true, 'debug_logging should be true after enable';
+            perform ash.debug_logging(true);
+            select debug_logging into v_result from ash.config where singleton;
+            assert v_result = true, 'debug_logging should be true after enable';
 
             -- Disable
-            PERFORM ash.debug_logging(false);
-            SELECT debug_logging INTO v_result FROM ash.config WHERE singleton;
-            ASSERT v_result = false, 'debug_logging should be false after disable';
+            perform ash.debug_logging(false);
+            select debug_logging into v_result from ash.config where singleton;
+            assert v_result = false, 'debug_logging should be false after disable';
 
             -- Status should show debug_logging
-            ASSERT EXISTS (
-              SELECT 1 FROM ash.status() WHERE metric = 'debug_logging'
+            assert exists (
+              select 1 from ash.status() where metric = 'debug_logging'
             ), 'status should show debug_logging metric';
 
-            RAISE NOTICE 'debug_logging tests PASSED';
-          END;
+            raise notice 'debug_logging tests PASSED';
+          end;
           $$;
           EOF
 
@@ -327,134 +327,134 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_job_id bigint;
             v_schedule text;
             v_has_pgcron boolean;
-          BEGIN
+          begin
             -- Skip cron schedule tests if pg_cron not available (e.g., PG18)
-            SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_cron') INTO v_has_pgcron;
-            IF NOT v_has_pgcron THEN
+            select exists (select from pg_extension where extname = 'pg_cron') into v_has_pgcron;
+            if not v_has_pgcron then
               -- Just verify start() works without pg_cron (no error)
-              PERFORM ash.start('1 second');
-              PERFORM ash.start('5 minutes');
-              PERFORM ash.start('2 hours');
-              PERFORM ash.stop();
-              RAISE NOTICE 'pg_cron not available — interval schedule tests skipped (pg_cron-optional path verified)';
-              RETURN;
-            END IF;
+              perform ash.start('1 second');
+              perform ash.start('5 minutes');
+              perform ash.start('2 hours');
+              perform ash.stop();
+              raise notice 'pg_cron not available — interval schedule tests skipped (pg_cron-optional path verified)';
+              return;
+            end if;
 
-            PERFORM ash.stop();
+            perform ash.stop();
 
             -- Test 1-59 seconds range
-            SELECT job_id INTO v_job_id
-            FROM ash.start('1 second')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '1 second should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '1 seconds', '1 second should be 1 seconds, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('1 second')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '1 second should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '1 seconds', '1 second should be 1 seconds, got: ' || v_schedule;
+            perform ash.stop();
 
-            SELECT job_id INTO v_job_id
-            FROM ash.start('59 seconds')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '59 seconds should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '59 seconds', '59 seconds should be 59 seconds, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('59 seconds')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '59 seconds should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '59 seconds', '59 seconds should be 59 seconds, got: ' || v_schedule;
+            perform ash.stop();
 
             -- Test boundary: 60 seconds = 1 minute (cron format)
-            SELECT job_id INTO v_job_id
-            FROM ash.start('60 seconds')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '60 seconds should work as 1 minute';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/1 * * * *', '60 seconds should be */1 * * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('60 seconds')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '60 seconds should work as 1 minute';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '*/1 * * * *', '60 seconds should be */1 * * * *, got: ' || v_schedule;
+            perform ash.stop();
 
             -- Test 1-59 minutes range
-            SELECT job_id INTO v_job_id
-            FROM ash.start('1 minute')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '1 minute should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/1 * * * *', '1 minute should be */1 * * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('1 minute')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '1 minute should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '*/1 * * * *', '1 minute should be */1 * * * *, got: ' || v_schedule;
+            perform ash.stop();
 
-            SELECT job_id INTO v_job_id
-            FROM ash.start('5 minutes')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '5 minutes should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/5 * * * *', '5 minutes should be */5 * * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('5 minutes')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '5 minutes should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '*/5 * * * *', '5 minutes should be */5 * * * *, got: ' || v_schedule;
+            perform ash.stop();
 
-            SELECT job_id INTO v_job_id
-            FROM ash.start('59 minutes')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '59 minutes should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '*/59 * * * *', '59 minutes should be */59 * * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('59 minutes')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '59 minutes should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '*/59 * * * *', '59 minutes should be */59 * * * *, got: ' || v_schedule;
+            perform ash.stop();
 
             -- Test boundary: 60 minutes = 1 hour (cron format)
-            SELECT job_id INTO v_job_id
-            FROM ash.start('60 minutes')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '60 minutes should work as 1 hour';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '0 * * * *', '60 minutes should be 0 * * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('60 minutes')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '60 minutes should work as 1 hour';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '0 * * * *', '60 minutes should be 0 * * * *, got: ' || v_schedule;
+            perform ash.stop();
 
             -- Test 1+ hours range
-            SELECT job_id INTO v_job_id
-            FROM ash.start('1 hour')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '1 hour should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '0 * * * *', '1 hour should be 0 * * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('1 hour')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '1 hour should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '0 * * * *', '1 hour should be 0 * * * *, got: ' || v_schedule;
+            perform ash.stop();
 
-            SELECT job_id INTO v_job_id
-            FROM ash.start('2 hours')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '2 hours should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '0 */2 * * *', '2 hours should be 0 */2 * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('2 hours')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '2 hours should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '0 */2 * * *', '2 hours should be 0 */2 * * *, got: ' || v_schedule;
+            perform ash.stop();
 
             -- Test 23 hours (maximum allowed)
-            SELECT job_id INTO v_job_id
-            FROM ash.start('23 hours')
-            WHERE job_type = 'sampler';
-            ASSERT v_job_id IS NOT NULL, '23 hours should work';
-            SELECT schedule INTO v_schedule FROM cron.job WHERE jobid = v_job_id;
-            ASSERT v_schedule = '0 */23 * * *', '23 hours should be 0 */23 * * *, got: ' || v_schedule;
-            PERFORM ash.stop();
+            select job_id into v_job_id
+            from ash.start('23 hours')
+            where job_type = 'sampler';
+            assert v_job_id is not null, '23 hours should work';
+            select schedule into v_schedule from cron.job where jobid = v_job_id;
+            assert v_schedule = '0 */23 * * *', '23 hours should be 0 */23 * * *, got: ' || v_schedule;
+            perform ash.stop();
 
             -- Test 24 hours should ERROR (exceeds 23h limit)
-            DECLARE
+            declare
               v_error_msg text;
-            BEGIN
-              SELECT status INTO v_error_msg
-              FROM ash.start('24 hours')
-              WHERE job_type = 'error';
-              ASSERT v_error_msg LIKE '%23 hours%', '24 hours should error with 23 hours limit, got: ' || v_error_msg;
-            END;
+            begin
+              select status into v_error_msg
+              from ash.start('24 hours')
+              where job_type = 'error';
+              assert v_error_msg like '%23 hours%', '24 hours should error with 23 hours limit, got: ' || v_error_msg;
+            end;
 
             -- Test error case: non-round interval
-            DECLARE
+            declare
               v_error_msg text;
-            BEGIN
-              SELECT status INTO v_error_msg
-              FROM ash.start('90 seconds')
-              WHERE job_type = 'error';
-              ASSERT v_error_msg LIKE '%exact minutes%', '90 seconds should error, got: ' || v_error_msg;
-            END;
+            begin
+              select status into v_error_msg
+              from ash.start('90 seconds')
+              where job_type = 'error';
+              assert v_error_msg like '%exact minutes%', '90 seconds should error, got: ' || v_error_msg;
+            end;
 
-            RAISE NOTICE 'All interval format tests PASSED';
-          END;
+            raise notice 'All interval format tests PASSED';
+          end;
           $$;
           EOF
 
@@ -464,15 +464,15 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           -- Reset to known state
-          UPDATE ash.config SET current_slot = 0;
-          TRUNCATE ash.sample_0, ash.sample_1, ash.sample_2;
-          TRUNCATE ash.query_map_0, ash.query_map_1, ash.query_map_2;
-          ALTER TABLE ash.query_map_0 ALTER COLUMN id RESTART;
-          ALTER TABLE ash.query_map_1 ALTER COLUMN id RESTART;
-          ALTER TABLE ash.query_map_2 ALTER COLUMN id RESTART;
+          update ash.config set current_slot = 0;
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+          alter table ash.query_map_0 alter column id restart;
+          alter table ash.query_map_1 alter column id restart;
+          alter table ash.query_map_2 alter column id restart;
 
           -- Seed dictionaries
-          INSERT INTO ash.wait_event_map (state, type, event) VALUES
+          insert into ash.wait_event_map (state, type, event) values
             ('active', 'CPU*', 'CPU*'),
             ('active', 'IO', 'DataFileRead'),
             ('active', 'Lock', 'tuple'),
@@ -480,15 +480,15 @@ jobs:
             ('active', 'Client', 'ClientRead'),
             ('active', 'Extension', 'DblinkGetResult'),
             ('idle in transaction', 'IdleTx', 'IdleTx')
-          ON CONFLICT DO NOTHING;
+          on conflict do nothing;
 
-          INSERT INTO ash.query_map_0 (query_id) VALUES (111111), (222222), (333333)
-          ON CONFLICT DO NOTHING;
+          insert into ash.query_map_0 (query_id) values (111111), (222222), (333333)
+          on conflict do nothing;
 
           -- Seed realistic sample data across multiple timestamps
           -- Now - 30min, 20min, 10min, 5min, 1min — each with multiple wait events
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_cpu_id smallint;
             v_io_id smallint;
             v_lock_id smallint;
@@ -500,44 +500,44 @@ jobs:
             v_q3 int4;
             v_now_ts int4;
             v_ts int4;
-          BEGIN
-            SELECT id INTO v_cpu_id FROM ash.wait_event_map WHERE type = 'CPU*' AND event = 'CPU*';
-            SELECT id INTO v_io_id FROM ash.wait_event_map WHERE type = 'IO' AND event = 'DataFileRead';
-            SELECT id INTO v_lock_id FROM ash.wait_event_map WHERE type = 'Lock' AND event = 'tuple';
-            SELECT id INTO v_lwlock_id FROM ash.wait_event_map WHERE type = 'LWLock' AND event = 'WALWrite';
-            SELECT id INTO v_client_id FROM ash.wait_event_map WHERE type = 'Client' AND event = 'ClientRead';
-            SELECT id INTO v_ext_id FROM ash.wait_event_map WHERE type = 'Extension' AND event = 'DblinkGetResult';
+          begin
+            select id into v_cpu_id from ash.wait_event_map where type = 'CPU*' and event = 'CPU*';
+            select id into v_io_id from ash.wait_event_map where type = 'IO' and event = 'DataFileRead';
+            select id into v_lock_id from ash.wait_event_map where type = 'Lock' and event = 'tuple';
+            select id into v_lwlock_id from ash.wait_event_map where type = 'LWLock' and event = 'WALWrite';
+            select id into v_client_id from ash.wait_event_map where type = 'Client' and event = 'ClientRead';
+            select id into v_ext_id from ash.wait_event_map where type = 'Extension' and event = 'DblinkGetResult';
 
-            SELECT id INTO v_q1 FROM ash.query_map_0 WHERE query_id = 111111;
-            SELECT id INTO v_q2 FROM ash.query_map_0 WHERE query_id = 222222;
-            SELECT id INTO v_q3 FROM ash.query_map_0 WHERE query_id = 333333;
+            select id into v_q1 from ash.query_map_0 where query_id = 111111;
+            select id into v_q2 from ash.query_map_0 where query_id = 222222;
+            select id into v_q3 from ash.query_map_0 where query_id = 333333;
 
-            v_now_ts := extract(epoch FROM now() - ash.epoch())::int4;
+            v_now_ts := extract(epoch from now() - ash.epoch())::int4;
 
             -- Generate 60 samples across 30 minutes (every 30 seconds)
-            FOR v_ts IN
-              SELECT generate_series(v_now_ts - 1800, v_now_ts - 30, 30)
-            LOOP
+            for v_ts in
+              select generate_series(v_now_ts - 1800, v_now_ts - 30, 30)
+            loop
               -- Mix of CPU, IO, Lock — varies by position in timeline
               -- First half: mostly CPU + IO
-              IF v_ts < v_now_ts - 900 THEN
-                INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
-                VALUES (v_ts, 1, 5,
-                  ARRAY[-v_cpu_id, 3, v_q1, v_q2, v_q3,
+              if v_ts < v_now_ts - 900 then
+                insert into ash.sample (sample_ts, datid, active_count, data, slot)
+                values (v_ts, 1, 5,
+                  array[-v_cpu_id, 3, v_q1, v_q2, v_q3,
                         -v_io_id, 2, v_q1, v_q2]::integer[], 0);
               -- Second half: add Lock spike
-              ELSE
-                INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
-                VALUES (v_ts, 1, 8,
-                  ARRAY[-v_cpu_id, 2, v_q1, v_q2,
+              else
+                insert into ash.sample (sample_ts, datid, active_count, data, slot)
+                values (v_ts, 1, 8,
+                  array[-v_cpu_id, 2, v_q1, v_q2,
                         -v_lock_id, 4, v_q1, v_q1, v_q2, v_q3,
                         -v_io_id, 1, v_q3,
                         -v_client_id, 1, v_q2]::integer[], 0);
-              END IF;
-            END LOOP;
+              end if;
+            end loop;
 
-            RAISE NOTICE 'Seeded 60 test samples across 30 minutes';
-          END;
+            raise notice 'Seeded 60 test samples across 30 minutes';
+          end;
           $$;
           EOF
 
@@ -546,49 +546,49 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
             v_rec record;
-          BEGIN
+          begin
             -- top_waits: should return rows with bar column
-            SELECT count(*) INTO v_count FROM ash.top_waits('1 hour');
-            ASSERT v_count > 0, 'top_waits returned 0 rows';
+            select count(*) into v_count from ash.top_waits('1 hour');
+            assert v_count > 0, 'top_waits returned 0 rows';
 
             -- Verify bar column exists in top_waits
-            SELECT * INTO v_rec FROM ash.top_waits('1 hour') LIMIT 1;
-            ASSERT v_rec.bar IS NOT NULL, 'top_waits bar column is null';
+            select * into v_rec from ash.top_waits('1 hour') limit 1;
+            assert v_rec.bar is not null, 'top_waits bar column is null';
 
             -- top_queries: should find our seeded queries
-            SELECT count(*) INTO v_count FROM ash.top_queries('1 hour');
-            ASSERT v_count > 0, 'top_queries returned 0 rows';
+            select count(*) into v_count from ash.top_queries('1 hour');
+            assert v_count > 0, 'top_queries returned 0 rows';
 
             -- top_by_type: should have CPU* and IO at minimum
-            SELECT count(*) INTO v_count FROM ash.top_by_type('1 hour');
-            ASSERT v_count >= 2, 'top_by_type returned fewer than 2 types';
+            select count(*) into v_count from ash.top_by_type('1 hour');
+            assert v_count >= 2, 'top_by_type returned fewer than 2 types';
 
             -- wait_timeline
-            SELECT count(*) INTO v_count FROM ash.wait_timeline('1 hour', '5 minutes');
-            ASSERT v_count > 0, 'wait_timeline returned 0 rows';
+            select count(*) into v_count from ash.wait_timeline('1 hour', '5 minutes');
+            assert v_count > 0, 'wait_timeline returned 0 rows';
 
             -- samples_by_database
-            SELECT count(*) INTO v_count FROM ash.samples_by_database('1 hour');
-            ASSERT v_count > 0, 'samples_by_database returned 0 rows';
+            select count(*) into v_count from ash.samples_by_database('1 hour');
+            assert v_count > 0, 'samples_by_database returned 0 rows';
 
             -- samples: decoded raw data
-            SELECT count(*) INTO v_count FROM ash.samples('1 hour', 20);
-            ASSERT v_count > 0, 'samples returned 0 rows';
+            select count(*) into v_count from ash.samples('1 hour', 20);
+            assert v_count > 0, 'samples returned 0 rows';
 
             -- activity_summary
-            SELECT count(*) INTO v_count FROM ash.activity_summary('1 hour');
-            ASSERT v_count > 0, 'activity_summary returned 0 rows';
+            select count(*) into v_count from ash.activity_summary('1 hour');
+            assert v_count > 0, 'activity_summary returned 0 rows';
 
             -- status
-            SELECT count(*) INTO v_count FROM ash.status();
-            ASSERT v_count > 0, 'status returned 0 rows';
+            select count(*) into v_count from ash.status();
+            assert v_count > 0, 'status returned 0 rows';
 
-            RAISE NOTICE 'Relative-time reader tests PASSED';
-          END;
+            raise notice 'Relative-time reader tests PASSED';
+          end;
           $$;
           EOF
 
@@ -597,29 +597,29 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
             v_start timestamptz := now() - interval '1 hour';
             v_end timestamptz := now();
-          BEGIN
-            SELECT count(*) INTO v_count FROM ash.top_waits_at(v_start, v_end);
-            ASSERT v_count > 0, 'top_waits_at returned 0 rows';
+          begin
+            select count(*) into v_count from ash.top_waits_at(v_start, v_end);
+            assert v_count > 0, 'top_waits_at returned 0 rows';
 
-            SELECT count(*) INTO v_count FROM ash.top_queries_at(v_start, v_end);
-            ASSERT v_count > 0, 'top_queries_at returned 0 rows';
+            select count(*) into v_count from ash.top_queries_at(v_start, v_end);
+            assert v_count > 0, 'top_queries_at returned 0 rows';
 
-            SELECT count(*) INTO v_count FROM ash.top_by_type_at(v_start, v_end);
-            ASSERT v_count >= 2, 'top_by_type_at returned fewer than 2 types';
+            select count(*) into v_count from ash.top_by_type_at(v_start, v_end);
+            assert v_count >= 2, 'top_by_type_at returned fewer than 2 types';
 
-            SELECT count(*) INTO v_count FROM ash.wait_timeline_at(v_start, v_end, '5 minutes');
-            ASSERT v_count > 0, 'wait_timeline_at returned 0 rows';
+            select count(*) into v_count from ash.wait_timeline_at(v_start, v_end, '5 minutes');
+            assert v_count > 0, 'wait_timeline_at returned 0 rows';
 
-            SELECT count(*) INTO v_count FROM ash.samples_at(v_start, v_end, 20);
-            ASSERT v_count > 0, 'samples_at returned 0 rows';
+            select count(*) into v_count from ash.samples_at(v_start, v_end, 20);
+            assert v_count > 0, 'samples_at returned 0 rows';
 
-            RAISE NOTICE 'Absolute-time reader tests PASSED';
-          END;
+            raise notice 'Absolute-time reader tests PASSED';
+          end;
           $$;
           EOF
 
@@ -628,34 +628,34 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
             v_start timestamptz := now() - interval '1 hour';
             v_end timestamptz := now();
-          BEGIN
+          begin
             -- query_waits for a known query
-            SELECT count(*) INTO v_count FROM ash.query_waits(111111, '1 hour');
-            ASSERT v_count > 0, 'query_waits returned 0 rows for query 111111';
+            select count(*) into v_count from ash.query_waits(111111, '1 hour');
+            assert v_count > 0, 'query_waits returned 0 rows for query 111111';
 
             -- query_waits_at
-            SELECT count(*) INTO v_count FROM ash.query_waits_at(111111, v_start, v_end);
-            ASSERT v_count > 0, 'query_waits_at returned 0 rows';
+            select count(*) into v_count from ash.query_waits_at(111111, v_start, v_end);
+            assert v_count > 0, 'query_waits_at returned 0 rows';
 
             -- top_queries_with_text (requires pg_stat_statements — errors without it)
-            SELECT count(*) INTO v_count FROM ash.top_queries_with_text('1 hour');
-            ASSERT v_count >= 0, 'top_queries_with_text should work with pgss installed';
+            select count(*) into v_count from ash.top_queries_with_text('1 hour');
+            assert v_count >= 0, 'top_queries_with_text should work with pgss installed';
 
             -- event_queries (requires pg_stat_statements)
-            SELECT count(*) INTO v_count FROM ash.event_queries('CPU*', '1 hour');
-            ASSERT v_count >= 0, 'event_queries should work with pgss installed';
+            select count(*) into v_count from ash.event_queries('CPU*', '1 hour');
+            assert v_count >= 0, 'event_queries should work with pgss installed';
 
             -- event_queries_at (requires pg_stat_statements)
-            SELECT count(*) INTO v_count FROM ash.event_queries_at('CPU*', v_start, v_end);
-            ASSERT v_count >= 0, 'event_queries_at should work with pgss installed';
+            select count(*) into v_count from ash.event_queries_at('CPU*', v_start, v_end);
+            assert v_count >= 0, 'event_queries_at should work with pgss installed';
 
-            RAISE NOTICE 'Query-specific function tests PASSED';
-          END;
+            raise notice 'Query-specific function tests PASSED';
+          end;
           $$;
           EOF
 
@@ -664,44 +664,44 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
             v_rec record;
             v_start timestamptz := now() - interval '1 hour';
             v_end timestamptz := now();
-          BEGIN
+          begin
             -- timeline_chart: relative time
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            ASSERT v_count > 1, 'timeline_chart returned too few rows: ' || v_count;
+            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            assert v_count > 1, 'timeline_chart returned too few rows: ' || v_count;
 
             -- First row should be legend (null bucket_start)
-            SELECT * INTO v_rec FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40) LIMIT 1;
-            ASSERT v_rec.bucket_start IS NULL, 'first row should be legend (null bucket_start)';
-            ASSERT v_rec.chart IS NOT NULL AND v_rec.chart <> '', 'legend chart is empty';
+            select * into v_rec from ash.timeline_chart('1 hour', '5 minutes', 3, 40) limit 1;
+            assert v_rec.bucket_start is null, 'first row should be legend (null bucket_start)';
+            assert v_rec.chart is not null and v_rec.chart <> '', 'legend chart is empty';
 
             -- Data rows should have bucket_start and chart; find one with samples
-            SELECT * INTO v_rec FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40)
-            WHERE bucket_start IS NOT NULL AND active > 0 LIMIT 1;
-            ASSERT v_rec.bucket_start IS NOT NULL, 'no data row with active > 0';
-            ASSERT v_rec.chart IS NOT NULL, 'data row has null chart';
+            select * into v_rec from ash.timeline_chart('1 hour', '5 minutes', 3, 40)
+            where bucket_start is not null and active > 0 limit 1;
+            assert v_rec.bucket_start is not null, 'no data row with active > 0';
+            assert v_rec.chart is not null, 'data row has null chart';
 
             -- timeline_chart_at: absolute time
-            SELECT count(*) INTO v_count FROM ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40);
-            ASSERT v_count > 1, 'timeline_chart_at returned too few rows: ' || v_count;
+            select count(*) into v_count from ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40);
+            assert v_count > 1, 'timeline_chart_at returned too few rows: ' || v_count;
 
             -- First row should be legend
-            SELECT * INTO v_rec FROM ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40) LIMIT 1;
-            ASSERT v_rec.bucket_start IS NULL, 'at: first row should be legend';
-            ASSERT v_rec.chart IS NOT NULL AND v_rec.chart <> '', 'at: legend chart is empty';
+            select * into v_rec from ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40) limit 1;
+            assert v_rec.bucket_start is null, 'at: first row should be legend';
+            assert v_rec.chart is not null and v_rec.chart <> '', 'at: legend chart is empty';
 
             -- detail column should exist and have values on rows with samples
-            SELECT * INTO v_rec FROM ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40)
-            WHERE bucket_start IS NOT NULL AND active > 0 LIMIT 1;
-            ASSERT v_rec.detail IS NOT NULL, 'detail column is null on data row';
+            select * into v_rec from ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40)
+            where bucket_start is not null and active > 0 limit 1;
+            assert v_rec.detail is not null, 'detail column is null on data row';
 
-            RAISE NOTICE 'Timeline chart tests PASSED';
-          END;
+            raise notice 'Timeline chart tests PASSED';
+          end;
           $$;
           EOF
 
@@ -710,8 +710,8 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_green text := E'\033[38;2;080;250;123m';
             v_light_yellow text := E'\033[38;2;241;250;140m';
             v_blue text := E'\033[38;2;030;100;255m';
@@ -724,27 +724,27 @@ jobs:
             v_purple text := E'\033[38;2;150;100;255m';
             v_light_purple text := E'\033[38;2;190;150;255m';
             v_gray text := E'\033[38;2;180;180;180m';
-          BEGIN
-            ASSERT ash._wait_color('CPU*', true) = v_green, 'CPU* should be green';
-            ASSERT ash._wait_color('IdleTx', true) = v_light_yellow, 'IdleTx should be light yellow';
-            ASSERT ash._wait_color('IO:DataFileRead', true) = v_blue, 'IO should be blue';
-            ASSERT ash._wait_color('IO:WALWrite', true) = v_blue, 'IO:WALWrite should be blue';
-            ASSERT ash._wait_color('Lock:tuple', true) = v_red, 'Lock should be red';
-            ASSERT ash._wait_color('Lock:transactionid', true) = v_red, 'Lock:transactionid should be red';
-            ASSERT ash._wait_color('LWLock:WALWrite', true) = v_pink, 'LWLock should be pink';
-            ASSERT ash._wait_color('IPC:BgWorkerStartup', true) = v_cyan, 'IPC should be cyan';
-            ASSERT ash._wait_color('Client:ClientRead', true) = v_yellow, 'Client should be yellow';
-            ASSERT ash._wait_color('Timeout:PgSleep', true) = v_orange, 'Timeout should be orange';
-            ASSERT ash._wait_color('BufferPin:BufferPin', true) = v_teal, 'BufferPin should be teal';
-            ASSERT ash._wait_color('Activity:ArchiverMain', true) = v_purple, 'Activity should be purple';
-            ASSERT ash._wait_color('Extension:DblinkGetResult', true) = v_light_purple, 'Extension should be light purple';
-            ASSERT ash._wait_color('UnknownType:Whatever', true) = v_gray, 'unknown should be gray';
+          begin
+            assert ash._wait_color('CPU*', true) = v_green, 'CPU* should be green';
+            assert ash._wait_color('IdleTx', true) = v_light_yellow, 'IdleTx should be light yellow';
+            assert ash._wait_color('IO:DataFileRead', true) = v_blue, 'IO should be blue';
+            assert ash._wait_color('IO:WALWrite', true) = v_blue, 'IO:WALWrite should be blue';
+            assert ash._wait_color('Lock:tuple', true) = v_red, 'Lock should be red';
+            assert ash._wait_color('Lock:transactionid', true) = v_red, 'Lock:transactionid should be red';
+            assert ash._wait_color('LWLock:WALWrite', true) = v_pink, 'LWLock should be pink';
+            assert ash._wait_color('IPC:BgWorkerStartup', true) = v_cyan, 'IPC should be cyan';
+            assert ash._wait_color('Client:ClientRead', true) = v_yellow, 'Client should be yellow';
+            assert ash._wait_color('Timeout:PgSleep', true) = v_orange, 'Timeout should be orange';
+            assert ash._wait_color('BufferPin:BufferPin', true) = v_teal, 'BufferPin should be teal';
+            assert ash._wait_color('Activity:ArchiverMain', true) = v_purple, 'Activity should be purple';
+            assert ash._wait_color('Extension:DblinkGetResult', true) = v_light_purple, 'Extension should be light purple';
+            assert ash._wait_color('UnknownType:Whatever', true) = v_gray, 'unknown should be gray';
             -- color=false returns empty string
-            ASSERT ash._wait_color('CPU*', false) = '', 'color=false should return empty';
-            ASSERT ash._wait_color('CPU*') = '', 'default color should be off';
+            assert ash._wait_color('CPU*', false) = '', 'color=false should return empty';
+            assert ash._wait_color('CPU*') = '', 'default color should be off';
 
-            RAISE NOTICE '_wait_color tests PASSED';
-          END;
+            raise notice '_wait_color tests PASSED';
+          end;
           $$;
           EOF
 
@@ -753,32 +753,32 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
-          BEGIN
+          begin
             -- top=1 (only top event + Other)
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('1 hour', '5 minutes', 1, 30);
-            ASSERT v_count > 1, 'top=1 should still return rows';
+            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 1, 30);
+            assert v_count > 1, 'top=1 should still return rows';
 
             -- top=5
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('1 hour', '5 minutes', 5, 60);
-            ASSERT v_count > 1, 'top=5 should still return rows';
+            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 5, 60);
+            assert v_count > 1, 'top=5 should still return rows';
 
             -- Small bucket (1 minute)
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('30 minutes', '1 minute', 3, 40);
-            ASSERT v_count > 1, 'small bucket should return rows';
+            select count(*) into v_count from ash.timeline_chart('30 minutes', '1 minute', 3, 40);
+            assert v_count > 1, 'small bucket should return rows';
 
             -- Large bucket (10 minutes)
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('30 minutes', '10 minutes', 3, 40);
-            ASSERT v_count > 1, 'large bucket should return rows';
+            select count(*) into v_count from ash.timeline_chart('30 minutes', '10 minutes', 3, 40);
+            assert v_count > 1, 'large bucket should return rows';
 
             -- Width=10 (narrow)
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('30 minutes', '5 minutes', 3, 10);
-            ASSERT v_count > 1, 'narrow width should return rows';
+            select count(*) into v_count from ash.timeline_chart('30 minutes', '5 minutes', 3, 10);
+            assert v_count > 1, 'narrow width should return rows';
 
-            RAISE NOTICE 'Parameter variation tests PASSED';
-          END;
+            raise notice 'Parameter variation tests PASSED';
+          end;
           $$;
           EOF
 
@@ -787,23 +787,23 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_rec record;
-          BEGIN
+          begin
             -- top_waits should have a bar column with █ characters
-            SELECT * INTO v_rec FROM ash.top_waits('1 hour') LIMIT 1;
-            ASSERT v_rec.bar IS NOT NULL, 'bar column missing from top_waits';
-            ASSERT position('█' in v_rec.bar) > 0 OR position('%' in v_rec.bar) > 0,
+            select * into v_rec from ash.top_waits('1 hour') limit 1;
+            assert v_rec.bar is not null, 'bar column missing from top_waits';
+            assert position('█' in v_rec.bar) > 0 or position('%' in v_rec.bar) > 0,
               'bar should contain block chars or percentages';
 
             -- "Other" rollup row should exist when there are enough events
-            PERFORM 1 FROM ash.top_waits('1 hour', 2)
-            WHERE wait_event = 'Other';
+            perform 1 from ash.top_waits('1 hour', 2)
+            where wait_event = 'Other';
             -- Note: may not always exist if fewer than limit+1 events
 
-            RAISE NOTICE 'top_waits bar tests PASSED';
-          END;
+            raise notice 'top_waits bar tests PASSED';
+          end;
           $$;
           EOF
 
@@ -812,71 +812,71 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_slot smallint;
             v_slots smallint[];
             v_ts int4;
             v_wait_id smallint;
             v_cron_avail boolean;
-          BEGIN
+          begin
             -- current_slot: returns current partition slot
-            SELECT ash.current_slot() INTO v_slot;
-            ASSERT v_slot >= 0 AND v_slot <= 2,
+            select ash.current_slot() into v_slot;
+            assert v_slot >= 0 and v_slot <= 2,
               'current_slot out of range: ' || v_slot;
 
             -- _active_slots: returns current + previous slot
-            SELECT ash._active_slots() INTO v_slots;
-            ASSERT array_length(v_slots, 1) = 2,
+            select ash._active_slots() into v_slots;
+            assert array_length(v_slots, 1) = 2,
               '_active_slots should return 2 elements, got: ' || array_length(v_slots, 1);
-            ASSERT v_slots[1] = v_slot,
+            assert v_slots[1] = v_slot,
               '_active_slots[1] should be current slot';
-            ASSERT v_slots[2] = ((v_slot - 1 + 3) % 3)::smallint,
+            assert v_slots[2] = ((v_slot - 1 + 3) % 3)::smallint,
               '_active_slots[2] should be previous slot';
 
             -- _to_sample_ts: converts timestamptz to int4 offset from epoch
-            SELECT ash._to_sample_ts(ash.epoch()) INTO v_ts;
-            ASSERT v_ts = 0, '_to_sample_ts(epoch) should be 0, got: ' || v_ts;
+            select ash._to_sample_ts(ash.epoch()) into v_ts;
+            assert v_ts = 0, '_to_sample_ts(epoch) should be 0, got: ' || v_ts;
 
-            SELECT ash._to_sample_ts(ash.epoch() + interval '1 hour') INTO v_ts;
-            ASSERT v_ts = 3600, '_to_sample_ts(epoch+1h) should be 3600, got: ' || v_ts;
+            select ash._to_sample_ts(ash.epoch() + interval '1 hour') into v_ts;
+            assert v_ts = 3600, '_to_sample_ts(epoch+1h) should be 3600, got: ' || v_ts;
 
             -- _to_sample_ts: future timestamps should be positive
-            SELECT ash._to_sample_ts(now()) INTO v_ts;
-            ASSERT v_ts > 0, '_to_sample_ts(now) should be positive';
+            select ash._to_sample_ts(now()) into v_ts;
+            assert v_ts > 0, '_to_sample_ts(now) should be positive';
 
             -- _register_wait: register a new wait event
-            SELECT ash._register_wait('active', 'Test', 'TestEvent') INTO v_wait_id;
-            ASSERT v_wait_id IS NOT NULL, '_register_wait returned null';
+            select ash._register_wait('active', 'Test', 'TestEvent') into v_wait_id;
+            assert v_wait_id is not null, '_register_wait returned null';
 
             -- _register_wait: same call should return same id (idempotent)
-            DECLARE
+            declare
               v_wait_id2 smallint;
-            BEGIN
-              SELECT ash._register_wait('active', 'Test', 'TestEvent') INTO v_wait_id2;
-              ASSERT v_wait_id2 = v_wait_id,
+            begin
+              select ash._register_wait('active', 'Test', 'TestEvent') into v_wait_id2;
+              assert v_wait_id2 = v_wait_id,
                 '_register_wait not idempotent: ' || v_wait_id || ' vs ' || v_wait_id2;
-            END;
+            end;
 
             -- _register_wait: different event should get different id
-            DECLARE
+            declare
               v_wait_id3 smallint;
-            BEGIN
-              SELECT ash._register_wait('active', 'Test', 'OtherEvent') INTO v_wait_id3;
-              ASSERT v_wait_id3 <> v_wait_id,
+            begin
+              select ash._register_wait('active', 'Test', 'OtherEvent') into v_wait_id3;
+              assert v_wait_id3 <> v_wait_id,
                 '_register_wait should return different id for different event';
-            END;
+            end;
 
             -- _pg_cron_available: should return boolean without error
-            SELECT ash._pg_cron_available() INTO v_cron_avail;
-            ASSERT v_cron_avail IS NOT NULL, '_pg_cron_available returned null';
+            select ash._pg_cron_available() into v_cron_avail;
+            assert v_cron_avail is not null, '_pg_cron_available returned null';
 
             -- epoch: should be 2026-01-01 00:00:00 UTC
-            ASSERT ash.epoch() = '2026-01-01 00:00:00+00'::timestamptz,
+            assert ash.epoch() = '2026-01-01 00:00:00+00'::timestamptz,
               'epoch should be 2026-01-01, got: ' || ash.epoch();
 
-            RAISE NOTICE 'Internal helper tests PASSED';
-          END;
+            raise notice 'Internal helper tests PASSED';
+          end;
           $$;
           EOF
 
@@ -885,260 +885,260 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
             v_rec record;
-          BEGIN
+          begin
             -- === Empty / future time ranges ===
 
             -- Future range: no data
-            SELECT count(*) INTO v_count
-            FROM ash.timeline_chart_at(now() + interval '1 hour', now() + interval '2 hours');
-            ASSERT v_count = 0, 'future range should return 0 rows';
+            select count(*) into v_count
+            from ash.timeline_chart_at(now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future range should return 0 rows';
 
-            SELECT count(*) INTO v_count
-            FROM ash.top_waits_at(now() + interval '1 hour', now() + interval '2 hours');
-            ASSERT v_count = 0, 'future top_waits_at should return 0 rows';
+            select count(*) into v_count
+            from ash.top_waits_at(now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future top_waits_at should return 0 rows';
 
-            SELECT count(*) INTO v_count
-            FROM ash.top_queries_at(now() + interval '1 hour', now() + interval '2 hours');
-            ASSERT v_count = 0, 'future top_queries_at should return 0 rows';
+            select count(*) into v_count
+            from ash.top_queries_at(now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future top_queries_at should return 0 rows';
 
-            SELECT count(*) INTO v_count
-            FROM ash.samples_at(now() + interval '1 hour', now() + interval '2 hours', 10);
-            ASSERT v_count = 0, 'future samples_at should return 0 rows';
+            select count(*) into v_count
+            from ash.samples_at(now() + interval '1 hour', now() + interval '2 hours', 10);
+            assert v_count = 0, 'future samples_at should return 0 rows';
 
-            SELECT count(*) INTO v_count
-            FROM ash.top_by_type_at(now() + interval '1 hour', now() + interval '2 hours');
-            ASSERT v_count = 0, 'future top_by_type_at should return 0 rows';
+            select count(*) into v_count
+            from ash.top_by_type_at(now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future top_by_type_at should return 0 rows';
 
-            SELECT count(*) INTO v_count
-            FROM ash.wait_timeline_at(now() + interval '1 hour', now() + interval '2 hours');
-            ASSERT v_count = 0, 'future wait_timeline_at should return 0 rows';
+            select count(*) into v_count
+            from ash.wait_timeline_at(now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future wait_timeline_at should return 0 rows';
 
-            SELECT count(*) INTO v_count
-            FROM ash.query_waits_at(111111, now() + interval '1 hour', now() + interval '2 hours');
-            ASSERT v_count = 0, 'future query_waits_at should return 0 rows';
+            select count(*) into v_count
+            from ash.query_waits_at(111111, now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future query_waits_at should return 0 rows';
 
             -- === Very short intervals ===
 
-            SELECT count(*) INTO v_count FROM ash.top_waits('1 second');
+            select count(*) into v_count from ash.top_waits('1 second');
             -- May return 0, that's fine — should not error
 
-            SELECT count(*) INTO v_count FROM ash.top_queries('1 second');
-            SELECT count(*) INTO v_count FROM ash.top_by_type('1 second');
-            SELECT count(*) INTO v_count FROM ash.wait_timeline('1 second', '1 second');
+            select count(*) into v_count from ash.top_queries('1 second');
+            select count(*) into v_count from ash.top_by_type('1 second');
+            select count(*) into v_count from ash.wait_timeline('1 second', '1 second');
 
             -- === Non-existent queries ===
 
-            SELECT count(*) INTO v_count FROM ash.query_waits(999999999, '1 hour');
-            ASSERT v_count = 0, 'non-existent query should return 0 rows';
+            select count(*) into v_count from ash.query_waits(999999999, '1 hour');
+            assert v_count = 0, 'non-existent query should return 0 rows';
 
-            SELECT count(*) INTO v_count
-            FROM ash.query_waits_at(999999999, now() - interval '1 hour', now());
-            ASSERT v_count = 0, 'non-existent query_at should return 0 rows';
+            select count(*) into v_count
+            from ash.query_waits_at(999999999, now() - interval '1 hour', now());
+            assert v_count = 0, 'non-existent query_at should return 0 rows';
 
             -- === _validate_data corner cases ===
 
-            ASSERT ash._validate_data(null) = false, 'null should be invalid';
-            ASSERT ash._validate_data('{}'::integer[]) = false, 'empty array should be invalid';
-            ASSERT ash._validate_data('{0}'::integer[]) = false, 'single zero should be invalid';
-            ASSERT ash._validate_data('{-1}'::integer[]) = false, 'single neg should be invalid (no count)';
-            ASSERT ash._validate_data('{-1,0}'::integer[]) = false, 'count=0 should be invalid';
-            ASSERT ash._validate_data('{-1,1,5}'::integer[]) = true, 'single backend should be valid';
-            ASSERT ash._validate_data('{-1,2,5,6,-2,1,7}'::integer[]) = true, 'multi-group should be valid';
-            ASSERT ash._validate_data('{-1,2,5}'::integer[]) = false, 'count=2 but only 1 qid should be invalid';
-            ASSERT ash._validate_data('{5,2,1,1}'::integer[]) = false, 'positive first element should be invalid';
+            assert ash._validate_data(null) = false, 'null should be invalid';
+            assert ash._validate_data('{}'::integer[]) = false, 'empty array should be invalid';
+            assert ash._validate_data('{0}'::integer[]) = false, 'single zero should be invalid';
+            assert ash._validate_data('{-1}'::integer[]) = false, 'single neg should be invalid (no count)';
+            assert ash._validate_data('{-1,0}'::integer[]) = false, 'count=0 should be invalid';
+            assert ash._validate_data('{-1,1,5}'::integer[]) = true, 'single backend should be valid';
+            assert ash._validate_data('{-1,2,5,6,-2,1,7}'::integer[]) = true, 'multi-group should be valid';
+            assert ash._validate_data('{-1,2,5}'::integer[]) = false, 'count=2 but only 1 qid should be invalid';
+            assert ash._validate_data('{5,2,1,1}'::integer[]) = false, 'positive first element should be invalid';
 
             -- === decode_sample corner cases ===
 
             -- Empty/null data
-            SELECT count(*) INTO v_count FROM ash.decode_sample(null);
-            ASSERT v_count = 0, 'null decode should return 0 rows';
+            select count(*) into v_count from ash.decode_sample(null);
+            assert v_count = 0, 'null decode should return 0 rows';
 
-            SELECT count(*) INTO v_count FROM ash.decode_sample('{}'::integer[]);
-            ASSERT v_count = 0, 'empty decode should return 0 rows';
+            select count(*) into v_count from ash.decode_sample('{}'::integer[]);
+            assert v_count = 0, 'empty decode should return 0 rows';
 
             -- Data with count=0 (no backends for this wait, but marker present)
-            SELECT count(*) INTO v_count FROM ash.decode_sample('{-1,0}'::integer[]);
-            ASSERT v_count = 0, 'count=0 should return 0 rows';
+            select count(*) into v_count from ash.decode_sample('{-1,0}'::integer[]);
+            assert v_count = 0, 'count=0 should return 0 rows';
 
             -- === Limit edge cases ===
 
             -- limit=1: should get exactly 1 event + maybe Other
-            SELECT count(*) INTO v_count FROM ash.top_waits('1 hour', 1);
-            ASSERT v_count >= 1 AND v_count <= 2,
+            select count(*) into v_count from ash.top_waits('1 hour', 1);
+            assert v_count >= 1 and v_count <= 2,
               'limit=1 should return 1-2 rows, got: ' || v_count;
 
             -- limit=100: should not error even with few events
-            SELECT count(*) INTO v_count FROM ash.top_waits('1 hour', 100);
-            ASSERT v_count > 0, 'limit=100 should return rows';
+            select count(*) into v_count from ash.top_waits('1 hour', 100);
+            assert v_count > 0, 'limit=100 should return rows';
 
             -- limit=0: edge case
-            SELECT count(*) INTO v_count FROM ash.top_queries('1 hour', 0);
+            select count(*) into v_count from ash.top_queries('1 hour', 0);
             -- Should return 0 or just Other
 
             -- === timeline_chart edge cases ===
 
             -- Width=1: minimal chart
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('30 minutes', '5 minutes', 3, 1);
-            ASSERT v_count > 1, 'width=1 should still return rows';
+            select count(*) into v_count from ash.timeline_chart('30 minutes', '5 minutes', 3, 1);
+            assert v_count > 1, 'width=1 should still return rows';
 
             -- top=1: only top event + Other
-            SELECT * INTO v_rec FROM ash.timeline_chart('30 minutes', '5 minutes', 1, 40) LIMIT 1;
-            ASSERT v_rec.chart IS NOT NULL, 'top=1 legend should exist';
+            select * into v_rec from ash.timeline_chart('30 minutes', '5 minutes', 1, 40) limit 1;
+            assert v_rec.chart is not null, 'top=1 legend should exist';
 
             -- Bucket larger than interval
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('5 minutes', '1 hour', 3, 40);
+            select count(*) into v_count from ash.timeline_chart('5 minutes', '1 hour', 3, 40);
             -- Should return at most 1-2 rows
 
             -- === Rotation edge cases ===
 
             -- Multiple rotations: slot should cycle through 0→1→2→0
-            DECLARE
+            declare
               v_s0 smallint;
               v_s1 smallint;
               v_s2 smallint;
               v_s3 smallint;
-            BEGIN
-              SELECT ash.current_slot() INTO v_s0;
+            begin
+              select ash.current_slot() into v_s0;
 
-              UPDATE ash.config SET rotated_at = now() - interval '2 days';
-              PERFORM ash.rotate();
-              SELECT ash.current_slot() INTO v_s1;
-              ASSERT v_s1 = ((v_s0 + 1) % 3)::smallint,
+              update ash.config set rotated_at = now() - interval '2 days';
+              perform ash.rotate();
+              select ash.current_slot() into v_s1;
+              assert v_s1 = ((v_s0 + 1) % 3)::smallint,
                 'first rotation: expected ' || ((v_s0 + 1) % 3) || ', got ' || v_s1;
 
-              UPDATE ash.config SET rotated_at = now() - interval '2 days';
-              PERFORM ash.rotate();
-              SELECT ash.current_slot() INTO v_s2;
-              ASSERT v_s2 = ((v_s0 + 2) % 3)::smallint,
+              update ash.config set rotated_at = now() - interval '2 days';
+              perform ash.rotate();
+              select ash.current_slot() into v_s2;
+              assert v_s2 = ((v_s0 + 2) % 3)::smallint,
                 'second rotation: expected ' || ((v_s0 + 2) % 3) || ', got ' || v_s2;
 
-              UPDATE ash.config SET rotated_at = now() - interval '2 days';
-              PERFORM ash.rotate();
-              SELECT ash.current_slot() INTO v_s3;
-              ASSERT v_s3 = v_s0,
+              update ash.config set rotated_at = now() - interval '2 days';
+              perform ash.rotate();
+              select ash.current_slot() into v_s3;
+              assert v_s3 = v_s0,
                 'third rotation should return to start: expected ' || v_s0 || ', got ' || v_s3;
-            END;
+            end;
 
             -- === Partition isolation ===
 
-            -- Data in inactive partition should NOT show in readers
-            DECLARE
+            -- Data in inactive partition should not show in readers
+            declare
               v_inactive smallint;
               v_unique_wait_id smallint;
               v_slot smallint;
               v_count_before int;
               v_count_after int;
               v_found boolean;
-            BEGIN
-              SELECT ash.current_slot() INTO v_slot;
+            begin
+              select ash.current_slot() into v_slot;
               -- Inactive partition = neither current nor previous
               v_inactive := ((v_slot + 1) % 3)::smallint;
 
               -- Register a unique wait event that only goes into inactive partition
-              SELECT ash._register_wait('active', 'TestIsolation', 'GhostEvent') INTO v_unique_wait_id;
+              select ash._register_wait('active', 'TestIsolation', 'GhostEvent') into v_unique_wait_id;
 
               -- Record current top_waits count
-              SELECT count(*) INTO v_count_before FROM ash.top_waits('1 hour');
+              select count(*) into v_count_before from ash.top_waits('1 hour');
 
               -- Insert into INACTIVE partition with the unique wait event
-              EXECUTE format(
-                'INSERT INTO ash.sample_%s (sample_ts, datid, active_count, data, slot) VALUES (%s, 1, 100, %L::integer[], %s)',
+              execute format(
+                'insert into ash.sample_%s (sample_ts, datid, active_count, data, slot) values (%s, 1, 100, %L::integer[], %s)',
                 v_inactive,
-                extract(epoch FROM now() - ash.epoch())::int4,
-                ARRAY[-v_unique_wait_id, 100, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]::integer[],
+                extract(epoch from now() - ash.epoch())::int4,
+                array[-v_unique_wait_id, 100, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]::integer[],
                 v_inactive
               );
 
-              -- GhostEvent should NOT appear in readers (filtered by _active_slots)
-              SELECT EXISTS (
-                SELECT 1 FROM ash.top_waits('1 hour', 100)
-                WHERE wait_event = 'TestIsolation:GhostEvent'
-              ) INTO v_found;
-              ASSERT NOT v_found,
+              -- GhostEvent should not appear in readers (filtered by _active_slots)
+              select exists (
+                select 1 from ash.top_waits('1 hour', 100)
+                where wait_event = 'TestIsolation:GhostEvent'
+              ) into v_found;
+              assert not v_found,
                 'GhostEvent from inactive partition should not appear in top_waits';
 
               -- Also check timeline_chart doesn't show it
-              SELECT EXISTS (
-                SELECT 1 FROM ash.timeline_chart('1 hour', '5 minutes', 100, 40)
-                WHERE detail LIKE '%GhostEvent%'
-              ) INTO v_found;
-              ASSERT NOT v_found,
+              select exists (
+                select 1 from ash.timeline_chart('1 hour', '5 minutes', 100, 40)
+                where detail like '%GhostEvent%'
+              ) into v_found;
+              assert not v_found,
                 'GhostEvent should not appear in timeline_chart';
 
               -- Cleanup
-              EXECUTE format('DELETE FROM ash.sample_%s WHERE active_count = 100', v_inactive);
-            END;
+              execute format('delete from ash.sample_%s where active_count = 100', v_inactive);
+            end;
 
             -- === Rotation guard: "rotated too recently" ===
 
-            DECLARE
+            declare
               v_result text;
-            BEGIN
+            begin
               -- Don't touch rotated_at — should still be recent from earlier rotation
-              SELECT ash.rotate() INTO v_result;
-              ASSERT v_result LIKE 'skipped%',
+              select ash.rotate() into v_result;
+              assert v_result like 'skipped%',
                 'rotate() should skip when called too soon, got: ' || coalesce(v_result, 'NULL');
-            END;
+            end;
 
             -- === Multi-database data ===
 
-            DECLARE
+            declare
               v_cpu_id2 smallint;
               v_db_count int;
               v_cur_slot smallint;
               v_now_ts int4;
-            BEGIN
-              SELECT id INTO v_cpu_id2 FROM ash.wait_event_map WHERE type = 'CPU*' AND event = 'CPU*';
+            begin
+              select id into v_cpu_id2 from ash.wait_event_map where type = 'CPU*' and event = 'CPU*';
               v_cur_slot := ash.current_slot();
-              v_now_ts := extract(epoch FROM now() - ash.epoch())::int4;
+              v_now_ts := extract(epoch from now() - ash.epoch())::int4;
 
               -- Insert data for TWO different datids into current slot
-              INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
-              VALUES
-                (v_now_ts - 60, 1, 1, ARRAY[-v_cpu_id2, 1, 1]::integer[], v_cur_slot),
-                (v_now_ts - 60, 99999, 1, ARRAY[-v_cpu_id2, 1, 1]::integer[], v_cur_slot);
+              insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values
+                (v_now_ts - 60, 1, 1, array[-v_cpu_id2, 1, 1]::integer[], v_cur_slot),
+                (v_now_ts - 60, 99999, 1, array[-v_cpu_id2, 1, 1]::integer[], v_cur_slot);
 
-              SELECT count(DISTINCT datid) INTO v_db_count
-              FROM ash.samples_by_database('1 hour');
-              ASSERT v_db_count >= 2,
+              select count(distinct datid) into v_db_count
+              from ash.samples_by_database('1 hour');
+              assert v_db_count >= 2,
                 'samples_by_database should show at least 2 databases, got: ' || v_db_count;
-            END;
+            end;
 
-            RAISE NOTICE 'Edge and corner case tests PASSED';
-          END;
+            raise notice 'Edge and corner case tests PASSED';
+          end;
           $$;
 
-          -- === _wait_color edge cases (separate DO block) ===
-          DO $$
-          BEGIN
+          -- === _wait_color edge cases (separate do block) ===
+          do $$
+          begin
             -- Exact boundary matches
-            ASSERT ash._wait_color('CPU*', true) = E'\033[38;2;080;250;123m', 'CPU* green';
-            ASSERT ash._wait_color('CPUsomething', true) = E'\033[38;2;080;250;123m', 'CPU prefix green';
-            ASSERT ash._wait_color('IdleTx', true) = E'\033[38;2;241;250;140m', 'IdleTx light yellow';
-            ASSERT ash._wait_color('IO:DataFileRead', true) = E'\033[38;2;030;100;255m', 'IO blue';
-            ASSERT ash._wait_color('IO:WALSync', true) = E'\033[38;2;030;100;255m', 'IO:WALSync blue';
-            ASSERT ash._wait_color('Lock:tuple', true) = E'\033[38;2;255;085;085m', 'Lock red';
-            ASSERT ash._wait_color('Lock:transactionid', true) = E'\033[38;2;255;085;085m', 'Lock:txid red';
-            ASSERT ash._wait_color('Lock:relation', true) = E'\033[38;2;255;085;085m', 'Lock:relation red';
-            ASSERT ash._wait_color('LWLock:WALWrite', true) = E'\033[38;2;255;121;198m', 'LWLock pink';
-            ASSERT ash._wait_color('LWLock:BufferContent', true) = E'\033[38;2;255;121;198m', 'LWLock:BufferContent pink';
-            ASSERT ash._wait_color('IPC:BgWorkerStartup', true) = E'\033[38;2;000;200;255m', 'IPC cyan';
-            ASSERT ash._wait_color('Client:ClientRead', true) = E'\033[38;2;255;220;100m', 'Client yellow';
-            ASSERT ash._wait_color('Client:ClientWrite', true) = E'\033[38;2;255;220;100m', 'Client:Write yellow';
-            ASSERT ash._wait_color('Timeout:PgSleep', true) = E'\033[38;2;255;165;000m', 'Timeout orange';
-            ASSERT ash._wait_color('BufferPin:BufferPin', true) = E'\033[38;2;000;210;180m', 'BufferPin teal';
-            ASSERT ash._wait_color('Activity:ArchiverMain', true) = E'\033[38;2;150;100;255m', 'Activity purple';
-            ASSERT ash._wait_color('Extension:DblinkGetResult', true) = E'\033[38;2;190;150;255m', 'Extension light purple';
-            ASSERT ash._wait_color('', true) = E'\033[38;2;180;180;180m', 'empty string gray (fallback)';
-            ASSERT ash._wait_color('') = '', 'empty string no-color returns empty';
-            ASSERT ash._wait_color('UnknownType:Whatever', true) = E'\033[38;2;180;180;180m', 'unknown gray';  -- 180 already 3 digits
+            assert ash._wait_color('CPU*', true) = E'\033[38;2;080;250;123m', 'CPU* green';
+            assert ash._wait_color('CPUsomething', true) = E'\033[38;2;080;250;123m', 'CPU prefix green';
+            assert ash._wait_color('IdleTx', true) = E'\033[38;2;241;250;140m', 'IdleTx light yellow';
+            assert ash._wait_color('IO:DataFileRead', true) = E'\033[38;2;030;100;255m', 'IO blue';
+            assert ash._wait_color('IO:WALSync', true) = E'\033[38;2;030;100;255m', 'IO:WALSync blue';
+            assert ash._wait_color('Lock:tuple', true) = E'\033[38;2;255;085;085m', 'Lock red';
+            assert ash._wait_color('Lock:transactionid', true) = E'\033[38;2;255;085;085m', 'Lock:txid red';
+            assert ash._wait_color('Lock:relation', true) = E'\033[38;2;255;085;085m', 'Lock:relation red';
+            assert ash._wait_color('LWLock:WALWrite', true) = E'\033[38;2;255;121;198m', 'LWLock pink';
+            assert ash._wait_color('LWLock:BufferContent', true) = E'\033[38;2;255;121;198m', 'LWLock:BufferContent pink';
+            assert ash._wait_color('IPC:BgWorkerStartup', true) = E'\033[38;2;000;200;255m', 'IPC cyan';
+            assert ash._wait_color('Client:ClientRead', true) = E'\033[38;2;255;220;100m', 'Client yellow';
+            assert ash._wait_color('Client:ClientWrite', true) = E'\033[38;2;255;220;100m', 'Client:Write yellow';
+            assert ash._wait_color('Timeout:PgSleep', true) = E'\033[38;2;255;165;000m', 'Timeout orange';
+            assert ash._wait_color('BufferPin:BufferPin', true) = E'\033[38;2;000;210;180m', 'BufferPin teal';
+            assert ash._wait_color('Activity:ArchiverMain', true) = E'\033[38;2;150;100;255m', 'Activity purple';
+            assert ash._wait_color('Extension:DblinkGetResult', true) = E'\033[38;2;190;150;255m', 'Extension light purple';
+            assert ash._wait_color('', true) = E'\033[38;2;180;180;180m', 'empty string gray (fallback)';
+            assert ash._wait_color('') = '', 'empty string no-color returns empty';
+            assert ash._wait_color('UnknownType:Whatever', true) = E'\033[38;2;180;180;180m', 'unknown gray';  -- 180 already 3 digits
 
-            RAISE NOTICE '_wait_color comprehensive tests PASSED';
-          END;
+            raise notice '_wait_color comprehensive tests PASSED';
+          end;
           $$;
           EOF
 
@@ -1147,13 +1147,13 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          SELECT ash.uninstall('yes');
-          DO $$
-          BEGIN
-            ASSERT NOT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'ash'),
+          select ash.uninstall('yes');
+          do $$
+          begin
+            assert not exists (select from pg_namespace where nspname = 'ash'),
               'schema not dropped after uninstall';
-            RAISE NOTICE 'Uninstall test PASSED';
-          END;
+            raise notice 'Uninstall test PASSED';
+          end;
           $$;
           EOF
 
@@ -1165,67 +1165,67 @@ jobs:
           -- Start from 1.0
           \i sql/ash-1.0.sql
 
-          DO $$
-          BEGIN
-            ASSERT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'ash'), '1.0 install failed';
-            RAISE NOTICE '1.0 installed OK';
-          END;
+          do $$
+          begin
+            assert exists (select from pg_namespace where nspname = 'ash'), '1.0 install failed';
+            raise notice '1.0 installed OK';
+          end;
           $$;
 
           -- Upgrade to 1.1
           \i sql/ash-1.1.sql
 
-          DO $$
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.1',
+          do $$
+          begin
+            assert (select version from ash.config where singleton) = '1.1',
               'version should be 1.1 after upgrade';
             -- timeline_chart must exist
-            ASSERT EXISTS (
-              SELECT FROM pg_proc WHERE proname = 'timeline_chart'
-                AND pronamespace = 'ash'::regnamespace
+            assert exists (
+              select from pg_proc where proname = 'timeline_chart'
+                and pronamespace = 'ash'::regnamespace
             ), 'timeline_chart missing after 1.1 upgrade';
-            RAISE NOTICE '1.0 -> 1.1 upgrade PASSED';
-          END;
+            raise notice '1.0 -> 1.1 upgrade PASSED';
+          end;
           $$;
 
           -- Upgrade to 1.2
           \i sql/ash-1.1-to-1.2.sql
 
-          DO $$
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
+          do $$
+          begin
+            assert (select version from ash.config where singleton) = '1.2',
               'version should be 1.2 after 1.1-to-1.2 upgrade';
-            RAISE NOTICE '1.1 -> 1.2 upgrade PASSED';
-          END;
+            raise notice '1.1 -> 1.2 upgrade PASSED';
+          end;
           $$;
 
           -- Upgrade to 1.3
           \i sql/ash-1.2-to-1.3.sql
 
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+          begin
+            assert (select version from ash.config where singleton) = '1.3',
               'version should be 1.3 after upgrade';
             -- timeline_chart must exist with new column order
-            SELECT count(*) INTO v_count
-            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            ASSERT v_count >= 0, 'timeline_chart missing after 1.3 upgrade';
-            SELECT count(*) INTO v_count
-            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
-            ASSERT v_count >= 0, 'timeline_chart with p_color missing after 1.3';
+            select count(*) into v_count
+            from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            assert v_count >= 0, 'timeline_chart missing after 1.3 upgrade';
+            select count(*) into v_count
+            from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
+            assert v_count >= 0, 'timeline_chart with p_color missing after 1.3';
             -- debug_logging must exist
-            ASSERT EXISTS (
-              SELECT FROM information_schema.columns
-              WHERE table_schema = 'ash' AND table_name = 'config' AND column_name = 'debug_logging'
+            assert exists (
+              select from information_schema.columns
+              where table_schema = 'ash' and table_name = 'config' and column_name = 'debug_logging'
             ), 'debug_logging column missing after 1.3 upgrade';
-            RAISE NOTICE '1.2 -> 1.3 upgrade PASSED';
-          END;
+            raise notice '1.2 -> 1.3 upgrade PASSED';
+          end;
           $$;
 
           -- Uninstall after upgrade test
-          SELECT ash.uninstall('yes');
+          select ash.uninstall('yes');
           EOF
 
       - name: "Upgrade path: 1.1 → 1.2 → 1.3 (direct)"
@@ -1235,41 +1235,41 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           \i sql/ash-1.1.sql
 
-          DO $$
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.1',
+          do $$
+          begin
+            assert (select version from ash.config where singleton) = '1.1',
               'version should be 1.1';
-            RAISE NOTICE '1.1 fresh install OK';
-          END;
+            raise notice '1.1 fresh install OK';
+          end;
           $$;
 
           \i sql/ash-1.1-to-1.2.sql
 
-          DO $$
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.2',
+          do $$
+          begin
+            assert (select version from ash.config where singleton) = '1.2',
               'version should be 1.2 after 1.1-to-1.2';
-            RAISE NOTICE '1.1 -> 1.2 direct upgrade PASSED';
-          END;
+            raise notice '1.1 -> 1.2 direct upgrade PASSED';
+          end;
           $$;
 
           \i sql/ash-1.2-to-1.3.sql
 
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+          begin
+            assert (select version from ash.config where singleton) = '1.3',
               'version should be 1.3 after upgrade';
-            SELECT count(*) INTO v_count
-            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            ASSERT v_count >= 0, 'timeline_chart missing';
-            RAISE NOTICE '1.2 -> 1.3 direct upgrade PASSED';
-          END;
+            select count(*) into v_count
+            from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            assert v_count >= 0, 'timeline_chart missing';
+            raise notice '1.2 -> 1.3 direct upgrade PASSED';
+          end;
           $$;
 
           -- Uninstall
-          SELECT ash.uninstall('yes');
+          select ash.uninstall('yes');
           EOF
 
       - name: "Dev workflow: re-apply migrations (idempotent)"
@@ -1283,32 +1283,32 @@ jobs:
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
 
-          DO $$
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+          do $$
+          begin
+            assert (select version from ash.config where singleton) = '1.3',
               'version should still be 1.3';
-            RAISE NOTICE 'Idempotent re-apply PASSED';
-          END;
+            raise notice 'Idempotent re-apply PASSED';
+          end;
           $$;
 
           -- Apply again
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
 
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
-          BEGIN
-            ASSERT (SELECT version FROM ash.config WHERE singleton) = '1.3',
+          begin
+            assert (select version from ash.config where singleton) = '1.3',
               'version should still be 1.3 after second apply';
-            SELECT count(*) INTO v_count
-            FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            ASSERT v_count >= 0, 'timeline_chart missing after re-apply';
-            RAISE NOTICE 'Second re-apply PASSED';
-          END;
+            select count(*) into v_count
+            from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            assert v_count >= 0, 'timeline_chart missing after re-apply';
+            raise notice 'Second re-apply PASSED';
+          end;
           $$;
 
-          SELECT ash.uninstall('yes');
+          select ash.uninstall('yes');
           EOF
 
       - name: "Schema equivalence: fresh install vs full upgrade path"
@@ -1318,43 +1318,43 @@ jobs:
           cat > /tmp/ash_schema_snapshot.sql << 'SNAPSQL'
           \pset tuples_only on
           \pset format unaligned
-          SELECT 'FUNC', p.proname,
+          select 'FUNC', p.proname,
                  pg_get_function_identity_arguments(p.oid),
                  pg_get_function_result(p.oid),
                  md5(p.prosrc)
-          FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = 'ash'
-          ORDER BY p.proname, pg_get_function_identity_arguments(p.oid);
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'ash'
+          order by p.proname, pg_get_function_identity_arguments(p.oid);
 
-          SELECT 'COL', c.relname, a.attname,
+          select 'COL', c.relname, a.attname,
                  pg_catalog.format_type(a.atttypid, a.atttypmod),
                  a.attnotnull,
                  pg_get_expr(d.adbin, d.adrelid)
-          FROM pg_class c
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          JOIN pg_attribute a ON a.attrelid = c.oid
-          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-          WHERE n.nspname = 'ash' AND c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped
-          ORDER BY c.relname, a.attname;
+          from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+          join pg_attribute a on a.attrelid = c.oid
+          left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+          where n.nspname = 'ash' and c.relkind in ('r','p') and a.attnum > 0 and not a.attisdropped
+          order by c.relname, a.attname;
 
-          SELECT 'IDX', c.relname, pg_get_indexdef(i.indexrelid)
-          FROM pg_index i
-          JOIN pg_class c ON c.oid = i.indexrelid
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = 'ash'
-          ORDER BY c.relname;
+          select 'IDX', c.relname, pg_get_indexdef(i.indexrelid)
+          from pg_index i
+          join pg_class c on c.oid = i.indexrelid
+          join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname = 'ash'
+          order by c.relname;
 
-          SELECT 'VIEW', viewname, md5(definition)
-          FROM pg_views
-          WHERE schemaname = 'ash'
-          ORDER BY viewname;
+          select 'VIEW', viewname, md5(definition)
+          from pg_views
+          where schemaname = 'ash'
+          order by viewname;
           SNAPSQL
 
           # 1) Fresh install → snapshot
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/fresh_schema.txt
-          psql -h localhost -U postgres -d postgres -c "SELECT ash.uninstall('yes')" > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
           # 2) Full upgrade path → snapshot
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.0.sql > /dev/null 2>&1
@@ -1362,7 +1362,7 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1-to-1.2.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.2-to-1.3.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
-          psql -h localhost -U postgres -d postgres -c "SELECT ash.uninstall('yes')" > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
           # 3) Compare
           if diff -u /tmp/fresh_schema.txt /tmp/upgraded_schema.txt; then
@@ -1377,80 +1377,80 @@ jobs:
           PGPASSWORD: postgres
         run: |
           # Drop pgss, reinstall pg_ash fresh (to test clean no-pgss state)
-          psql -h localhost -U postgres -d postgres -c "SELECT ash.uninstall('yes')" 2>/dev/null || true
-          psql -h localhost -U postgres -d postgres -c "DROP EXTENSION IF EXISTS pg_stat_statements" 2>/dev/null || true
+          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" 2>/dev/null || true
+          psql -h localhost -U postgres -d postgres -c "drop extension if exists pg_stat_statements" 2>/dev/null || true
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
 
           -- Seed minimal data for testing
-          INSERT INTO ash.wait_event_map (state, type, event) VALUES
-            ('active', 'CPU*', 'CPU*') ON CONFLICT DO NOTHING;
-          INSERT INTO ash.query_map_0 (query_id) VALUES (999999) ON CONFLICT DO NOTHING;
+          insert into ash.wait_event_map (state, type, event) values
+            ('active', 'CPU*', 'CPU*') on conflict do nothing;
+          insert into ash.query_map_0 (query_id) values (999999) on conflict do nothing;
 
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_count int;
             v_cpu_id smallint;
             v_q1 int4;
             v_now_ts int4;
-          BEGIN
-            SELECT id INTO v_cpu_id FROM ash.wait_event_map WHERE type = 'CPU*';
-            SELECT id INTO v_q1 FROM ash.query_map_0 WHERE query_id = 999999;
-            v_now_ts := extract(epoch FROM now() - ash.epoch())::int4;
-            INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
-            VALUES (v_now_ts - 60, 1, 1, ARRAY[-v_cpu_id, 1, v_q1]::integer[], 0);
+          begin
+            select id into v_cpu_id from ash.wait_event_map where type = 'CPU*';
+            select id into v_q1 from ash.query_map_0 where query_id = 999999;
+            v_now_ts := extract(epoch from now() - ash.epoch())::int4;
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values (v_now_ts - 60, 1, 1, array[-v_cpu_id, 1, v_q1]::integer[], 0);
 
-            -- Functions that should work (with NULL query_text):
-            SELECT count(*) INTO v_count FROM ash.top_waits('1 hour');
-            ASSERT v_count > 0, 'top_waits should work without pgss';
+            -- Functions that should work (with null query_text):
+            select count(*) into v_count from ash.top_waits('1 hour');
+            assert v_count > 0, 'top_waits should work without pgss';
 
             select count(*) into v_count from ash.top_queries('1 hour');
             assert v_count > 0, 'top_queries should work without pgss (query_text = NULL, fires WARNING)';
 
-            SELECT count(*) INTO v_count FROM ash.top_by_type('1 hour');
-            ASSERT v_count > 0, 'top_by_type should work without pgss';
+            select count(*) into v_count from ash.top_by_type('1 hour');
+            assert v_count > 0, 'top_by_type should work without pgss';
 
             select count(*) into v_count from ash.samples('1 hour');
             assert v_count > 0, 'samples should work without pgss (query_text = NULL, fires WARNING)';
 
-            SELECT count(*) INTO v_count FROM ash.activity_summary('1 hour');
-            ASSERT v_count > 0, 'activity_summary should work without pgss';
+            select count(*) into v_count from ash.activity_summary('1 hour');
+            assert v_count > 0, 'activity_summary should work without pgss';
 
-            SELECT count(*) INTO v_count FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            ASSERT v_count >= 0, 'timeline_chart should work without pgss';
+            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            assert v_count >= 0, 'timeline_chart should work without pgss';
 
-            PERFORM ash.take_sample();
-            PERFORM ash.status();
-            PERFORM ash.debug_logging();
+            perform ash.take_sample();
+            perform ash.status();
+            perform ash.debug_logging();
 
             -- Functions that should ERROR without pgss:
-            BEGIN
-              PERFORM ash.top_queries_with_text('1 hour');
-              RAISE EXCEPTION 'top_queries_with_text should have errored without pgss';
-            EXCEPTION WHEN OTHERS THEN
-              ASSERT SQLERRM LIKE '%pg_stat_statements%',
+            begin
+              perform ash.top_queries_with_text('1 hour');
+              raise exception 'top_queries_with_text should have errored without pgss';
+            exception when others then
+              assert SQLERRM like '%pg_stat_statements%',
                 'top_queries_with_text error should mention pg_stat_statements, got: ' || SQLERRM;
-            END;
+            end;
 
-            BEGIN
-              PERFORM ash.event_queries('CPU*', '1 hour');
-              RAISE EXCEPTION 'event_queries should have errored without pgss';
-            EXCEPTION WHEN OTHERS THEN
-              ASSERT SQLERRM LIKE '%pg_stat_statements%',
+            begin
+              perform ash.event_queries('CPU*', '1 hour');
+              raise exception 'event_queries should have errored without pgss';
+            exception when others then
+              assert SQLERRM like '%pg_stat_statements%',
                 'event_queries error should mention pg_stat_statements, got: ' || SQLERRM;
-            END;
+            end;
 
-            BEGIN
-              PERFORM ash.event_queries_at('CPU*', now() - interval '1 hour', now());
-              RAISE EXCEPTION 'event_queries_at should have errored without pgss';
-            EXCEPTION WHEN OTHERS THEN
-              ASSERT SQLERRM LIKE '%pg_stat_statements%',
+            begin
+              perform ash.event_queries_at('CPU*', now() - interval '1 hour', now());
+              raise exception 'event_queries_at should have errored without pgss';
+            exception when others then
+              assert SQLERRM like '%pg_stat_statements%',
                 'event_queries_at error should mention pg_stat_statements, got: ' || SQLERRM;
-            END;
+            end;
 
-            RAISE NOTICE 'All degraded-mode (no pgss) tests PASSED';
-          END;
+            raise notice 'All degraded-mode (no pgss) tests PASSED';
+          end;
           $$;
           EOF
 
@@ -1491,56 +1491,56 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "select ash.uninstall('yes')"
 
           # Restore pgss for subsequent steps
-          psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" 2>/dev/null || true
+          psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_stat_statements" 2>/dev/null || true
 
       - name: "Degraded mode: without pg_cron"
         env:
           PGPASSWORD: postgres
         run: |
           # Install pg_ash fresh without pg_cron
-          psql -h localhost -U postgres -d postgres -c "DROP EXTENSION IF EXISTS pg_cron CASCADE" 2>/dev/null || true
+          psql -h localhost -U postgres -d postgres -c "drop extension if exists pg_cron cascade" 2>/dev/null || true
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          DO $$
-          DECLARE
+          do $$
+          declare
             v_rec record;
             v_status_val text;
-          BEGIN
+          begin
             -- start() should work without pg_cron (no error, prints hints)
-            SELECT status INTO v_status_val
-            FROM ash.start('1 second')
-            WHERE job_type = 'sampler';
-            ASSERT v_status_val LIKE '%schedule externally%',
+            select status into v_status_val
+            from ash.start('1 second')
+            where job_type = 'sampler';
+            assert v_status_val like '%schedule externally%',
               'start() without pg_cron should say schedule externally, got: ' || v_status_val;
 
             -- stop() should work without pg_cron
-            SELECT status INTO v_status_val
-            FROM ash.stop()
-            LIMIT 1;
-            ASSERT v_status_val LIKE '%external scheduler%',
+            select status into v_status_val
+            from ash.stop()
+            limit 1;
+            assert v_status_val like '%external scheduler%',
               'stop() without pg_cron should mention external scheduler, got: ' || v_status_val;
 
             -- status() should show pg_cron_available = no
-            SELECT value INTO v_status_val
-            FROM ash.status()
-            WHERE metric = 'pg_cron_available';
-            ASSERT v_status_val LIKE '%no%',
+            select value into v_status_val
+            from ash.status()
+            where metric = 'pg_cron_available';
+            assert v_status_val like '%no%',
               'status() should show pg_cron not available, got: ' || v_status_val;
 
             -- take_sample() should work without pg_cron
-            PERFORM ash.take_sample();
+            perform ash.take_sample();
 
             -- All reader functions should work
-            PERFORM ash.top_waits('1 hour');
-            PERFORM ash.samples('1 hour');
-            PERFORM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            perform ash.top_waits('1 hour');
+            perform ash.samples('1 hour');
+            perform ash.timeline_chart('1 hour', '5 minutes', 3, 40);
 
-            RAISE NOTICE 'All degraded-mode (no pg_cron) tests PASSED';
-          END;
+            raise notice 'All degraded-mode (no pg_cron) tests PASSED';
+          end;
           $$;
 
-          SELECT ash.uninstall('yes');
+          select ash.uninstall('yes');
           EOF
 
       - name: Final summary
