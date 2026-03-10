@@ -1452,9 +1452,43 @@ jobs:
             RAISE NOTICE 'All degraded-mode (no pgss) tests PASSED';
           END;
           $$;
-
-          SELECT ash.uninstall('yes');
           EOF
+
+          # Verify WARNING is emitted by pgss-optional functions (stderr check)
+          echo "Verifying WARNING messages from pgss-optional functions..."
+
+          for func in \
+            "SELECT * FROM ash.top_queries('1 hour')" \
+            "SELECT * FROM ash.top_queries_at(now() - interval '1 hour', now())" \
+            "SELECT * FROM ash.samples('1 hour')" \
+            "SELECT * FROM ash.samples_at(now() - interval '1 hour', now())"; do
+            output=$(psql -h localhost -U postgres -d postgres -c "$func" 2>&1)
+            if echo "$output" | grep -q "WARNING.*pg_stat_statements"; then
+              echo "  ✓ $func — WARNING emitted"
+            else
+              echo "  ✗ $func — expected WARNING about pg_stat_statements"
+              echo "  Output was: $output"
+              exit 1
+            fi
+          done
+
+          # Verify functions that should NOT warn (no pgss dependency)
+          for func in \
+            "SELECT * FROM ash.top_waits('1 hour')" \
+            "SELECT * FROM ash.top_by_type('1 hour')" \
+            "SELECT * FROM ash.activity_summary('1 hour')"; do
+            output=$(psql -h localhost -U postgres -d postgres -c "$func" 2>&1)
+            if echo "$output" | grep -q "WARNING.*pg_stat_statements"; then
+              echo "  ✗ $func — should NOT emit pgss WARNING"
+              exit 1
+            else
+              echo "  ✓ $func — no WARNING (correct)"
+            fi
+          done
+
+          echo "WARNING verification PASSED"
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "SELECT ash.uninstall('yes')"
 
           # Restore pgss for subsequent steps
           psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" 2>/dev/null || true
