@@ -31,6 +31,10 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 ## Quick start
 
 ```sql
+-- prerequisites (optional but recommended)
+create extension if not exists pg_stat_statements;  -- enables query text + execution metrics
+-- pg_cron is optional: if installed, ash.start() uses it; otherwise see "Scheduling without pg_cron"
+
 -- install (just run the SQL file — works on RDS, Cloud SQL, AlloyDB, etc.)
 \i sql/ash-install.sql
 
@@ -84,22 +88,33 @@ select * from ash.status();
 
 ## Function reference
 
+### Admin
+
+| Function | Description |
+|----------|-------------|
+| `ash.start(interval)` | Start sampling (default: `'1 second'`). Uses pg_cron if available, otherwise prints external scheduling instructions |
+| `ash.stop()` | Stop sampling (removes pg_cron jobs or reminds to stop external scheduler) |
+| `ash.status()` | Sampling status, version, partition info, debug_logging state |
+| `ash.take_sample()` | Take one sample manually (called automatically by the scheduler) |
+| `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers) |
+| `ash.debug_logging(bool)` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call without argument to check current state |
+| `ash.uninstall('yes')` | Drop the ash schema and remove pg_cron jobs |
+
 ### Relative time (last N hours)
 
 | Function | Description |
 |----------|-------------|
 | `ash.top_waits(interval, limit, width)` | Top wait events ranked by sample count, with bar chart |
 | `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
-| `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join |
+| `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join (**requires pg_stat_statements**) |
 | `ash.query_waits(query_id, interval, width, color)` | Wait profile for a specific query |
 | `ash.top_by_type(interval, width, color)` | Breakdown by wait event type |
 | `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
 | `ash.samples_by_database(interval)` | Per-database activity |
 | `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
 | `ash.timeline_chart(interval, bucket, top, width)` | Stacked bar chart of wait events over time |
-| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event |
+| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event (**requires pg_stat_statements**) |
 | `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
-| `ash.status()` | Sampling status and partition info |
 
 All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
 
@@ -110,7 +125,7 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 | `ash.top_waits_at(start, end, limit, width)` | Top waits in a time range, with bar chart |
 | `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
 | `ash.query_waits_at(query_id, start, end, width, color)` | Query wait profile in a time range |
-| `ash.event_queries_at(event, start, end, limit)` | Top queries for a wait event in a time range |
+| `ash.event_queries_at(event, start, end, limit)` | Top queries for a wait event in a time range (**requires pg_stat_statements**) |
 | `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
 | `ash.top_by_type_at(start, end, width, color)` | Breakdown by wait event type in a time range |
 | `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |
@@ -542,7 +557,7 @@ See [issue #1](https://github.com/NikolayS/pg_ash/issues/1) for full benchmarks 
 
 - Postgres 14+ (requires `query_id` in `pg_stat_activity`)
 - pg_cron 1.5+ (optional — for built-in scheduling; see [Scheduling without pg_cron](#scheduling-without-pg_cron) for alternatives)
-- pg_stat_statements (optional — enables query text, `calls`, `total_exec_time_ms`, `mean_exec_time_ms` in `top_queries_with_text()` and `event_queries()`; all other functions work without it)
+- pg_stat_statements (optional but recommended — enables query text and execution metrics; without it, `top_queries_with_text()`, `event_queries()`, and `event_queries_at()` will error, and `top_queries()`, `samples()` will return NULL for `query_text`)
 
 **Note on `query_id`**: The default `compute_query_id = auto` only populates `query_id` when pg_stat_statements is in `shared_preload_libraries`. If `query_id` is NULL in `pg_stat_activity`, set:
 
@@ -563,6 +578,25 @@ update ash.config set rotation_period = '12 hours';
 
 -- check current configuration
 select * from ash.status();
+```
+
+### Debug logging
+
+Enable per-session RAISE LOG output from `take_sample()` — useful for diagnosing connection pooler issues (e.g., PgBouncer mapping `client_addr` to pooler sessions):
+
+```sql
+-- check current state
+select ash.debug_logging();
+
+-- enable: each take_sample() call logs every active session to the Postgres log
+select ash.debug_logging(true);
+
+-- sample output in the Postgres server log:
+-- LOG: ash.take_sample: pid=107 state=active wait_type=CPU* wait_event=CPU* backend_type=client backend query_id=-5287352711091412819
+-- LOG: ash.take_sample: pid=108 state=idle in transaction wait_type=Client wait_event=ClientRead backend_type=client backend query_id=-6949053775937549307
+
+-- disable
+select ash.debug_logging(false);
 ```
 
 ### pg_cron run history

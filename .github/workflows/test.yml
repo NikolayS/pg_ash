@@ -286,6 +286,42 @@ jobs:
           $$;
           EOF
 
+      - name: Test debug_logging
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          DO $$
+          DECLARE
+            v_result bool;
+          BEGIN
+            -- Check initial state (should be false)
+            SELECT debug_logging INTO v_result FROM ash.config WHERE singleton;
+            ASSERT v_result = false, 'debug_logging should default to false';
+
+            -- Query current state via function
+            PERFORM ash.debug_logging();
+
+            -- Enable
+            PERFORM ash.debug_logging(true);
+            SELECT debug_logging INTO v_result FROM ash.config WHERE singleton;
+            ASSERT v_result = true, 'debug_logging should be true after enable';
+
+            -- Disable
+            PERFORM ash.debug_logging(false);
+            SELECT debug_logging INTO v_result FROM ash.config WHERE singleton;
+            ASSERT v_result = false, 'debug_logging should be false after disable';
+
+            -- Status should show debug_logging
+            ASSERT EXISTS (
+              SELECT 1 FROM ash.status() WHERE metric = 'debug_logging'
+            ), 'status should show debug_logging metric';
+
+            RAISE NOTICE 'debug_logging tests PASSED';
+          END;
+          $$;
+          EOF
+
       - name: Test all interval formats (issue #2)
         env:
           PGPASSWORD: postgres
@@ -609,6 +645,14 @@ jobs:
             -- top_queries_with_text (requires pg_stat_statements — errors without it)
             SELECT count(*) INTO v_count FROM ash.top_queries_with_text('1 hour');
             ASSERT v_count >= 0, 'top_queries_with_text should work with pgss installed';
+
+            -- event_queries (requires pg_stat_statements)
+            SELECT count(*) INTO v_count FROM ash.event_queries('CPU*', '1 hour');
+            ASSERT v_count >= 0, 'event_queries should work with pgss installed';
+
+            -- event_queries_at (requires pg_stat_statements)
+            SELECT count(*) INTO v_count FROM ash.event_queries_at('CPU*', v_start, v_end);
+            ASSERT v_count >= 0, 'event_queries_at should work with pgss installed';
 
             RAISE NOTICE 'Query-specific function tests PASSED';
           END;
