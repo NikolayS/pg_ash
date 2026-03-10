@@ -1372,6 +1372,143 @@ jobs:
             exit 1
           fi
 
+      - name: "Degraded mode: without pg_stat_statements"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Drop pgss, reinstall pg_ash fresh (to test clean no-pgss state)
+          psql -h localhost -U postgres -d postgres -c "SELECT ash.uninstall('yes')" 2>/dev/null || true
+          psql -h localhost -U postgres -d postgres -c "DROP EXTENSION IF EXISTS pg_stat_statements" 2>/dev/null || true
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+
+          -- Seed minimal data for testing
+          INSERT INTO ash.wait_event_map (state, type, event) VALUES
+            ('active', 'CPU*', 'CPU*') ON CONFLICT DO NOTHING;
+          INSERT INTO ash.query_map_0 (query_id) VALUES (999999) ON CONFLICT DO NOTHING;
+
+          DO $$
+          DECLARE
+            v_count int;
+            v_cpu_id smallint;
+            v_q1 int4;
+            v_now_ts int4;
+          BEGIN
+            SELECT id INTO v_cpu_id FROM ash.wait_event_map WHERE type = 'CPU*';
+            SELECT id INTO v_q1 FROM ash.query_map_0 WHERE query_id = 999999;
+            v_now_ts := extract(epoch FROM now() - ash.epoch())::int4;
+            INSERT INTO ash.sample (sample_ts, datid, active_count, data, slot)
+            VALUES (v_now_ts - 60, 1, 1, ARRAY[-v_cpu_id, 1, v_q1]::integer[], 0);
+
+            -- Functions that should work (with NULL query_text):
+            SELECT count(*) INTO v_count FROM ash.top_waits('1 hour');
+            ASSERT v_count > 0, 'top_waits should work without pgss';
+
+            SELECT count(*) INTO v_count FROM ash.top_queries('1 hour');
+            ASSERT v_count > 0, 'top_queries should work without pgss (query_text = NULL)';
+
+            SELECT count(*) INTO v_count FROM ash.top_by_type('1 hour');
+            ASSERT v_count > 0, 'top_by_type should work without pgss';
+
+            SELECT count(*) INTO v_count FROM ash.samples('1 hour');
+            ASSERT v_count > 0, 'samples should work without pgss (query_text = NULL)';
+
+            SELECT count(*) INTO v_count FROM ash.activity_summary('1 hour');
+            ASSERT v_count > 0, 'activity_summary should work without pgss';
+
+            SELECT count(*) INTO v_count FROM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            ASSERT v_count >= 0, 'timeline_chart should work without pgss';
+
+            PERFORM ash.take_sample();
+            PERFORM ash.status();
+            PERFORM ash.debug_logging();
+
+            -- Functions that should ERROR without pgss:
+            BEGIN
+              PERFORM ash.top_queries_with_text('1 hour');
+              RAISE EXCEPTION 'top_queries_with_text should have errored without pgss';
+            EXCEPTION WHEN OTHERS THEN
+              ASSERT SQLERRM LIKE '%pg_stat_statements%',
+                'top_queries_with_text error should mention pg_stat_statements, got: ' || SQLERRM;
+            END;
+
+            BEGIN
+              PERFORM ash.event_queries('CPU*', '1 hour');
+              RAISE EXCEPTION 'event_queries should have errored without pgss';
+            EXCEPTION WHEN OTHERS THEN
+              ASSERT SQLERRM LIKE '%pg_stat_statements%',
+                'event_queries error should mention pg_stat_statements, got: ' || SQLERRM;
+            END;
+
+            BEGIN
+              PERFORM ash.event_queries_at('CPU*', now() - interval '1 hour', now());
+              RAISE EXCEPTION 'event_queries_at should have errored without pgss';
+            EXCEPTION WHEN OTHERS THEN
+              ASSERT SQLERRM LIKE '%pg_stat_statements%',
+                'event_queries_at error should mention pg_stat_statements, got: ' || SQLERRM;
+            END;
+
+            RAISE NOTICE 'All degraded-mode (no pgss) tests PASSED';
+          END;
+          $$;
+
+          SELECT ash.uninstall('yes');
+          EOF
+
+          # Restore pgss for subsequent steps
+          psql -h localhost -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" 2>/dev/null || true
+
+      - name: "Degraded mode: without pg_cron"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Install pg_ash fresh without pg_cron
+          psql -h localhost -U postgres -d postgres -c "DROP EXTENSION IF EXISTS pg_cron CASCADE" 2>/dev/null || true
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          DO $$
+          DECLARE
+            v_rec record;
+            v_status_val text;
+          BEGIN
+            -- start() should work without pg_cron (no error, prints hints)
+            SELECT status INTO v_status_val
+            FROM ash.start('1 second')
+            WHERE job_type = 'sampler';
+            ASSERT v_status_val LIKE '%schedule externally%',
+              'start() without pg_cron should say schedule externally, got: ' || v_status_val;
+
+            -- stop() should work without pg_cron
+            SELECT status INTO v_status_val
+            FROM ash.stop()
+            LIMIT 1;
+            ASSERT v_status_val LIKE '%external scheduler%',
+              'stop() without pg_cron should mention external scheduler, got: ' || v_status_val;
+
+            -- status() should show pg_cron_available = no
+            SELECT value INTO v_status_val
+            FROM ash.status()
+            WHERE metric = 'pg_cron_available';
+            ASSERT v_status_val LIKE '%no%',
+              'status() should show pg_cron not available, got: ' || v_status_val;
+
+            -- take_sample() should work without pg_cron
+            PERFORM ash.take_sample();
+
+            -- All reader functions should work
+            PERFORM ash.top_waits('1 hour');
+            PERFORM ash.samples('1 hour');
+            PERFORM ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+
+            RAISE NOTICE 'All degraded-mode (no pg_cron) tests PASSED';
+          END;
+          $$;
+
+          SELECT ash.uninstall('yes');
+          EOF
+
       - name: Final summary
         env:
           PGPASSWORD: postgres
