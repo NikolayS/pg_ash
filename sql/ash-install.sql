@@ -1469,7 +1469,7 @@ begin
     limit p_limit;
   else
     raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
-      using hint = 'top_queries_with_text() requires pg_stat_statements for query text and execution metrics. Use top_queries() for sample-only data without pgss.';
+      using hint = 'top_queries_with_text() requires pg_stat_statements for query text and execution metrics. Use top_queries() for sample-only data without pg_stat_statements.';
   end if;
 end;
 $$;
@@ -2733,7 +2733,7 @@ begin
     order by r.samples desc;
   else
     raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
-      using hint = 'event_queries() requires pg_stat_statements for query text. Use top_queries() or top_waits() for sample-only data without pgss.';
+      using hint = 'event_queries() requires pg_stat_statements for query text. Use top_queries() or top_waits() for sample-only data without pg_stat_statements.';
   end if;
 end;
 $$;
@@ -2837,7 +2837,7 @@ begin
     order by r.samples desc;
   else
     raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
-      using hint = 'event_queries_at() requires pg_stat_statements for query text. Use top_queries_at() or top_waits_at() for sample-only data without pgss.';
+      using hint = 'event_queries_at() requires pg_stat_statements for query text. Use top_queries_at() or top_waits_at() for sample-only data without pg_stat_statements.';
   end if;
 end;
 $$;
