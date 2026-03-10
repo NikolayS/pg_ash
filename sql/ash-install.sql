@@ -1468,7 +1468,7 @@ begin
     order by r.cnt desc
     limit p_limit;
   else
-    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
       using hint = 'top_queries_with_text() requires pg_stat_statements for query text and execution metrics. Use top_queries() for sample-only data without pgss.';
   end if;
 end;
@@ -2732,7 +2732,7 @@ begin
     left join pg_stat_statements pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
-    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
       using hint = 'event_queries() requires pg_stat_statements for query text. Use top_queries() or top_waits() for sample-only data without pgss.';
   end if;
 end;
@@ -2836,7 +2836,7 @@ begin
     left join pg_stat_statements pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
-    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;'
+    raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
       using hint = 'event_queries_at() requires pg_stat_statements for query text. Use top_queries_at() or top_waits_at() for sample-only data without pgss.';
   end if;
 end;
