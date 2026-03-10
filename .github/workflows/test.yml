@@ -1461,7 +1461,8 @@ jobs:
             "SELECT * FROM ash.top_queries('1 hour')" \
             "SELECT * FROM ash.top_queries_at(now() - interval '1 hour', now())" \
             "SELECT * FROM ash.samples('1 hour')" \
-            "SELECT * FROM ash.samples_at(now() - interval '1 hour', now())"; do
+            "SELECT * FROM ash.samples_at(now() - interval '1 hour', now())" \
+            "SELECT * FROM ash.activity_summary('1 hour')"; do
             output=$(psql -h localhost -U postgres -d postgres -c "$func" 2>&1)
             if echo "$output" | grep -q "WARNING.*pg_stat_statements"; then
               echo "  ✓ $func — WARNING emitted"
@@ -1475,8 +1476,7 @@ jobs:
           # Verify functions that should NOT warn (no pgss dependency)
           for func in \
             "SELECT * FROM ash.top_waits('1 hour')" \
-            "SELECT * FROM ash.top_by_type('1 hour')" \
-            "SELECT * FROM ash.activity_summary('1 hour')"; do
+            "SELECT * FROM ash.top_by_type('1 hour')"; do
             output=$(psql -h localhost -U postgres -d postgres -c "$func" 2>&1)
             if echo "$output" | grep -q "WARNING.*pg_stat_statements"; then
               echo "  ✗ $func — should NOT emit pgss WARNING"
