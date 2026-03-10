@@ -1140,6 +1140,7 @@ begin
     order by r.cnt desc
     limit p_limit;
   else
+    raise warning 'pg_stat_statements is not installed — query_text will be NULL. Run: CREATE EXTENSION pg_stat_statements;';
     return query
     with qids as (
       select s.slot, s.data[i] as map_id
@@ -1519,6 +1520,7 @@ begin
     left join pg_stat_statements pss on pss.queryid = r.query_id
     order by r.cnt desc limit p_limit;
   else
+    raise warning 'pg_stat_statements is not installed — query_text will be NULL. Run: CREATE EXTENSION pg_stat_statements;';
     return query
     with qids as (
       select s.slot, s.data[i] as map_id
@@ -2251,6 +2253,7 @@ begin
     order by d.sample_ts desc, wm.type, wm.event
     limit p_limit;
   else
+    raise warning 'pg_stat_statements is not installed — query_text will be NULL. Run: CREATE EXTENSION pg_stat_statements;';
     return query
     with decoded as (
       select
@@ -2355,6 +2358,7 @@ begin
     order by d.sample_ts desc, wm.type, wm.event
     limit p_limit;
   else
+    raise warning 'pg_stat_statements is not installed — query_text will be NULL. Run: CREATE EXTENSION pg_stat_statements;';
     return query
     with decoded as (
       select
