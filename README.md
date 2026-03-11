@@ -144,17 +144,23 @@ select * from ash.status();
 ```
            metric           |             value
 ----------------------------+-------------------------------
- version                    | 1.2
+ version                    | 1.3
+ color                      | off
  current_slot               | 0
  sample_interval            | 00:00:01
  rotation_period            | 1 day
  include_bg_workers         | false
- samples_in_current_slot    | 56
+ debug_logging              | false
+ installed_at               | 2026-02-16 08:30:00.000000+00
+ rotated_at                 | 2026-02-16 08:30:00.000000+00
+ time_since_rotation        | 00:09:03.123456
  last_sample_ts             | 2026-02-16 08:39:03+00
+ samples_in_current_slot    | 56
+ samples_total              | 56
  wait_event_map_count       | 11
  wait_event_map_utilization | 0.03%
  query_map_count            | 8
- pg_cron_available          | no
+ pg_cron_available          | yes
 ```
 
 ### What hurt recently?
