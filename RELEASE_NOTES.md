@@ -1,3 +1,59 @@
+# pg_ash 1.3 release notes
+
+30 commits since v1.2. Upgrade from 1.2: `\i sql/ash-1.2-to-1.3.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`.
+
+## What changed
+
+### New: pg_cron now optional
+
+`ash.start()` works without pg_cron — records the interval and prints `NOTICE` instructions for external scheduling (system cron, systemd timer, psql `\watch`, Python loop). `ash.stop()` reminds you to stop your external scheduler. `ash.status()` shows `no (use external scheduler)` when pg_cron is absent. (#7)
+
+### New: debug_logging()
+
+`ash.debug_logging(true)` enables per-session `RAISE LOG` in `take_sample()` — each sampled backend emits a log line with pid, state, wait event, backend type, and query_id. Useful for diagnosing connection pooler behavior. Goes to server log only, independent of `client_min_messages`. (#8, refs #4)
+
+### New: pgss-dependent functions fail fast
+
+`top_queries_with_text()`, `event_queries()`, and `event_queries_at()` now raise a clear `EXCEPTION` with a `HINT` when `pg_stat_statements` is not installed, instead of silently returning NULLs. (#14, refs #10)
+
+### New: pgss-optional functions warn
+
+`top_queries()`, `top_queries_at()`, `samples()`, and `samples_at()` emit a `WARNING` when `pg_stat_statements` is missing — query_text returns NULL but the function still returns sample data. (#17)
+
+### Fixed: Azure compatibility
+
+`cron.alter_job()` API used instead of direct `UPDATE cron.job` — works on Azure Flexible Server where the table is read-only. Nodename update skipped when unnecessary (background workers mode or socket connection). (#6, fixes #3)
+
+### Fixed: minute and hour intervals
+
+`ash.start('5 minutes')` and `ash.start('6 hours')` now work. Sub-minute still requires pg_cron ≥ 1.5. Non-round intervals (e.g. 90 seconds) and intervals exceeding 23 hours are rejected with clear errors. (fixes #2)
+
+### Fixed: Azure pg_cron version strings
+
+pg_cron version `'4-1'` (Azure format) is now parsed correctly via `regexp_replace`. Previously caused a version check failure.
+
+### Improved: take_sample() optimization
+
+Removed `DISTINCT` from the Read 1 `pg_stat_activity` scan. Wait event dedup uses an in-memory `text[]` seen-set instead of per-row existence checks. (#8)
+
+### Improved: schema parity
+
+Upgrade script (`ash-1.2-to-1.3.sql`) re-creates all 38 functions, ensuring identical function bodies between fresh install and upgrade path. CI schema equivalence test validates this on every push. (#9, #13)
+
+### Improved: CI
+
+PG18 added to standard test matrix (dropped pgxn-tools workaround). `pg_stat_statements` loaded in CI for pgss-dependent testing. Degraded mode tests (without pgss, without pg_cron). Shell-level `WARNING` verification via stderr capture. SQL keywords lowercased in test file. (#14, #15, #17, #18)
+
+## Functions (38 total)
+
+| Function | Description |
+|---|---|
+| `debug_logging(bool)` | **New** — enable/disable per-session RAISE LOG in take_sample() |
+
+All other functions unchanged from 1.2. See README for the full reference.
+
+---
+
 # pg_ash 1.2 release notes
 
 51 commits since v1.1. Upgrade from 1.1: `\i sql/ash-1.1-to-1.2.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`.
