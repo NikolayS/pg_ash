@@ -3,7 +3,8 @@
 -- Changes:
 --   - Make pg_cron optional: ash.start() works without it (#7)
 --   - Azure / managed-service compatibility for cron.job operations (#6)
---   - ash.debug_logging() — per-session RAISE LOG in take_sample() (#8)
+--   - ash.set_debug_logging() — per-session RAISE LOG in take_sample() (#8)
+--     (renamed from debug_logging → set_debug_logging)
 --   - take_sample() Read 1 loop: in-memory dedup, no DISTINCT scan
 --   - Version column DEFAULT fix for schema parity (#9)
 --   - Fix != to <> per code style
@@ -194,8 +195,8 @@ begin
   -- Debug logging (when v_debug_logging = true):
   --   Uses RAISE LOG — goes to server log only, never to the client.
   --   Independent of log_min_messages and client_min_messages.
-  --   Enable:  select ash.debug_logging(true);
-  --   Disable: select ash.debug_logging(false);
+  --   Enable:  select ash.set_debug_logging(true);
+  --   Disable: select ash.set_debug_logging(false);
   --
   -- Both tasks share one pg_stat_activity scan. Wait event registration skips
   -- duplicates via a seen-set (text[] + ANY check) to avoid repeated lookups.
@@ -782,7 +783,10 @@ begin
 end;
 $$;
 
-create or replace function ash.debug_logging(p_enabled bool default null)
+-- Drop old function name (renamed debug_logging → set_debug_logging)
+drop function if exists ash.debug_logging(bool);
+
+create or replace function ash.set_debug_logging(p_enabled bool default null)
 returns text
 language plpgsql
 as $$
@@ -2639,12 +2643,12 @@ begin
   execute format('revoke all on function ash.uninstall(text) from public');
   execute format('revoke all on function ash.rotate() from public');
   execute format('revoke all on function ash.take_sample() from public');
-  execute format('revoke all on function ash.debug_logging(bool) from public');
+  execute format('revoke all on function ash.set_debug_logging(bool) from public');
 
   execute format('grant execute on function ash.start(interval) to %I', v_owner);
   execute format('grant execute on function ash.stop() to %I', v_owner);
   execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
-  execute format('grant execute on function ash.debug_logging(bool) to %I', v_owner);
+  execute format('grant execute on function ash.set_debug_logging(bool) to %I', v_owner);
 end $$;

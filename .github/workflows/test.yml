@@ -286,7 +286,7 @@ jobs:
           $$;
           EOF
 
-      - name: Test debug_logging
+      - name: Test set_debug_logging
         env:
           PGPASSWORD: postgres
         run: |
@@ -300,15 +300,15 @@ jobs:
             assert v_result = false, 'debug_logging should default to false';
 
             -- Query current state via function
-            perform ash.debug_logging();
+            perform ash.set_debug_logging();
 
             -- Enable
-            perform ash.debug_logging(true);
+            perform ash.set_debug_logging(true);
             select debug_logging into v_result from ash.config where singleton;
             assert v_result = true, 'debug_logging should be true after enable';
 
             -- Disable
-            perform ash.debug_logging(false);
+            perform ash.set_debug_logging(false);
             select debug_logging into v_result from ash.config where singleton;
             assert v_result = false, 'debug_logging should be false after disable';
 
@@ -317,7 +317,7 @@ jobs:
               select 1 from ash.status() where metric = 'debug_logging'
             ), 'status should show debug_logging metric';
 
-            raise notice 'debug_logging tests PASSED';
+            raise notice 'set_debug_logging tests PASSED';
           end;
           $$;
           EOF
@@ -1422,7 +1422,7 @@ jobs:
 
             perform ash.take_sample();
             perform ash.status();
-            perform ash.debug_logging();
+            perform ash.set_debug_logging();
 
             -- Functions that should ERROR without pgss:
             begin

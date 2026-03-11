@@ -97,7 +97,7 @@ select * from ash.status();
 | `ash.status()` | Sampling status, version, partition info, debug_logging state |
 | `ash.take_sample()` | Take one sample manually (called automatically by the scheduler) |
 | `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers) |
-| `ash.debug_logging(bool)` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call without argument to check current state |
+| `ash.set_debug_logging(bool)` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call without argument to check current state |
 | `ash.uninstall('yes')` | Drop the ash schema and remove pg_cron jobs |
 
 ### Relative time (last N hours)
@@ -586,17 +586,17 @@ Enable per-session RAISE LOG output from `take_sample()` — useful for diagnosi
 
 ```sql
 -- check current state
-select ash.debug_logging();
+select ash.set_debug_logging();
 
 -- enable: each take_sample() call logs every active session to the Postgres log
-select ash.debug_logging(true);
+select ash.set_debug_logging(true);
 
 -- sample output in the Postgres server log:
 -- LOG: ash.take_sample: pid=107 state=active wait_type=CPU* wait_event=CPU* backend_type=client backend query_id=-5287352711091412819
 -- LOG: ash.take_sample: pid=108 state=idle in transaction wait_type=Client wait_event=ClientRead backend_type=client backend query_id=-6949053775937549307
 
 -- disable
-select ash.debug_logging(false);
+select ash.set_debug_logging(false);
 ```
 
 ### pg_cron run history
