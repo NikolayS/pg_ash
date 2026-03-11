@@ -74,7 +74,7 @@ select ash.uninstall('yes');
 
 ```sql
 -- from 1.0 to 1.1
-\i sql/ash-1.1.sql
+\i sql/ash-1.0-to-1.1.sql
 
 -- from 1.1 to 1.2
 \i sql/ash-1.1-to-1.2.sql

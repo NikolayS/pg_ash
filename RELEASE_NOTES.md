@@ -1,6 +1,6 @@
 # pg_ash 1.3 release notes
 
-30 commits since v1.2. Upgrade from 1.2: `\i sql/ash-1.2-to-1.3.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`.
+33 commits since v1.2. Upgrade from 1.2: `\i sql/ash-1.2-to-1.3.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`.
 
 ## What changed
 
