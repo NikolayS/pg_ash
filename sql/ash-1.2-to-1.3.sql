@@ -1,14 +1,15 @@
 -- pg_ash: upgrade from 1.2 to 1.3
 -- Safe to re-run (idempotent).
 -- Changes:
---   - Make pg_cron optional: ash.start() works without it (#7)
+--   - pg_cron now optional: ash.start() works without it (#7)
 --   - Azure / managed-service compatibility for cron.job operations (#6)
 --   - ash.set_debug_logging() — per-session RAISE LOG in take_sample() (#8)
 --     (renamed from debug_logging → set_debug_logging)
---   - take_sample() Read 1 loop: in-memory dedup, no DISTINCT scan
---   - Version column DEFAULT fix for schema parity (#9)
---   - Fix != to <> per code style
+--   - take_sample() optimization: in-memory dedup, no DISTINCT scan (#8)
 --   - pgss-dependent functions error without pg_stat_statements (#14, refs #10)
+--   - pgss-optional functions warn when pg_stat_statements missing (#17)
+--   - Version column DEFAULT fix for schema parity (#9)
+--   - Code style: != to <> (#7)
 
 -- Add debug_logging column to config if missing
 do $$
