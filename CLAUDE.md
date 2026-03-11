@@ -4,12 +4,7 @@
 
 Follow the rules at https://gitlab.com/postgres-ai/rules/-/tree/main/rules — always pull latest before starting work.
 
-## SQL Style
-
-- Lowercase keywords (`select`, `from`, `where` — not `SELECT`, `FROM`, `WHERE`)
-- `<>` not `!=`
-- 2-space indent
-- `where singleton`, `select from` pattern
+SQL style guide: https://gitlab.com/postgres-ai/rules/-/blob/main/rules/development__db-sql-style-guide.mdc
 
 ## Deployment
 
@@ -32,4 +27,4 @@ Never merge without explicit approval from the project owner.
 - Pure SQL + PL/pgSQL (no extensions, no `.control` file)
 - Anti-extension design: `\i` to install, works on RDS/Cloud SQL/Supabase/AlloyDB/Neon
 - Optional pg_cron integration for automated sampling
-- Optional pg_stat_statements for query text enrichment
+- Optional pg_stat_statements for query text and execution metrics
