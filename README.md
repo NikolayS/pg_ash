@@ -4,7 +4,7 @@
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/pg_ash)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/NikolayS/pg_ash/blob/main/LICENSE)
 [![Pure SQL](https://img.shields.io/badge/Pure_SQL-no_C_extension-green)](https://github.com/NikolayS/pg_ash)
-[![Functions tested](https://img.shields.io/badge/functions_tested-37%2F37_(100%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
+[![Functions tested](https://img.shields.io/badge/functions_tested-38%2F38_(100%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
 
 Active Session History for Postgres — lightweight wait event sampling with zero bloat.
 
@@ -19,7 +19,7 @@ Postgres has no built-in session history. When something was slow an hour ago, t
 | | pg_ash | pg_wait_sampling | pgsentinel | External sampling |
 |---|---|---|---|---|
 | Install | `\i` (pure SQL) | shared_preload_libraries | shared_preload_libraries (package or compile) | Separate infra |
-| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (as of early 2026) | Not known to be supported | Yes, with effort |
+| Works on managed (RDS, Cloud SQL, Supabase, ...) | Yes | Cloud SQL only (limited managed support) | Not known to be supported | Yes, with effort |
 | Sampling rate | 1s (via pg_cron, system cron, or any scheduler) | 10ms (in-process) | 10ms (in-process) | 15-60s typical |
 | Visibility | Inside Postgres | Inside Postgres | Inside Postgres | Outside only |
 | Storage | Disk (~30 MiB/day) | Memory only | Memory only | External store |
@@ -97,7 +97,7 @@ select * from ash.status();
 | `ash.status()` | Sampling status, version, partition info, debug_logging state |
 | `ash.take_sample()` | Take one sample manually (called automatically by the scheduler) |
 | `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers) |
-| `ash.set_debug_logging(bool)` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call without argument to check current state |
+| `ash.set_debug_logging([bool])` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call with no argument to check current state |
 | `ash.uninstall('yes')` | Drop the ash schema and remove pg_cron jobs |
 
 ### Relative time (last N hours)
@@ -334,7 +334,7 @@ select * from ash.top_waits('1 hour', p_color => true);
 
 psql's table formatter escapes ANSI codes — to render colors, pipe through sed:
 
-```sql
+```
 -- add to ~/.psqlrc for a reusable :color command
 \set color '\\g | sed ''s/\\\\x1B/\\x1b/g'' | less -R'
 
@@ -707,7 +707,7 @@ Don't forget to also schedule `ash.rotate()` — once per `rotation_period` (def
 - **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
 - **query_map hard cap at 50k entries** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. This can flood the query_map partitions. A hard cap of 50,000 entries per partition prevents unbounded growth — queries beyond the cap are tracked as "unknown." PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
-- **Parallel query workers counted individually** — parallel workers share the same `query_id` as the leader but are counted as separate backends. This inflates the apparent "weight" of parallel queries in `top_queries()`. Track `leader_pid` grouping is a potential future improvement.
+- **Parallel query workers counted individually** — parallel workers share the same `query_id` as the leader but are counted as separate backends. This inflates the apparent "weight" of parallel queries in `top_queries()`. `leader_pid` grouping is not yet implemented.
 - **WAL overhead** — 1-second sampling generates ~29 KiB WAL per sample (~2.4 GiB/day), dominated by `full_page_writes`. This is significant for WAL-sensitive replication setups. Consider 5-second or 10-second sampling intervals (`ash.start('5 seconds')`) if WAL volume is a concern. The overhead scales linearly with sampling frequency.
 
 ## License
