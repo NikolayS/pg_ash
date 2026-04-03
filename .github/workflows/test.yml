@@ -236,18 +236,16 @@ jobs:
           end;
           $$;
 
-          -- 3. Simulate query_canceled via helper function to test the handler
-          -- This avoids timing-dependent tests that fail on fast CI runners
+          -- 3. Simulate query_canceled via pg_cancel_backend to test the handler
+          -- This is deterministic — no timing dependency on CI runner speed
           create or replace function test_simulate_cancel()
           returns int language plpgsql as $$
           begin
-            -- Set a very short timeout and sleep to guarantee cancel
-            perform set_config('statement_timeout', '1', true);
-            perform pg_sleep(10);
+            -- Cancel our own backend; pg_sleep gives PG time to deliver the signal
+            perform pg_cancel_backend(pg_backend_pid());
+            perform pg_sleep(1);
             return 0;  -- never reached
           exception when query_canceled then
-            perform set_config('statement_timeout', '0', true);
-            -- Directly test the handler logic: increment missed_samples
             update ash.config set missed_samples = missed_samples + 1 where singleton;
             return -1;
           end;
