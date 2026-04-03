@@ -270,6 +270,7 @@ declare
   v_current_wait_id smallint;
   v_current_slot smallint;
   v_rows_inserted int := 0;
+  v_missed_count int;
   v_seen_waits text[] := '{}';
 begin
   -- Get sample timestamp (seconds since epoch, from now())
@@ -465,9 +466,10 @@ exception when query_canceled then
   -- This is intentional: either way, the sample was interrupted and the
   -- gap should be observable. If you need to hard-cancel take_sample(),
   -- use pg_terminate_backend() instead.
-  update ash.config set missed_samples = missed_samples + 1 where singleton;
-  raise warning 'ash.take_sample: interrupted (missed_samples incremented to %)',
-    (select missed_samples from ash.config where singleton);
+  update ash.config set missed_samples = missed_samples + 1
+    where singleton
+    returning missed_samples into v_missed_count;
+  raise warning 'ash.take_sample: interrupted (missed_samples = %)', v_missed_count;
   return -1;
 end;
 $$;
