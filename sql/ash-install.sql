@@ -459,9 +459,12 @@ begin
   return v_rows_inserted;
 
 exception when query_canceled then
-  -- statement_timeout fired — record the miss so gaps are observable.
-  -- Reset statement_timeout first so the UPDATE itself isn't canceled.
-  perform set_config('statement_timeout', '0', true);
+  -- statement_timeout (or pg_cancel_backend) fired — record the miss.
+  -- NOTE: query_canceled catches both statement_timeout AND explicit
+  -- pg_cancel_backend() signals. PG provides no way to distinguish them.
+  -- This is intentional: either way, the sample was interrupted and the
+  -- gap should be observable. If you need to hard-cancel take_sample(),
+  -- use pg_terminate_backend() instead.
   update ash.config set missed_samples = missed_samples + 1 where singleton;
   raise warning 'ash.take_sample: interrupted (missed_samples incremented to %)',
     (select missed_samples from ash.config where singleton);
@@ -2642,8 +2645,6 @@ begin
     alter table ash.config add column version text not null default '1.3';
   end if;
 end $$;
-
-update ash.config set version = '1.3' where singleton;
 
 -- Migration: add missed_samples column if upgrading from pre-1.4
 do $$
