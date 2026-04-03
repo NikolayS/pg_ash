@@ -14,7 +14,7 @@ begin
     where table_schema = 'ash' and table_name = 'config' and column_name = 'missed_samples'
   ) then
     alter table ash.config
-      add column missed_samples int not null default 0;
+      add column missed_samples bigint not null default 0;
   end if;
 end $$;
 
@@ -38,7 +38,7 @@ declare
   v_current_wait_id smallint;
   v_current_slot smallint;
   v_rows_inserted int := 0;
-  v_missed_count int;
+  v_missed_count bigint;
   v_seen_waits text[] := '{}';
 begin
   -- Get sample timestamp (seconds since epoch, from now())
@@ -237,7 +237,11 @@ exception when query_canceled then
   update ash.config set missed_samples = missed_samples + 1
     where singleton
     returning missed_samples into v_missed_count;
-  raise warning 'ash.take_sample: interrupted (missed_samples = %)', v_missed_count;
+  if v_missed_count is null then
+    raise warning 'ash.take_sample: interrupted (config row missing — missed_samples not tracked)';
+  else
+    raise warning 'ash.take_sample: interrupted (missed_samples = %)', v_missed_count;
+  end if;
   return -1;
 end;
 $$;
