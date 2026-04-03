@@ -64,7 +64,8 @@ create table if not exists ash.config (
   include_bg_workers bool not null default false,
   debug_logging      bool not null default false,
   encoding_version   smallint not null default 1,
-  version            text not null default '1.3',
+  version            text not null default '1.4',
+  missed_samples     int not null default 0,
   rotated_at         timestamptz not null default clock_timestamp(),
   installed_at       timestamptz not null default clock_timestamp()
 );
@@ -456,6 +457,15 @@ begin
   end loop;
 
   return v_rows_inserted;
+
+exception when query_canceled then
+  -- statement_timeout fired — record the miss so gaps are observable.
+  -- Reset statement_timeout first so the UPDATE itself isn't canceled.
+  perform set_config('statement_timeout', '0', true);
+  update ash.config set missed_samples = missed_samples + 1 where singleton;
+  raise warning 'ash.take_sample: interrupted (missed_samples incremented to %)',
+    (select missed_samples from ash.config where singleton);
+  return -1;
 end;
 $$;
 
@@ -1028,6 +1038,7 @@ begin
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
   metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
+  metric := 'missed_samples'; value := v_config.missed_samples::text; return next;
   metric := 'installed_at'; value := v_config.installed_at::text; return next;
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
@@ -2633,6 +2644,19 @@ begin
 end $$;
 
 update ash.config set version = '1.3' where singleton;
+
+-- Migration: add missed_samples column if upgrading from pre-1.4
+do $$
+begin
+  if not exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config' and column_name = 'missed_samples'
+  ) then
+    alter table ash.config add column missed_samples int not null default 0;
+  end if;
+end $$;
+
+update ash.config set version = '1.4' where singleton;
 
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
