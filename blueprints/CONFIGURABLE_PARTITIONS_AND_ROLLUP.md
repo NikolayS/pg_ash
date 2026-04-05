@@ -1,5 +1,20 @@
 # Configurable N-partitions + Rollup tables
 
+> **Spec version**: 0.2 (2026-04-05)
+> **Target**: pg_ash v1.5
+> **Status**: Draft — under review
+> **Issue**: [#30](https://github.com/NikolayS/pg_ash/issues/30)
+> **Branch**: `feat/configurable-partitions-and-rollup`
+
+## Changelog
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 0.1 | 2026-04-03 | Initial spec: configurable N-partitions + rollup tables |
+| 0.2 | 2026-04-05 | Incorporated 4 expert reviews. Major changes: epoch fixed to existing 2026-01-01; watermark-based rollup execution model; hardened `rebuild_partitions()` with disable/lock/restart protocol; precise retention semantics; `peak_backends` clarified as per-database; retention config columns added from day one; `rollup_min_samples` threshold added; ts/epoch helper functions; explicit upgrade ordering; array merge helpers redesigned (jsonb approach removed); `rollup_minute()` pseudocode rewritten; reader function specs expanded; `start()`/`stop()` idempotency rules; catalog-based cleanup for `uninstall()`/`rebuild_partitions()` |
+
+---
+
 ## Overview
 
 Two features for pg_ash v1.5:
@@ -8,6 +23,8 @@ Two features for pg_ash v1.5:
 2. **Rollup tables for long-term storage** — minute and hourly aggregates surviving rotation, per the existing `ROLLUP_DESIGN.md`.
 
 Both share a dependency: rotation logic must become dynamic before rollups can reference partition boundaries correctly.
+
+**Version note**: Current version is 1.3. Whether this ships as v1.4 or v1.5 depends on whether other features land first. The spec uses "v1.5" as a placeholder; the upgrade script will be named accordingly at release time (e.g., `ash-1.3-to-1.4.sql` or `ash-1.4-to-1.5.sql`).
 
 ---
 
@@ -18,29 +35,27 @@ Both share a dependency: rotation logic must become dynamic before rollups can r
 pg_ash hardcodes 3 partitions (`sample_0/1/2`, `query_map_0/1/2`) with `% 3` modular arithmetic and a `CASE` statement in `rotate()`. This means:
 
 - Default retention = 1 rotation period (the third partition is being truncated)
-- Users who want longer raw sample retention (e.g., 7 days at 1-day rotation = 7 partitions) must edit SQL source
+- Users who want longer raw sample retention (e.g., 7 days at 1-day rotation) must edit SQL source
 - The `CASE` block in `rotate()` doesn't scale
 
 ### Design
 
-#### Config
+#### Config changes
 
-Add `num_partitions` column to `ash.config`:
+Add columns to `ash.config`:
 
 ```sql
 alter table ash.config
   add column num_partitions smallint not null default 3;
-```
 
-Valid range: 3–32. Minimum 3 because the ring buffer needs current + previous + one being truncated. Maximum 32 is practical — beyond that, the `query_map_all` UNION ALL view becomes unwieldy and planner overhead grows.
-
-Constraint:
-
-```sql
 alter table ash.config
   add constraint config_num_partitions_check
   check (num_partitions between 3 and 32);
 ```
+
+Valid range: 3–32.
+- **Minimum 3**: the ring buffer needs current + previous + one being truncated.
+- **Maximum 32**: implementation ceiling chosen to contain `query_map_all` UNION ALL planning overhead. CI must benchmark lookup paths at N=3, 9, 16, and 32. If performance degrades beyond acceptable thresholds, fall back to a real partitioned `query_map` parent rather than a generated view. This is a known scaling ceiling, not just a "practical" limit.
 
 #### Partition naming
 
@@ -73,7 +88,6 @@ begin
       '  unique (query_id)'
       ')', i
     );
-    -- create indexes on sample_N
     execute format(
       'create index if not exists sample_%s_ts_idx '
       'on ash.sample_%s (sample_ts desc)', i, i
@@ -112,57 +126,73 @@ Still reads from `ash.config.current_slot`. No change needed.
 
 #### `take_sample()` — dynamic routing
 
-Replace the 3-way `IF` for query_map inserts with dynamic SQL:
+Replace the 3-way `IF` for query_map inserts with dynamic SQL. The dynamic version must preserve the existing behavior: query `pg_stat_activity` directly with the 50k cap check using `reltuples` (not `pg_relation_size`).
 
 ```sql
--- current approach (hardcoded):
+-- current approach (hardcoded 3-way IF, repeated query):
 if v_current_slot = 0 then
-  insert into ash.query_map_0 ...
+  insert into ash.query_map_0 (query_id)
+  select distinct sa.query_id
+  from pg_stat_activity sa
+  where sa.query_id is not null
+    and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
+    and (sa.backend_type = 'client backend'
+     or (v_include_bg and sa.backend_type in (...)))
+    and sa.pid <> pg_backend_pid()
+    and (select reltuples from pg_class
+     where oid = 'ash.query_map_0'::regclass) < 50000
+  on conflict (query_id) do nothing;
 elsif v_current_slot = 1 then
-  insert into ash.query_map_1 ...
-else
-  insert into ash.query_map_2 ...
+  -- same query, different table name (bug fixes must be applied 3x)
+  ...
 end if;
 
--- new approach (dynamic):
+-- new approach (single dynamic SQL, bug fixes apply once):
 execute format(
   'insert into ash.query_map_%s (query_id) '
   'select distinct sa.query_id '
-  'from unnest($1) as sa(query_id) '
-  'where sa.query_id <> 0 '
+  'from pg_stat_activity sa '
+  'where sa.query_id is not null '
+  '  and sa.state in (''active'', ''idle in transaction'', '
+  '    ''idle in transaction (aborted)'') '
+  '  and (sa.backend_type = ''client backend'' '
+  '   or ($1 and sa.backend_type in (''autovacuum worker'', '
+  '     ''logical replication worker'', ''parallel worker'', '
+  '     ''background worker''))) '
+  '  and sa.pid <> pg_backend_pid() '
+  '  and (select reltuples from pg_class '
+  '   where oid = %L::regclass) < 50000 '
   'on conflict (query_id) do nothing',
-  v_current_slot
-) using v_query_ids;
-
--- with 50k cap check:
-execute format(
-  'select pg_catalog.pg_relation_size(oid) '
-  'from pg_catalog.pg_class '
-  'where oid = %L::regclass',
+  v_current_slot,
   'ash.query_map_' || v_current_slot
-) into v_qmap_size;
+) using v_include_bg;
 ```
 
-**Performance note**: Dynamic SQL adds ~0.1ms overhead per `take_sample()` call. At 1s sampling interval, this is negligible (<0.01% overhead). The plan cache won't help with partition routing anyway since the slot changes.
+**Performance note**: Dynamic SQL adds ~0.1ms overhead per `take_sample()` call. At 1s sampling interval, this is negligible (<0.01% overhead). The plan cache won't help with partition routing anyway since the slot changes. Ensure `v_current_slot` is strictly typed as `smallint` before format concatenation to prevent any string coercion overhead.
 
 #### `rotate()` — dynamic truncation
 
 Replace the `CASE` statement with dynamic SQL:
 
 ```sql
--- current approach:
-case v_truncate_slot
-  when 0 then truncate ash.sample_0; truncate ash.query_map_0; ...
-  when 1 then ...
-  when 2 then ...
-end case;
+-- read num_partitions from config (already fetched with current_slot)
+v_num_partitions := v_config.num_partitions;
 
--- new approach:
-v_num_partitions := (select num_partitions from ash.config where singleton);
+-- calculate new slot dynamically
+v_new_slot := (v_old_slot + 1) % v_num_partitions;
 v_truncate_slot := (v_new_slot + 1) % v_num_partitions;
 
+-- advance current_slot first (before truncate)
+update ash.config
+set current_slot = v_new_slot,
+    rotated_at = now()
+where singleton;
+
+-- dynamic truncation (replaces CASE block)
 execute format('truncate ash.sample_%s', v_truncate_slot);
 execute format('truncate ash.query_map_%s', v_truncate_slot);
+-- ALTER COLUMN id RESTART takes ACCESS EXCLUSIVE lock on query_map.
+-- Safe here because we just truncated the table — no concurrent readers.
 execute format(
   'alter table ash.query_map_%s alter column id restart', v_truncate_slot
 );
@@ -170,9 +200,13 @@ execute format(
 
 Modular arithmetic changes from `% 3` to `% v_num_partitions` everywhere.
 
-#### `rebuild_partitions(p_num int DEFAULT NULL)`
+**Rollup integration** (Phase B): `rotate()` should call `rollup_minute()` for any un-rolled-up minutes in the partition about to be truncated. This is a belt-and-suspenders safeguard — the regular cron-driven rollup handles the normal case, but this ensures no data loss even if the scheduler drifts. Safe because rollup is idempotent (upsert). See Part 2 for details.
 
-New admin function (modeled after pg-flight-recorder's `rebuild_ring_buffers`):
+#### `rebuild_partitions(p_num int default null)` — hardened
+
+New admin function. **Destructive** — all raw sample data is lost. Rollup tables survive.
+
+The v0.1 spec was too simple — it called `stop()` then immediately dropped tables. This races with in-flight `take_sample()` calls and external schedulers. The hardened protocol:
 
 ```sql
 create or replace function ash.rebuild_partitions(p_num int default null)
@@ -190,597 +224,156 @@ begin
     raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
   end if;
 
-  if v_new_n = v_old_n then
-    return format('already at %s partitions, no rebuild needed', v_old_n);
-  end if;
+  -- Step 1: Mark sampling disabled in config.
+  -- take_sample() checks this flag and returns early.
+  update ash.config set sampling_enabled = false where singleton;
 
-  -- Stop sampling first (if pg_cron is available)
+  -- Step 2: Stop pg_cron jobs if available
   if ash._pg_cron_available() then
     perform ash.stop();
   end if;
 
-  -- Drop ALL existing sample partitions and query_maps
-  for i in 0..v_old_n-1 loop
-    execute format('drop table if exists ash.sample_%s', i);
-    execute format('drop table if exists ash.query_map_%s', i);
-  end loop;
+  -- Step 3: Acquire advisory lock shared by take_sample/rotate/rollup paths.
+  -- Wait up to 5s for any in-flight operations to complete.
+  set local lock_timeout = '5s';
+  if not pg_try_advisory_lock(hashtext('ash_rebuild')) then
+    -- Re-enable sampling since we failed
+    update ash.config set sampling_enabled = true where singleton;
+    raise exception 'rebuild_partitions: could not acquire lock — '
+      'another operation is in progress';
+  end if;
 
-  -- Update config
-  update ash.config
-  set num_partitions = v_new_n,
-      current_slot = 0,
-      rotated_at = now()
-  where singleton;
+  begin
+    -- Step 4: Brief sleep to let any in-flight take_sample() finish.
+    -- take_sample() runs every 1s and completes in <100ms typically.
+    perform pg_sleep(2);
 
-  -- Create new partitions
-  for i in 0..v_new_n-1 loop
-    execute format(
-      'create table ash.sample_%s partition of ash.sample for values in (%s)', i, i
+    -- Step 5: Drop ALL existing sample partitions and query_maps.
+    -- Use catalog enumeration (not config) to catch orphaned tables
+    -- from prior failed rebuilds.
+    perform ash._drop_all_partitions();
+
+    -- Step 6: Update config
+    update ash.config
+    set num_partitions = v_new_n,
+        current_slot = 0,
+        rotated_at = now()
+    where singleton;
+
+    -- Step 7: Create new partitions
+    for i in 0..v_new_n-1 loop
+      execute format(
+        'create table ash.sample_%s partition of ash.sample '
+        'for values in (%s)', i, i
+      );
+      execute format(
+        'create table ash.query_map_%s ('
+        '  id int4 generated always as identity,'
+        '  query_id int8 not null,'
+        '  unique (query_id))', i
+      );
+      execute format(
+        'create index sample_%s_ts_idx on ash.sample_%s (sample_ts desc)',
+        i, i
+      );
+    end loop;
+
+    -- Step 8: Rebuild the query_map_all view
+    perform ash._rebuild_query_map_view();
+
+    perform pg_advisory_unlock(hashtext('ash_rebuild'));
+
+    -- Step 9: Leave sampling DISABLED. User must explicitly call
+    -- ash.start() to resume. This is intentional — forcing explicit
+    -- restart prevents accidental data collection into a fresh schema.
+    return format(
+      'rebuilt: %s -> %s partitions. all raw data cleared. '
+      'call ash.start() to resume sampling.',
+      v_old_n, v_new_n
     );
-    execute format(
-      'create table ash.query_map_%s ('
-      '  id int4 generated always as identity,'
-      '  query_id int8 not null,'
-      '  unique (query_id))', i
-    );
-    -- indexes on sample_N
-    execute format(
-      'create index sample_%s_ts_idx on ash.sample_%s (sample_ts desc)', i, i
-    );
-  end loop;
 
-  -- Rebuild the query_map_all view
-  perform ash._rebuild_query_map_view();
-
-  return format('rebuilt: %s -> %s partitions. all data cleared. restart sampling.', v_old_n, v_new_n);
+  exception when others then
+    perform pg_advisory_unlock(hashtext('ash_rebuild'));
+    -- Re-enable sampling on failure so the system isn't left dead
+    update ash.config set sampling_enabled = true where singleton;
+    raise;
+  end;
 end $$;
 ```
 
-**WARNING**: This is destructive — all raw sample data is lost. Rollup tables (Part 2) survive.
+**Config change**: add `sampling_enabled bool not null default true` to `ash.config`. `take_sample()` checks this flag and returns 0 immediately when disabled.
 
 REVOKE from PUBLIC (admin-only, like `rotate`, `start`, `stop`).
+
+#### `_drop_all_partitions()` — catalog-based cleanup
+
+Use catalog enumeration instead of trusting `num_partitions` config. This catches orphaned tables from prior failed rebuilds:
+
+```sql
+create or replace function ash._drop_all_partitions()
+returns void
+language plpgsql
+as $$
+declare
+  v_rec record;
+begin
+  -- Drop sample partitions (children of ash.sample)
+  for v_rec in
+    select c.relname
+    from pg_inherits i
+    join pg_class c on c.oid = i.inhrelid
+    join pg_namespace n on n.oid = c.relnamespace
+    where i.inhparent = 'ash.sample'::regclass
+      and n.nspname = 'ash'
+  loop
+    execute format('drop table if exists ash.%I', v_rec.relname);
+  end loop;
+
+  -- Drop query_map tables by naming pattern
+  for v_rec in
+    select c.relname
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'ash'
+      and c.relname ~ '^query_map_[0-9]+$'
+      and c.relkind = 'r'
+  loop
+    execute format('drop table if exists ash.%I', v_rec.relname);
+  end loop;
+end $$;
+```
 
 #### `status()` — add num_partitions metric
 
 ```sql
 metric := 'num_partitions'; value := v_config.num_partitions::text; return next;
+metric := 'sampling_enabled'; value := v_config.sampling_enabled::text; return next;
 ```
 
-#### `uninstall()` — dynamic drop
+#### `uninstall()` — catalog-based drop
 
-Replace hardcoded drops with loop:
+Use `_drop_all_partitions()` instead of loop over config count:
 
 ```sql
-for i in 0..v_n-1 loop
-  execute format('drop table if exists ash.sample_%s', i);
-  execute format('drop table if exists ash.query_map_%s', i);
-end loop;
+-- Drop all sample partitions and query_maps (catalog-based)
+perform ash._drop_all_partitions();
+-- Then drop the parent table, view, etc.
 ```
 
-#### Upgrade path (1.4 → 1.5)
-
-```sql
--- Add num_partitions column (default 3 = backwards-compatible)
-do $$
-begin
-  if not exists (
-    select from information_schema.columns
-    where table_schema = 'ash' and table_name = 'config'
-      and column_name = 'num_partitions'
-  ) then
-    alter table ash.config
-      add column num_partitions smallint not null default 3;
-    alter table ash.config
-      add constraint config_num_partitions_check
-      check (num_partitions between 3 and 32);
-  end if;
-end $$;
-```
-
-Existing installations keep 3 partitions. `rebuild_partitions(N)` to change.
-
-#### Retention semantics
+#### Retention semantics — precise definition
 
 With N partitions and rotation_period P:
 
-- **Active data**: partitions `current_slot` (writing) and `current_slot - 1` (just completed)
-- **Readable data**: N-1 partitions (all except the one being truncated next)
-- **Total raw retention**: `(N - 2) * P` readable + current partial
-- **Default (N=3, P=1day)**: ~1–2 days (unchanged from current behavior)
-- **Example (N=9, P=1day)**: ~7 days raw retention
+- **Guaranteed complete-history retention**: `(N - 2) * P` — this many full rotation periods are always fully queryable, regardless of when you ask.
+- **Best-case visible window**: up to `(N - 1) * P` — immediately after rotation, before truncation of the oldest, you briefly see N-1 complete periods.
+- **Plus current partial period**: the active partition accumulates data throughout the current rotation cycle.
+- **Default (N=3, P=1day)**: guaranteed 1 day of complete history + current partial (unchanged from current behavior).
+- **Example (N=9, P=1day)**: guaranteed 7 days of complete history + current partial.
 
-#### sample table default constraint
+**Important**: "N-1 readable partitions" is physically true but not equivalent to "N-1 periods of useful history." The practically queryable window depends on when within the rotation cycle you ask. Documentation and `status()` output should use the conservative `(N - 2) * P` guarantee.
 
-The `sample` parent table has `slot smallint not null default ash.current_slot()`. The partition `for values in (N)` constraint means PG routes inserts to the correct child. No change needed here — LIST partitioning handles it.
+#### sample table partition routing
 
-But we need to ensure the CHECK constraint on `slot` reflects the valid range. Currently there's no explicit CHECK — LIST partition bounds enforce it implicitly. With dynamic N, any `slot` value outside 0..N-1 would fail at insert time with "no partition of relation". This is the correct behavior.
-
----
-
-## Part 2: Rollup tables for long-term storage
-
-### Problem
-
-Raw samples rotate away after (N-2) × rotation_period. For trend analysis ("is the system getting slower this month?"), we need aggregated long-term storage.
-
-### Design
-
-Per the existing `ROLLUP_DESIGN.md`, with refinements for the N-partition world.
-
-#### Tables
-
-```sql
-create table if not exists ash.rollup_1m (
-  ts         int4 not null,  -- minute-aligned, epoch offset
-  datid      oid not null,
-  samples    smallint not null,
-  peak_backends smallint not null,
-  wait_counts int4[] not null,  -- [wait_id, count, wait_id, count, ...]
-  query_counts int8[] not null, -- [query_id, count, query_id, count, ...]
-  primary key (ts, datid)
-);
-
-create table if not exists ash.rollup_1h (
-  ts         int4 not null,  -- hour-aligned, epoch offset
-  datid      oid not null,
-  samples    smallint not null,
-  peak_backends smallint not null,
-  wait_counts int4[] not null,
-  query_counts int8[] not null,
-  primary key (ts, datid)
-);
-```
-
-B-tree on `(ts, datid)` via PK — sufficient for all access patterns.
-
-No partitioning on rollup tables. They're small (see storage estimates below) and `DELETE` + autovacuum handles retention fine.
-
-#### Epoch function
-
-Reuse pg_ash's existing epoch (2025-01-01 UTC, from `ash.config.installed_at`? No — we need a fixed, universal epoch):
-
-```sql
-create or replace function ash.epoch()
-returns timestamptz
-immutable
-language sql
-as $$
-  select '2025-01-01 00:00:00+00'::timestamptz
-$$;
-```
-
-`int4` overflow horizon: 2025 + 68 years ≈ 2093. Sufficient.
-
-#### `ash.rollup_minute()`
-
-Aggregation function, called by pg_cron every minute (or by external scheduler):
-
-```sql
-create or replace function ash.rollup_minute()
-returns int  -- number of rollup rows upserted
-language plpgsql
-as $$
-declare
-  v_minute_start int4;
-  v_minute_end int4;
-  v_count int := 0;
-begin
-  -- Previous minute boundaries
-  v_minute_end := extract(epoch from
-    date_trunc('minute', now()) - ash.epoch())::int4;
-  v_minute_start := v_minute_end - 60;
-
-  -- For each database with samples in this minute:
-  -- 1. Decode all samples in the time range
-  -- 2. Aggregate wait events into [wait_id, count] pairs
-  -- 3. Aggregate query_ids into [query_id, count] pairs (top 100)
-  -- 4. Compute peak_backends (max active sessions in any single sample)
-  -- 5. Upsert into rollup_1m
-
-  with minute_samples as (
-    select
-      s.sample_ts,
-      s.active_count,
-      s.data,
-      s.slot
-    from ash.sample s
-    where s.sample_ts >= v_minute_start
-      and s.sample_ts < v_minute_end
-  ),
-  decoded as (
-    select
-      ms.sample_ts,
-      ms.active_count,
-      d.*
-    from minute_samples ms
-    cross join lateral ash.decode_sample(ms.data, ms.slot) d
-  ),
-  per_db as (
-    select
-      datid,
-      count(distinct sample_ts)::smallint as samples,
-      max(active_count)::smallint as peak_backends,
-      -- wait event aggregation: sum counts per wait_event_map id
-      -- (implementation detail: build array from aggregated results)
-      array_agg(distinct wait_event_id order by count desc) as wait_ids,
-      array_agg(distinct query_id order by count desc) as query_ids
-    from decoded
-    group by datid
-  )
-  insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
-  select
-    v_minute_start,
-    datid,
-    samples,
-    peak_backends,
-    wait_counts_array,  -- built from per-wait aggregation
-    query_counts_array  -- built from per-query aggregation, top 100
-  from per_db
-  on conflict (ts, datid) do update set
-    samples = excluded.samples,
-    peak_backends = excluded.peak_backends,
-    wait_counts = excluded.wait_counts,
-    query_counts = excluded.query_counts;
-
-  get diagnostics v_count = row_count;
-  return v_count;
-end $$;
-```
-
-**Note**: The actual implementation will need to properly decode the packed sample arrays. The `decode_sample()` function already exists — it returns rows with `(datid, userid, query_map_id, wait_event_type, wait_event)`. The rollup aggregator needs to:
-
-1. Group by `datid`
-2. For waits: count occurrences of each `(wait_event_type, wait_event)` pair → look up `wait_event_map` id → build `[id, count, id, count, ...]`
-3. For queries: resolve `query_map_id` → `query_id` via `query_map_all`, count occurrences → build `[query_id, count, ...]`, truncate to top 100
-4. `samples` = count of distinct `sample_ts` values
-5. `peak_backends` = max `active_count` across all samples in the minute
-
-**Key invariant**: Rollup must run BEFORE rotation truncates the data. With default 1-day rotation, there's plenty of time. With very short rotation periods (e.g., 1 hour with 3 partitions), the rollup might miss data if it falls behind. The rollup function should check if data exists and emit a WARNING if the time range is empty (gap detection).
-
-#### `ash.rollup_hour()`
-
-```sql
-create or replace function ash.rollup_hour()
-returns int
-language plpgsql
-as $$
-declare
-  v_hour_start int4;
-  v_hour_end int4;
-  v_count int := 0;
-begin
-  v_hour_end := extract(epoch from
-    date_trunc('hour', now()) - ash.epoch())::int4;
-  v_hour_start := v_hour_end - 3600;
-
-  insert into ash.rollup_1h (ts, datid, samples, peak_backends, wait_counts, query_counts)
-  select
-    v_hour_start,
-    datid,
-    sum(samples)::smallint,
-    max(peak_backends)::smallint,
-    ash._merge_wait_counts(array_agg(wait_counts)),
-    ash._truncate_query_counts(
-      ash._merge_query_counts(array_agg(query_counts)),
-      100  -- top 100 queries per hour
-    )
-  from ash.rollup_1m
-  where ts >= v_hour_start and ts < v_hour_end
-  group by datid
-  on conflict (ts, datid) do update set
-    samples = excluded.samples,
-    peak_backends = excluded.peak_backends,
-    wait_counts = excluded.wait_counts,
-    query_counts = excluded.query_counts;
-
-  get diagnostics v_count = row_count;
-  return v_count;
-end $$;
-```
-
-#### Helper functions for array merging
-
-```sql
--- Merge multiple wait_counts arrays: sum counts for matching wait_ids
-create or replace function ash._merge_wait_counts(p_arrays int4[][])
-returns int4[]
-language plpgsql immutable
-as $$
-declare
-  v_result jsonb := '{}';
-  v_arr int4[];
-  v_i int;
-begin
-  foreach v_arr slice 1 in array p_arrays loop
-    v_i := 1;
-    while v_i < array_length(v_arr, 1) loop
-      -- v_arr[v_i] = wait_id, v_arr[v_i+1] = count
-      v_result := jsonb_set(
-        v_result,
-        array[v_arr[v_i]::text],
-        to_jsonb(coalesce((v_result->>v_arr[v_i]::text)::int, 0) + v_arr[v_i+1])
-      );
-      v_i := v_i + 2;
-    end loop;
-  end loop;
-  -- Convert back to sorted array [id, count, id, count, ...]
-  return (
-    select array_agg(v order by count desc)
-    from (
-      select unnest(array[key::int4, value::int4]) as v,
-             value::int as count
-      from jsonb_each_text(v_result)
-    ) sub
-  );
-end $$;
-
--- Same pattern for query_counts (int8 arrays)
-create or replace function ash._merge_query_counts(p_arrays int8[][])
-returns int8[]
-language plpgsql immutable;
-
--- Truncate query_counts to top N by count
-create or replace function ash._truncate_query_counts(p_arr int8[], p_top int)
-returns int8[]
-language plpgsql immutable;
-```
-
-**Alternative (simpler, recommended)**: Skip jsonb intermediate. Use a temp-table-free approach with `unnest` + `array_agg`:
-
-```sql
--- For the hourly rollup, since we're aggregating at most 60 minute-rows per db:
--- Just unnest all arrays, group by id, sum counts, re-array
-with pairs as (
-  select
-    arr[i] as id,
-    arr[i+1] as count
-  from unnest_minute_arrays  -- from rollup_1m rows
-  cross join generate_subscripts(arr, 1) i
-  where i % 2 = 1
-)
-select array_agg(id order by sum_count desc) || array_agg(sum_count order by sum_count desc)
-from (
-  select id, sum(count) as sum_count
-  from pairs
-  group by id
-) agg;
-```
-
-The exact implementation should avoid temp tables (per pg_ash design principles — zero catalog churn).
-
-#### Retention function
-
-```sql
-create or replace function ash.rollup_cleanup()
-returns text
-language plpgsql
-as $$
-declare
-  v_1m_deleted int;
-  v_1h_deleted int;
-  v_1m_retention int;  -- days
-  v_1h_retention int;  -- days
-begin
-  -- Configurable via ash.config (future), hardcoded for now
-  v_1m_retention := 30;   -- 30 days of per-minute data
-  v_1h_retention := 1825; -- 5 years of per-hour data
-
-  delete from ash.rollup_1m
-  where ts < extract(epoch from
-    now() - (v_1m_retention || ' days')::interval - ash.epoch())::int4;
-  get diagnostics v_1m_deleted = row_count;
-
-  delete from ash.rollup_1h
-  where ts < extract(epoch from
-    now() - (v_1h_retention || ' days')::interval - ash.epoch())::int4;
-  get diagnostics v_1h_deleted = row_count;
-
-  return format('cleanup: deleted %s minute rows, %s hourly rows',
-    v_1m_deleted, v_1h_deleted);
-end $$;
-```
-
-#### Reader functions
-
-```sql
--- Wait event trends over time from minute rollups
-create or replace function ash.minute_waits(
-  p_interval interval default '1 hour',
-  p_limit int default 10,
-  p_color bool default false
-)
-returns table (
-  wait_event text,
-  backend_seconds bigint,
-  pct numeric,
-  bar text
-)
-language plpgsql stable
-set jit = off;
-
--- Same but with absolute timestamps
-create or replace function ash.minute_waits_at(
-  p_start timestamptz,
-  p_end timestamptz,
-  p_limit int default 10,
-  p_color bool default false
-)
-returns table (...)
-language plpgsql stable
-set jit = off;
-
--- Query trends from hourly rollups
-create or replace function ash.hourly_queries(
-  p_interval interval default '1 day',
-  p_limit int default 10,
-  p_color bool default false
-)
-returns table (
-  query_id bigint,
-  backend_seconds bigint,
-  pct numeric,
-  query_text text  -- from pg_stat_statements if available
-)
-language plpgsql stable
-set jit = off;
-
--- Peak concurrency per day
-create or replace function ash.daily_peak_backends(
-  p_interval interval default '7 days'
-)
-returns table (
-  day date,
-  peak_backends int,
-  avg_backends numeric
-)
-language plpgsql stable
-set jit = off;
-
--- Rollup status (for ash.status())
--- Shows: rollup_1m rows, oldest/newest, rollup_1h rows, oldest/newest
-```
-
-All readers get `_at` variants (absolute timestamps) following existing pg_ash convention.
-
-#### pg_cron scheduling
-
-When `ash.start()` is called and pg_cron is available:
-
-```sql
--- Existing: take_sample every second, rotate every rotation_period
--- New:
-perform cron.schedule('ash_rollup_1m', '* * * * *', 'select ash.rollup_minute()');
-perform cron.schedule('ash_rollup_1h', '0 * * * *', 'select ash.rollup_hour()');
-perform cron.schedule('ash_rollup_gc', '0 3 * * *', 'select ash.rollup_cleanup()');
-```
-
-When pg_cron is unavailable, emit NOTICE with external scheduler instructions (consistent with existing behavior).
-
-#### `ash.stop()` changes
-
-Also unschedule rollup jobs.
-
-#### `ash.status()` additions
-
-```
-rollup_1m_rows         | 43200
-rollup_1m_oldest       | 2026-03-04 00:00:00+00
-rollup_1m_newest       | 2026-04-03 05:59:00+00
-rollup_1h_rows         | 744
-rollup_1h_oldest       | 2026-03-04 00:00:00+00
-rollup_1h_newest       | 2026-04-03 05:00:00+00
-```
+The `sample` parent table has `slot smallint not null default ash.current_slot()`. LIST partitioning routes inserts to the correct child by slot value. No change needed — any `slot` value outside 0..N-1 fails at insert time with "no partition of relation." This is the correct behavior.
 
 ---
-
-## Storage estimates
-
-### Raw samples (configurable N)
-
-| N | rotation_period | Raw retention | Storage (est.) |
-|---|----------------|---------------|----------------|
-| 3 | 1 day | ~1-2 days | ~30 MiB/day |
-| 5 | 1 day | ~3-4 days | ~30 MiB/day |
-| 9 | 1 day | ~7 days | ~30 MiB/day |
-| 3 | 1 hour | ~1-2 hours | ~1.25 MiB/hr |
-
-N doesn't change daily storage — it changes how many days you keep.
-
-### Rollup tables
-
-Per `ROLLUP_DESIGN.md`:
-
-| Level | Retention | Rows/db | Storage/db |
-|-------|----------|---------|-----------|
-| 1-minute | 30 days | ~43,200 | ~43 MiB |
-| 1-hour | 5 years | ~43,800 | ~77 MiB |
-
-Total: ~120 MiB per database for 5 years of trend data. Negligible.
-
----
-
-## Upgrade path
-
-### 1.4 → 1.5
-
-```sql
--- ash-1.4-to-1.5.sql
-
--- 1. Add num_partitions column
-alter table ash.config
-  add column if not exists num_partitions smallint not null default 3;
-alter table ash.config
-  add constraint config_num_partitions_check
-  check (num_partitions between 3 and 32);
-
--- 2. Create rollup tables
-create table if not exists ash.rollup_1m (...);
-create table if not exists ash.rollup_1h (...);
-
--- 3. Create epoch(), rollup functions, reader functions
--- 4. Replace rotate() with dynamic version
--- 5. Replace take_sample() with dynamic query_map routing
--- 6. Create rebuild_partitions()
--- 7. Create _rebuild_query_map_view()
--- 8. Update status() with new metrics
--- 9. Update version to 1.5
-```
-
-Existing 3-partition installations continue working unchanged. `num_partitions = 3` by default.
-
----
-
-## Implementation order
-
-1. **Phase A: Configurable partitions** (can ship independently)
-   - Add `num_partitions` to config
-   - Make `rotate()` dynamic
-   - Make `take_sample()` query_map routing dynamic
-   - Add `rebuild_partitions()`, `_rebuild_query_map_view()`
-   - Update `uninstall()`, `status()`
-   - Dynamic partition creation at install time
-   - Upgrade script
-   - CI: test with N=3 (default), N=5, N=7
-
-2. **Phase B: Rollup tables** (depends on Phase A for dynamic rotation awareness)
-   - Add `epoch()` function
-   - Create `rollup_1m`, `rollup_1h` tables
-   - Implement `rollup_minute()`, `rollup_hour()`, `rollup_cleanup()`
-   - Array merge helpers
-   - Reader functions (`minute_waits`, `hourly_queries`, `daily_peak_backends`) with `_at` variants
-   - Update `start()`/`stop()` for rollup cron jobs
-   - Update `status()` with rollup metrics
-   - Update `uninstall()` to drop rollup tables
-   - CI: test rollup correctness (insert known samples → verify aggregated values)
-
----
-
-## Open questions
-
-1. **Should `num_partitions` be changeable via a simple `UPDATE` + function call, or require `rebuild_partitions()`?** Recommendation: require `rebuild_partitions()` — changing the partition count requires DDL (create/drop tables), so it can't be a simple config change.
-
-2. **Rollup retention configurability**: Hardcode 30d/5y initially, or add `rollup_1m_retention_days` / `rollup_1h_retention_days` to config? Recommendation: config columns from the start — trivial to add, avoids schema change later.
-
-3. **Should rollup run even without pg_cron?** Yes — the functions exist regardless. Users without pg_cron call them from external schedulers (crontab, systemd timer). Same pattern as `take_sample()`.
-
-4. **Gap detection**: If rollup finds no raw samples for a time range (data was rotated before rollup ran), should it insert a zero-row or skip? Recommendation: skip + emit WARNING. A zero-row would be misleading ("system was idle" vs "data was lost").
-
-5. **Rollup during partition rebuild**: `rebuild_partitions()` clears all raw data. Rollup tables survive. This is the correct behavior — rollup preserves historical trends even when raw data is destroyed.
-
----
-
-## Key decisions (inherited from ROLLUP_DESIGN.md)
-
-1. **Denormalized `query_id` in rollups** — `query_counts` stores raw `query_id` (int8), not `query_map_id`. Eliminates GC coordination.
-2. **Backend-seconds as count unit** — consistent with Oracle ASH.
-3. **Upsert for idempotency** — `ON CONFLICT DO UPDATE` handles double-fires.
-4. **No partitioning on rollup tables** — too small to benefit.
-5. **All wait events kept, queries truncated to top 100** — waits are bounded by PG source (~600 max).
-
-## Key decisions (new)
-
-6. **Dynamic SQL for partition routing** — `execute format(...)` in `take_sample()` and `rotate()`. Negligible overhead at 1s interval.
-7. **`rebuild_partitions()` is destructive** — requires explicit call, REVOKE'd from PUBLIC.
-8. **Minimum 3 partitions** — ring buffer needs current + previous + truncate target.
-9. **Maximum 32 partitions** — practical limit for UNION ALL view and planner.
-10. **Config column, not config table** — `num_partitions` in `ash.config` singleton row, consistent with existing design.
