@@ -988,3 +988,215 @@ last_rollup_1h_ts      | 2026-04-03 05:00:00+00
 ```
 
 ---
+
+## Storage estimates
+
+### Raw samples (configurable N)
+
+| N | rotation_period | Guaranteed retention | Storage (est.) |
+|---|----------------|---------------------|----------------|
+| 3 | 1 day | 1 day + current partial | ~30 MiB/day |
+| 5 | 1 day | 3 days + current partial | ~30 MiB/day |
+| 9 | 1 day | 7 days + current partial | ~30 MiB/day |
+| 3 | 1 hour | 1 hour + current partial | ~1.25 MiB/hr |
+
+N doesn't change daily storage — it changes how many days you keep.
+
+### Rollup tables
+
+Per `ROLLUP_DESIGN.md`:
+
+| Level | Retention | Rows/db | Storage/db |
+|-------|----------|---------|-----------|
+| 1-minute | 30 days | ~43,200 | ~43 MiB |
+| 1-hour | 5 years | ~43,800 | ~77 MiB |
+
+Total: ~120 MiB per database for 5 years of trend data. Negligible for any production system.
+
+---
+
+## Upgrade path
+
+### Upgrade ordering (strict)
+
+The upgrade script must execute in this exact order. No step may depend on a later step. No "called later" implicit steps.
+
+```sql
+-- ash-{prev}-to-{next}.sql
+
+-- 1. Add config columns (safe — all have defaults)
+alter table ash.config
+  add column if not exists num_partitions smallint not null default 3;
+alter table ash.config
+  add constraint config_num_partitions_check
+  check (num_partitions between 3 and 32);
+alter table ash.config
+  add column if not exists sampling_enabled bool not null default true;
+alter table ash.config
+  add column if not exists rollup_1m_retention_days smallint not null default 30;
+alter table ash.config
+  add column if not exists rollup_1h_retention_days smallint not null default 1825;
+alter table ash.config
+  add column if not exists rollup_min_samples smallint not null default 3;
+alter table ash.config
+  add column if not exists last_rollup_1m_ts int4;
+alter table ash.config
+  add column if not exists last_rollup_1h_ts int4;
+
+-- 2. Install helper functions (no dependencies on new objects)
+--    ts_from_timestamptz(), ts_to_timestamptz()
+--    _merge_wait_counts(), _merge_query_counts(), _truncate_pairs()
+--    _drop_all_partitions()
+
+-- 3. Install _rebuild_query_map_view()
+
+-- 4. Rebuild query_map_all view immediately
+--    (existing 3 partitions — view now generated dynamically)
+select ash._rebuild_query_map_view();
+
+-- 5. Replace take_sample() with dynamic version
+--    (now uses dynamic SQL for query_map routing)
+
+-- 6. Replace rotate() with dynamic version
+--    (now uses % num_partitions, includes rollup integration)
+
+-- 7. Install rebuild_partitions()
+
+-- 8. Replace start()/stop() with rollup-aware versions
+--    (idempotent scheduling of rollup cron jobs)
+
+-- 9. Replace status() with extended version
+
+-- 10. Replace uninstall() with catalog-based version
+
+-- 11. Create rollup tables
+create table if not exists ash.rollup_1m (...);
+create table if not exists ash.rollup_1h (...);
+
+-- 12. Install rollup functions
+--     rollup_minute(), rollup_hour(), rollup_cleanup()
+
+-- 13. Install reader functions
+--     minute_waits(), minute_waits_at(), hourly_queries(),
+--     hourly_queries_at(), daily_peak_backends(),
+--     daily_peak_backends_at()
+
+-- 14. Update version
+update ash.config set version = '{next}' where singleton;
+```
+
+Existing 3-partition installations continue working unchanged. `num_partitions = 3` by default. Users call `rebuild_partitions(N)` to change.
+
+---
+
+## Implementation order
+
+### Phase A: Configurable partitions (can ship independently)
+
+1. Add `num_partitions` and `sampling_enabled` to config
+2. Implement `_drop_all_partitions()` (catalog-based)
+3. Implement `_rebuild_query_map_view()`
+4. Make `take_sample()` dynamic (with `sampling_enabled` check)
+5. Make `rotate()` dynamic (`% num_partitions`)
+6. Implement `rebuild_partitions()` with disable/lock/restart protocol
+7. Update `uninstall()` to use `_drop_all_partitions()`
+8. Update `status()` with `num_partitions`, `sampling_enabled`
+9. Dynamic partition creation at install time
+10. Upgrade script (strict ordering)
+11. CI: test with N=3 (default), N=5, N=9; benchmark `query_map_all` at N=16, N=32
+
+### Phase B: Rollup tables (depends on Phase A)
+
+1. Add config columns: retention, `rollup_min_samples`, watermarks
+2. Implement `ts_from_timestamptz()`, `ts_to_timestamptz()`
+3. Implement array merge helpers — **prototype and test in isolation first**
+4. Create `rollup_1m`, `rollup_1h` tables
+5. Implement `rollup_minute()` with watermark-based catch-up
+6. Implement `rollup_hour()` with watermark-based catch-up
+7. Implement `rollup_cleanup()` (config-driven retention)
+8. Add rollup integration to `rotate()` (pre-truncation rollup call)
+9. Reader functions (`minute_waits`, `hourly_queries`, `daily_peak_backends`) with `_at` variants
+10. Update `start()`/`stop()` for idempotent rollup cron scheduling
+11. Update `status()` with rollup metrics and watermarks
+12. Update `uninstall()` to drop rollup tables and functions
+13. CI: test rollup correctness (insert known samples → verify aggregated values), test catch-up after simulated outage, test rotation near minute boundaries
+
+---
+
+## Resolved questions
+
+These were open in v0.1. All reviewers converged on the same answers:
+
+1. **`num_partitions` change mechanism**: Require `rebuild_partitions()`. DDL behind a simple `UPDATE` is an anti-pattern that obscures locks and operational reality. *(Unanimous)*
+
+2. **Rollup retention configurability**: Config columns from day one (`rollup_1m_retention_days`, `rollup_1h_retention_days`). Hardcoding retention policies results in urgent feature requests within a month. *(Unanimous)*
+
+3. **Rollup without pg_cron**: Yes — functions exist regardless. Users without pg_cron call them from external schedulers. Core logic should not be held hostage to pg_cron. *(Unanimous)*
+
+4. **Gap detection**: Skip + emit WARNING. Never fabricate zero-rows in a telemetry system — that implies "idle system" rather than "missing observer." *(Unanimous)*
+
+5. **Rollup during partition rebuild**: Rollup tables survive destruction of raw partitions. This guarantees continuity of historical baselines. *(Unanimous)*
+
+---
+
+## Remaining open questions (v0.2)
+
+1. **`rollup_gaps` table**: Should gap metadata be written to a small `ash.rollup_gaps` table so `status()` can report "3 minute-gaps detected in last 30 days"? Or are WARNING logs sufficient? *(R1 suggests table; needs discussion)*
+
+2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: Should rollup levels be individually disableable via config? Adds flexibility but also config surface area. *(R2 suggests yes; needs discussion)*
+
+3. **Duplicate `sample_ts` handling**: Can duplicate sample rows for the same `(sample_ts, datid)` occur? If yes, `count(distinct sample_ts)` in rollup is correct but masks the issue. If no, it's an invariant worth asserting. *(R2 flags; needs investigation)*
+
+4. **Reader function time-range routing**: Should readers automatically choose raw samples vs. rollup tables based on the requested time range? (e.g., last 5 minutes → raw, last 7 days → rollup_1m, last 3 months → rollup_1h). Or keep them as separate explicit functions? *(R3 asks about UI/terminal layer; needs discussion)*
+
+---
+
+## Key decisions
+
+### Inherited from ROLLUP_DESIGN.md
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | Denormalized `query_id` in rollups | `query_counts` stores raw `query_id` (int8), not `query_map_id`. Eliminates GC coordination — rollups are self-contained. |
+| 2 | Backend-seconds as count unit | Consistent with Oracle ASH. `count / samples` gives average backends. |
+| 3 | Upsert for idempotency | `ON CONFLICT DO UPDATE` handles double-fires, late execution, manual re-runs. |
+| 4 | No partitioning on rollup tables | Too small to benefit. DELETE + autovacuum sufficient. |
+| 5 | All wait events kept; queries top 100 | Waits bounded by PG source (~600 max). Queries need truncation. |
+
+### New in this spec
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 6 | Dynamic SQL for partition routing | `execute format(...)` in `take_sample()` and `rotate()`. ~0.1ms overhead at 1s interval. Eliminates duplicated code. |
+| 7 | `rebuild_partitions()` disable/lock/restart | Destructive operation requires explicit disable, advisory lock, brief drain, and manual restart. Prevents races with in-flight operations and external schedulers. |
+| 8 | Minimum 3 partitions | Ring buffer needs: current + previous + truncate target. |
+| 9 | Maximum 32 partitions | Implementation ceiling for UNION ALL view planning overhead. CI-benchmarked, not arbitrary. Fallback to real partitioned parent if exceeded. |
+| 10 | Config column for `num_partitions` | Singleton row design, consistent with existing `ash.config`. |
+| 11 | Watermark-based rollup execution | Catch-up capable, deterministic gap detection, idempotent replay. Fire-and-forget is too fragile for long-term storage. |
+| 12 | `rotate()` calls rollup before truncate | Belt-and-suspenders safeguard. Rollup is idempotent, so double-processing is safe. |
+| 13 | Epoch stays 2026-01-01 | Already deployed and `IMMUTABLE`. Changing it corrupts all existing timestamps. Rollups use the same epoch. |
+| 14 | ts↔timestamptz helper functions | Single source of truth for epoch arithmetic. Prevents off-by-one bugs across reader and rollup functions. |
+| 15 | Retention config columns from day one | Avoids schema migration later. First thing serious users ask to tune. |
+| 16 | `rollup_min_samples` threshold | Noise filtering for trend analysis (default: 3+ backend-seconds). Configurable per `PARTITIONED_QUERYMAP_DESIGN.md`. |
+| 17 | `peak_backends` is per-database | Computed from decoded rows per `(sample_ts, datid)`, not from cluster-wide `active_count`. |
+| 18 | Pure SQL array merge helpers | jsonb approach discarded — CPU burn for type conversion. Set-based unnest + group by + array_agg stays in typed integer domain. |
+| 19 | Catalog-based cleanup for uninstall/rebuild | Enumerate actual objects from `pg_class`/`pg_inherits` instead of trusting config count. Catches orphaned tables from failed operations. |
+| 20 | Idempotent start()/stop() | Unschedule by name before scheduling. Tolerate missing jobs. Safe for repeated calls. |
+
+---
+
+## Review attribution
+
+This spec was reviewed by 4 independent reviewers. Key contributions:
+
+- **Reviewer 1** (R1): Identified broken `rollup_minute()` pseudocode and `_merge_wait_counts` correctness bug. Proposed ts↔timestamptz helpers, `rotate()`-calls-rollup safeguard, `rebuild_partitions()` drain, and `rollup_gaps` table. Flagged PG array_agg flattening issue with 2D arrays.
+
+- **Reviewer 2** (R2): Pushed for watermark-based rollup execution (the biggest design change from v0.1). Identified `rebuild_partitions()` safety gaps, retention semantics imprecision, `peak_backends` ambiguity, and upgrade ordering risks. Proposed catalog-based cleanup, `sampling_enabled` flag, and helper function invariants.
+
+- **Reviewer 3** (R3): Validated TOAST threshold analysis for arrays. Confirmed jsonb approach should be discarded. Provided answers to all open questions with strong rationale. Raised UI/terminal layer question for historical metrics.
+
+- **Reviewer 4** (R4, automated): Identified epoch conflict (2025 vs 2026), `take_sample()` dynamic SQL mismatch with actual code, 50k cap metric inconsistency, missing `rollup_min_samples`, reader function signature divergence from `ROLLUP_DESIGN.md`, and version numbering gap.
+
+---
+
+*Supersedes*: This spec supersedes the reader function signatures in `ROLLUP_DESIGN.md` (which used absolute-timestamp-only signatures). The new signatures use interval + `_at()` variants, consistent with existing pg_ash API convention (`top_waits`/`top_waits_at`, etc.).
