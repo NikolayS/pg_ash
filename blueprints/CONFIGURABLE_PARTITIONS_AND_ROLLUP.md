@@ -1205,6 +1205,10 @@ All new functions that should be REVOKE'd from PUBLIC:
 
 Reader functions (`minute_waits`, `hourly_queries`, `daily_peak_backends` and `_at` variants) should be accessible to any user who can read `ash.sample`.
 
+**pg_cron role note**: All rollup functions (`rollup_minute`, `rollup_hour`, `rollup_cleanup`) call internal helpers (`_merge_wait_counts`, etc.) that are REVOKE'd from PUBLIC. If pg_cron is configured to run jobs as a less-privileged role (not the schema owner), those calls will fail with `permission denied`. Either grant EXECUTE on internal helpers to the pg_cron role, or ensure all pg_cron ash jobs run as the database owner / schema owner. Document this in the installation guide.
+
+**Timestamp helper exposure**: `ts_from_timestamptz` and `ts_to_timestamptz` are harmless read-only functions useful for users querying rollup tables directly (e.g., building Grafana panels). **Decision: grant to PUBLIC.** They provide no elevation of privilege.
+
 ### Upgrade runbook
 
 The upgrade SQL script alone is not sufficient. The release notes must include:
@@ -1310,7 +1314,7 @@ These were open in v0.1. All reviewers converged on the same answers:
 | 9 | Maximum 32 partitions | Implementation ceiling for UNION ALL view planning overhead. CI-benchmarked, not arbitrary. Fallback to real partitioned parent if exceeded. |
 | 10 | Config column for `num_partitions` | Singleton row design, consistent with existing `ash.config`. |
 | 11 | Watermark-based rollup execution | Catch-up capable, deterministic gap detection, idempotent replay. Fire-and-forget is too fragile for long-term storage. |
-| 12 | `rotate()` calls rollup before truncate | Belt-and-suspenders safeguard. Rollup is idempotent, so double-processing is safe. |
+| 12 | `rotate()` calls rollup before truncate | Belt-and-suspenders safeguard. Rollup is idempotent, so double-processing is safe. The forced rollup and subsequent truncate are **not** a single atomic unit — correctness depends on idempotent watermark advancement and the fact that missed minutes will be retried (either by the next scheduled cron call or the next rotation). |
 | 13 | Epoch stays 2026-01-01 | Already deployed and `IMMUTABLE`. Changing it corrupts all existing timestamps. Rollups use the same epoch. |
 | 14 | ts↔timestamptz helper functions | Single source of truth for epoch arithmetic. Prevents off-by-one bugs across reader and rollup functions. |
 | 15 | Retention config columns from day one | Avoids schema migration later. First thing serious users ask to tune. |
