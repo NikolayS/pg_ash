@@ -327,32 +327,38 @@ The `sampling_enabled` flag controls which functions check it and how:
 
 #### Advisory locking contract
 
-All critical paths must participate in a compatible locking protocol. PostgreSQL advisory locks don't have built-in shared/exclusive semantics, so we use two lock keys to simulate them:
+All critical paths must participate in a compatible locking protocol. PostgreSQL advisory locks don't have built-in shared/exclusive semantics, so we use two lock key pairs to simulate them.
+
+**Lock form: two-key `pg_try_advisory_xact_lock(int4, int4)`** (transaction-level, auto-releases on commit/rollback). Using transaction-level locks eliminates the leak risk: if `take_sample()` errors between acquisition and explicit unlock, the lock auto-releases at transaction end. Since pg_cron reuses connections, a leaked session-level lock would persist and block all future `rebuild_partitions()` drain checks permanently.
 
 ```
-Lock key: hashtext('ash_operation')  — "participation" lock
-Lock key: hashtext('ash_rebuild')    — "exclusive rebuild" lock
+Key pair (0, hashtext('ash_operation')::int4)  — participation lock
+Key pair (1, hashtext('ash_rebuild')::int4)    — exclusive rebuild lock
 ```
+
+Using the two-key form `(classid, objid)` also makes the `pg_locks` drain query unambiguous — single-key advisory locks store the key in `objid` with `classid=0`, which the drain check gets wrong when querying by `classid`. With explicit two-key form, we control both columns.
 
 **Protocol**:
 
 | Function | Lock behavior |
 |----------|--------------|
-| `take_sample()` | `pg_try_advisory_lock(hashtext('ash_operation'))` at entry, unlock at exit. If lock fails (rebuild in progress), return 0 silently. |
-| `rotate()` | Already uses `pg_try_advisory_lock(hashtext('ash_rotate'))`. Add: also acquire `hashtext('ash_operation')` participation lock. |
-| `rollup_minute()` | `pg_try_advisory_lock(hashtext('ash_operation'))` at entry, unlock at exit. If lock fails, return 0 (will catch up next call). |
+| `take_sample()` | `pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4)` at entry. Auto-releases at transaction end. If lock fails (rebuild in progress), return 0 silently. **Observability**: increment a skipped-sample counter in config or log at DEBUG level — silent failure should not be invisible in `status()`. |
+| `rotate()` | Does **not** check `sampling_enabled`. Relies on advisory lock: acquires `(0, hashtext('ash_rotate')::int4)` as before. No `ash_operation` participation lock needed — rotation is coordinated separately and is safe during rebuild (it just won't find data to rotate). |
+| `rollup_minute()` | `pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4)` at entry. If lock fails, return 0 (will catch up next call via watermark). |
 | `rollup_hour()` | Same as `rollup_minute()`. |
-| `rebuild_partitions()` | 1. Set `sampling_enabled = false`. 2. Stop pg_cron jobs. 3. Acquire `hashtext('ash_rebuild')` exclusive lock. 4. Wait for all `hashtext('ash_operation')` locks to be released (poll with short sleep, bounded timeout). 5. Proceed with rebuild. |
+| `rebuild_partitions()` | 1. Set `sampling_enabled = false`. 2. Stop pg_cron jobs. 3. Acquire `(1, hashtext('ash_rebuild')::int4)`. 4. Poll `pg_locks` until no active `ash_operation` holders. 5. Proceed. |
 
-**Step 4 detail**: `rebuild_partitions()` waits for in-flight operations by checking `pg_locks` for the `ash_operation` advisory lock key:
+**Step 4 detail** — drain poll using the correct `pg_locks` columns for two-key advisory locks:
 
 ```sql
--- Wait up to 5s for all ash_operation locks to clear
+-- Wait up to 5s for all ash_operation xact locks to clear.
+-- Two-key advisory locks: classid = first key, objid = second key.
 for i in 1..10 loop
   if not exists (
     select from pg_locks
     where locktype = 'advisory'
-      and classid = hashtext('ash_operation')::int4
+      and classid = 0
+      and objid = hashtext('ash_operation')::int4::bigint
       and granted
   ) then
     exit;  -- all clear
@@ -361,9 +367,12 @@ for i in 1..10 loop
 end loop;
 ```
 
-This replaces the `pg_sleep(2)` heuristic with a real drain protocol. The sleep is kept as a bounded fallback (10 iterations × 0.5s = 5s max), but the check is deterministic.
+**`rotate()` and `sampling_enabled`**: The semantics table (above) says scheduled `rotate()` "returns early" when disabled, but there is no mechanism to distinguish scheduled from manual invocation. Rather than add complexity, drop the `sampling_enabled` check from `rotate()` entirely. The advisory lock is the actual correctness mechanism — if sampling is disabled for a rebuild, `rebuild_partitions()` holds the rebuild lock which prevents nothing in `rotate()`, but that is fine: `rotate()` truncating an already-empty partition is a no-op. Document this clearly rather than adding a check that doesn't cleanly enforce the intent.
 
-**Note**: `pg_sleep(2)` from v0.2 is downgraded from "core drain mechanism" to "fallback within a bounded polling loop." The advisory lock participation is the actual correctness mechanism.
+**Proof required**: Before implementation, write a test that verifies:
+1. `take_sample()` holding `(0, hashtext('ash_operation'))` appears in `pg_locks` with `classid=0`, `objid=hashtext(...)`.
+2. The drain query in `rebuild_partitions()` correctly detects and waits for it.
+This must be validated against PG 14–18.
 
 REVOKE from PUBLIC (admin-only, like `rotate`, `start`, `stop`).
 
