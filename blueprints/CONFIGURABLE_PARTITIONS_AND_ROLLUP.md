@@ -654,56 +654,15 @@ end $$;
 
 **Design decision**: The v0.1 spec proposed a jsonb-based merge. All reviewers agreed this should be discarded — converting integer arrays to text-keyed jsonb just to increment counts is a CPU burn. Use pure set-based SQL with unnest + group by + array_agg.
 
-The helpers take an `anyarray` aggregated from multiple rollup rows and merge id/count pairs.
+**Critical bug in v0.2 draft**: The initial interleaving approach used `unnest(array[id, total])` with `row_number()` window and `ORDER BY grp, v DESC`. This is **fatally flawed** — when `count > id` (e.g., `wait_id=5, count=100`), the `v DESC` sort puts count before id, producing `[100, 5]` instead of `[5, 100]`. All three round-2 reviewers caught this independently. The fix uses `CROSS JOIN LATERAL (VALUES ...)` to assign an explicit sub-row ordinal that is independent of the integer values.
+
+**`array_agg(int4[])` flattening assumption**: PostgreSQL flattens `array_agg(int4[])` into `int4[]` when all input arrays have the same dimensionality. However, if any `wait_counts` is empty (`'{}'`), dimensionality mismatch can cause `array_agg` to error. Call sites must filter: `array_agg(wait_counts) filter (where wait_counts <> '{}')`, or the function must handle empty/NULL input gracefully. This assumption requires CI validation against PG 14–18.
 
 ```sql
 -- Merge multiple wait_counts arrays: sum counts for matching wait_ids.
--- Input: array of int4[] arrays (from array_agg(wait_counts)).
--- Note: PG flattens array_agg(int4[]) into int4[] — so the input
--- is actually a single flat int4[] containing concatenated pairs.
--- The function must handle this correctly.
-create or replace function ash._merge_wait_counts(p_flat int4[])
-returns int4[]
-language sql
-immutable
-parallel safe
-as $$
-  -- Unnest the flat array into (position, value) pairs,
-  -- extract id/count pairs by position parity,
-  -- group by id, sum counts, re-assemble sorted array
-  with numbered as (
-    select
-      row_number() over () as pos,
-      val
-    from unnest(p_flat) as val
-  ),
-  pairs as (
-    select
-      n1.val as id,
-      n2.val as cnt
-    from numbered n1
-    join numbered n2 on n2.pos = n1.pos + 1
-    where n1.pos % 2 = 1
-  ),
-  merged as (
-    select id, sum(cnt)::int4 as total
-    from pairs
-    group by id
-    order by total desc, id asc
-  )
-  select coalesce(
-    array_agg(id order by total desc, id asc)
-      || array_agg(total order by total desc, id asc),
-    '{}'::int4[]
-  )
-  from merged
-$$;
-```
-
-**Wait — the above interleaving is wrong.** `array_agg(id) || array_agg(total)` produces `[id1, id2, ..., count1, count2, ...]` not `[id1, count1, id2, count2, ...]`. Correct approach:
-
-```sql
--- Correct: produce interleaved [id, count, id, count, ...]
+-- Input: flat int4[] from array_agg(wait_counts) — PG concatenates
+-- the pairs into one flat array. The function extracts id/count pairs
+-- by position parity, groups by id, sums counts, and re-interleaves.
 create or replace function ash._merge_wait_counts(p_flat int4[])
 returns int4[]
 language sql
@@ -721,26 +680,69 @@ as $$
     where n1.pos % 2 = 1
   ),
   merged as (
-    select id, sum(cnt)::int4 as total
+    select id, sum(cnt)::int4 as total,
+           row_number() over (order by sum(cnt) desc, id asc) as rn
     from pairs
     group by id
   ),
   interleaved as (
-    select unnest(array[id, total]) as v,
-           row_number() over (order by total desc, id asc) as grp
+    select v, rn, sub
     from merged
+    cross join lateral (values (1, id), (2, total)) as t(sub, v)
   )
-  select coalesce(array_agg(v order by grp, v desc), '{}'::int4[])
+  select coalesce(
+    array_agg(v order by rn, sub),
+    '{}'::int4[]
+  )
   from interleaved
 $$;
 ```
 
-**Implementation note**: The exact interleaving approach needs careful testing. The core algorithm is: unnest flat concatenated pairs → group by id → sum counts → re-interleave into `[id, count, ...]` sorted by count desc. The implementation should be prototyped and tested in isolation before building the rest of the rollup pipeline around it.
+**How this works**: Each `merged` row (one per distinct wait_id) gets expanded into exactly two rows via `CROSS JOIN LATERAL (VALUES (1, id), (2, total))`. The `sub` column (1=id, 2=count) ensures strict positional ordering within each pair, regardless of the integer values. `ORDER BY rn, sub` produces `[id1, count1, id2, count2, ...]` sorted by count descending, with ties broken by id ascending.
 
-Same pattern for `_merge_query_counts(int8[])` — identical logic, different types.
+Same pattern for `_merge_query_counts(int8[])` — identical logic, `int8` types:
 
 ```sql
--- Truncate a paired array to top N entries by count
+create or replace function ash._merge_query_counts(p_flat int8[])
+returns int8[]
+language sql
+immutable
+parallel safe
+as $$
+  with numbered as (
+    select row_number() over () as pos, val
+    from unnest(p_flat) as val
+  ),
+  pairs as (
+    select n1.val as id, n2.val as cnt
+    from numbered n1
+    join numbered n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  merged as (
+    select id, sum(cnt)::int8 as total,
+           row_number() over (order by sum(cnt) desc, id asc) as rn
+    from pairs
+    group by id
+  ),
+  interleaved as (
+    select v, rn, sub
+    from merged
+    cross join lateral (values (1, id), (2, total)) as t(sub, v)
+  )
+  select coalesce(
+    array_agg(v order by rn, sub),
+    '{}'::int8[]
+  )
+  from interleaved
+$$;
+```
+
+Truncation helper:
+
+```sql
+-- Truncate a paired array to top N entries by count.
+-- Preserves [id, count] pairing correctly.
 create or replace function ash._truncate_pairs(p_arr int8[], p_top int)
 returns int8[]
 language sql
@@ -758,26 +760,38 @@ as $$
     where n1.pos % 2 = 1
   ),
   top_n as (
-    select id, cnt
+    select id, cnt,
+           row_number() over (order by cnt desc, id asc) as rn
     from pairs
     order by cnt desc, id asc
     limit p_top
   ),
   interleaved as (
-    select unnest(array[id, cnt]) as v,
-           row_number() over (order by cnt desc, id asc) as grp
+    select v, rn, sub
     from top_n
+    cross join lateral (values (1, id), (2, cnt)) as t(sub, v)
   )
-  select coalesce(array_agg(v order by grp, v desc), '{}'::int8[])
+  select coalesce(
+    array_agg(v order by rn, sub),
+    '{}'::int8[]
+  )
   from interleaved
 $$;
 ```
+
+**Verification requirement**: Before any other code depends on these helpers, write `DO` block assertions that feed known arrays and verify output byte-for-byte. Example test cases:
+- `_merge_wait_counts('{5,100,3,50,5,200}')` → `'{5,300,3,50}'` (id=5 merged: 100+200=300)
+- `_merge_wait_counts('{}')` → `'{}'`
+- `_merge_wait_counts(NULL)` → `'{}'`
+- `_truncate_pairs('{10,500,20,300,30,100}', 2)` → `'{10,500,20,300}'`
+- Mixed empty/non-empty inputs via `array_agg` in rollup context
 
 **Array invariant enforcement**: All helper functions guarantee:
 - Even-length output (id/count pairs)
 - NULL input → empty array
 - Empty input → empty array
-- Deterministic ordering: count DESC, id ASC
+- Deterministic ordering: count DESC, id ASC (ties broken by id)
+- Pair integrity: position 2k+1 is always id, position 2k+2 is always count
 - No temp tables (zero catalog churn)
 
 #### Retention function
