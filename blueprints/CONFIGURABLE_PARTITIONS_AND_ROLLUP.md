@@ -1162,6 +1162,36 @@ update ash.config set version = '{next}' where singleton;
 
 Existing 3-partition installations continue working unchanged. `num_partitions = 3` by default. Users call `rebuild_partitions(N)` to change.
 
+### REVOKE inventory
+
+All new functions that should be REVOKE'd from PUBLIC:
+
+| Function | Reason |
+|----------|--------|
+| `rebuild_partitions()` | Destructive DDL — admin only |
+| `_drop_all_partitions()` | Internal — no direct user access |
+| `_rebuild_query_map_view()` | Internal — no direct user access |
+| `_merge_wait_counts()` | Internal helper |
+| `_merge_query_counts()` | Internal helper |
+| `_truncate_pairs()` | Internal helper |
+| `ts_from_timestamptz()` | Read-only helper — may grant to PUBLIC if desired |
+| `ts_to_timestamptz()` | Read-only helper — may grant to PUBLIC if desired |
+| `rollup_minute()` | Debatable — idempotent, but unprivileged users shouldn't invoke |
+| `rollup_hour()` | Same |
+| `rollup_cleanup()` | Same |
+
+Reader functions (`minute_waits`, `hourly_queries`, `daily_peak_backends` and `_at` variants) should be accessible to any user who can read `ash.sample`.
+
+### Upgrade runbook
+
+The upgrade SQL script alone is not sufficient. The release notes must include:
+
+> **Before upgrading**: stop or disable sampling. If using pg_cron: `SELECT ash.stop();`. If using an external scheduler: disable the cron job or timer before running the upgrade script.
+>
+> **After upgrading**: resume via `SELECT ash.start();`. Do not rely on the old scheduler picking up new function bodies automatically — the function signatures may have changed.
+>
+> The upgrade script is not safe to run under an active pg_cron schedule. Running DDL underneath active jobs risks concurrent errors.
+
 ---
 
 ## Implementation order
