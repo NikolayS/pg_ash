@@ -320,9 +320,8 @@ The `sampling_enabled` flag controls which functions check it and how:
 
 | Function | Behavior when `sampling_enabled = false` |
 |----------|------------------------------------------|
-| `take_sample()` | Returns 0 immediately (no sampling) |
-| `rotate()` (scheduled) | Returns early — scheduled rotation should not run while sampling is disabled |
-| `rotate()` (manual) | Still callable manually for admin purposes |
+| `take_sample()` | Returns 0 immediately (no sampling). Increments skipped-sample counter (see below). |
+| `rotate()` | **Does not check `sampling_enabled`**. No scheduled/manual distinction exists in the code; relying on advisory lock is sufficient. Truncating an already-empty partition during rebuild is a safe no-op. |
 | `rollup_minute()` | **Still runs** — historical catch-up/cleanup may be wanted even while sampling is paused |
 | `rollup_hour()` | **Still runs** — same rationale |
 | `rollup_cleanup()` | **Still runs** — retention cleanup is independent |
