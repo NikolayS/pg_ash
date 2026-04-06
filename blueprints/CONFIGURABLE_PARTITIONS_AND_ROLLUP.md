@@ -1147,10 +1147,14 @@ select ash._rebuild_query_map_view();
 -- 5. Replace take_sample() with dynamic version
 --    (now uses dynamic SQL for query_map routing)
 
--- 6. Replace rotate() with dynamic version
---    (now uses % num_partitions, includes rollup integration)
+-- 6. Replace rotate() with dynamic version — WITHOUT rollup integration.
+--    (uses % num_partitions only; rollup call added at step 13 below)
+--    REASON: rollup_minute() is not installed until step 12. If a
+--    rotation fires between steps 6 and 12, a forward-referencing
+--    rotate() would fail with "function does not exist". Install the
+--    full rotate() in two passes: dynamic-only now, rollup-integrated later.
 
--- 7. Install rebuild_partitions()
+-- 7. Install rebuild_partitions(), _drop_all_partitions()
 
 -- 8. Replace start()/stop() with rollup-aware versions
 --    (idempotent scheduling of rollup cron jobs)
@@ -1166,12 +1170,16 @@ create table if not exists ash.rollup_1h (...);
 -- 12. Install rollup functions
 --     rollup_minute(), rollup_hour(), rollup_cleanup()
 
--- 13. Install reader functions
+-- 13. Replace rotate() again — now with rollup integration.
+--     CREATE OR REPLACE adds the rollup_minute() pre-truncation call.
+--     Safe because rollup_minute() now exists.
+
+-- 14. Install reader functions
 --     minute_waits(), minute_waits_at(), hourly_queries(),
 --     hourly_queries_at(), daily_peak_backends(),
 --     daily_peak_backends_at()
 
--- 14. Update version
+-- 15. Update version
 update ash.config set version = '{next}' where singleton;
 ```
 
