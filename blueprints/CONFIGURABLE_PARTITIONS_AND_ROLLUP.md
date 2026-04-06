@@ -301,7 +301,64 @@ begin
 end $$;
 ```
 
-**Config change**: add `sampling_enabled bool not null default true` to `ash.config`. `take_sample()` checks this flag and returns 0 immediately when disabled.
+**Config change**: add `sampling_enabled bool not null default true` to `ash.config`.
+
+#### `sampling_enabled` semantics
+
+The `sampling_enabled` flag controls which functions check it and how:
+
+| Function | Behavior when `sampling_enabled = false` |
+|----------|------------------------------------------|
+| `take_sample()` | Returns 0 immediately (no sampling) |
+| `rotate()` (scheduled) | Returns early — scheduled rotation should not run while sampling is disabled |
+| `rotate()` (manual) | Still callable manually for admin purposes |
+| `rollup_minute()` | **Still runs** — historical catch-up/cleanup may be wanted even while sampling is paused |
+| `rollup_hour()` | **Still runs** — same rationale |
+| `rollup_cleanup()` | **Still runs** — retention cleanup is independent |
+| `start()` | Sets `sampling_enabled = true`, then schedules jobs |
+| `stop()` | Sets `sampling_enabled = false`, then unschedules jobs |
+
+**Recovery from catastrophic rebuild failure**: If `rebuild_partitions()` fails after setting `sampling_enabled = false` but before completing (connection drop, OOM), the flag persists with no automatic recovery. `status()` should flag `sampling_enabled = false` with no active pg_cron jobs as an anomalous state. Recovery: `UPDATE ash.config SET sampling_enabled = true WHERE singleton; SELECT ash.start();`
+
+#### Advisory locking contract
+
+All critical paths must participate in a compatible locking protocol. PostgreSQL advisory locks don't have built-in shared/exclusive semantics, so we use two lock keys to simulate them:
+
+```
+Lock key: hashtext('ash_operation')  — "participation" lock
+Lock key: hashtext('ash_rebuild')    — "exclusive rebuild" lock
+```
+
+**Protocol**:
+
+| Function | Lock behavior |
+|----------|--------------|
+| `take_sample()` | `pg_try_advisory_lock(hashtext('ash_operation'))` at entry, unlock at exit. If lock fails (rebuild in progress), return 0 silently. |
+| `rotate()` | Already uses `pg_try_advisory_lock(hashtext('ash_rotate'))`. Add: also acquire `hashtext('ash_operation')` participation lock. |
+| `rollup_minute()` | `pg_try_advisory_lock(hashtext('ash_operation'))` at entry, unlock at exit. If lock fails, return 0 (will catch up next call). |
+| `rollup_hour()` | Same as `rollup_minute()`. |
+| `rebuild_partitions()` | 1. Set `sampling_enabled = false`. 2. Stop pg_cron jobs. 3. Acquire `hashtext('ash_rebuild')` exclusive lock. 4. Wait for all `hashtext('ash_operation')` locks to be released (poll with short sleep, bounded timeout). 5. Proceed with rebuild. |
+
+**Step 4 detail**: `rebuild_partitions()` waits for in-flight operations by checking `pg_locks` for the `ash_operation` advisory lock key:
+
+```sql
+-- Wait up to 5s for all ash_operation locks to clear
+for i in 1..10 loop
+  if not exists (
+    select from pg_locks
+    where locktype = 'advisory'
+      and classid = hashtext('ash_operation')::int4
+      and granted
+  ) then
+    exit;  -- all clear
+  end if;
+  perform pg_sleep(0.5);
+end loop;
+```
+
+This replaces the `pg_sleep(2)` heuristic with a real drain protocol. The sleep is kept as a bounded fallback (10 iterations × 0.5s = 5s max), but the check is deterministic.
+
+**Note**: `pg_sleep(2)` from v0.2 is downgraded from "core drain mechanism" to "fallback within a bounded polling loop." The advisory lock participation is the actual correctness mechanism.
 
 REVOKE from PUBLIC (admin-only, like `rotate`, `start`, `stop`).
 
