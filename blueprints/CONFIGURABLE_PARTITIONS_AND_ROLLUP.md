@@ -200,7 +200,11 @@ execute format(
 
 Modular arithmetic changes from `% 3` to `% v_num_partitions` everywhere.
 
-**Rollup integration** (Phase B): `rotate()` should call `rollup_minute()` for any un-rolled-up minutes in the partition about to be truncated. This is a belt-and-suspenders safeguard — the regular cron-driven rollup handles the normal case, but this ensures no data loss even if the scheduler drifts. Safe because rollup is idempotent (upsert). See Part 2 for details.
+**Rollup integration** (Phase B): `rotate()` should call `rollup_minute()` **before** the config update and truncation, not after. This ensures the rollup runs while the config row is not locked. The forced rollup only processes **minutes strictly earlier than the current incomplete minute** — same boundary rule as scheduled rollup. No partial-minute rollup, ever.
+
+**Scope of in-rotate rollup**: The forced rollup uses the standard watermark catch-up, but with `v_batch_limit` sized to cover just the partition about to be truncated (not unlimited catch-up). With rotation_period = 1 day, that's at most 1440 minutes. If the scheduler has been down for multiple rotation periods, `rotate()` catches up only the minutes in the endangered partition — the rest will be caught up by subsequent scheduled `rollup_minute()` calls.
+
+**Why before config update**: If `rotate()` updates `current_slot` first (locking the config row), then calls `rollup_minute()`, any concurrent `take_sample()` that reads config will block. Calling rollup *before* the slot advance avoids this contention. The rollup is idempotent (upsert), so double-processing is safe.
 
 #### `rebuild_partitions(p_num int default null)` — hardened
 
