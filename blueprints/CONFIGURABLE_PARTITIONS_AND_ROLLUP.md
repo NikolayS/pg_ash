@@ -1267,28 +1267,24 @@ These were open in v0.1. All reviewers converged on the same answers:
 
 ---
 
-## Remaining open questions (v0.3)
+## Remaining open questions (v0.4)
 
 1. **`rollup_gaps` table**: Should gap metadata be written to a small `ash.rollup_gaps` table so `status()` can report "3 minute-gaps detected in last 30 days"? Or are WARNING logs sufficient?
-   - *R1*: Yes — warnings are easy to miss; a small table with `(gap_start_ts, gap_end_ts, detected_at, reason)` is worth it.
-   - *R3*: No for v1.5 — a gaps table adds schema surface area. Trivial to add later if users ask. Start with WARNING logs.
-   - **Decision needed.**
+   - *R1 (round 1)*: Yes — warnings are easy to miss; a small table with `(gap_start_ts, gap_end_ts, detected_at, reason)` is worth it.
+   - *R3 (round 2), R1 (round 3)*: No for v1.5 — a gaps table adds schema surface area. Trivial to add later if users ask. Start with WARNING logs.
+   - **Leaning: WARNING logs for v1.5.** Resolve before coding Phase B.
 
-2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: Should rollup levels be individually disableable?
-   - *R2*: Yes.
-   - *R3*: No (YAGNI). Users who don't want minute rollups can set `rollup_1m_retention_days = 0`; cleanup will clear them.
-   - **Decision: skip for v1.5.** No new flags. Retention set to 0 is the escape hatch.
+2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: *(Resolved — skip for v1.5.)* `rollup_1m_retention_days = 0` is the escape hatch; cleanup clears all rows immediately. Semantics of retention=0: `rollup_minute()` still populates rows but `rollup_cleanup()` deletes them on next run. Effectively a no-op level with no stored data after cleanup.
 
-3. **Duplicate `sample_ts` handling**: Can duplicate sample rows for the same `(sample_ts, datid)` occur?
-   - *R2, R3*: Resolve before coding. If duplicates are impossible, assert it. If possible, define whether they are retries (deduplicate) or legitimate (sum). `count(distinct sample_ts)` papers over the ambiguity.
-   - **Action required**: investigate `take_sample()` for any code path that could produce duplicates (e.g., cron overlap, retry on error). Add `UNIQUE (sample_ts, datid)` constraint or at minimum a comment if the invariant holds.
+3. **Duplicate `sample_ts` handling**: *(Resolved by locking protocol — R3 round 3.)* The new `pg_try_advisory_xact_lock` on `ash_operation` prevents concurrent `take_sample()` calls from pg_cron — the second concurrent call fails the lock and returns 0 immediately. Therefore `(sample_ts, datid)` duplicates from pg_cron overlap are now impossible. **Document as enforced invariant.** Consider adding `UNIQUE (sample_ts, datid)` to the `ash.sample` parent table to make it structural. Any retry-on-error code path must acquire the participation lock before re-attempting the insert.
 
-4. **Reader function time-range routing**: Auto-route raw vs. rollup based on requested interval?
-   - *R3*: Keep explicit separate functions for v1.5. Auto-routing is a UX improvement that layers on top later without schema changes.
-   - **Decision: keep separate functions.** No auto-routing in v1.5.
+4. **Reader function time-range routing**: *(Resolved — keep separate functions.)* No auto-routing in v1.5. Auto-routing is a UX layer that can be added later without schema changes.
 
-5. **`rollup_min_samples` column naming**: The name implies "number of raw samples" but the description says "backend-seconds." Since 1 sample tick = 1 backend-second they are equivalent, but the name is ambiguous. Consider renaming to `rollup_min_backend_seconds`. *(R3 flags)*
-   - **Decision needed before coding** — renaming after release requires a migration.
+5. **`rollup_min_samples` column naming**: Three different rename suggestions from reviewers:
+   - *R3 (round 2)*: `rollup_min_backend_seconds`
+   - *R3 (round 3)*: `rollup_min_query_count` (threshold on the count value in query_counts pairs)
+   - *R1 (round 3)*: Agrees renaming is correct, prefers `rollup_min_backend_seconds`
+   - **Decision needed before coding.** The threshold applies to the `count` field in `[query_id, count]` pairs within the aggregation window, which equals backend-seconds. Both names are more precise than `rollup_min_samples`. Pick one and document the unit clearly in a column comment.
 
 ---
 
