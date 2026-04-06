@@ -453,6 +453,8 @@ With N partitions and rotation_period P:
 
 The `sample` parent table has `slot smallint not null default ash.current_slot()`. LIST partitioning routes inserts to the correct child by slot value. No change needed — any `slot` value outside 0..N-1 fails at insert time with "no partition of relation." This is the correct behavior.
 
+**Add `UNIQUE (sample_ts, datid)` to the `ash.sample` parent table**: The participation advisory lock (`ash_operation`) prevents concurrent `take_sample()` calls, making `(sample_ts, datid)` duplicates from cron overlap impossible. Adding an explicit unique constraint means that if any future code path violates lock discipline, the database catches it immediately rather than producing silently duplicated rollup aggregates. This is belt-and-suspenders: locks protect behavior, constraints protect data.
+
 ---
 
 ## Part 2: Rollup tables for long-term storage
@@ -556,6 +558,7 @@ No partitioning on rollup tables. They're small (see storage estimates below) an
 - Empty result returns `'{}'::int4[]` (or `int8[]`), never NULL
 - Ordering: by count DESC, then by id ASC for deterministic output
 - For query counts, truncation preserves `[id, count]` pairing correctly
+- **Mandatory call-site filter**: every `array_agg(...)` that feeds `_merge_wait_counts` or `_merge_query_counts` **must** use `FILTER (WHERE <col> <> '{}')`. Without this, a single empty-array row causes a dimensionality mismatch error in `array_agg(int4[])` when PostgreSQL cannot reconcile 0-D `'{}'` with 1-D `'{a,b}'` inputs. This is a spec-level invariant; CI must include a test with at least one empty-array row.
 
 #### Watermark-based rollup execution model
 
@@ -709,9 +712,9 @@ begin
       datid,
       sum(samples)::smallint,
       max(peak_backends)::smallint,
-      ash._merge_wait_counts(array_agg(wait_counts)),
+      ash._merge_wait_counts(array_agg(wait_counts) filter (where wait_counts <> '{}')),
       ash._truncate_pairs(
-        ash._merge_query_counts(array_agg(query_counts)),
+        ash._merge_query_counts(array_agg(query_counts) filter (where query_counts <> '{}')),
         100  -- top 100 queries per hour
       )
     from ash.rollup_1m
