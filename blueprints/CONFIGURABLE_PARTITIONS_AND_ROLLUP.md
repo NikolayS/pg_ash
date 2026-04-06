@@ -204,7 +204,7 @@ Modular arithmetic changes from `% 3` to `% v_num_partitions` everywhere.
 
 **Rollup integration** (Phase B): `rotate()` should call `rollup_minute()` **before** the config update and truncation, not after. This ensures the rollup runs while the config row is not locked. The forced rollup only processes **minutes strictly earlier than the current incomplete minute** — same boundary rule as scheduled rollup. No partial-minute rollup, ever.
 
-**Scope of in-rotate rollup**: The forced rollup uses the standard watermark catch-up, but with `v_batch_limit` sized to cover just the partition about to be truncated (not unlimited catch-up). With rotation_period = 1 day, that's at most 1440 minutes. If the scheduler has been down for multiple rotation periods, `rotate()` catches up only the minutes in the endangered partition — the rest will be caught up by subsequent scheduled `rollup_minute()` calls.
+**Scope of in-rotate rollup**: `rotate()` calls `perform ash.rollup_minute(p_batch_limit => v_rotation_period_minutes)` where `v_rotation_period_minutes = extract(epoch from rotation_period)::int / 60`. For a 1-day rotation that's `perform ash.rollup_minute(1440)`, ensuring all endangered minutes in the about-to-be-truncated partition are rolled up. If the scheduler has been down for multiple rotation periods, `rotate()` catches up only the current endangered partition's minutes — remaining catch-up happens via subsequent scheduled `rollup_minute()` calls (which use the default 60-minute batch).
 
 **Why before config update**: If `rotate()` updates `current_slot` first (locking the config row), then calls `rollup_minute()`, any concurrent `take_sample()` that reads config will block. Calling rollup *before* the slot advance avoids this contention. The rollup is idempotent (upsert), so double-processing is safe.
 
@@ -570,7 +570,12 @@ The v0.1 spec used a fire-and-forget "previous minute only" model — `rollup_mi
 #### `ash.rollup_minute()`
 
 ```sql
-create or replace function ash.rollup_minute()
+create or replace function ash.rollup_minute(
+  p_batch_limit int default 60  -- max minutes to catch up per call
+                                 -- cron default: 60 (1 hr catch-up per minute)
+                                 -- rotate() call: rotation_period_seconds / 60
+                                 -- e.g., 1-day rotation → pass 1440
+)
 returns int  -- total rollup rows upserted
 language plpgsql
 as $$
@@ -579,11 +584,12 @@ declare
   v_now_minute_ts int4;
   v_minute_start int4;
   v_minute_end int4;
-  v_batch_limit int := 60;  -- catch up at most 60 minutes per call
+  v_batch_limit int;
   v_total int := 0;
   v_count int;
   v_min_samples smallint;
 begin
+  v_batch_limit := p_batch_limit;
   select last_rollup_1m_ts, rollup_min_samples
   into v_last_ts, v_min_samples
   from ash.config where singleton;
