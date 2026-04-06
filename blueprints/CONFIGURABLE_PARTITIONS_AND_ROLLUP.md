@@ -347,7 +347,7 @@ Using the two-key form `(classid, objid)` also makes the `pg_locks` drain query 
 
 | Function | Lock behavior |
 |----------|--------------|
-| `take_sample()` | `pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4)` at entry. Auto-releases at transaction end. If lock fails (rebuild in progress), return 0 silently. **Observability**: increment a skipped-sample counter in config or log at DEBUG level — silent failure should not be invisible in `status()`. |
+| `take_sample()` | `pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4)` at entry. Auto-releases at transaction end. If lock fails (rebuild in progress), return 0 and **increment `skipped_samples` counter in `ash.config`** (mandatory — silent skips must be visible in `status()`). This counter resets on `ash.start()`. |
 | `rotate()` | Does **not** check `sampling_enabled`. Relies on advisory lock: acquires `(0, hashtext('ash_rotate')::int4)` as before. No `ash_operation` participation lock needed — rotation is coordinated separately and is safe during rebuild (it just won't find data to rotate). |
 | `rollup_minute()` | `pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4)` at entry. If lock fails, return 0 (will catch up next call via watermark). |
 | `rollup_hour()` | Same as `rollup_minute()`. |
@@ -472,14 +472,14 @@ Add retention and rollup control columns to `ash.config`:
 alter table ash.config
   add column rollup_1m_retention_days smallint not null default 30,
   add column rollup_1h_retention_days smallint not null default 1825,
-  add column rollup_min_samples smallint not null default 3,
+  add column rollup_min_backend_seconds smallint not null default 3,
   add column last_rollup_1m_ts int4,
   add column last_rollup_1h_ts int4;
 ```
 
 - `rollup_1m_retention_days`: how long to keep per-minute rollups (default 30 days).
 - `rollup_1h_retention_days`: how long to keep per-hour rollups (default 1825 = 5 years).
-- `rollup_min_samples`: minimum backend-seconds a query must have in an aggregation window to be stored in `query_counts` (default 3). Queries below this threshold are noise — not useful for trend analysis. See `PARTITIONED_QUERYMAP_DESIGN.md` for rationale.
+- `rollup_min_backend_seconds`: minimum backend-seconds a query must have in an aggregation window to be stored in `query_counts` (default 3). Queries below this threshold are noise — not useful for trend analysis. See `PARTITIONED_QUERYMAP_DESIGN.md` for rationale.
 - `last_rollup_1m_ts` / `last_rollup_1h_ts`: watermark timestamps for catch-up execution (see below).
 
 #### Epoch and timestamp helpers
@@ -590,7 +590,7 @@ declare
   v_min_samples smallint;
 begin
   v_batch_limit := p_batch_limit;
-  select last_rollup_1m_ts, rollup_min_samples
+  select last_rollup_1m_ts, rollup_min_backend_seconds
   into v_last_ts, v_min_samples
   from ash.config where singleton;
 
@@ -1138,7 +1138,7 @@ alter table ash.config
 alter table ash.config
   add column if not exists rollup_1h_retention_days smallint not null default 1825;
 alter table ash.config
-  add column if not exists rollup_min_samples smallint not null default 3;
+  add column if not exists rollup_min_backend_seconds smallint not null default 3;
 alter table ash.config
   add column if not exists last_rollup_1m_ts int4;
 alter table ash.config
@@ -1250,7 +1250,7 @@ The upgrade SQL script alone is not sufficient. The release notes must include:
 
 ### Phase B: Rollup tables (depends on Phase A)
 
-1. Add config columns: retention, `rollup_min_samples`, watermarks
+1. Add config columns: retention, `rollup_min_backend_seconds`, watermarks
 2. Implement `ts_from_timestamptz()`, `ts_to_timestamptz()`
 3. Implement array merge helpers — **prototype and test in isolation first**
 4. Create `rollup_1m`, `rollup_1h` tables
@@ -1282,24 +1282,17 @@ These were open in v0.1. All reviewers converged on the same answers:
 
 ---
 
-## Remaining open questions (v0.4)
+## Remaining open questions (v0.5)
 
-1. **`rollup_gaps` table**: Should gap metadata be written to a small `ash.rollup_gaps` table so `status()` can report "3 minute-gaps detected in last 30 days"? Or are WARNING logs sufficient?
-   - *R1 (round 1)*: Yes — warnings are easy to miss; a small table with `(gap_start_ts, gap_end_ts, detected_at, reason)` is worth it.
-   - *R3 (round 2), R1 (round 3)*: No for v1.5 — a gaps table adds schema surface area. Trivial to add later if users ask. Start with WARNING logs.
-   - **Leaning: WARNING logs for v1.5.** Resolve before coding Phase B.
+1. **`rollup_gaps` table**: *(Resolved — WARNING logs for v1.5.)* Round 3 consensus (R1 + R3): WARNING logs sufficient for now; schema surface area not worth it. Trivial to add a gaps table in a future version if users ask.
 
-2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: *(Resolved — skip for v1.5.)* `rollup_1m_retention_days = 0` is the escape hatch; cleanup clears all rows immediately. Semantics of retention=0: `rollup_minute()` still populates rows but `rollup_cleanup()` deletes them on next run. Effectively a no-op level with no stored data after cleanup.
+2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: *(Resolved — skip for v1.5.)* `rollup_1m_retention_days = 0` is the escape hatch; cleanup clears all rows immediately. Semantics of retention=0: `rollup_minute()` still populates rows transiently but `rollup_cleanup()` deletes them on next run. Not a compute-disable, just a storage escape hatch.
 
-3. **Duplicate `sample_ts` handling**: *(Resolved by locking protocol — R3 round 3.)* The new `pg_try_advisory_xact_lock` on `ash_operation` prevents concurrent `take_sample()` calls from pg_cron — the second concurrent call fails the lock and returns 0 immediately. Therefore `(sample_ts, datid)` duplicates from pg_cron overlap are now impossible. **Document as enforced invariant.** Consider adding `UNIQUE (sample_ts, datid)` to the `ash.sample` parent table to make it structural. Any retry-on-error code path must acquire the participation lock before re-attempting the insert.
+3. **Duplicate `sample_ts` handling**: *(Resolved by locking protocol.)* `pg_try_advisory_xact_lock` on `ash_operation` prevents concurrent `take_sample()` calls — the second concurrent call fails the lock and returns 0. Therefore `(sample_ts, datid)` duplicates from cron overlap are impossible. **Add `UNIQUE (sample_ts, datid)` to `ash.sample` parent table** — locks protect behavior, constraints protect data. If any future code path violates lock discipline, the constraint catches it immediately.
 
-4. **Reader function time-range routing**: *(Resolved — keep separate functions.)* No auto-routing in v1.5. Auto-routing is a UX layer that can be added later without schema changes.
+4. **Reader function time-range routing**: *(Resolved — keep separate functions.)* No auto-routing in v1.5.
 
-5. **`rollup_min_samples` column naming**: Three different rename suggestions from reviewers:
-   - *R3 (round 2)*: `rollup_min_backend_seconds`
-   - *R3 (round 3)*: `rollup_min_query_count` (threshold on the count value in query_counts pairs)
-   - *R1 (round 3)*: Agrees renaming is correct, prefers `rollup_min_backend_seconds`
-   - **Decision needed before coding.** The threshold applies to the `count` field in `[query_id, count]` pairs within the aggregation window, which equals backend-seconds. Both names are more precise than `rollup_min_samples`. Pick one and document the unit clearly in a column comment.
+5. **`rollup_min_samples` column naming**: *(Resolved — rename to `rollup_min_backend_seconds`.)* Round 3 majority (R1 rounds 1+3). The threshold is on the `count` field in `[query_id, count]` pairs = backend-seconds at 1s sampling interval. Column comment should note: "minimum backend-seconds a query must accumulate in an aggregation window to be stored in query_counts. At 1s sampling interval, 1 backend-second = 1 raw sample appearance." This rename must propagate everywhere in the spec and upgrade script.
 
 ---
 
@@ -1329,7 +1322,7 @@ These were open in v0.1. All reviewers converged on the same answers:
 | 13 | Epoch stays 2026-01-01 | Already deployed and `IMMUTABLE`. Changing it corrupts all existing timestamps. Rollups use the same epoch. |
 | 14 | ts↔timestamptz helper functions | Single source of truth for epoch arithmetic. Prevents off-by-one bugs across reader and rollup functions. |
 | 15 | Retention config columns from day one | Avoids schema migration later. First thing serious users ask to tune. |
-| 16 | `rollup_min_samples` threshold | Noise filtering for trend analysis (default: 3+ backend-seconds). Configurable per `PARTITIONED_QUERYMAP_DESIGN.md`. |
+| 16 | `rollup_min_backend_seconds` threshold | Noise filtering for trend analysis (default: 3+ backend-seconds). Configurable per `PARTITIONED_QUERYMAP_DESIGN.md`. |
 | 17 | `peak_backends` is per-database | Computed from decoded rows per `(sample_ts, datid)`, not from cluster-wide `active_count`. |
 | 18 | Pure SQL array merge helpers | jsonb approach discarded — CPU burn for type conversion. Set-based unnest + group by + array_agg stays in typed integer domain. |
 | 19 | Catalog-based cleanup for uninstall/rebuild | Enumerate actual objects from `pg_class`/`pg_inherits` instead of trusting config count. Catches orphaned tables from failed operations. |
@@ -1347,7 +1340,7 @@ This spec was reviewed by 4 independent reviewers. Key contributions:
 
 - **Reviewer 3** (R3): Validated TOAST threshold analysis for arrays. Confirmed jsonb approach should be discarded. Provided answers to all open questions with strong rationale. Raised UI/terminal layer question for historical metrics.
 
-- **Reviewer 4** (R4, automated): Identified epoch conflict (2025 vs 2026), `take_sample()` dynamic SQL mismatch with actual code, 50k cap metric inconsistency, missing `rollup_min_samples`, reader function signature divergence from `ROLLUP_DESIGN.md`, and version numbering gap.
+- **Reviewer 4** (R4, automated): Identified epoch conflict (2025 vs 2026), `take_sample()` dynamic SQL mismatch with actual code, 50k cap metric inconsistency, missing `rollup_min_backend_seconds`, reader function signature divergence from `ROLLUP_DESIGN.md`, and version numbering gap.
 
 ---
 
