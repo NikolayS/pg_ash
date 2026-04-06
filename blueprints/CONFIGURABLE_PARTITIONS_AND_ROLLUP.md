@@ -1,6 +1,6 @@
 # Configurable N-partitions + Rollup tables
 
-> **Spec version**: 0.2 (2026-04-05)
+> **Spec version**: 0.3 (2026-04-05)
 > **Target**: pg_ash v1.5
 > **Status**: Draft — under review
 > **Issue**: [#30](https://github.com/NikolayS/pg_ash/issues/30)
@@ -11,7 +11,8 @@
 | Version | Date | Changes |
 |---------|------|---------|
 | 0.1 | 2026-04-03 | Initial spec: configurable N-partitions + rollup tables |
-| 0.2 | 2026-04-05 | Incorporated 4 expert reviews. Major changes: epoch fixed to existing 2026-01-01; watermark-based rollup execution model; hardened `rebuild_partitions()` with disable/lock/restart protocol; precise retention semantics; `peak_backends` clarified as per-database; retention config columns added from day one; `rollup_min_samples` threshold added; ts/epoch helper functions; explicit upgrade ordering; array merge helpers redesigned (jsonb approach removed); `rollup_minute()` pseudocode rewritten; reader function specs expanded; `start()`/`stop()` idempotency rules; catalog-based cleanup for `uninstall()`/`rebuild_partitions()` |
+| 0.2 | 2026-04-05 | Incorporated 4 expert reviews (round 1). Major changes: epoch fixed to existing 2026-01-01; watermark-based rollup execution model; hardened `rebuild_partitions()` with disable/lock/restart protocol; precise retention semantics; `peak_backends` clarified as per-database; retention config columns added from day one; `rollup_min_samples` threshold added; ts/epoch helper functions; explicit upgrade ordering; array merge helpers redesigned (jsonb approach removed); `rollup_minute()` pseudocode rewritten; reader function specs expanded; `start()`/`stop()` idempotency rules; catalog-based cleanup for `uninstall()`/`rebuild_partitions()` |
+| 0.3 | 2026-04-05 | Incorporated 3 expert reviews (round 2). Critical fix: array interleaving bug in `_merge_wait_counts`/`_truncate_pairs` (all 3 reviewers caught independently — `ORDER BY v DESC` swapped id/count pairs when count > id; fixed with `CROSS JOIN LATERAL (VALUES ...)` explicit sub-row ordinal). Added explicit two-key advisory locking contract (`ash_operation` participation + `ash_rebuild` exclusive) replacing `pg_sleep(2)` heuristic with bounded polling drain. Added `sampling_enabled` semantics table. Tightened `rotate()` rollup integration (before config update, complete minutes only, bounded batch). Added REVOKE inventory. Added upgrade runbook. Updated open questions with round-2 answers; 2 resolved, 3 still pending. Added `rollup_min_samples` naming question. |
 
 ---
 
@@ -576,9 +577,14 @@ begin
   -- Current minute boundary (we only process *complete* minutes)
   v_now_minute_ts := ash.ts_from_timestamptz(date_trunc('minute', now()));
 
-  -- Initialize watermark if NULL (first run)
+  -- Initialize watermark if NULL (first run after install or upgrade).
+  -- Scans all sample partitions to find earliest data.
+  -- Post-upgrade catch-up rate: ~60 minutes of history per 1 minute of
+  -- wall clock (v_batch_limit=60 per call, called every minute by cron).
+  -- Example: system running 3 days before rollups enabled → ~72 cron
+  -- invocations (~72 minutes) to catch up. During catch-up, ensure
+  -- rotation_period × (N-2) provides enough runway before data is lost.
   if v_last_ts is null then
-    -- Find earliest sample_ts, align to minute
     select (min(sample_ts) / 60) * 60
     into v_last_ts
     from ash.sample;
