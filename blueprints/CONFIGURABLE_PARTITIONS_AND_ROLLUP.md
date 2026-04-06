@@ -239,71 +239,76 @@ begin
     perform ash.stop();
   end if;
 
-  -- Step 3: Acquire advisory lock shared by take_sample/rotate/rollup paths.
-  -- Wait up to 5s for any in-flight operations to complete.
-  set local lock_timeout = '5s';
-  if not pg_try_advisory_lock(hashtext('ash_rebuild')) then
+  -- Step 3: Acquire rebuild exclusive lock (two-key xact-level form).
+  -- Xact-level: auto-releases on commit/rollback — no manual unlock needed.
+  -- Two-key form (classid=1, objid=key): matches pg_locks drain query exactly.
+  if not pg_try_advisory_xact_lock(1, hashtext('ash_rebuild')::int4) then
     -- Re-enable sampling since we failed
     update ash.config set sampling_enabled = true where singleton;
     raise exception 'rebuild_partitions: could not acquire lock — '
-      'another operation is in progress';
+      'another rebuild is in progress';
   end if;
 
-  begin
-    -- Step 4: Brief sleep to let any in-flight take_sample() finish.
-    -- take_sample() runs every 1s and completes in <100ms typically.
-    perform pg_sleep(2);
+  -- Step 4: Drain — wait up to 5s for in-flight take_sample/rollup to finish.
+  -- They hold (0, hashtext('ash_operation')) xact locks; we poll pg_locks.
+  -- Two-key advisory locks: classid = first key, objid = second key (as oid).
+  for i in 1..10 loop
+    if not exists (
+      select from pg_locks
+      where locktype = 'advisory'
+        and classid = 0
+        and objid = hashtext('ash_operation')::int4::oid
+        and granted
+    ) then
+      exit;  -- all clear
+    end if;
+    perform pg_sleep(0.5);
+  end loop;
 
-    -- Step 5: Drop ALL existing sample partitions and query_maps.
-    -- Use catalog enumeration (not config) to catch orphaned tables
-    -- from prior failed rebuilds.
-    perform ash._drop_all_partitions();
+  -- Step 5: Drop ALL existing sample partitions and query_maps.
+  -- Use catalog enumeration (not config) to catch orphaned tables
+  -- from prior failed rebuilds.
+  perform ash._drop_all_partitions();
 
-    -- Step 6: Update config
-    update ash.config
-    set num_partitions = v_new_n,
-        current_slot = 0,
-        rotated_at = now()
-    where singleton;
+  -- Step 6: Update config
+  update ash.config
+  set num_partitions = v_new_n,
+      current_slot = 0,
+      rotated_at = now()
+  where singleton;
 
-    -- Step 7: Create new partitions
-    for i in 0..v_new_n-1 loop
-      execute format(
-        'create table ash.sample_%s partition of ash.sample '
-        'for values in (%s)', i, i
-      );
-      execute format(
-        'create table ash.query_map_%s ('
-        '  id int4 generated always as identity,'
-        '  query_id int8 not null,'
-        '  unique (query_id))', i
-      );
-      execute format(
-        'create index sample_%s_ts_idx on ash.sample_%s (sample_ts desc)',
-        i, i
-      );
-    end loop;
-
-    -- Step 8: Rebuild the query_map_all view
-    perform ash._rebuild_query_map_view();
-
-    perform pg_advisory_unlock(hashtext('ash_rebuild'));
-
-    -- Step 9: Leave sampling DISABLED. User must explicitly call
-    -- ash.start() to resume. This is intentional — forcing explicit
-    -- restart prevents accidental data collection into a fresh schema.
-    return format(
-      'rebuilt: %s -> %s partitions. all raw data cleared. '
-      'call ash.start() to resume sampling.',
-      v_old_n, v_new_n
+  -- Step 7: Create new partitions
+  for i in 0..v_new_n-1 loop
+    execute format(
+      'create table ash.sample_%s partition of ash.sample '
+      'for values in (%s)', i, i
     );
+    execute format(
+      'create table ash.query_map_%s ('
+      '  id int4 generated always as identity,'
+      '  query_id int8 not null,'
+      '  unique (query_id))', i
+    );
+    execute format(
+      'create index sample_%s_ts_idx on ash.sample_%s (sample_ts desc)',
+      i, i
+    );
+  end loop;
 
-  exception when others then
-    perform pg_advisory_unlock(hashtext('ash_rebuild'));
-    -- Re-enable sampling on failure so the system isn't left dead
-    update ash.config set sampling_enabled = true where singleton;
-    raise;
-  end;
+  -- Step 8: Rebuild the query_map_all view
+  perform ash._rebuild_query_map_view();
+
+  -- No explicit unlock — xact lock auto-releases on commit.
+  -- Step 9: Leave sampling DISABLED. User must explicitly call
+  -- ash.start() to resume. This is intentional — forcing explicit
+  -- restart prevents accidental data collection into a fresh schema.
+  -- On exception: sampling_enabled stays false if lock was acquired.
+  -- Recovery: UPDATE ash.config SET sampling_enabled = true; SELECT ash.start();
+  return format(
+    'rebuilt: %s -> %s partitions. all raw data cleared. '
+    'call ash.start() to resume sampling.',
+    v_old_n, v_new_n
+  );
 end $$;
 ```
 
