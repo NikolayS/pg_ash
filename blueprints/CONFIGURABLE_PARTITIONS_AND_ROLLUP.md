@@ -14,7 +14,7 @@
 | 0.2 | 2026-04-05 | Incorporated 4 expert reviews (round 1). Major changes: epoch fixed to existing 2026-01-01; watermark-based rollup execution model; hardened `rebuild_partitions()` with disable/lock/restart protocol; precise retention semantics; `peak_backends` clarified as per-database; retention config columns added from day one; `rollup_min_samples` threshold added; ts/epoch helper functions; explicit upgrade ordering; array merge helpers redesigned (jsonb approach removed); `rollup_minute()` pseudocode rewritten; reader function specs expanded; `start()`/`stop()` idempotency rules; catalog-based cleanup for `uninstall()`/`rebuild_partitions()` |
 | 0.3 | 2026-04-05 | Incorporated 3 expert reviews (round 2). Critical fix: array interleaving bug in `_merge_wait_counts`/`_truncate_pairs` (all 3 reviewers caught independently — `ORDER BY v DESC` swapped id/count pairs when count > id; fixed with `CROSS JOIN LATERAL (VALUES ...)` explicit sub-row ordinal). Added explicit two-key advisory locking contract (`ash_operation` participation + `ash_rebuild` exclusive) replacing `pg_sleep(2)` heuristic with bounded polling drain. Added `sampling_enabled` semantics table. Tightened `rotate()` rollup integration (before config update, complete minutes only, bounded batch). Added REVOKE inventory. Added upgrade runbook. Updated open questions with round-2 answers; 2 resolved, 3 still pending. Added `rollup_min_samples` naming question. |
 | 0.4 | 2026-04-06 | Incorporated 3 expert reviews (round 3). Critical fixes: `pg_locks` drain check queried wrong column for single-key advisory locks — switched to two-key form `(classid, objid)` with explicit `pg_try_advisory_xact_lock` (xact-level auto-release eliminates session leak risk in pg_cron). Fixed upgrade step ordering: `rotate()` now installed in two passes (without rollup at step 6, with rollup at step 13 after `rollup_minute()` exists). Dropped `sampling_enabled` check from `rotate()` (no mechanism to distinguish scheduled vs manual; rely on advisory lock). Resolved open questions 2 (enable flags — skip), 3 (duplicate sample_ts — prevented by participation lock, document as enforced invariant), 4 (reader routing — keep separate). Added non-atomicity sentence for rotate+rollup. Added pg_cron role REVOKE caveat. Decided ts helpers are PUBLIC. Updated open questions 1 and 5 with round-3 input. |
-| 0.5 | 2026-04-06 | Final polish pass. Renamed `rollup_min_samples` → `rollup_min_backend_seconds` throughout (threshold is backend-seconds at 1s sampling interval, not a raw sample count). Added `skipped_samples int4` to `ash.config` DDL, upgrade script, and `status()` output — mandatory observability for silent `take_sample()` skips. Added `UNIQUE (sample_ts, datid)` constraint to `ash.sample` parent table (belt-and-suspenders alongside participation lock). Made `FILTER (WHERE col <> '{}')` a mandatory spec-level invariant for all `array_agg()` calls feeding `_merge_*` helpers; applied to `rollup_hour()` code block. All open questions resolved; spec is ready for implementation. |
+| 0.5 | 2026-04-06 | Final polish pass. Renamed `rollup_min_samples` → `rollup_min_backend_seconds` throughout. Added `skipped_samples int4` to `ash.config` DDL, upgrade script, and `status()` output (counter since last `ash.start()`). Made `FILTER (WHERE col <> '{}')` a mandatory spec-level invariant for all `array_agg()` calls feeding `_merge_*` helpers; applied to `rollup_hour()` code block. Fixed drain query cast inconsistency: both occurrences now use `hashtext(...)::int4::oid` (not `::bigint`, which silently fails for negative int4 values against the oid-typed `pg_locks.objid` column). Corrected `UNIQUE (sample_ts, datid)` analysis: constraint not enforceable on partitioned parent without partition key; advisory lock is the sole protection. Fixed REVOKE table for ts helpers: "GRANT TO PUBLIC" (not "may grant if desired"). Added prominent WARNING block for `rebuild_partitions()` failure-leaves-sampling-disabled semantics. All open questions resolved. |
 
 ---
 
@@ -299,12 +299,10 @@ begin
   -- Step 8: Rebuild the query_map_all view
   perform ash._rebuild_query_map_view();
 
-  -- No explicit unlock — xact lock auto-releases on commit.
+  -- No explicit unlock — xact lock auto-releases on commit/rollback.
   -- Step 9: Leave sampling DISABLED. User must explicitly call
-  -- ash.start() to resume. This is intentional — forcing explicit
-  -- restart prevents accidental data collection into a fresh schema.
-  -- On exception: sampling_enabled stays false if lock was acquired.
-  -- Recovery: UPDATE ash.config SET sampling_enabled = true; SELECT ash.start();
+  -- ash.start() to resume. Forcing explicit restart prevents accidental
+  -- data collection into a partially-built schema.
   return format(
     'rebuilt: %s -> %s partitions. all raw data cleared. '
     'call ash.start() to resume sampling.',
@@ -312,6 +310,8 @@ begin
   );
 end $$;
 ```
+
+> **WARNING — failure leaves sampling disabled**: If `rebuild_partitions()` raises an exception after acquiring the rebuild lock (e.g., disk full during partition creation, constraint violation), the xact rolls back — but `sampling_enabled = false` was committed in a prior statement and is **not rolled back**. The schema may be in an unknown intermediate state. **Manual recovery required**: inspect `ash.status()`, verify partition count and table existence, fix the root cause, then `UPDATE ash.config SET sampling_enabled = true WHERE singleton; SELECT ash.start();`. This is intentional fail-safe behavior — an unknown schema state should never silently resume sampling. Document in the upgrade runbook and operator guide.
 
 **Config change**: add `sampling_enabled bool not null default true` and `skipped_samples int4 not null default 0` to `ash.config`. The `skipped_samples` counter is incremented by `take_sample()` whenever sampling is skipped (rebuild in progress). It resets to 0 on `ash.start()`. Mandatory: silent skips must be visible in `status()` output.
 
@@ -364,7 +364,7 @@ for i in 1..10 loop
     select from pg_locks
     where locktype = 'advisory'
       and classid = 0
-      and objid = hashtext('ash_operation')::int4::bigint
+      and objid = hashtext('ash_operation')::int4::oid
       and granted
   ) then
     exit;  -- all clear
@@ -425,7 +425,7 @@ end $$;
 ```sql
 metric := 'num_partitions'; value := v_config.num_partitions::text; return next;
 metric := 'sampling_enabled'; value := v_config.sampling_enabled::text; return next;
-metric := 'skipped_samples'; value := v_config.skipped_samples::text; return next;
+metric := 'skipped_samples'; value := v_config.skipped_samples::text; return next;  -- counter since last ash.start()
 ```
 
 #### `uninstall()` — catalog-based drop
@@ -454,7 +454,9 @@ With N partitions and rotation_period P:
 
 The `sample` parent table has `slot smallint not null default ash.current_slot()`. LIST partitioning routes inserts to the correct child by slot value. No change needed — any `slot` value outside 0..N-1 fails at insert time with "no partition of relation." This is the correct behavior.
 
-**Add `UNIQUE (sample_ts, datid)` to the `ash.sample` parent table**: The participation advisory lock (`ash_operation`) prevents concurrent `take_sample()` calls, making `(sample_ts, datid)` duplicates from cron overlap impossible. Adding an explicit unique constraint means that if any future code path violates lock discipline, the database catches it immediately rather than producing silently duplicated rollup aggregates. This is belt-and-suspenders: locks protect behavior, constraints protect data.
+**`UNIQUE (sample_ts, datid)` on `ash.sample` — not directly enforceable on partitioned parent**: PostgreSQL requires unique constraints on a partitioned table to include all partitioning columns. Since `ash.sample` is LIST-partitioned by `slot`, a `UNIQUE (sample_ts, datid)` on the parent fails with "unique constraint on partitioned table must include all partitioning columns." You would need `UNIQUE (sample_ts, datid, slot)`, but that does not prevent the same `(sample_ts, datid)` appearing in two different slots — exactly the scenario to guard against.
+
+**Conclusion**: the advisory lock (`ash_operation`) is the actual protection. `take_sample()` acquires it exclusively before writing, making concurrent `(sample_ts, datid)` collisions impossible. Do not add a false-confidence unique constraint that doesn't enforce the intended invariant. Document this as a known limitation: the correctness guarantee comes from the locking protocol, not from a DDL constraint.
 
 ---
 
@@ -1215,8 +1217,8 @@ All new functions that should be REVOKE'd from PUBLIC:
 | `_merge_wait_counts()` | Internal helper |
 | `_merge_query_counts()` | Internal helper |
 | `_truncate_pairs()` | Internal helper |
-| `ts_from_timestamptz()` | Read-only helper — may grant to PUBLIC if desired |
-| `ts_to_timestamptz()` | Read-only helper — may grant to PUBLIC if desired |
+| `ts_from_timestamptz()` | **Grant to PUBLIC** — harmless read-only conversion, needed by users building Grafana panels / custom queries |
+| `ts_to_timestamptz()` | **Grant to PUBLIC** — same rationale |
 | `rollup_minute()` | Debatable — idempotent, but unprivileged users shouldn't invoke |
 | `rollup_hour()` | Same |
 | `rollup_cleanup()` | Same |
@@ -1295,7 +1297,7 @@ These were open in v0.1. All reviewers converged on the same answers:
 
 2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: *(Resolved — skip for v1.5.)* `rollup_1m_retention_days = 0` is the escape hatch; cleanup clears all rows immediately. Semantics of retention=0: `rollup_minute()` still populates rows transiently but `rollup_cleanup()` deletes them on next run. Not a compute-disable, just a storage escape hatch.
 
-3. **Duplicate `sample_ts` handling**: *(Resolved by locking protocol.)* `pg_try_advisory_xact_lock` on `ash_operation` prevents concurrent `take_sample()` calls — the second concurrent call fails the lock and returns 0. Therefore `(sample_ts, datid)` duplicates from cron overlap are impossible. **Add `UNIQUE (sample_ts, datid)` to `ash.sample` parent table** — locks protect behavior, constraints protect data. If any future code path violates lock discipline, the constraint catches it immediately.
+3. **Duplicate `sample_ts` handling**: *(Resolved by locking protocol — no DDL constraint.)* `pg_try_advisory_xact_lock` on `ash_operation` prevents concurrent `take_sample()` calls — the second call fails the lock and returns 0. Therefore `(sample_ts, datid)` duplicates are impossible. A `UNIQUE (sample_ts, datid)` constraint on the parent is not enforceable — PostgreSQL requires unique constraints on partitioned tables to include the partition key (`slot`), and `UNIQUE (sample_ts, datid, slot)` does not prevent the same `(sample_ts, datid)` in different slots. The advisory lock is the sole protection; document this clearly.
 
 4. **Reader function time-range routing**: *(Resolved — keep separate functions.)* No auto-routing in v1.5.
 
