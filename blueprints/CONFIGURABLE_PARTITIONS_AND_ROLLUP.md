@@ -312,7 +312,7 @@ begin
 end $$;
 ```
 
-**Config change**: add `sampling_enabled bool not null default true` to `ash.config`.
+**Config change**: add `sampling_enabled bool not null default true` and `skipped_samples int4 not null default 0` to `ash.config`. The `skipped_samples` counter is incremented by `take_sample()` whenever sampling is skipped (rebuild in progress). It resets to 0 on `ash.start()`. Mandatory: silent skips must be visible in `status()` output.
 
 #### `sampling_enabled` semantics
 
@@ -424,6 +424,7 @@ end $$;
 ```sql
 metric := 'num_partitions'; value := v_config.num_partitions::text; return next;
 metric := 'sampling_enabled'; value := v_config.sampling_enabled::text; return next;
+metric := 'skipped_samples'; value := v_config.skipped_samples::text; return next;
 ```
 
 #### `uninstall()` — catalog-based drop
@@ -1134,6 +1135,8 @@ alter table ash.config
 alter table ash.config
   add column if not exists sampling_enabled bool not null default true;
 alter table ash.config
+  add column if not exists skipped_samples int4 not null default 0;
+alter table ash.config
   add column if not exists rollup_1m_retention_days smallint not null default 30;
 alter table ash.config
   add column if not exists rollup_1h_retention_days smallint not null default 1825;
@@ -1243,7 +1246,7 @@ The upgrade SQL script alone is not sufficient. The release notes must include:
 5. Make `rotate()` dynamic (`% num_partitions`)
 6. Implement `rebuild_partitions()` with disable/lock/restart protocol
 7. Update `uninstall()` to use `_drop_all_partitions()`
-8. Update `status()` with `num_partitions`, `sampling_enabled`
+8. Update `status()` with `num_partitions`, `sampling_enabled`, `skipped_samples`
 9. Dynamic partition creation at install time
 10. Upgrade script (strict ordering)
 11. CI: test with N=3 (default), N=5, N=9; benchmark `query_map_all` at N=16, N=32
