@@ -940,16 +940,16 @@ jobs:
             assert v_slots[2] = ((v_slot - 1 + (select num_partitions from ash.config where singleton)) % (select num_partitions from ash.config where singleton))::smallint,
               '_active_slots[2] should be previous slot';
 
-            -- _to_sample_ts: converts timestamptz to int4 offset from epoch
-            select ash._to_sample_ts(ash.epoch()) into v_ts;
-            assert v_ts = 0, '_to_sample_ts(epoch) should be 0, got: ' || v_ts;
+            -- ts_from_timestamptz: converts timestamptz to int4 offset from epoch
+            select ash.ts_from_timestamptz(ash.epoch()) into v_ts;
+            assert v_ts = 0, 'ts_from_timestamptz(epoch) should be 0, got: ' || v_ts;
 
-            select ash._to_sample_ts(ash.epoch() + interval '1 hour') into v_ts;
-            assert v_ts = 3600, '_to_sample_ts(epoch+1h) should be 3600, got: ' || v_ts;
+            select ash.ts_from_timestamptz(ash.epoch() + interval '1 hour') into v_ts;
+            assert v_ts = 3600, 'ts_from_timestamptz(epoch+1h) should be 3600, got: ' || v_ts;
 
-            -- _to_sample_ts: future timestamps should be positive
-            select ash._to_sample_ts(now()) into v_ts;
-            assert v_ts > 0, '_to_sample_ts(now) should be positive';
+            -- ts_from_timestamptz: future timestamps should be positive
+            select ash.ts_from_timestamptz(now()) into v_ts;
+            assert v_ts > 0, 'ts_from_timestamptz(now) should be positive';
 
             -- _register_wait: register a new wait event
             select ash._register_wait('active', 'Test', 'TestEvent') into v_wait_id;
