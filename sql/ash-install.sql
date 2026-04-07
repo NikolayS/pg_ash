@@ -2044,6 +2044,8 @@ declare
   v_start_ts int4;
   v_end_ts int4;
   v_has_pgss bool;
+  v_rec record;
+  v_qtext text;
 begin
   v_start_ts := ash.ts_from_timestamptz(now() - p_interval);
   v_end_ts := ash.ts_from_timestamptz(now());
@@ -2051,48 +2053,57 @@ begin
   select exists (select from pg_extension where extname = 'pg_stat_statements')
   into v_has_pgss;
 
-  return query
-  with raw_pairs as (
+  for v_rec in
+    with raw_pairs as (
+      select
+        (row_number() over ()) as pos,
+        val
+      from ash.rollup_1h r,
+        lateral unnest(r.query_counts) as val
+      where r.ts >= v_start_ts and r.ts < v_end_ts
+    ),
+    pairs as (
+      select n1.val as qid, n2.val as cnt
+      from raw_pairs n1
+      join raw_pairs n2 on n2.pos = n1.pos + 1
+      where n1.pos % 2 = 1
+    ),
+    summed as (
+      select
+        qid,
+        sum(cnt)::bigint as total
+      from pairs
+      group by qid
+    ),
+    grand_total as (
+      select sum(total) as gt from summed
+    )
     select
-      (row_number() over ()) as pos,
-      val
-    from ash.rollup_1h r,
-      lateral unnest(r.query_counts) as val
-    where r.ts >= v_start_ts and r.ts < v_end_ts
-  ),
-  pairs as (
-    select n1.val as qid, n2.val as cnt
-    from raw_pairs n1
-    join raw_pairs n2 on n2.pos = n1.pos + 1
-    where n1.pos % 2 = 1
-  ),
-  summed as (
-    select
-      qid,
-      sum(cnt)::bigint as total
-    from pairs
-    group by qid
-  ),
-  grand_total as (
-    select sum(total) as gt from summed
-  )
-  select
-    s.qid,
-    s.total,
-    round(s.total * 100.0 / nullif(gt.gt, 0), 1),
-    case
-      when v_has_pgss then (
-        select left(pgss.query, 80)
-        from pg_stat_statements pgss
-        where pgss.queryid = s.qid
-        limit 1
-      )
-      else null
-    end
-  from summed s
-  cross join grand_total gt
-  order by s.total desc
-  limit p_limit;
+      s.qid,
+      s.total,
+      round(s.total * 100.0 / nullif(gt.gt, 0), 1) as p
+    from summed s
+    cross join grand_total gt
+    order by s.total desc
+    limit p_limit
+  loop
+    query_id := v_rec.qid;
+    backend_seconds := v_rec.total;
+    pct := v_rec.p;
+    query_text := null;
+
+    if v_has_pgss then
+      begin
+        execute 'select left(query, 80) from pg_stat_statements where queryid = $1 limit 1'
+        into v_qtext using v_rec.qid;
+        query_text := v_qtext;
+      exception when others then
+        null;
+      end;
+    end if;
+
+    return next;
+  end loop;
 end;
 $$;
 
@@ -2116,6 +2127,8 @@ declare
   v_start_ts int4;
   v_end_ts int4;
   v_has_pgss bool;
+  v_rec record;
+  v_qtext text;
 begin
   v_start_ts := ash.ts_from_timestamptz(p_start);
   v_end_ts := ash.ts_from_timestamptz(p_end);
@@ -2123,48 +2136,57 @@ begin
   select exists (select from pg_extension where extname = 'pg_stat_statements')
   into v_has_pgss;
 
-  return query
-  with raw_pairs as (
+  for v_rec in
+    with raw_pairs as (
+      select
+        (row_number() over ()) as pos,
+        val
+      from ash.rollup_1h r,
+        lateral unnest(r.query_counts) as val
+      where r.ts >= v_start_ts and r.ts < v_end_ts
+    ),
+    pairs as (
+      select n1.val as qid, n2.val as cnt
+      from raw_pairs n1
+      join raw_pairs n2 on n2.pos = n1.pos + 1
+      where n1.pos % 2 = 1
+    ),
+    summed as (
+      select
+        qid,
+        sum(cnt)::bigint as total
+      from pairs
+      group by qid
+    ),
+    grand_total as (
+      select sum(total) as gt from summed
+    )
     select
-      (row_number() over ()) as pos,
-      val
-    from ash.rollup_1h r,
-      lateral unnest(r.query_counts) as val
-    where r.ts >= v_start_ts and r.ts < v_end_ts
-  ),
-  pairs as (
-    select n1.val as qid, n2.val as cnt
-    from raw_pairs n1
-    join raw_pairs n2 on n2.pos = n1.pos + 1
-    where n1.pos % 2 = 1
-  ),
-  summed as (
-    select
-      qid,
-      sum(cnt)::bigint as total
-    from pairs
-    group by qid
-  ),
-  grand_total as (
-    select sum(total) as gt from summed
-  )
-  select
-    s.qid,
-    s.total,
-    round(s.total * 100.0 / nullif(gt.gt, 0), 1),
-    case
-      when v_has_pgss then (
-        select left(pgss.query, 80)
-        from pg_stat_statements pgss
-        where pgss.queryid = s.qid
-        limit 1
-      )
-      else null
-    end
-  from summed s
-  cross join grand_total gt
-  order by s.total desc
-  limit p_limit;
+      s.qid,
+      s.total,
+      round(s.total * 100.0 / nullif(gt.gt, 0), 1) as p
+    from summed s
+    cross join grand_total gt
+    order by s.total desc
+    limit p_limit
+  loop
+    query_id := v_rec.qid;
+    backend_seconds := v_rec.total;
+    pct := v_rec.p;
+    query_text := null;
+
+    if v_has_pgss then
+      begin
+        execute 'select left(query, 80) from pg_stat_statements where queryid = $1 limit 1'
+        into v_qtext using v_rec.qid;
+        query_text := v_qtext;
+      exception when others then
+        null;
+      end;
+    end if;
+
+    return next;
+  end loop;
 end;
 $$;
 

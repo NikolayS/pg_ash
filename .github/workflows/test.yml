@@ -315,10 +315,13 @@ jobs:
             insert into ash.sample (sample_ts, datid, active_count, data)
             values (1000, 1, 2, '{-1,2,1,1}');
 
-            -- new_slot = (old + 1) % 3, truncate_slot = (new_slot + 1) % 3
-            v_target_slot := ((v_slot_before + 1) % 3)::smallint;
+            -- new_slot = (old + 1) % N, truncate_slot = (new_slot + 1) % N
             declare
-              v_truncate_slot smallint := ((v_target_slot + 1) % 3)::smallint;
+              v_num_partitions smallint := (select num_partitions from ash.config where singleton);
+            begin
+            v_target_slot := ((v_slot_before + 1) % v_num_partitions)::smallint;
+            declare
+              v_truncate_slot smallint := ((v_target_slot + 1) % v_num_partitions)::smallint;
             begin
               -- Seed the partition that will be TRUNCATED
               execute format(
@@ -363,6 +366,7 @@ jobs:
               ) into v_next_id;
               assert v_next_id = 1,
                 'query_map_' || v_truncate_slot || ' identity should restart at 1, got ' || v_next_id;
+            end;
             end;
 
             raise notice 'Rotation tests PASSED (truncation + sequence reset verified)';
@@ -924,7 +928,7 @@ jobs:
           begin
             -- current_slot: returns current partition slot
             select ash.current_slot() into v_slot;
-            assert v_slot >= 0 and v_slot <= 2,
+            assert v_slot >= 0 and v_slot < (select num_partitions from ash.config where singleton),
               'current_slot out of range: ' || v_slot;
 
             -- _active_slots: returns current + previous slot
@@ -933,7 +937,7 @@ jobs:
               '_active_slots should return 2 elements, got: ' || array_length(v_slots, 1);
             assert v_slots[1] = v_slot,
               '_active_slots[1] should be current slot';
-            assert v_slots[2] = ((v_slot - 1 + 3) % 3)::smallint,
+            assert v_slots[2] = ((v_slot - 1 + (select num_partitions from ash.config where singleton)) % (select num_partitions from ash.config where singleton))::smallint,
               '_active_slots[2] should be previous slot';
 
             -- _to_sample_ts: converts timestamptz to int4 offset from epoch
@@ -1242,6 +1246,592 @@ jobs:
             raise notice '_wait_color comprehensive tests PASSED';
           end;
           $$;
+          EOF
+
+      - name: "Test v1.4: configurable partitions"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_count int;
+            v_num smallint;
+            v_result text;
+            v_slot smallint;
+            v_slots smallint[];
+          begin
+            -- === Config columns exist ===
+            assert exists (
+              select from information_schema.columns
+              where table_schema = 'ash' and table_name = 'config'
+                and column_name = 'num_partitions'
+            ), 'num_partitions column missing';
+
+            assert exists (
+              select from information_schema.columns
+              where table_schema = 'ash' and table_name = 'config'
+                and column_name = 'sampling_enabled'
+            ), 'sampling_enabled column missing';
+
+            assert exists (
+              select from information_schema.columns
+              where table_schema = 'ash' and table_name = 'config'
+                and column_name = 'skipped_samples'
+            ), 'skipped_samples column missing';
+
+            -- === Default partition count ===
+            select num_partitions into v_num from ash.config where singleton;
+            assert v_num = 3, 'default num_partitions should be 3, got ' || v_num;
+
+            -- === Check constraint on num_partitions ===
+            begin
+              update ash.config set num_partitions = 2 where singleton;
+              assert false, 'should not allow num_partitions < 3';
+            exception when check_violation then
+              null; -- expected
+            end;
+            begin
+              update ash.config set num_partitions = 33 where singleton;
+              assert false, 'should not allow num_partitions > 32';
+            exception when check_violation then
+              null; -- expected
+            end;
+
+            -- === sampling_enabled flag controls take_sample ===
+            update ash.config set sampling_enabled = false, skipped_samples = 0
+            where singleton;
+            perform ash.take_sample();
+            assert (select skipped_samples from ash.config where singleton) = 1,
+              'skipped_samples should increment when disabled';
+            perform ash.take_sample();
+            assert (select skipped_samples from ash.config where singleton) = 2,
+              'skipped_samples should be 2 after second skip';
+            update ash.config set sampling_enabled = true where singleton;
+
+            -- === _active_slots uses num_partitions ===
+            select ash._active_slots() into v_slots;
+            select current_slot, num_partitions into v_slot, v_num
+            from ash.config where singleton;
+            assert v_slots[2] = ((v_slot - 1 + v_num) % v_num)::smallint,
+              '_active_slots should use num_partitions for modulo';
+
+            raise notice 'Configurable partitions tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: rebuild_partitions"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_count int;
+            v_num smallint;
+            v_result text;
+            v_slot smallint;
+          begin
+            -- === Rebuild to 5 partitions ===
+            select ash.rebuild_partitions(5) into v_result;
+            assert v_result like 'rebuilt: 3 -> 5%',
+              'rebuild should report 3 -> 5, got: ' || v_result;
+
+            -- Verify config updated
+            select num_partitions, current_slot, sampling_enabled
+            into v_num, v_slot
+            from ash.config where singleton;
+            assert v_num = 5, 'num_partitions should be 5 after rebuild';
+            assert v_slot = 0, 'current_slot should reset to 0 after rebuild';
+
+            -- Verify 5 sample partitions
+            select count(*) into v_count
+            from pg_inherits where inhparent = 'ash.sample'::regclass;
+            assert v_count = 5,
+              'should have 5 sample partitions, got ' || v_count;
+
+            -- Verify 5 query_map tables
+            select count(*) into v_count
+            from pg_class c
+            join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'ash' and c.relname ~ '^query_map_[0-9]+$'
+              and c.relkind = 'r';
+            assert v_count = 5,
+              'should have 5 query_map tables, got ' || v_count;
+
+            -- Verify query_map_all view exists and covers all 5
+            assert exists (select from pg_views
+              where schemaname = 'ash' and viewname = 'query_map_all'),
+              'query_map_all view should exist after rebuild';
+
+            -- Verify indexes on new partitions
+            assert exists (select from pg_indexes
+              where schemaname = 'ash' and indexname = 'sample_3_ts_idx'),
+              'sample_3 index missing after rebuild';
+            assert exists (select from pg_indexes
+              where schemaname = 'ash' and indexname = 'sample_4_ts_idx'),
+              'sample_4 index missing after rebuild';
+
+            -- Verify sampling_enabled is false after rebuild (must call start())
+            assert (select sampling_enabled from ash.config where singleton) = false,
+              'sampling_enabled should be false after rebuild';
+
+            -- === Rotate with 5 partitions ===
+            update ash.config
+            set sampling_enabled = true,
+              rotated_at = now() - interval '2 days'
+            where singleton;
+            perform ash.rotate();
+            assert (select current_slot from ash.config where singleton) = 1,
+              'slot should advance to 1 after rotate with 5 partitions';
+
+            -- truncate_slot = (1 + 1) % 5 = 2
+            select count(*) into v_count from ash.sample_2;
+            assert v_count = 0, 'sample_2 should be empty after rotation';
+
+            -- === Rebuild back to 3 ===
+            select ash.rebuild_partitions(3) into v_result;
+            assert v_result like 'rebuilt: 5 -> 3%',
+              'rebuild should report 5 -> 3';
+
+            -- Verify old partitions are gone
+            assert not exists (select from pg_tables
+              where schemaname = 'ash' and tablename = 'sample_3'),
+              'sample_3 should not exist after rebuild to 3';
+            assert not exists (select from pg_tables
+              where schemaname = 'ash' and tablename = 'query_map_4'),
+              'query_map_4 should not exist after rebuild to 3';
+
+            -- === Edge case: rebuild with invalid N ===
+            begin
+              perform ash.rebuild_partitions(2);
+              assert false, 'should reject N=2';
+            exception when others then
+              null; -- expected
+            end;
+
+            begin
+              perform ash.rebuild_partitions(33);
+              assert false, 'should reject N=33';
+            exception when others then
+              null; -- expected
+            end;
+
+            -- Re-enable sampling for subsequent tests
+            update ash.config set sampling_enabled = true where singleton;
+
+            raise notice 'rebuild_partitions tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: ts helpers"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_ts int4;
+            v_tstamptz timestamptz;
+          begin
+            -- ts_from_timestamptz: epoch -> 0
+            v_ts := ash.ts_from_timestamptz(ash.epoch());
+            assert v_ts = 0,
+              'ts_from_timestamptz(epoch) should be 0, got ' || v_ts;
+
+            -- ts_from_timestamptz: epoch + 1 hour -> 3600
+            v_ts := ash.ts_from_timestamptz(ash.epoch() + interval '1 hour');
+            assert v_ts = 3600,
+              'ts_from_timestamptz(epoch+1h) should be 3600, got ' || v_ts;
+
+            -- ts_to_timestamptz: 0 -> epoch
+            v_tstamptz := ash.ts_to_timestamptz(0);
+            assert v_tstamptz = ash.epoch(),
+              'ts_to_timestamptz(0) should be epoch, got ' || v_tstamptz;
+
+            -- ts_to_timestamptz: 3600 -> epoch + 1 hour
+            v_tstamptz := ash.ts_to_timestamptz(3600);
+            assert v_tstamptz = ash.epoch() + interval '1 hour',
+              'ts_to_timestamptz(3600) should be epoch+1h';
+
+            -- Round-trip: now -> ts -> timestamptz (within 1 second)
+            v_ts := ash.ts_from_timestamptz(now());
+            v_tstamptz := ash.ts_to_timestamptz(v_ts);
+            assert abs(extract(epoch from now() - v_tstamptz)) < 1,
+              'round-trip should be within 1 second';
+
+            -- ts_from_timestamptz(now()) should be positive
+            assert ash.ts_from_timestamptz(now()) > 0,
+              'ts for current time should be positive';
+
+            raise notice 'Timestamp helper tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: array merge helpers"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_result int4[];
+            v_result8 int8[];
+          begin
+            -- === _merge_wait_counts ===
+
+            -- Basic merge: same id summed
+            v_result := ash._merge_wait_counts('{5,100,3,50,5,200}');
+            assert v_result = '{5,300,3,50}'::int4[],
+              '_merge_wait_counts failed: expected {5,300,3,50}, got ' || v_result::text;
+
+            -- Empty input
+            v_result := ash._merge_wait_counts('{}');
+            assert v_result = '{}'::int4[],
+              '_merge_wait_counts({}) should return {}, got ' || v_result::text;
+
+            -- NULL input
+            v_result := ash._merge_wait_counts(null);
+            assert v_result = '{}'::int4[],
+              '_merge_wait_counts(null) should return {}, got ' || v_result::text;
+
+            -- Single pair
+            v_result := ash._merge_wait_counts('{7,42}');
+            assert v_result = '{7,42}'::int4[],
+              '_merge_wait_counts single pair failed: ' || v_result::text;
+
+            -- Ordering: count DESC, id ASC for ties
+            v_result := ash._merge_wait_counts('{1,10,2,10,3,20}');
+            assert v_result = '{3,20,1,10,2,10}'::int4[],
+              '_merge_wait_counts ordering failed: ' || v_result::text;
+
+            -- Critical bug test: count > id should NOT swap order
+            -- (this was the v0.2 ORDER BY v DESC bug)
+            v_result := ash._merge_wait_counts('{1,1000}');
+            assert v_result[1] = 1 and v_result[2] = 1000,
+              'pair integrity violated when count > id: ' || v_result::text;
+
+            -- === _merge_query_counts ===
+            v_result8 := ash._merge_query_counts('{100,5,200,3,100,10}'::int8[]);
+            assert v_result8 = '{100,15,200,3}'::int8[],
+              '_merge_query_counts failed: ' || v_result8::text;
+
+            v_result8 := ash._merge_query_counts(null);
+            assert v_result8 = '{}'::int8[],
+              '_merge_query_counts(null) should return {}';
+
+            -- === _truncate_pairs ===
+            v_result8 := ash._truncate_pairs('{10,500,20,300,30,100}'::int8[], 2);
+            assert v_result8 = '{10,500,20,300}'::int8[],
+              '_truncate_pairs top 2 failed: ' || v_result8::text;
+
+            -- Truncate to 1
+            v_result8 := ash._truncate_pairs('{10,500,20,300}'::int8[], 1);
+            assert v_result8 = '{10,500}'::int8[],
+              '_truncate_pairs top 1 failed: ' || v_result8::text;
+
+            -- Truncate to more than available (returns all)
+            v_result8 := ash._truncate_pairs('{10,500}'::int8[], 5);
+            assert v_result8 = '{10,500}'::int8[],
+              '_truncate_pairs overcount failed: ' || v_result8::text;
+
+            -- Empty input
+            v_result8 := ash._truncate_pairs('{}'::int8[], 5);
+            assert v_result8 = '{}'::int8[],
+              '_truncate_pairs({}) should return {}';
+
+            raise notice 'Array merge helper tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: rollup tables and functions"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_count int;
+            v_result int;
+            v_result_text text;
+            v_minute_ts int4;
+            v_sample_ts int4;
+            v_wait_id smallint;
+          begin
+            -- === Rollup tables exist ===
+            assert exists (select from pg_tables
+              where schemaname = 'ash' and tablename = 'rollup_1m'),
+              'rollup_1m table missing';
+            assert exists (select from pg_tables
+              where schemaname = 'ash' and tablename = 'rollup_1h'),
+              'rollup_1h table missing';
+
+            -- === Config columns for rollup ===
+            assert (select rollup_1m_retention_days from ash.config where singleton) = 30,
+              'rollup_1m_retention_days default should be 30';
+            assert (select rollup_1h_retention_days from ash.config where singleton) = 1825,
+              'rollup_1h_retention_days default should be 1825';
+            assert (select rollup_min_backend_seconds from ash.config where singleton) = 3,
+              'rollup_min_backend_seconds default should be 3';
+
+            -- === Rollup with no data returns 0 ===
+            select ash.rollup_minute() into v_result;
+            assert v_result = 0, 'rollup_minute with no data should return 0';
+
+            select ash.rollup_hour() into v_result;
+            assert v_result = 0, 'rollup_hour with no data should return 0';
+
+            -- === Rollup cleanup with no data ===
+            select ash.rollup_cleanup() into v_result_text;
+            assert v_result_text like 'cleanup:%',
+              'rollup_cleanup should return cleanup message';
+
+            -- === Seed data and test rollup ===
+            -- Register a wait event
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait_id;
+
+            -- Insert a query_map entry
+            insert into ash.query_map_0 (query_id) values (12345)
+            on conflict (query_id) do nothing;
+
+            -- Get a minute-aligned ts 2 minutes ago (so it's a complete minute)
+            v_minute_ts := (ash.ts_from_timestamptz(
+              date_trunc('minute', now() - interval '2 minutes')
+            ) / 60) * 60;
+
+            -- Insert sample data for that minute
+            for i in 0 .. 2 loop
+              v_sample_ts := v_minute_ts + i * 20;  -- 3 samples, 20s apart
+              insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (
+                v_sample_ts,
+                0::oid,
+                2::smallint,
+                array[-v_wait_id, 2, 1, 0]::integer[],
+                0::smallint
+              );
+            end loop;
+
+            -- Clear watermark to force processing from start
+            update ash.config set last_rollup_1m_ts = null where singleton;
+
+            -- Run rollup_minute
+            select ash.rollup_minute() into v_result;
+            assert v_result > 0,
+              'rollup_minute should process seeded data, got ' || v_result;
+
+            -- Verify rollup_1m has data
+            select count(*) into v_count from ash.rollup_1m;
+            assert v_count > 0,
+              'rollup_1m should have rows after rollup_minute';
+
+            -- Verify rollup_1m content
+            assert exists (
+              select from ash.rollup_1m
+              where ts = v_minute_ts and datid = 0::oid
+            ), 'rollup_1m should have row for seeded minute';
+
+            -- Verify watermark advanced
+            assert (select last_rollup_1m_ts from ash.config where singleton) is not null,
+              'last_rollup_1m_ts should be set after rollup';
+
+            -- === Test idempotency: re-run should upsert, not duplicate ===
+            update ash.config set last_rollup_1m_ts = null where singleton;
+            select ash.rollup_minute() into v_result;
+            -- Should still have exactly 1 row per minute (upsert)
+            select count(*) into v_count from ash.rollup_1m
+            where ts = v_minute_ts and datid = 0::oid;
+            assert v_count = 1,
+              'rollup should be idempotent (upsert), got ' || v_count || ' rows';
+
+            -- === Test rollup_hour ===
+            -- Seed minute rollup data for an hour boundary
+            declare
+              v_hour_ts int4 := (ash.ts_from_timestamptz(
+                date_trunc('hour', now() - interval '2 hours')
+              ) / 3600) * 3600;
+            begin
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values
+                (v_hour_ts,      0::oid, 60, 5, array[v_wait_id, 120]::int4[], '{12345,60}'::int8[]),
+                (v_hour_ts + 60, 0::oid, 60, 3, array[v_wait_id, 100]::int4[], '{12345,40}'::int8[])
+              on conflict (ts, datid) do nothing;
+
+              update ash.config set last_rollup_1h_ts = null where singleton;
+              select ash.rollup_hour() into v_result;
+              assert v_result > 0,
+                'rollup_hour should process seeded data';
+
+              -- Verify hourly aggregation
+              assert exists (
+                select from ash.rollup_1h
+                where ts = v_hour_ts and datid = 0::oid
+              ), 'rollup_1h should have row for seeded hour';
+            end;
+
+            raise notice 'Rollup tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: rollup reader functions"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_count int;
+          begin
+            -- === Reader functions exist ===
+            assert exists (select from pg_proc
+              where proname = 'minute_waits' and pronamespace = 'ash'::regnamespace),
+              'minute_waits() missing';
+            assert exists (select from pg_proc
+              where proname = 'minute_waits_at' and pronamespace = 'ash'::regnamespace),
+              'minute_waits_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'hourly_queries' and pronamespace = 'ash'::regnamespace),
+              'hourly_queries() missing';
+            assert exists (select from pg_proc
+              where proname = 'hourly_queries_at' and pronamespace = 'ash'::regnamespace),
+              'hourly_queries_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'daily_peak_backends' and pronamespace = 'ash'::regnamespace),
+              'daily_peak_backends() missing';
+            assert exists (select from pg_proc
+              where proname = 'daily_peak_backends_at' and pronamespace = 'ash'::regnamespace),
+              'daily_peak_backends_at() missing';
+
+            -- === Readers run without error (may return 0 rows) ===
+            select count(*) into v_count from ash.minute_waits('1 hour', 10);
+            assert v_count >= 0, 'minute_waits should not error';
+
+            select count(*) into v_count
+            from ash.minute_waits_at(now() - interval '1 hour', now(), 10);
+            assert v_count >= 0, 'minute_waits_at should not error';
+
+            select count(*) into v_count from ash.hourly_queries('1 day', 10);
+            assert v_count >= 0, 'hourly_queries should not error';
+
+            select count(*) into v_count
+            from ash.hourly_queries_at(now() - interval '1 day', now(), 10);
+            assert v_count >= 0, 'hourly_queries_at should not error';
+
+            select count(*) into v_count from ash.daily_peak_backends('7 days');
+            assert v_count >= 0, 'daily_peak_backends should not error';
+
+            select count(*) into v_count
+            from ash.daily_peak_backends_at(now() - interval '7 days', now());
+            assert v_count >= 0, 'daily_peak_backends_at should not error';
+
+            -- === Future range: no data ===
+            select count(*) into v_count
+            from ash.minute_waits_at(now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future minute_waits_at should return 0 rows';
+
+            raise notice 'Rollup reader tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: status output"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_metrics text[];
+          begin
+            -- Collect all metric names from status()
+            select array_agg(metric) into v_metrics from ash.status();
+
+            -- Check new metrics exist
+            assert 'num_partitions' = any(v_metrics),
+              'status should include num_partitions';
+            assert 'sampling_enabled' = any(v_metrics),
+              'status should include sampling_enabled';
+            assert 'skipped_samples' = any(v_metrics),
+              'status should include skipped_samples';
+            assert 'raw_retention' = any(v_metrics),
+              'status should include raw_retention';
+            assert 'rollup_1m_rows' = any(v_metrics),
+              'status should include rollup_1m_rows';
+            assert 'rollup_1m_retention' = any(v_metrics),
+              'status should include rollup_1m_retention';
+            assert 'rollup_1h_rows' = any(v_metrics),
+              'status should include rollup_1h_rows';
+            assert 'rollup_1h_retention' = any(v_metrics),
+              'status should include rollup_1h_retention';
+
+            -- Original metrics still present
+            assert 'version' = any(v_metrics),
+              'status should include version';
+            assert 'current_slot' = any(v_metrics),
+              'status should include current_slot';
+
+            raise notice 'Status output tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: security (REVOKE on new functions)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Create unprivileged user
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_test_user') then
+              create role ash_test_user login;
+            end if;
+          end $$;
+
+          grant usage on schema ash to ash_test_user;
+          grant select on all tables in schema ash to ash_test_user;
+
+          -- Test that admin functions are revoked from public
+          set role ash_test_user;
+
+          do $$
+          begin
+            -- rebuild_partitions should be denied
+            begin
+              perform ash.rebuild_partitions(3);
+              assert false, 'rebuild_partitions should be denied for unprivileged user';
+            exception when insufficient_privilege then
+              null; -- expected
+            end;
+
+            -- rollup_minute should be denied
+            begin
+              perform ash.rollup_minute();
+              assert false, 'rollup_minute should be denied for unprivileged user';
+            exception when insufficient_privilege then
+              null; -- expected
+            end;
+
+            -- But ts helpers should be accessible (PUBLIC)
+            perform ash.ts_from_timestamptz(now());
+            perform ash.ts_to_timestamptz(0);
+
+            -- Reader functions should be accessible
+            perform (select count(*) from ash.minute_waits('1 hour', 1));
+
+            raise notice 'Security tests PASSED';
+          end;
+          $$;
+
+          reset role;
+          revoke all on schema ash from ash_test_user;
+          revoke all on all tables in schema ash from ash_test_user;
+          drop role ash_test_user;
           EOF
 
       - name: Test uninstall
