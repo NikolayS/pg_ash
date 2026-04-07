@@ -380,8 +380,9 @@ declare
   v_missed_count bigint;
   v_seen_waits text[] := '{}';
 begin
-  -- Check if sampling is enabled (disabled during rebuild_partitions)
-  select sampling_enabled into v_sampling_enabled
+  -- Get config (single read for all settings)
+  select sampling_enabled, include_bg_workers, debug_logging
+  into v_sampling_enabled, v_include_bg, v_debug_logging
   from ash.config where singleton;
 
   if not v_sampling_enabled then
@@ -404,11 +405,6 @@ begin
 
   -- Get sample timestamp (seconds since epoch, from now())
   v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
-
-  -- Get config
-  select include_bg_workers, debug_logging
-  into v_include_bg, v_debug_logging
-  from ash.config where singleton;
   v_current_slot := ash.current_slot();
 
   -- =========================================================================
@@ -1664,91 +1660,93 @@ begin
   while v_minute_start < v_now_minute_ts and v_batch_remaining > 0 loop
     v_minute_end := v_minute_start + 60;
 
-    -- Aggregate raw samples for this minute, decoded via ash.decode_sample.
-    -- Groups by datid, computing:
-    --   samples: count of distinct sample_ts
-    --   peak_backends: max active_count per sample_ts per datid
-    --   wait_counts: [wait_id, count, ...] from decoded wait events
-    --   query_counts: [query_id, count, ...] top 100 by count, filtered by min threshold
+    -- Decode samples once, then aggregate wait_counts and query_counts together.
+    -- Previous version decoded samples 3x per datid (outer + 2 correlated subqueries).
     insert into ash.rollup_1m (
       ts, datid, samples, peak_backends, wait_counts, query_counts
     )
+    with decoded as (
+      select
+        s.datid,
+        s.sample_ts,
+        s.active_count,
+        (ash.decode_sample(s.data, s.slot)).*
+      from ash.sample s
+      where s.sample_ts >= v_minute_start
+        and s.sample_ts < v_minute_end
+    ),
+    base as (
+      select
+        datid,
+        count(distinct sample_ts)::smallint as samples,
+        max(active_count)::smallint as peak_backends
+      from decoded
+      group by datid
+    ),
+    wait_agg as (
+      select
+        d.datid,
+        wm.id as wait_id,
+        count(*)::int4 as cnt,
+        row_number() over (partition by d.datid order by count(*) desc, wm.id asc) as rn
+      from decoded d
+      join ash.wait_event_map wm
+        on wm.state || '|' || wm.type || '|' || wm.event = d.wait_event
+      group by d.datid, wm.id
+    ),
+    wait_interleaved as (
+      select datid, v, rn, sub
+      from wait_agg
+      cross join lateral (values (1, wait_id), (2, cnt)) as t(sub, v)
+    ),
+    wait_arrays as (
+      select
+        datid,
+        coalesce(array_agg(v order by rn, sub), '{}'::int4[]) as wait_counts
+      from wait_interleaved
+      group by datid
+    ),
+    query_agg as (
+      select
+        d.datid,
+        d.query_id,
+        count(*)::int8 as cnt,
+        row_number() over (
+          partition by d.datid
+          order by count(*) desc, d.query_id asc
+        ) as rn
+      from decoded d
+      where d.query_id is not null and d.query_id <> 0
+      group by d.datid, d.query_id
+      having count(*) >= v_min_backend_seconds
+    ),
+    query_top as (
+      select datid, query_id, cnt, rn
+      from query_agg
+      where rn <= 100
+    ),
+    query_interleaved as (
+      select datid, v, rn, sub
+      from query_top
+      cross join lateral (values (1, query_id), (2, cnt)) as t(sub, v)
+    ),
+    query_arrays as (
+      select
+        datid,
+        coalesce(array_agg(v order by rn, sub), '{}'::int8[]) as query_counts
+      from query_interleaved
+      group by datid
+    )
     select
       v_minute_start,
-      s.datid,
-      count(distinct s.sample_ts)::smallint,
-      max(s.active_count)::smallint,
-      -- wait_counts: aggregate decoded wait events
-      coalesce(
-        (
-          with decoded as (
-            select
-              (ash.decode_sample(s2.data, s2.slot)).*
-            from ash.sample s2
-            where s2.sample_ts >= v_minute_start
-              and s2.sample_ts < v_minute_end
-              and s2.datid = s.datid
-          ),
-          wait_agg as (
-            select
-              wm.id as wait_id,
-              count(*)::int4 as cnt,
-              row_number() over (order by count(*) desc, wm.id asc) as rn
-            from decoded d
-            join ash.wait_event_map wm
-              on wm.state || '|' || wm.type || '|' || wm.event = d.wait_event
-            group by wm.id
-          ),
-          interleaved as (
-            select v, rn, sub
-            from wait_agg
-            cross join lateral (values (1, wait_id), (2, cnt)) as t(sub, v)
-          )
-          select array_agg(v order by rn, sub)
-          from interleaved
-        ),
-        '{}'::int4[]
-      ),
-      -- query_counts: aggregate decoded query_ids, filter by min threshold, top 100
-      coalesce(
-        (
-          with decoded as (
-            select
-              (ash.decode_sample(s3.data, s3.slot)).*
-            from ash.sample s3
-            where s3.sample_ts >= v_minute_start
-              and s3.sample_ts < v_minute_end
-              and s3.datid = s.datid
-          ),
-          query_agg as (
-            select
-              d.query_id,
-              count(*)::int8 as cnt,
-              row_number() over (order by count(*) desc, d.query_id asc) as rn
-            from decoded d
-            where d.query_id is not null and d.query_id <> 0
-            group by d.query_id
-            having count(*) >= v_min_backend_seconds
-          ),
-          top_queries as (
-            select query_id, cnt, rn
-            from query_agg
-            where rn <= 100
-          ),
-          interleaved as (
-            select v, rn, sub
-            from top_queries
-            cross join lateral (values (1, query_id), (2, cnt)) as t(sub, v)
-          )
-          select array_agg(v order by rn, sub)
-          from interleaved
-        ),
-        '{}'::int8[]
-      )
-    from ash.sample s
-    where s.sample_ts >= v_minute_start
-      and s.sample_ts < v_minute_end
-    group by s.datid
+      b.datid,
+      b.samples,
+      b.peak_backends,
+      coalesce(wa.wait_counts, '{}'::int4[]),
+      coalesce(qa.query_counts, '{}'::int8[])
+    from base b
+    left join wait_arrays wa on wa.datid = b.datid
+    left join query_arrays qa on qa.datid = b.datid
     on conflict (ts, datid) do update set
       samples = excluded.samples,
       peak_backends = excluded.peak_backends,
@@ -1902,68 +1900,7 @@ $$;
 -- STEP 7: Rollup reader functions
 --------------------------------------------------------------------------------
 
--- Wait event trends from minute rollups
-create or replace function ash.minute_waits(
-  p_interval interval default '1 hour',
-  p_limit int default 10
-)
-returns table (
-  wait_event text,
-  backend_seconds bigint,
-  pct numeric,
-  bar text
-)
-language plpgsql
-stable
-set jit = off
-as $$
-declare
-  v_start_ts int4;
-  v_end_ts int4;
-  v_total_seconds bigint;
-begin
-  v_end_ts := ash.ts_from_timestamptz(now());
-  v_start_ts := ash.ts_from_timestamptz(now() - p_interval);
-
-  return query
-  with raw_pairs as (
-    select
-      (row_number() over ()) as pos,
-      val::int4 as val
-    from ash.rollup_1m r,
-      lateral unnest(r.wait_counts) as val
-    where r.ts >= v_start_ts and r.ts < v_end_ts
-  ),
-  pairs as (
-    select n1.val as wait_id, n2.val as cnt
-    from raw_pairs n1
-    join raw_pairs n2 on n2.pos = n1.pos + 1
-    where n1.pos % 2 = 1
-  ),
-  summed as (
-    select
-      wait_id,
-      sum(cnt)::bigint as total
-    from pairs
-    group by wait_id
-  ),
-  grand_total as (
-    select sum(total) as gt from summed
-  )
-  select
-    wm.state || '/' || wm.type || '/' || wm.event,
-    s.total,
-    round(s.total * 100.0 / nullif(gt.gt, 0), 1),
-    repeat('#', (s.total * 40 / nullif(gt.gt, 0))::int)
-  from summed s
-  join ash.wait_event_map wm on wm.id = s.wait_id
-  cross join grand_total gt
-  order by s.total desc
-  limit p_limit;
-end;
-$$;
-
--- Absolute-time variant
+-- Wait event trends from minute rollups (absolute time range — base implementation)
 create or replace function ash.minute_waits_at(
   p_start timestamptz,
   p_end timestamptz,
@@ -1982,7 +1919,6 @@ as $$
 declare
   v_start_ts int4;
   v_end_ts int4;
-  v_total_seconds bigint;
 begin
   v_start_ts := ash.ts_from_timestamptz(p_start);
   v_end_ts := ash.ts_from_timestamptz(p_end);
@@ -2025,89 +1961,25 @@ begin
 end;
 $$;
 
--- Query trends from hourly rollups
-create or replace function ash.hourly_queries(
-  p_interval interval default '1 day',
+-- Wait event trends from minute rollups (interval wrapper)
+create or replace function ash.minute_waits(
+  p_interval interval default '1 hour',
   p_limit int default 10
 )
 returns table (
-  query_id bigint,
+  wait_event text,
   backend_seconds bigint,
   pct numeric,
-  query_text text
+  bar text
 )
-language plpgsql
+language sql
 stable
 set jit = off
 as $$
-declare
-  v_start_ts int4;
-  v_end_ts int4;
-  v_has_pgss bool;
-  v_rec record;
-  v_qtext text;
-begin
-  v_start_ts := ash.ts_from_timestamptz(now() - p_interval);
-  v_end_ts := ash.ts_from_timestamptz(now());
-
-  select exists (select from pg_extension where extname = 'pg_stat_statements')
-  into v_has_pgss;
-
-  for v_rec in
-    with raw_pairs as (
-      select
-        (row_number() over ()) as pos,
-        val
-      from ash.rollup_1h r,
-        lateral unnest(r.query_counts) as val
-      where r.ts >= v_start_ts and r.ts < v_end_ts
-    ),
-    pairs as (
-      select n1.val as qid, n2.val as cnt
-      from raw_pairs n1
-      join raw_pairs n2 on n2.pos = n1.pos + 1
-      where n1.pos % 2 = 1
-    ),
-    summed as (
-      select
-        qid,
-        sum(cnt)::bigint as total
-      from pairs
-      group by qid
-    ),
-    grand_total as (
-      select sum(total) as gt from summed
-    )
-    select
-      s.qid,
-      s.total,
-      round(s.total * 100.0 / nullif(gt.gt, 0), 1) as p
-    from summed s
-    cross join grand_total gt
-    order by s.total desc
-    limit p_limit
-  loop
-    query_id := v_rec.qid;
-    backend_seconds := v_rec.total;
-    pct := v_rec.p;
-    query_text := null;
-
-    if v_has_pgss then
-      begin
-        execute 'select left(query, 80) from pg_stat_statements where queryid = $1 limit 1'
-        into v_qtext using v_rec.qid;
-        query_text := v_qtext;
-      exception when others then
-        null;
-      end;
-    end if;
-
-    return next;
-  end loop;
-end;
+  select * from ash.minute_waits_at(now() - p_interval, now(), p_limit)
 $$;
 
--- Absolute-time variant
+-- Query trends from hourly rollups (absolute time range — base implementation)
 create or replace function ash.hourly_queries_at(
   p_start timestamptz,
   p_end timestamptz,
@@ -2190,39 +2062,25 @@ begin
 end;
 $$;
 
--- Peak concurrency per day from hourly rollups
-create or replace function ash.daily_peak_backends(
-  p_interval interval default '7 days'
+-- Query trends from hourly rollups (interval wrapper)
+create or replace function ash.hourly_queries(
+  p_interval interval default '1 day',
+  p_limit int default 10
 )
 returns table (
-  day date,
-  peak_backends int,
-  avg_backends numeric
+  query_id bigint,
+  backend_seconds bigint,
+  pct numeric,
+  query_text text
 )
-language plpgsql
+language sql
 stable
 set jit = off
 as $$
-declare
-  v_start_ts int4;
-  v_end_ts int4;
-begin
-  v_start_ts := ash.ts_from_timestamptz(now() - p_interval);
-  v_end_ts := ash.ts_from_timestamptz(now());
-
-  return query
-  select
-    (ash.ts_to_timestamptz(r.ts))::date as d,
-    max(r.peak_backends)::int,
-    round(avg(r.peak_backends), 1)
-  from ash.rollup_1h r
-  where r.ts >= v_start_ts and r.ts < v_end_ts
-  group by d
-  order by d;
-end;
+  select * from ash.hourly_queries_at(now() - p_interval, now(), p_limit)
 $$;
 
--- Absolute-time variant
+-- Peak concurrency per day from hourly rollups (absolute time range — base implementation)
 create or replace function ash.daily_peak_backends_at(
   p_start timestamptz,
   p_end timestamptz
@@ -2253,6 +2111,22 @@ begin
   group by d
   order by d;
 end;
+$$;
+
+-- Peak concurrency per day from hourly rollups (interval wrapper)
+create or replace function ash.daily_peak_backends(
+  p_interval interval default '7 days'
+)
+returns table (
+  day date,
+  peak_backends int,
+  avg_backends numeric
+)
+language sql
+stable
+set jit = off
+as $$
+  select * from ash.daily_peak_backends_at(now() - p_interval, now())
 $$;
 
 
@@ -2779,17 +2653,6 @@ $$;
 -- Absolute time range functions — for incident investigation
 -------------------------------------------------------------------------------
 
--- Convert a timestamptz to our internal sample_ts (seconds since epoch)
--- IMMUTABLE because ash.epoch() is IMMUTABLE (constant after install).
--- If epoch() ever changes, all sample_ts values become invalid anyway.
-create or replace function ash._to_sample_ts(p_ts timestamptz)
-returns int4
-language sql
-immutable
-as $$
-  select extract(epoch from p_ts - ash.epoch())::int4
-$$;
-
 -- Top waits in an absolute time range
 create or replace function ash.top_waits_at(
   p_start timestamptz,
@@ -2816,8 +2679,8 @@ as $$
          ash.wait_event_map wm
     where wm.id = (-s.data[i])::smallint
       and s.slot = any(ash._active_slots())
-      and s.sample_ts >= ash._to_sample_ts(p_start)
-      and s.sample_ts < ash._to_sample_ts(p_end)
+      and s.sample_ts >= ash.ts_from_timestamptz(p_start)
+      and s.sample_ts < ash.ts_from_timestamptz(p_end)
       and s.data[i] < 0
   ),
   totals as (
@@ -2877,8 +2740,8 @@ set jit = off
 as $$
 declare
   v_has_pgss boolean := false;
-  v_start int4 := ash._to_sample_ts(p_start);
-  v_end int4 := ash._to_sample_ts(p_end);
+  v_start int4 := ash.ts_from_timestamptz(p_start);
+  v_end int4 := ash.ts_from_timestamptz(p_end);
 begin
   -- Probe the view directly — extension installed <> shared library loaded
   begin
@@ -2964,8 +2827,8 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
-      and s.sample_ts >= ash._to_sample_ts(p_start)
-      and s.sample_ts < ash._to_sample_ts(p_end)
+      and s.sample_ts >= ash.ts_from_timestamptz(p_start)
+      and s.sample_ts < ash.ts_from_timestamptz(p_end)
       and s.data[i] < 0
   )
   select
@@ -2999,8 +2862,8 @@ as $$
     select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
-      and s.sample_ts >= ash._to_sample_ts(p_start)
-      and s.sample_ts < ash._to_sample_ts(p_end)
+      and s.sample_ts >= ash.ts_from_timestamptz(p_start)
+      and s.sample_ts < ash.ts_from_timestamptz(p_end)
       and s.data[i] < 0
   ),
   totals as (
@@ -3043,8 +2906,8 @@ stable
 set jit = off
 as $$
 declare
-  v_start int4 := ash._to_sample_ts(p_start);
-  v_end int4 := ash._to_sample_ts(p_end);
+  v_start int4 := ash.ts_from_timestamptz(p_start);
+  v_end int4 := ash.ts_from_timestamptz(p_end);
 begin
   if not exists (select from ash.query_map_all where query_id = p_query_id) then
     return;
@@ -3440,8 +3303,8 @@ declare
   v_i int;
   v_legend_len int;
 begin
-  v_start_ts := ash._to_sample_ts(p_start);
-  v_end_ts := ash._to_sample_ts(p_end);
+  v_start_ts := ash.ts_from_timestamptz(p_start);
+  v_end_ts := ash.ts_from_timestamptz(p_end);
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
   -- Rank by avg active sessions weighted by bucket presence
@@ -3734,8 +3597,8 @@ declare
   v_start int4;
   v_end int4;
 begin
-  v_start := ash._to_sample_ts(p_start);
-  v_end := ash._to_sample_ts(p_end);
+  v_start := ash.ts_from_timestamptz(p_start);
+  v_end := ash.ts_from_timestamptz(p_end);
 
   begin
     perform 1 from pg_stat_statements limit 1;
@@ -3971,8 +3834,8 @@ set jit = off
 as $$
 declare
   v_has_pgss boolean := false;
-  v_start int4 := ash._to_sample_ts(p_start);
-  v_end int4 := ash._to_sample_ts(p_end);
+  v_start int4 := ash.ts_from_timestamptz(p_start);
+  v_end int4 := ash.ts_from_timestamptz(p_end);
 begin
   begin
     perform 1 from pg_stat_statements limit 1;
