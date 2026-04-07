@@ -1,10 +1,10 @@
 # Configurable N-partitions + Rollup tables
 
-> **Spec version**: 0.6 (2026-04-06)
-> **Target**: pg_ash v1.5
-> **Status**: Reviewed — ready for implementation
-> **Issue**: [#30](https://github.com/NikolayS/pg_ash/issues/30)
-> **Branch**: `feat/configurable-partitions-and-rollup`
+- **Spec version**: 0.6 (2026-04-06)
+- **Target**: pg_ash v1.5
+- **Status**: Reviewed — ready for implementation
+- **Issue**: [#30](https://github.com/NikolayS/pg_ash/issues/30)
+- **Branch**: `feat/configurable-partitions-and-rollup`
 
 ## Changelog
 
