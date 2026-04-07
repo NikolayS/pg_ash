@@ -1,5 +1,5 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.3 (latest)
+-- Version: 1.4 (latest)
 -- Fresh install: \i sql/ash-install.sql
 -- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql
 -- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql
@@ -57,17 +57,26 @@ $$;
 
 -- Configuration singleton table
 create table if not exists ash.config (
-  singleton          bool primary key default true check (singleton),
-  current_slot       smallint not null default 0,
-  sample_interval    interval not null default '1 second',
-  rotation_period    interval not null default '1 day',
-  include_bg_workers bool not null default false,
-  debug_logging      bool not null default false,
-  encoding_version   smallint not null default 1,
-  version            text not null default '1.4',
-  missed_samples     bigint not null default 0,
-  rotated_at         timestamptz not null default clock_timestamp(),
-  installed_at       timestamptz not null default clock_timestamp()
+  singleton                  bool primary key default true check (singleton),
+  current_slot               smallint not null default 0,
+  num_partitions             smallint not null default 3
+                               check (num_partitions between 3 and 32),
+  sampling_enabled           bool not null default true,
+  skipped_samples            int4 not null default 0,
+  missed_samples             bigint not null default 0,
+  sample_interval            interval not null default '1 second',
+  rotation_period            interval not null default '1 day',
+  include_bg_workers         bool not null default false,
+  debug_logging              bool not null default false,
+  encoding_version           smallint not null default 1,
+  version                    text not null default '1.4',
+  rotated_at                 timestamptz not null default clock_timestamp(),
+  installed_at               timestamptz not null default clock_timestamp(),
+  rollup_1m_retention_days   smallint not null default 30,
+  rollup_1h_retention_days   smallint not null default 1825,
+  rollup_min_backend_seconds smallint not null default 3,
+  last_rollup_1m_ts          int4,
+  last_rollup_1h_ts          int4
 );
 
 -- Insert initial row if not exists
@@ -85,27 +94,92 @@ create table if not exists ash.wait_event_map (
 -- Query ID dictionaries — one per sample partition, TRUNCATE together.
 -- Each has its own identity sequence (explicit, not LIKE INCLUDING ALL,
 -- because PG14-15 shares sequences with LIKE INCLUDING ALL).
-create table if not exists ash.query_map_0 (
-  id        int4 primary key generated always as identity (start with 1),
-  query_id  int8 not null unique
-);
-create table if not exists ash.query_map_1 (
-  id        int4 primary key generated always as identity (start with 1),
-  query_id  int8 not null unique
-);
-create table if not exists ash.query_map_2 (
-  id        int4 primary key generated always as identity (start with 1),
-  query_id  int8 not null unique
-);
+-- Created dynamically based on num_partitions (default 3).
+do $$
+declare
+  v_n int;
+begin
+  select num_partitions into v_n from ash.config where singleton;
+
+  for i in 0 .. v_n - 1 loop
+    execute format(
+      'create table if not exists ash.query_map_%s ('
+      '  id       int4 primary key generated always as identity (start with 1),'
+      '  query_id int8 not null unique'
+      ')', i
+    );
+  end loop;
+end $$;
+
+-- Rebuild query_map_all view dynamically for N partitions.
+-- Called by rebuild_partitions() after creating/dropping partition tables.
+create or replace function ash._rebuild_query_map_view()
+returns void
+language plpgsql
+as $$
+declare
+  v_n int;
+  v_sql text := '';
+begin
+  select num_partitions into v_n
+  from ash.config
+  where singleton;
+
+  for i in 0 .. v_n - 1 loop
+    if i > 0 then
+      v_sql := v_sql || ' union all ';
+    end if;
+
+    v_sql := v_sql || format(
+      'select %s::smallint as slot, id, query_id from ash.query_map_%s',
+      i, i
+    );
+  end loop;
+
+  execute 'create or replace view ash.query_map_all as ' || v_sql;
+end;
+$$;
 
 -- Unified view for readers — planner eliminates non-matching partitions
 -- when slot is a constant (which it is, from s.slot in reader queries).
-create or replace view ash.query_map_all as
-  select 0::smallint as slot, id, query_id from ash.query_map_0
-  union all
-  select 1::smallint, id, query_id from ash.query_map_1
-  union all
-  select 2::smallint, id, query_id from ash.query_map_2;
+-- Built dynamically to support N partitions.
+select ash._rebuild_query_map_view();
+
+-- Drop all sample partitions and query_map tables (catalog-based).
+-- Uses pg_inherits/pg_class instead of trusting num_partitions config,
+-- catching orphaned tables from prior failed rebuilds.
+create or replace function ash._drop_all_partitions()
+returns void
+language plpgsql
+as $$
+declare
+  v_rec record;
+begin
+  -- Drop sample partitions (children of ash.sample)
+  for v_rec in
+    select c.relname
+    from pg_inherits i
+    join pg_class c on c.oid = i.inhrelid
+    join pg_namespace n on n.oid = c.relnamespace
+    where i.inhparent = 'ash.sample'::regclass
+      and n.nspname = 'ash'
+  loop
+    execute format('drop table if exists ash.%I', v_rec.relname);
+  end loop;
+
+  -- Drop query_map tables by naming pattern
+  for v_rec in
+    select c.relname
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'ash'
+      and c.relname ~ '^query_map_[0-9]+$'
+      and c.relkind = 'r'
+  loop
+    execute format('drop table if exists ash.%I', v_rec.relname);
+  end loop;
+end;
+$$;
 
 -- Current slot function
 create or replace function ash.current_slot()
@@ -127,20 +201,52 @@ create table if not exists ash.sample (
   slot         smallint not null default ash.current_slot()
 ) partition by list (slot);
 
--- Create partitions
-create table if not exists ash.sample_0 partition of ash.sample for values in (0);
-create table if not exists ash.sample_1 partition of ash.sample for values in (1);
-create table if not exists ash.sample_2 partition of ash.sample for values in (2);
+-- Create partitions and indexes dynamically based on num_partitions.
+do $$
+declare
+  v_n int;
+begin
+  select num_partitions into v_n from ash.config where singleton;
 
--- Create indexes on partitions
--- (sample_ts) for time-range reader queries
-create index if not exists sample_0_ts_idx on ash.sample_0 (sample_ts);
-create index if not exists sample_1_ts_idx on ash.sample_1 (sample_ts);
-create index if not exists sample_2_ts_idx on ash.sample_2 (sample_ts);
--- (datid, sample_ts) for per-database time-range queries
-create index if not exists sample_0_datid_ts_idx on ash.sample_0 (datid, sample_ts);
-create index if not exists sample_1_datid_ts_idx on ash.sample_1 (datid, sample_ts);
-create index if not exists sample_2_datid_ts_idx on ash.sample_2 (datid, sample_ts);
+  for i in 0 .. v_n - 1 loop
+    execute format(
+      'create table if not exists ash.sample_%s '
+      'partition of ash.sample for values in (%s)', i, i
+    );
+
+    -- (sample_ts) for time-range reader queries
+    execute format(
+      'create index if not exists sample_%s_ts_idx '
+      'on ash.sample_%s (sample_ts)', i, i
+    );
+
+    -- (datid, sample_ts) for per-database time-range queries
+    execute format(
+      'create index if not exists sample_%s_datid_ts_idx '
+      'on ash.sample_%s (datid, sample_ts)', i, i
+    );
+  end loop;
+end $$;
+
+-- Convert timestamptz to int4 epoch offset
+create or replace function ash.ts_from_timestamptz(p_ts timestamptz)
+returns int4
+language sql
+immutable
+parallel safe
+as $$
+  select extract(epoch from p_ts - ash.epoch())::int4
+$$;
+
+-- Convert int4 epoch offset to timestamptz
+create or replace function ash.ts_to_timestamptz(p_ts int4)
+returns timestamptz
+language sql
+immutable
+parallel safe
+as $$
+  select ash.epoch() + p_ts * interval '1 second'
+$$;
 
 -- Register wait event function (upsert, returns id)
 create or replace function ash._register_wait(p_state text, p_type text, p_event text)
@@ -263,6 +369,7 @@ declare
   v_sample_ts int4;
   v_include_bg bool;
   v_debug_logging bool;
+  v_sampling_enabled bool;
   v_rec record;
   v_datid_rec record;
   v_data integer[];
@@ -273,6 +380,28 @@ declare
   v_missed_count bigint;
   v_seen_waits text[] := '{}';
 begin
+  -- Check if sampling is enabled (disabled during rebuild_partitions)
+  select sampling_enabled into v_sampling_enabled
+  from ash.config where singleton;
+
+  if not v_sampling_enabled then
+    update ash.config
+    set skipped_samples = skipped_samples + 1
+    where singleton;
+
+    return 0;
+  end if;
+
+  -- Acquire participation lock (xact-level, auto-releases on commit/rollback).
+  -- rebuild_partitions() polls pg_locks for this to drain in-flight operations.
+  if not pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4) then
+    update ash.config
+    set skipped_samples = skipped_samples + 1
+    where singleton;
+
+    return 0;
+  end if;
+
   -- Get sample timestamp (seconds since epoch, from now())
   v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
 
@@ -355,44 +484,25 @@ begin
   -- Partitioned query_map: TRUNCATE resets on rotation, but between rotations
   -- PG14-15 volatile SQL comments can flood query_map. 50k hard cap per
   -- partition prevents unbounded growth. PG16+ normalizes comments.
-  -- NOTE: 3-way IF for clarity on hot path. Bug fixes must be applied 3×.
-  if v_current_slot = 0 then
-    insert into ash.query_map_0 (query_id)
-    select distinct sa.query_id
-    from pg_stat_activity sa
-    where sa.query_id is not null
-      and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
-      and (sa.backend_type = 'client backend'
-       or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-      and sa.pid <> pg_backend_pid()
-      and (select reltuples from pg_class
-       where oid = 'ash.query_map_0'::regclass) < 50000
-    on conflict (query_id) do nothing;
-  elsif v_current_slot = 1 then
-    insert into ash.query_map_1 (query_id)
-    select distinct sa.query_id
-    from pg_stat_activity sa
-    where sa.query_id is not null
-      and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
-      and (sa.backend_type = 'client backend'
-       or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-      and sa.pid <> pg_backend_pid()
-      and (select reltuples from pg_class
-       where oid = 'ash.query_map_1'::regclass) < 50000
-    on conflict (query_id) do nothing;
-  else
-    insert into ash.query_map_2 (query_id)
-    select distinct sa.query_id
-    from pg_stat_activity sa
-    where sa.query_id is not null
-      and sa.state in ('active', 'idle in transaction', 'idle in transaction (aborted)')
-      and (sa.backend_type = 'client backend'
-       or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
-      and sa.pid <> pg_backend_pid()
-      and (select reltuples from pg_class
-       where oid = 'ash.query_map_2'::regclass) < 50000
-    on conflict (query_id) do nothing;
-  end if;
+  -- Dynamic SQL: single query template, bug fixes apply once (not 3×).
+  execute format(
+    'insert into ash.query_map_%s (query_id) '
+    'select distinct sa.query_id '
+    'from pg_stat_activity sa '
+    'where sa.query_id is not null '
+    '  and sa.state in (''active'', ''idle in transaction'', '
+    '    ''idle in transaction (aborted)'') '
+    '  and (sa.backend_type = ''client backend'' '
+    '   or ($1 and sa.backend_type in (''autovacuum worker'', '
+    '     ''logical replication worker'', ''parallel worker'', '
+    '     ''background worker''))) '
+    '  and sa.pid <> pg_backend_pid() '
+    '  and (select reltuples from pg_class '
+    '   where oid = %L::regclass) < 50000 '
+    'on conflict (query_id) do nothing',
+    v_current_slot,
+    'ash.query_map_' || v_current_slot
+  ) using v_include_bg;
 
   -- ---- Read 2+3: Per-database encoding ----
   -- Build and insert encoded arrays — one per database.
@@ -587,6 +697,7 @@ $$;
 
 -- Rotate partitions: advance current_slot, truncate the old previous partition
 -- and its matching query_map partition (lockstep TRUNCATE — zero bloat everywhere).
+-- Uses dynamic SQL with modulo-N for configurable partition count.
 create or replace function ash.rotate()
 returns text
 language plpgsql
@@ -595,21 +706,21 @@ declare
   v_old_slot smallint;
   v_new_slot smallint;
   v_truncate_slot smallint;
+  v_num_partitions smallint;
   v_rotation_period interval;
   v_rotated_at timestamptz;
+  v_rotation_minutes int;
 begin
   -- Advisory lock prevents concurrent rotation from pg_cron overlap.
   -- rotate() is already REVOKE'd from PUBLIC — only schema owner can call it.
-  -- A malicious user holding this advisory lock number can delay (not prevent)
-  -- rotation, but they'd need direct DB access first.
   if not pg_try_advisory_lock(hashtext('ash_rotate')) then
     return 'skipped: another rotation in progress';
   end if;
 
   begin
     -- Get current config
-    select current_slot, rotation_period, rotated_at
-    into v_old_slot, v_rotation_period, v_rotated_at
+    select current_slot, num_partitions, rotation_period, rotated_at
+    into v_old_slot, v_num_partitions, v_rotation_period, v_rotated_at
     from ash.config
     where singleton;
 
@@ -622,13 +733,25 @@ begin
     -- Set lock timeout to avoid blocking on long-running queries
     set local lock_timeout = '2s';
 
-    -- Calculate new slot (0 -> 1 -> 2 -> 0)
-    v_new_slot := (v_old_slot + 1) % 3;
+    -- Pre-truncation rollup: process endangered minutes before they are lost.
+    -- Called before config update to avoid locking contention with take_sample().
+    -- Rollup is idempotent (upsert), so double-processing is safe.
+    v_rotation_minutes := extract(epoch from v_rotation_period)::int / 60;
 
-    -- The partition to truncate is the one that was "previous" before rotation
-    -- which is (old_slot - 1 + 3) % 3, but after we advance, it becomes
-    -- the "next" partition: (new_slot + 1) % 3
-    v_truncate_slot := (v_new_slot + 1) % 3;
+    begin
+      perform ash.rollup_minute(v_rotation_minutes);
+    exception when undefined_function then
+      -- rollup_minute() not yet installed (upgrade in progress), skip
+      null;
+    when others then
+      raise warning 'ash.rotate: rollup_minute failed [%]: %', sqlstate, sqlerrm;
+    end;
+
+    -- Calculate new slot dynamically (0 -> 1 -> ... -> N-1 -> 0)
+    v_new_slot := (v_old_slot + 1) % v_num_partitions;
+
+    -- The partition to truncate is the one after the new slot
+    v_truncate_slot := (v_new_slot + 1) % v_num_partitions;
 
     -- Advance current_slot first (before truncate)
     update ash.config
@@ -638,20 +761,14 @@ begin
 
     -- Lockstep TRUNCATE: sample partition + matching query_map partition.
     -- Zero bloat everywhere — no DELETE, no dead tuples, no GC needed.
-    case v_truncate_slot
-      when 0 then
-        truncate ash.sample_0;
-        truncate ash.query_map_0;
-        alter table ash.query_map_0 alter column id restart;
-      when 1 then
-        truncate ash.sample_1;
-        truncate ash.query_map_1;
-        alter table ash.query_map_1 alter column id restart;
-      when 2 then
-        truncate ash.sample_2;
-        truncate ash.query_map_2;
-        alter table ash.query_map_2 alter column id restart;
-    end case;
+    -- Dynamic SQL replaces the old CASE block for N-partition support.
+    execute format('truncate ash.sample_%s', v_truncate_slot);
+    execute format('truncate ash.query_map_%s', v_truncate_slot);
+    -- ALTER COLUMN id RESTART takes ACCESS EXCLUSIVE lock on query_map.
+    -- Safe here because we just truncated the table — no concurrent readers.
+    execute format(
+      'alter table ash.query_map_%s alter column id restart', v_truncate_slot
+    );
 
     perform pg_advisory_unlock(hashtext('ash_rotate'));
 
@@ -665,6 +782,110 @@ begin
     perform pg_advisory_unlock(hashtext('ash_rotate'));
     raise;
   end;
+end;
+$$;
+
+
+-- Rebuild partitions: destructive admin function to change partition count.
+-- All raw sample data is lost. Rollup tables survive.
+-- WARNING: failure after acquiring lock leaves sampling_enabled = false.
+-- Manual recovery: UPDATE ash.config SET sampling_enabled = true; SELECT ash.start();
+create or replace function ash.rebuild_partitions(p_num int default null)
+returns text
+language plpgsql
+as $$
+declare
+  v_old_n int;
+  v_new_n int;
+begin
+  select num_partitions into v_old_n from ash.config where singleton;
+  v_new_n := coalesce(p_num, v_old_n);
+
+  if v_new_n < 3 or v_new_n > 32 then
+    raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
+  end if;
+
+  -- Step 1: Mark sampling disabled. take_sample() checks this and returns early.
+  update ash.config set sampling_enabled = false where singleton;
+
+  -- Step 2: Stop pg_cron jobs if available
+  if ash._pg_cron_available() then
+    perform ash.stop();
+  end if;
+
+  -- Step 3: Acquire rebuild exclusive lock (two-key xact-level form).
+  -- Xact-level: auto-releases on commit/rollback — no manual unlock needed.
+  if not pg_try_advisory_xact_lock(1, hashtext('ash_rebuild')::int4) then
+    update ash.config set sampling_enabled = true where singleton;
+    raise exception 'rebuild_partitions: could not acquire lock — '
+      'another rebuild is in progress';
+  end if;
+
+  -- Step 4: Drain — wait up to 5s for in-flight take_sample/rollup to finish.
+  -- They hold (0, hashtext('ash_operation')) xact locks; we poll pg_locks.
+  for i in 1 .. 10 loop
+    if not exists (
+      select from pg_locks
+      where locktype = 'advisory'
+        and classid = 0
+        and objid = hashtext('ash_operation')::int4::oid
+        and granted
+    ) then
+      exit;
+    end if;
+
+    perform pg_sleep(0.5);
+  end loop;
+
+  -- Step 5: Drop the query_map_all view first (depends on query_map tables)
+  drop view if exists ash.query_map_all;
+
+  -- Drop ALL existing sample partitions and query_maps.
+  -- Uses catalog enumeration to catch orphaned tables.
+  perform ash._drop_all_partitions();
+
+  -- Step 6: Update config
+  update ash.config
+  set num_partitions = v_new_n,
+    current_slot = 0,
+    rotated_at = now()
+  where singleton;
+
+  -- Step 7: Create new partitions
+  for i in 0 .. v_new_n - 1 loop
+    execute format(
+      'create table ash.sample_%s '
+      'partition of ash.sample for values in (%s)', i, i
+    );
+
+    execute format(
+      'create table ash.query_map_%s ('
+      '  id       int4 primary key generated always as identity (start with 1),'
+      '  query_id int8 not null unique'
+      ')', i
+    );
+
+    execute format(
+      'create index sample_%s_ts_idx on ash.sample_%s (sample_ts)', i, i
+    );
+
+    execute format(
+      'create index sample_%s_datid_ts_idx on ash.sample_%s (datid, sample_ts)',
+      i, i
+    );
+  end loop;
+
+  -- Step 8: Rebuild the query_map_all view
+  perform ash._rebuild_query_map_view();
+
+  -- Step 9: Leave sampling DISABLED. User must explicitly call
+  -- ash.start() to resume. Prevents accidental data collection
+  -- into a partially-built schema.
+  return format(
+    'rebuilt: %s -> %s partitions. all raw data cleared. '
+    'call ash.start() to resume sampling.',
+    v_old_n, v_new_n
+  );
 end;
 $$;
 
@@ -710,7 +931,11 @@ begin
 
   -- If pg_cron is not available, just record the interval and advise on external scheduling
   if not ash._pg_cron_available() then
-    update ash.config set sample_interval = p_interval where singleton;
+    update ash.config
+    set sample_interval = p_interval,
+      sampling_enabled = true,
+      skipped_samples = 0
+    where singleton;
 
     job_type := 'sampler';
     job_id := null;
@@ -722,11 +947,17 @@ begin
     status := format('rotation_period is %s — schedule ash.rotate() externally', (select rotation_period from ash.config where singleton));
     return next;
 
+    job_type := 'rollup';
+    job_id := null;
+    status := 'schedule ash.rollup_minute() every minute, ash.rollup_hour() every hour, ash.rollup_cleanup() daily';
+    return next;
+
     raise notice 'pg_cron is not installed. To sample, call ash.take_sample() from an external scheduler:';
     raise notice '  system cron:    * * * * * psql -qAtX -c "select ash.take_sample()" (for per-second, use a loop)';
     raise notice '  psql:           SELECT ash.take_sample() \watch 1';
     raise notice '  any language:   execute "SELECT ash.take_sample()" in a loop with sleep';
     raise notice 'Also schedule ash.rotate() at the rotation_period interval (default: daily).';
+    raise notice 'Schedule rollup: ash.rollup_minute() every minute, ash.rollup_hour() every hour, ash.rollup_cleanup() daily.';
 
     return;
   end if;
@@ -858,8 +1089,79 @@ begin
     return next;
   end if;
 
-  -- Update sample_interval in config (after all validation and job creation)
-  update ash.config set sample_interval = p_interval where singleton;
+  -- Schedule rollup cron jobs (idempotent: unschedule first)
+  -- rollup_minute: every minute
+  begin
+    perform cron.unschedule('ash_rollup_1m');
+  exception when others then
+    null;
+  end;
+
+  select cron.schedule(
+    'ash_rollup_1m',
+    '* * * * *',
+    'select ash.rollup_minute()'
+  ) into v_rotation_job; -- reuse variable for job id
+
+  if not v_skip_nodename_update then
+    update cron.job set nodename = '' where jobid = v_rotation_job;
+  end if;
+
+  job_type := 'rollup_1m';
+  job_id := v_rotation_job;
+  status := 'created';
+  return next;
+
+  -- rollup_hour: every hour at minute 0
+  begin
+    perform cron.unschedule('ash_rollup_1h');
+  exception when others then
+    null;
+  end;
+
+  select cron.schedule(
+    'ash_rollup_1h',
+    '0 * * * *',
+    'select ash.rollup_hour()'
+  ) into v_rotation_job;
+
+  if not v_skip_nodename_update then
+    update cron.job set nodename = '' where jobid = v_rotation_job;
+  end if;
+
+  job_type := 'rollup_1h';
+  job_id := v_rotation_job;
+  status := 'created';
+  return next;
+
+  -- rollup_cleanup: daily at 03:00 UTC
+  begin
+    perform cron.unschedule('ash_rollup_gc');
+  exception when others then
+    null;
+  end;
+
+  select cron.schedule(
+    'ash_rollup_gc',
+    '0 3 * * *',
+    'select ash.rollup_cleanup()'
+  ) into v_rotation_job;
+
+  if not v_skip_nodename_update then
+    update cron.job set nodename = '' where jobid = v_rotation_job;
+  end if;
+
+  job_type := 'rollup_gc';
+  job_id := v_rotation_job;
+  status := 'created';
+  return next;
+
+  -- Update sample_interval, enable sampling, reset skip counter
+  update ash.config
+  set sample_interval = p_interval,
+    sampling_enabled = true,
+    skipped_samples = 0
+  where singleton;
 
   -- Warn about pg_cron run history overhead.
   -- At 1s sampling, cron.job_run_details grows ~12 MiB/day unbounded.
@@ -878,7 +1180,7 @@ begin
 end;
 $$;
 
--- Stop sampling: remove pg_cron jobs
+-- Stop sampling: remove pg_cron jobs, disable sampling
 create or replace function ash.stop()
 returns table (job_type text, job_id bigint, status text)
 language plpgsql
@@ -886,6 +1188,9 @@ as $$
 declare
   v_job_id bigint;
 begin
+  -- Mark sampling as disabled
+  update ash.config set sampling_enabled = false where singleton;
+
   -- If pg_cron is not available, just remind about external scheduler
   if not ash._pg_cron_available() then
     job_type := 'info';
@@ -920,6 +1225,37 @@ begin
     status := 'removed';
     return next;
   end if;
+
+  -- Remove rollup jobs (idempotent — tolerate missing jobs)
+  begin
+    perform cron.unschedule('ash_rollup_1m');
+    job_type := 'rollup_1m';
+    job_id := null;
+    status := 'removed';
+    return next;
+  exception when others then
+    null;
+  end;
+
+  begin
+    perform cron.unschedule('ash_rollup_1h');
+    job_type := 'rollup_1h';
+    job_id := null;
+    status := 'removed';
+    return next;
+  exception when others then
+    null;
+  end;
+
+  begin
+    perform cron.unschedule('ash_rollup_gc');
+    job_type := 'rollup_gc';
+    job_id := null;
+    status := 'removed';
+    return next;
+  exception when others then
+    null;
+  end;
 
   return;
 end;
@@ -999,7 +1335,7 @@ stable
 as $$
   select array[
     current_slot,
-    ((current_slot - 1 + 3) % 3)::smallint
+    ((current_slot - 1 + num_partitions) % num_partitions)::smallint
   ]
   from ash.config
   where singleton
@@ -1022,6 +1358,12 @@ declare
   v_samples_total int;
   v_wait_events int;
   v_query_ids int;
+  v_rollup_1m_rows bigint;
+  v_rollup_1h_rows bigint;
+  v_rollup_1m_oldest int4;
+  v_rollup_1m_newest int4;
+  v_rollup_1h_oldest int4;
+  v_rollup_1h_newest int4;
 begin
   -- Get config
   select * into v_config from ash.config where singleton;
@@ -1040,11 +1382,29 @@ begin
   select count(*) into v_wait_events from ash.wait_event_map;
   select count(*) into v_query_ids from ash.query_map_all;
 
+  -- Rollup stats (handle tables not yet existing during upgrade)
+  begin
+    select count(*), min(ts), max(ts)
+    into v_rollup_1m_rows, v_rollup_1m_oldest, v_rollup_1m_newest
+    from ash.rollup_1m;
+
+    select count(*), min(ts), max(ts)
+    into v_rollup_1h_rows, v_rollup_1h_oldest, v_rollup_1h_newest
+    from ash.rollup_1h;
+  exception when undefined_table then
+    v_rollup_1m_rows := 0;
+    v_rollup_1h_rows := 0;
+  end;
+
   metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
   metric := 'color'; value := case when ash._color_on() then 'on' else 'off' end; return next;
+  metric := 'num_partitions'; value := v_config.num_partitions::text; return next;
+  metric := 'sampling_enabled'; value := v_config.sampling_enabled::text; return next;
+  metric := 'skipped_samples'; value := v_config.skipped_samples::text; return next;
   metric := 'current_slot'; value := v_config.current_slot::text; return next;
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
+  metric := 'raw_retention'; value := ((v_config.num_partitions - 2) * v_config.rotation_period)::text || ' + current partial'; return next;
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
   metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
   metric := 'missed_samples'; value := v_config.missed_samples::text; return next;
@@ -1053,8 +1413,8 @@ begin
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
 
   if v_last_sample_ts is not null then
-    metric := 'last_sample_ts'; value := (ash.epoch() + v_last_sample_ts * interval '1 second')::text; return next;
-    metric := 'time_since_last_sample'; value := (now() - (ash.epoch() + v_last_sample_ts * interval '1 second'))::text; return next;
+    metric := 'last_sample_ts'; value := ash.ts_to_timestamptz(v_last_sample_ts)::text; return next;
+    metric := 'time_since_last_sample'; value := (now() - ash.ts_to_timestamptz(v_last_sample_ts))::text; return next;
   else
     metric := 'last_sample_ts'; value := 'no samples'; return next;
   end if;
@@ -1065,6 +1425,32 @@ begin
   metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
 
+  -- Rollup metrics
+  metric := 'rollup_1m_rows'; value := coalesce(v_rollup_1m_rows, 0)::text; return next;
+
+  if v_rollup_1m_oldest is not null then
+    metric := 'rollup_1m_oldest'; value := ash.ts_to_timestamptz(v_rollup_1m_oldest)::text; return next;
+    metric := 'rollup_1m_newest'; value := ash.ts_to_timestamptz(v_rollup_1m_newest)::text; return next;
+  end if;
+
+  metric := 'rollup_1m_retention'; value := v_config.rollup_1m_retention_days || ' days'; return next;
+  metric := 'rollup_1h_rows'; value := coalesce(v_rollup_1h_rows, 0)::text; return next;
+
+  if v_rollup_1h_oldest is not null then
+    metric := 'rollup_1h_oldest'; value := ash.ts_to_timestamptz(v_rollup_1h_oldest)::text; return next;
+    metric := 'rollup_1h_newest'; value := ash.ts_to_timestamptz(v_rollup_1h_newest)::text; return next;
+  end if;
+
+  metric := 'rollup_1h_retention'; value := v_config.rollup_1h_retention_days || ' days'; return next;
+
+  if v_config.last_rollup_1m_ts is not null then
+    metric := 'last_rollup_1m_ts'; value := ash.ts_to_timestamptz(v_config.last_rollup_1m_ts)::text; return next;
+  end if;
+
+  if v_config.last_rollup_1h_ts is not null then
+    metric := 'last_rollup_1h_ts'; value := ash.ts_to_timestamptz(v_config.last_rollup_1h_ts)::text; return next;
+  end if;
+
   -- pg_cron status if available
   if ash._pg_cron_available() then
     metric := 'pg_cron_available'; value := 'yes'; return next;
@@ -1072,7 +1458,10 @@ begin
       select 'cron_job_' || jobname,
          format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
       from cron.job
-      where jobname in ('ash_sampler', 'ash_rotation')
+      where jobname in (
+        'ash_sampler', 'ash_rotation',
+        'ash_rollup_1m', 'ash_rollup_1h', 'ash_rollup_gc'
+      )
     loop
       return next;
     end loop;
@@ -1083,6 +1472,771 @@ begin
   return;
 end;
 $$;
+
+--------------------------------------------------------------------------------
+-- STEP 6: Rollup tables and functions
+--------------------------------------------------------------------------------
+
+-- Minute-level rollup: aggregated samples per minute per database.
+-- Survives raw partition rotation. Retained per rollup_1m_retention_days.
+create table if not exists ash.rollup_1m (
+  ts              int4 not null,     -- minute-aligned epoch offset
+  datid           oid not null,
+  samples         smallint not null, -- count of raw samples in this minute (max 60)
+  peak_backends   smallint not null, -- max per-database active backends in any
+                                     -- single sample within this minute
+  wait_counts     int4[] not null,   -- [wait_id, count, wait_id, count, ...]
+  query_counts    int8[] not null,   -- [query_id, count, query_id, count, ...]
+  primary key (ts, datid)
+);
+
+-- Hourly rollup: aggregated from minute rollups.
+-- Retained per rollup_1h_retention_days (default 5 years).
+create table if not exists ash.rollup_1h (
+  ts              int4 not null,     -- hour-aligned epoch offset
+  datid           oid not null,
+  samples         smallint not null, -- sum of minute samples (max 3600)
+  peak_backends   smallint not null, -- max per-database peak across the hour
+  wait_counts     int4[] not null,
+  query_counts    int8[] not null,
+  primary key (ts, datid)
+);
+
+-- Merge multiple wait_counts arrays: sum counts for matching wait_ids.
+-- Input: flat int4[] from array_agg(wait_counts) — PG concatenates
+-- the pairs into one flat array. The function extracts id/count pairs
+-- by position parity, groups by id, sums counts, and re-interleaves.
+-- Uses CROSS JOIN LATERAL (VALUES ...) for correct pair ordering
+-- (avoids the ORDER BY v DESC bug that swaps id/count when count > id).
+create or replace function ash._merge_wait_counts(p_flat int4[])
+returns int4[]
+language sql
+immutable
+parallel safe
+as $$
+  with numbered as (
+    select row_number() over () as pos, val
+    from unnest(p_flat) as val
+  ),
+  pairs as (
+    select n1.val as id, n2.val as cnt
+    from numbered n1
+    join numbered n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  merged as (
+    select id, sum(cnt)::int4 as total,
+           row_number() over (order by sum(cnt) desc, id asc) as rn
+    from pairs
+    group by id
+  ),
+  interleaved as (
+    select v, rn, sub
+    from merged
+    cross join lateral (values (1, id), (2, total)) as t(sub, v)
+  )
+  select coalesce(
+    array_agg(v order by rn, sub),
+    '{}'::int4[]
+  )
+  from interleaved
+$$;
+
+-- Merge multiple query_counts arrays: same logic as _merge_wait_counts, int8.
+create or replace function ash._merge_query_counts(p_flat int8[])
+returns int8[]
+language sql
+immutable
+parallel safe
+as $$
+  with numbered as (
+    select row_number() over () as pos, val
+    from unnest(p_flat) as val
+  ),
+  pairs as (
+    select n1.val as id, n2.val as cnt
+    from numbered n1
+    join numbered n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  merged as (
+    select id, sum(cnt)::int8 as total,
+           row_number() over (order by sum(cnt) desc, id asc) as rn
+    from pairs
+    group by id
+  ),
+  interleaved as (
+    select v, rn, sub
+    from merged
+    cross join lateral (values (1, id), (2, total)) as t(sub, v)
+  )
+  select coalesce(
+    array_agg(v order by rn, sub),
+    '{}'::int8[]
+  )
+  from interleaved
+$$;
+
+-- Truncate a paired array to top N entries by count.
+-- Preserves [id, count] pairing correctly.
+create or replace function ash._truncate_pairs(p_arr int8[], p_top int)
+returns int8[]
+language sql
+immutable
+parallel safe
+as $$
+  with numbered as (
+    select row_number() over () as pos, val
+    from unnest(p_arr) as val
+  ),
+  pairs as (
+    select n1.val as id, n2.val as cnt
+    from numbered n1
+    join numbered n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  top_n as (
+    select id, cnt,
+           row_number() over (order by cnt desc, id asc) as rn
+    from pairs
+    limit p_top
+  ),
+  interleaved as (
+    select v, rn, sub
+    from top_n
+    cross join lateral (values (1, id), (2, cnt)) as t(sub, v)
+  )
+  select coalesce(
+    array_agg(v order by rn, sub),
+    '{}'::int8[]
+  )
+  from interleaved
+$$;
+
+-- Rollup minute: watermark-based aggregation of raw samples into minute rollups.
+-- Processes all unprocessed complete minutes up to p_batch_limit.
+-- Idempotent via ON CONFLICT DO UPDATE (upsert).
+create or replace function ash.rollup_minute(
+  p_batch_limit int default 60  -- max minutes to catch up per call
+)
+returns int
+language plpgsql
+as $$
+declare
+  v_last_ts int4;
+  v_now_minute_ts int4;
+  v_minute_start int4;
+  v_minute_end int4;
+  v_batch_remaining int;
+  v_total int := 0;
+  v_count int;
+  v_min_backend_seconds smallint;
+  v_has_later_data bool;
+begin
+  -- Acquire participation lock (xact-level)
+  if not pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4) then
+    return 0;
+  end if;
+
+  v_batch_remaining := p_batch_limit;
+
+  select last_rollup_1m_ts, rollup_min_backend_seconds
+  into v_last_ts, v_min_backend_seconds
+  from ash.config where singleton;
+
+  -- Current minute boundary (only process *complete* minutes)
+  v_now_minute_ts := ash.ts_from_timestamptz(date_trunc('minute', now()));
+
+  -- Initialize watermark if NULL (first run after install or upgrade).
+  if v_last_ts is null then
+    select (min(sample_ts) / 60) * 60
+    into v_last_ts
+    from ash.sample;
+
+    if v_last_ts is null then
+      return 0;  -- no samples at all
+    end if;
+  end if;
+
+  -- Process each unprocessed complete minute
+  v_minute_start := v_last_ts;
+
+  while v_minute_start < v_now_minute_ts and v_batch_remaining > 0 loop
+    v_minute_end := v_minute_start + 60;
+
+    -- Aggregate raw samples for this minute, decoded via ash.decode_sample.
+    -- Groups by datid, computing:
+    --   samples: count of distinct sample_ts
+    --   peak_backends: max active_count per sample_ts per datid
+    --   wait_counts: [wait_id, count, ...] from decoded wait events
+    --   query_counts: [query_id, count, ...] top 100 by count, filtered by min threshold
+    insert into ash.rollup_1m (
+      ts, datid, samples, peak_backends, wait_counts, query_counts
+    )
+    select
+      v_minute_start,
+      s.datid,
+      count(distinct s.sample_ts)::smallint,
+      max(s.active_count)::smallint,
+      -- wait_counts: aggregate decoded wait events
+      coalesce(
+        (
+          with decoded as (
+            select
+              (ash.decode_sample(s2.data, s2.slot)).*
+            from ash.sample s2
+            where s2.sample_ts >= v_minute_start
+              and s2.sample_ts < v_minute_end
+              and s2.datid = s.datid
+          ),
+          wait_agg as (
+            select
+              wm.id as wait_id,
+              count(*)::int4 as cnt,
+              row_number() over (order by count(*) desc, wm.id asc) as rn
+            from decoded d
+            join ash.wait_event_map wm
+              on wm.state || '|' || wm.type || '|' || wm.event = d.wait_event
+            group by wm.id
+          ),
+          interleaved as (
+            select v, rn, sub
+            from wait_agg
+            cross join lateral (values (1, wait_id), (2, cnt)) as t(sub, v)
+          )
+          select array_agg(v order by rn, sub)
+          from interleaved
+        ),
+        '{}'::int4[]
+      ),
+      -- query_counts: aggregate decoded query_ids, filter by min threshold, top 100
+      coalesce(
+        (
+          with decoded as (
+            select
+              (ash.decode_sample(s3.data, s3.slot)).*
+            from ash.sample s3
+            where s3.sample_ts >= v_minute_start
+              and s3.sample_ts < v_minute_end
+              and s3.datid = s.datid
+          ),
+          query_agg as (
+            select
+              d.query_id,
+              count(*)::int8 as cnt,
+              row_number() over (order by count(*) desc, d.query_id asc) as rn
+            from decoded d
+            where d.query_id is not null and d.query_id <> 0
+            group by d.query_id
+            having count(*) >= v_min_backend_seconds
+          ),
+          top_queries as (
+            select query_id, cnt, rn
+            from query_agg
+            where rn <= 100
+          ),
+          interleaved as (
+            select v, rn, sub
+            from top_queries
+            cross join lateral (values (1, query_id), (2, cnt)) as t(sub, v)
+          )
+          select array_agg(v order by rn, sub)
+          from interleaved
+        ),
+        '{}'::int8[]
+      )
+    from ash.sample s
+    where s.sample_ts >= v_minute_start
+      and s.sample_ts < v_minute_end
+    group by s.datid
+    on conflict (ts, datid) do update set
+      samples = excluded.samples,
+      peak_backends = excluded.peak_backends,
+      wait_counts = excluded.wait_counts,
+      query_counts = excluded.query_counts;
+
+    get diagnostics v_count = row_count;
+
+    -- Gap detection: no samples for this minute but later data exists
+    if v_count = 0 then
+      select exists (
+        select from ash.sample where sample_ts >= v_minute_end
+      ) into v_has_later_data;
+
+      if v_has_later_data then
+        raise warning 'ash.rollup_minute: gap at minute % — no samples but later data exists (data may have rotated before rollup)',
+          ash.ts_to_timestamptz(v_minute_start);
+      end if;
+    end if;
+
+    v_total := v_total + v_count;
+
+    -- Advance watermark transactionally
+    update ash.config
+    set last_rollup_1m_ts = v_minute_end
+    where singleton;
+
+    v_minute_start := v_minute_end;
+    v_batch_remaining := v_batch_remaining - 1;
+  end loop;
+
+  return v_total;
+end;
+$$;
+
+-- Rollup hour: aggregate minute rollups into hourly rollups.
+-- Watermark-based, idempotent via upsert.
+create or replace function ash.rollup_hour()
+returns int
+language plpgsql
+as $$
+declare
+  v_last_ts int4;
+  v_now_hour_ts int4;
+  v_hour_start int4;
+  v_hour_end int4;
+  v_batch_limit int := 24;
+  v_total int := 0;
+  v_count int;
+begin
+  -- Acquire participation lock (xact-level)
+  if not pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4) then
+    return 0;
+  end if;
+
+  select last_rollup_1h_ts into v_last_ts
+  from ash.config where singleton;
+
+  v_now_hour_ts := ash.ts_from_timestamptz(date_trunc('hour', now()));
+
+  if v_last_ts is null then
+    select (min(ts) / 3600) * 3600 into v_last_ts from ash.rollup_1m;
+
+    if v_last_ts is null then
+      return 0;
+    end if;
+  end if;
+
+  v_hour_start := v_last_ts;
+
+  while v_hour_start < v_now_hour_ts and v_batch_limit > 0 loop
+    v_hour_end := v_hour_start + 3600;
+
+    insert into ash.rollup_1h (
+      ts, datid, samples, peak_backends, wait_counts, query_counts
+    )
+    select
+      v_hour_start,
+      datid,
+      sum(samples)::smallint,
+      max(peak_backends)::smallint,
+      ash._merge_wait_counts(
+        array_agg(wait_counts) filter (where wait_counts <> '{}')
+      ),
+      ash._truncate_pairs(
+        ash._merge_query_counts(
+          array_agg(query_counts) filter (where query_counts <> '{}')
+        ),
+        100  -- top 100 queries per hour
+      )
+    from ash.rollup_1m
+    where ts >= v_hour_start and ts < v_hour_end
+    group by datid
+    on conflict (ts, datid) do update set
+      samples = excluded.samples,
+      peak_backends = excluded.peak_backends,
+      wait_counts = excluded.wait_counts,
+      query_counts = excluded.query_counts;
+
+    get diagnostics v_count = row_count;
+    v_total := v_total + v_count;
+
+    update ash.config
+    set last_rollup_1h_ts = v_hour_end
+    where singleton;
+
+    v_hour_start := v_hour_end;
+    v_batch_limit := v_batch_limit - 1;
+  end loop;
+
+  return v_total;
+end;
+$$;
+
+-- Rollup cleanup: delete expired rows based on retention config.
+create or replace function ash.rollup_cleanup()
+returns text
+language plpgsql
+as $$
+declare
+  v_1m_deleted int;
+  v_1h_deleted int;
+  v_1m_retention int;
+  v_1h_retention int;
+  v_cutoff_1m int4;
+  v_cutoff_1h int4;
+begin
+  select rollup_1m_retention_days, rollup_1h_retention_days
+  into v_1m_retention, v_1h_retention
+  from ash.config where singleton;
+
+  v_cutoff_1m := ash.ts_from_timestamptz(
+    now() - (v_1m_retention || ' days')::interval
+  );
+  v_cutoff_1h := ash.ts_from_timestamptz(
+    now() - (v_1h_retention || ' days')::interval
+  );
+
+  delete from ash.rollup_1m where ts < v_cutoff_1m;
+  get diagnostics v_1m_deleted = row_count;
+
+  delete from ash.rollup_1h where ts < v_cutoff_1h;
+  get diagnostics v_1h_deleted = row_count;
+
+  return format('cleanup: deleted %s minute rows, %s hourly rows',
+    v_1m_deleted, v_1h_deleted);
+end;
+$$;
+
+--------------------------------------------------------------------------------
+-- STEP 7: Rollup reader functions
+--------------------------------------------------------------------------------
+
+-- Wait event trends from minute rollups
+create or replace function ash.minute_waits(
+  p_interval interval default '1 hour',
+  p_limit int default 10
+)
+returns table (
+  wait_event text,
+  backend_seconds bigint,
+  pct numeric,
+  bar text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_total_seconds bigint;
+begin
+  v_end_ts := ash.ts_from_timestamptz(now());
+  v_start_ts := ash.ts_from_timestamptz(now() - p_interval);
+
+  return query
+  with raw_pairs as (
+    select
+      (row_number() over ()) as pos,
+      val::int4 as val
+    from ash.rollup_1m r,
+      lateral unnest(r.wait_counts) as val
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  ),
+  pairs as (
+    select n1.val as wait_id, n2.val as cnt
+    from raw_pairs n1
+    join raw_pairs n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  summed as (
+    select
+      wait_id,
+      sum(cnt)::bigint as total
+    from pairs
+    group by wait_id
+  ),
+  grand_total as (
+    select sum(total) as gt from summed
+  )
+  select
+    wm.state || '/' || wm.type || '/' || wm.event,
+    s.total,
+    round(s.total * 100.0 / nullif(gt.gt, 0), 1),
+    repeat('#', (s.total * 40 / nullif(gt.gt, 0))::int)
+  from summed s
+  join ash.wait_event_map wm on wm.id = s.wait_id
+  cross join grand_total gt
+  order by s.total desc
+  limit p_limit;
+end;
+$$;
+
+-- Absolute-time variant
+create or replace function ash.minute_waits_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_limit int default 10
+)
+returns table (
+  wait_event text,
+  backend_seconds bigint,
+  pct numeric,
+  bar text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_total_seconds bigint;
+begin
+  v_start_ts := ash.ts_from_timestamptz(p_start);
+  v_end_ts := ash.ts_from_timestamptz(p_end);
+
+  return query
+  with raw_pairs as (
+    select
+      (row_number() over ()) as pos,
+      val::int4 as val
+    from ash.rollup_1m r,
+      lateral unnest(r.wait_counts) as val
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  ),
+  pairs as (
+    select n1.val as wait_id, n2.val as cnt
+    from raw_pairs n1
+    join raw_pairs n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  summed as (
+    select
+      wait_id,
+      sum(cnt)::bigint as total
+    from pairs
+    group by wait_id
+  ),
+  grand_total as (
+    select sum(total) as gt from summed
+  )
+  select
+    wm.state || '/' || wm.type || '/' || wm.event,
+    s.total,
+    round(s.total * 100.0 / nullif(gt.gt, 0), 1),
+    repeat('#', (s.total * 40 / nullif(gt.gt, 0))::int)
+  from summed s
+  join ash.wait_event_map wm on wm.id = s.wait_id
+  cross join grand_total gt
+  order by s.total desc
+  limit p_limit;
+end;
+$$;
+
+-- Query trends from hourly rollups
+create or replace function ash.hourly_queries(
+  p_interval interval default '1 day',
+  p_limit int default 10
+)
+returns table (
+  query_id bigint,
+  backend_seconds bigint,
+  pct numeric,
+  query_text text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_has_pgss bool;
+begin
+  v_start_ts := ash.ts_from_timestamptz(now() - p_interval);
+  v_end_ts := ash.ts_from_timestamptz(now());
+
+  select exists (select from pg_extension where extname = 'pg_stat_statements')
+  into v_has_pgss;
+
+  return query
+  with raw_pairs as (
+    select
+      (row_number() over ()) as pos,
+      val
+    from ash.rollup_1h r,
+      lateral unnest(r.query_counts) as val
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  ),
+  pairs as (
+    select n1.val as qid, n2.val as cnt
+    from raw_pairs n1
+    join raw_pairs n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  summed as (
+    select
+      qid,
+      sum(cnt)::bigint as total
+    from pairs
+    group by qid
+  ),
+  grand_total as (
+    select sum(total) as gt from summed
+  )
+  select
+    s.qid,
+    s.total,
+    round(s.total * 100.0 / nullif(gt.gt, 0), 1),
+    case
+      when v_has_pgss then (
+        select left(pgss.query, 80)
+        from pg_stat_statements pgss
+        where pgss.queryid = s.qid
+        limit 1
+      )
+      else null
+    end
+  from summed s
+  cross join grand_total gt
+  order by s.total desc
+  limit p_limit;
+end;
+$$;
+
+-- Absolute-time variant
+create or replace function ash.hourly_queries_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_limit int default 10
+)
+returns table (
+  query_id bigint,
+  backend_seconds bigint,
+  pct numeric,
+  query_text text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_has_pgss bool;
+begin
+  v_start_ts := ash.ts_from_timestamptz(p_start);
+  v_end_ts := ash.ts_from_timestamptz(p_end);
+
+  select exists (select from pg_extension where extname = 'pg_stat_statements')
+  into v_has_pgss;
+
+  return query
+  with raw_pairs as (
+    select
+      (row_number() over ()) as pos,
+      val
+    from ash.rollup_1h r,
+      lateral unnest(r.query_counts) as val
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  ),
+  pairs as (
+    select n1.val as qid, n2.val as cnt
+    from raw_pairs n1
+    join raw_pairs n2 on n2.pos = n1.pos + 1
+    where n1.pos % 2 = 1
+  ),
+  summed as (
+    select
+      qid,
+      sum(cnt)::bigint as total
+    from pairs
+    group by qid
+  ),
+  grand_total as (
+    select sum(total) as gt from summed
+  )
+  select
+    s.qid,
+    s.total,
+    round(s.total * 100.0 / nullif(gt.gt, 0), 1),
+    case
+      when v_has_pgss then (
+        select left(pgss.query, 80)
+        from pg_stat_statements pgss
+        where pgss.queryid = s.qid
+        limit 1
+      )
+      else null
+    end
+  from summed s
+  cross join grand_total gt
+  order by s.total desc
+  limit p_limit;
+end;
+$$;
+
+-- Peak concurrency per day from hourly rollups
+create or replace function ash.daily_peak_backends(
+  p_interval interval default '7 days'
+)
+returns table (
+  day date,
+  peak_backends int,
+  avg_backends numeric
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+begin
+  v_start_ts := ash.ts_from_timestamptz(now() - p_interval);
+  v_end_ts := ash.ts_from_timestamptz(now());
+
+  return query
+  select
+    (ash.ts_to_timestamptz(r.ts))::date as d,
+    max(r.peak_backends)::int,
+    round(avg(r.peak_backends), 1)
+  from ash.rollup_1h r
+  where r.ts >= v_start_ts and r.ts < v_end_ts
+  group by d
+  order by d;
+end;
+$$;
+
+-- Absolute-time variant
+create or replace function ash.daily_peak_backends_at(
+  p_start timestamptz,
+  p_end timestamptz
+)
+returns table (
+  day date,
+  peak_backends int,
+  avg_backends numeric
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+begin
+  v_start_ts := ash.ts_from_timestamptz(p_start);
+  v_end_ts := ash.ts_from_timestamptz(p_end);
+
+  return query
+  select
+    (ash.ts_to_timestamptz(r.ts))::date as d,
+    max(r.peak_backends)::int,
+    round(avg(r.peak_backends), 1)
+  from ash.rollup_1h r
+  where r.ts >= v_start_ts and r.ts < v_end_ts
+  group by d
+  order by d;
+end;
+$$;
+
+
+--------------------------------------------------------------------------------
+-- STEP 8: Existing reader functions (raw samples)
+--------------------------------------------------------------------------------
 
 -- Top wait events (inline SQL decode — no plpgsql per-row overhead)
 -------------------------------------------------------------------------------
@@ -2916,6 +4070,15 @@ begin
   execute format('revoke all on function ash.rotate() from public');
   execute format('revoke all on function ash.take_sample() from public');
   execute format('revoke all on function ash.set_debug_logging(bool) from public');
+  execute format('revoke all on function ash.rebuild_partitions(int) from public');
+  execute format('revoke all on function ash._drop_all_partitions() from public');
+  execute format('revoke all on function ash._rebuild_query_map_view() from public');
+  execute format('revoke all on function ash.rollup_minute(int) from public');
+  execute format('revoke all on function ash.rollup_hour() from public');
+  execute format('revoke all on function ash.rollup_cleanup() from public');
+  execute format('revoke all on function ash._merge_wait_counts(int4[]) from public');
+  execute format('revoke all on function ash._merge_query_counts(int8[]) from public');
+  execute format('revoke all on function ash._truncate_pairs(int8[], int) from public');
 
   execute format('grant execute on function ash.start(interval) to %I', v_owner);
   execute format('grant execute on function ash.stop() to %I', v_owner);
@@ -2923,4 +4086,16 @@ begin
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
   execute format('grant execute on function ash.set_debug_logging(bool) to %I', v_owner);
+  execute format('grant execute on function ash.rebuild_partitions(int) to %I', v_owner);
+  execute format('grant execute on function ash._drop_all_partitions() to %I', v_owner);
+  execute format('grant execute on function ash._rebuild_query_map_view() to %I', v_owner);
+  execute format('grant execute on function ash.rollup_minute(int) to %I', v_owner);
+  execute format('grant execute on function ash.rollup_hour() to %I', v_owner);
+  execute format('grant execute on function ash.rollup_cleanup() to %I', v_owner);
+  execute format('grant execute on function ash._merge_wait_counts(int4[]) to %I', v_owner);
+  execute format('grant execute on function ash._merge_query_counts(int8[]) to %I', v_owner);
+  execute format('grant execute on function ash._truncate_pairs(int8[], int) to %I', v_owner);
+
+  -- ts helpers: grant to PUBLIC (harmless read-only conversion, useful for Grafana panels)
+  -- ts_from_timestamptz and ts_to_timestamptz are already PUBLIC by default
 end $$;
