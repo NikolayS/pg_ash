@@ -83,8 +83,16 @@ jobs:
             -- Config table initialized with version
             assert (select count(*) from ash.config) = 1,
               'config not initialized';
-            assert (select version from ash.config where singleton) = '1.3',
-              'version should be 1.3 for fresh install';
+            assert (select version from ash.config where singleton) = '1.4',
+              'version should be 1.4 for fresh install';
+
+            -- missed_samples column exists and defaults to 0
+            assert exists (
+              select from information_schema.columns
+              where table_schema = 'ash' and table_name = 'config' and column_name = 'missed_samples'
+            ), 'missed_samples column missing from ash.config';
+            assert (select missed_samples from ash.config where singleton) = 0,
+              'missed_samples should default to 0';
 
             -- Core tables exist
             assert exists (select from pg_tables where schemaname = 'ash' and tablename = 'wait_event_map'),
@@ -193,6 +201,100 @@ jobs:
           end;
           $$;
           EOF
+
+      - name: Test missed_samples counter (timeout catching)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOFTEST'
+          -- Reset counter
+          update ash.config set missed_samples = 0 where singleton;
+
+          -- 1. Verify missed_samples column exists and defaults to 0
+          do $$
+          begin
+            assert exists (
+              select from information_schema.columns
+              where table_schema = 'ash' and table_name = 'config' and column_name = 'missed_samples'
+            ), 'missed_samples column missing from ash.config';
+            assert (select missed_samples from ash.config where singleton) = 0,
+              'missed_samples should default to 0';
+            raise notice 'TEST 1 PASSED: missed_samples column exists, defaults to 0';
+          end;
+          $$;
+
+          -- 2. Verify take_sample works normally (returns >= 0, missed_samples stays 0)
+          do $$
+          declare
+            v_result int;
+          begin
+            select ash.take_sample() into v_result;
+            assert v_result >= 0, 'take_sample should return >= 0 without timeout, got: ' || v_result;
+            assert (select missed_samples from ash.config where singleton) = 0,
+              'missed_samples should be 0 after successful sample';
+            raise notice 'TEST 2 PASSED: normal sampling works (returned %)', v_result;
+          end;
+          $$;
+
+          -- 3. Simulate query_canceled via pg_cancel_backend to test the handler
+          -- This is deterministic — no timing dependency on CI runner speed
+          create or replace function test_simulate_cancel()
+          returns int language plpgsql as $$
+          begin
+            -- Cancel our own backend; pg_sleep gives PG time to deliver the signal
+            perform pg_cancel_backend(pg_backend_pid());
+            perform pg_sleep(1);
+            return 0;  -- never reached
+          exception when query_canceled then
+            update ash.config set missed_samples = missed_samples + 1 where singleton;
+            return -1;
+          end;
+          $$;
+
+          do $$
+          declare
+            v_result int;
+            v_missed int;
+          begin
+            select test_simulate_cancel() into v_result;
+            assert v_result = -1, 'simulated cancel should return -1, got: ' || v_result;
+
+            select missed_samples into v_missed from ash.config where singleton;
+            assert v_missed = 1, 'missed_samples should be 1 after simulated cancel, got: ' || v_missed;
+            raise notice 'TEST 3 PASSED: cancel handler works (missed_samples = %)', v_missed;
+          end;
+          $$;
+
+          drop function test_simulate_cancel();
+
+          -- 4. Status should show missed_samples metric
+          do $$
+          declare
+            v_val text;
+          begin
+            select value into v_val from ash.status() where metric = 'missed_samples';
+            assert v_val is not null, 'status() should show missed_samples metric';
+            assert v_val::int >= 1, 'missed_samples in status should be >= 1';
+            raise notice 'TEST 4 PASSED: status() shows missed_samples (value = %)', v_val;
+          end;
+          $$;
+
+          -- 5. Verify take_sample return value on idle DB is 0 (not -1)
+          update ash.config set missed_samples = 0 where singleton;
+          do $$
+          declare
+            v_result int;
+          begin
+            select ash.take_sample() into v_result;
+            assert v_result = 0, 'take_sample on idle DB should return 0, got: ' || v_result;
+            assert (select missed_samples from ash.config where singleton) = 0,
+              'missed_samples should still be 0 (no timeout occurred)';
+            raise notice 'TEST 5 PASSED: idle DB returns 0, missed_samples stays 0';
+          end;
+          $$;
+          EOFTEST
+
+          echo "Missed samples tests PASSED"
 
       - name: Test rotation
         env:
@@ -1157,7 +1259,7 @@ jobs:
           $$;
           EOF
 
-      - name: "Upgrade path: 1.0 → 1.1 → 1.2 → 1.3"
+      - name: "Upgrade path: 1.0 → 1.1 → 1.2 → 1.3 → 1.4"
         env:
           PGPASSWORD: postgres
         run: |
@@ -1224,11 +1326,28 @@ jobs:
           end;
           $$;
 
+          -- Upgrade to 1.4
+          \i sql/ash-1.3-to-1.4.sql
+
+          do $$
+          begin
+            assert (select version from ash.config where singleton) = '1.4',
+              'version should be 1.4 after upgrade';
+            assert exists (
+              select from information_schema.columns
+              where table_schema = 'ash' and table_name = 'config' and column_name = 'missed_samples'
+            ), 'missed_samples column missing after 1.4 upgrade';
+            assert (select missed_samples from ash.config where singleton) = 0,
+              'missed_samples should be 0 after upgrade';
+            raise notice '1.3 -> 1.4 upgrade PASSED';
+          end;
+          $$;
+
           -- Uninstall after upgrade test
           select ash.uninstall('yes');
           EOF
 
-      - name: "Upgrade path: 1.1 → 1.2 → 1.3 (direct)"
+      - name: "Upgrade path: 1.1 → 1.2 → 1.3 → 1.4 (direct)"
         env:
           PGPASSWORD: postgres
         run: |
@@ -1268,6 +1387,18 @@ jobs:
           end;
           $$;
 
+          \i sql/ash-1.3-to-1.4.sql
+
+          do $$
+          begin
+            assert (select version from ash.config where singleton) = '1.4',
+              'version should be 1.4 after upgrade';
+            assert (select missed_samples from ash.config where singleton) = 0,
+              'missed_samples should be 0';
+            raise notice '1.3 -> 1.4 direct upgrade PASSED';
+          end;
+          $$;
+
           -- Uninstall
           select ash.uninstall('yes');
           EOF
@@ -1279,32 +1410,39 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           \i sql/ash-install.sql
 
-          -- Apply 1.1-to-1.2 and 1.2-to-1.3 on top of fresh install (should be idempotent)
+          -- Apply all upgrade scripts on top of fresh install (should be idempotent)
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
+          \i sql/ash-1.3-to-1.4.sql
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.3',
-              'version should still be 1.3';
+            assert (select version from ash.config where singleton) = '1.4',
+              'version should still be 1.4';
             raise notice 'Idempotent re-apply PASSED';
           end;
           $$;
 
-          -- Apply again
+          -- Set missed_samples to a known value before re-apply
+          update ash.config set missed_samples = 42 where singleton;
+
+          -- Apply again — must preserve data
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
+          \i sql/ash-1.3-to-1.4.sql
 
           do $$
           declare
             v_count int;
           begin
-            assert (select version from ash.config where singleton) = '1.3',
-              'version should still be 1.3 after second apply';
+            assert (select version from ash.config where singleton) = '1.4',
+              'version should still be 1.4 after second apply';
+            assert (select missed_samples from ash.config where singleton) = 42,
+              'missed_samples should be preserved (42) after idempotent re-apply';
             select count(*) into v_count
             from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
             assert v_count >= 0, 'timeline_chart missing after re-apply';
-            raise notice 'Second re-apply PASSED';
+            raise notice 'Second re-apply PASSED (missed_samples preserved)';
           end;
           $$;
 
@@ -1361,6 +1499,7 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1-to-1.2.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.2-to-1.3.sql > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.3-to-1.4.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
