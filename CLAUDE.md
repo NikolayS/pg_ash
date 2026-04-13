@@ -16,6 +16,15 @@ CI via GitHub Actions:
 
 `ash-install.sql` is the source of truth. Upgrade scripts (`ash-X.Y-to-X.Z.sql`) are generated at release time, not in feature PRs.
 
+## Testing
+
+Red/green TDD: write failing tests first, then fix the code to make them pass.
+
+- **Bug fixes**: always write a test that reproduces the bug (RED), then fix (GREEN). This proves the fix works and prevents regressions.
+- **New features**: write tests for the expected behavior before or alongside the implementation. Run tests locally with `sudo -u postgres psql -v ON_ERROR_STOP=1 -f sql/ash-install.sql` and DO blocks with assertions.
+- **CI tests** live in `.github/workflows/test.yml`. Each test section uses PL/pgSQL `DO $$ ... assert ... $$` blocks. Assert exact values, not just row existence — a test that only checks "row exists" can't distinguish correct aggregation from garbage.
+- **Test locally on available PG version** before pushing. CI covers PG 14–18.
+
 ## Code Review
 
 All changes go through PRs. Before merging, run a REV review (https://gitlab.com/postgres-ai/rev/) and post the report as a PR comment. REV is designed for GitLab but works on GitHub PRs too.
