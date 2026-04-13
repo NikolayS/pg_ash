@@ -29,7 +29,8 @@ begin
         'event_queries', 'event_queries_at',
         'top_queries_with_text',
         'uninstall',
-        'debug_logging'
+        'debug_logging',
+        '_to_sample_ts'
       )
   loop
     execute 'drop function if exists ' || r.sig;
@@ -3725,6 +3726,7 @@ begin
 end $$;
 
 update ash.config set version = '1.4' where singleton;
+alter table ash.config alter column version set default '1.4';
 
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
