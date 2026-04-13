@@ -1629,11 +1629,28 @@ jobs:
             assert v_count > 0,
               'rollup_1m should have rows after rollup_minute';
 
-            -- Verify rollup_1m content
+            -- Verify rollup_1m content — exact values
             assert exists (
               select from ash.rollup_1m
               where ts = v_minute_ts and datid = 0::oid
             ), 'rollup_1m should have row for seeded minute';
+
+            -- Verify exact aggregated values
+            declare
+              v_r record;
+            begin
+              select * into v_r from ash.rollup_1m
+              where ts = v_minute_ts and datid = 0::oid;
+
+              assert v_r.samples = 3,
+                'rollup samples should be 3, got ' || v_r.samples;
+              assert v_r.peak_backends = 2,
+                'rollup peak_backends should be 2, got ' || v_r.peak_backends;
+              assert array_length(v_r.wait_counts, 1) >= 2,
+                'wait_counts should have at least one pair';
+              assert v_r.wait_counts[1] = v_wait_id,
+                'wait_counts[1] should be wait_id ' || v_wait_id || ', got ' || v_r.wait_counts[1];
+            end;
 
             -- Verify watermark advanced
             assert (select last_rollup_1m_ts from ash.config where singleton) is not null,
@@ -1666,11 +1683,24 @@ jobs:
               assert v_result > 0,
                 'rollup_hour should process seeded data';
 
-              -- Verify hourly aggregation
-              assert exists (
-                select from ash.rollup_1h
-                where ts = v_hour_ts and datid = 0::oid
-              ), 'rollup_1h should have row for seeded hour';
+              -- Verify hourly aggregation — exact values
+              declare
+                v_hr record;
+              begin
+                select * into v_hr from ash.rollup_1h
+                where ts = v_hour_ts and datid = 0::oid;
+
+                assert v_hr is not null, 'rollup_1h row missing';
+                assert v_hr.samples = 120,
+                  'hourly samples should be 120 (60+60), got ' || v_hr.samples;
+                assert v_hr.peak_backends = 5,
+                  'hourly peak_backends should be 5, got ' || v_hr.peak_backends;
+                -- wait_counts should be merged: wait_id with count 220 (120+100)
+                assert v_hr.wait_counts[1] = v_wait_id,
+                  'hourly wait_counts[1] should be wait_id';
+                assert v_hr.wait_counts[2] = 220,
+                  'hourly wait_counts[2] should be 220 (120+100), got ' || v_hr.wait_counts[2];
+              end;
             end;
 
             raise notice 'Rollup tests PASSED';
@@ -1832,6 +1862,76 @@ jobs:
           revoke all on schema ash from ash_test_user;
           revoke all on all tables in schema ash from ash_test_user;
           drop role ash_test_user;
+          EOF
+
+      - name: "Test v1.4: rollup_cleanup retention"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_old_ts int4;
+            v_recent_ts int4;
+            v_count int;
+            v_result text;
+          begin
+            -- Insert old data (40 days ago) and recent data (1 day ago)
+            v_old_ts := ash.ts_from_timestamptz(now() - interval '40 days');
+            v_recent_ts := ash.ts_from_timestamptz(now() - interval '1 day');
+
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            values
+              (v_old_ts, 0::oid, 10, 2, '{}'::int4[], '{}'::int8[]),
+              (v_recent_ts, 0::oid, 10, 2, '{}'::int4[], '{}'::int8[])
+            on conflict (ts, datid) do nothing;
+
+            -- Run cleanup with default 30-day retention
+            select ash.rollup_cleanup() into v_result;
+            assert v_result like 'cleanup:%', 'cleanup should return message';
+
+            -- Old row should be deleted
+            select count(*) into v_count from ash.rollup_1m where ts = v_old_ts;
+            assert v_count = 0,
+              'old rollup_1m row (40 days) should be deleted, got ' || v_count;
+
+            -- Recent row should survive
+            select count(*) into v_count from ash.rollup_1m where ts = v_recent_ts;
+            assert v_count = 1,
+              'recent rollup_1m row (1 day) should survive, got ' || v_count;
+
+            raise notice 'rollup_cleanup retention tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Test v1.4: advisory lock visibility"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_found bool;
+          begin
+            -- Acquire the ash_operation lock (same as take_sample uses)
+            perform pg_advisory_xact_lock(0, hashtext('ash_operation')::int4);
+
+            -- Verify it appears in pg_locks with correct classid/objid
+            select exists (
+              select from pg_locks
+              where locktype = 'advisory'
+                and classid = 0
+                and objid = hashtext('ash_operation')::int4::oid
+                and granted
+            ) into v_found;
+
+            assert v_found,
+              'ash_operation advisory lock should be visible in pg_locks';
+
+            raise notice 'Advisory lock visibility test PASSED';
+          end;
+          $$;
           EOF
 
       - name: Test uninstall

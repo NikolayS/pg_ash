@@ -708,8 +708,9 @@ declare
   v_rotation_minutes int;
 begin
   -- Advisory lock prevents concurrent rotation from pg_cron overlap.
-  -- rotate() is already REVOKE'd from PUBLIC — only schema owner can call it.
-  if not pg_try_advisory_lock(hashtext('ash_rotate')) then
+  -- Xact-level: auto-releases on commit/rollback — no leak risk with pg_cron
+  -- connection reuse. rotate() is REVOKE'd from PUBLIC — only schema owner.
+  if not pg_try_advisory_xact_lock(hashtext('ash_rotate')) then
     return 'skipped: another rotation in progress';
   end if;
 
@@ -722,7 +723,6 @@ begin
 
     -- Check if we rotated too recently (within 90% of rotation_period)
     if now() - v_rotated_at < v_rotation_period * 0.9 then
-      perform pg_advisory_unlock(hashtext('ash_rotate'));
       return 'skipped: rotated too recently at ' || v_rotated_at::text;
     end if;
 
@@ -766,16 +766,12 @@ begin
       'alter table ash.query_map_%s alter column id restart', v_truncate_slot
     );
 
-    perform pg_advisory_unlock(hashtext('ash_rotate'));
-
     return format('rotated: slot %s -> %s, truncated slot %s (sample + query_map)',
            v_old_slot, v_new_slot, v_truncate_slot);
 
   exception when lock_not_available then
-    perform pg_advisory_unlock(hashtext('ash_rotate'));
     return 'failed: lock timeout on partition truncate, will retry next cycle';
   when others then
-    perform pg_advisory_unlock(hashtext('ash_rotate'));
     raise;
   end;
 end;
@@ -1538,7 +1534,8 @@ as $$
   from interleaved
 $$;
 
--- Merge multiple query_counts arrays: same logic as _merge_wait_counts, int8.
+-- Merge multiple query_counts arrays: identical logic to _merge_wait_counts
+-- above, but int8 typed. Kept separate for type safety (no polymorphic overhead).
 create or replace function ash._merge_query_counts(p_flat int8[])
 returns int8[]
 language sql
@@ -1595,6 +1592,7 @@ as $$
     select id, cnt,
            row_number() over (order by cnt desc, id asc) as rn
     from pairs
+    order by cnt desc, id asc
     limit p_top
   ),
   interleaved as (
@@ -1691,7 +1689,8 @@ begin
         row_number() over (partition by d.datid order by count(*) desc, wm.id asc) as rn
       from decoded d
       join ash.wait_event_map wm
-        on wm.state || '|' || wm.type || '|' || wm.event = d.wait_event
+        on d.wait_event = case when wm.event = wm.type then wm.event
+                                else wm.type || ':' || wm.event end
       group by d.datid, wm.id
     ),
     wait_interleaved as (
