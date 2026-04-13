@@ -29,8 +29,7 @@ begin
         'event_queries', 'event_queries_at',
         'top_queries_with_text',
         'uninstall',
-        'debug_logging',
-        '_to_sample_ts'
+        'debug_logging'
       )
   loop
     execute 'drop function if exists ' || r.sig;
@@ -2675,6 +2674,18 @@ $$;
 -------------------------------------------------------------------------------
 -- Absolute time range functions — for incident investigation
 -------------------------------------------------------------------------------
+
+-- Backward-compat alias: old upgrade scripts (1.1-to-1.2, 1.2-to-1.3) reference
+-- this name in function bodies. Keep as a thin wrapper so re-applying old upgrade
+-- scripts on a v1.4 database doesn't fail. New code should use ts_from_timestamptz.
+create or replace function ash._to_sample_ts(p_ts timestamptz)
+returns int4
+language sql
+immutable
+parallel safe
+as $$
+  select ash.ts_from_timestamptz(p_ts)
+$$;
 
 -- Top waits in an absolute time range
 create or replace function ash.top_waits_at(
