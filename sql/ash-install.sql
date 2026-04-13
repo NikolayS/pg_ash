@@ -82,6 +82,29 @@ create table if not exists ash.config (
 -- Insert initial row if not exists
 insert into ash.config (singleton) values (true) on conflict do nothing;
 
+-- Migration: add v1.4 columns if upgrading from pre-1.4.
+-- Must run before any code reads these columns.
+do $$
+begin
+  if not exists (
+    select from information_schema.columns
+    where table_schema = 'ash' and table_name = 'config'
+      and column_name = 'num_partitions'
+  ) then
+    alter table ash.config
+      add column num_partitions smallint not null default 3
+        check (num_partitions between 3 and 32),
+      add column sampling_enabled bool not null default true,
+      add column skipped_samples int4 not null default 0,
+      add column missed_samples bigint not null default 0,
+      add column rollup_1m_retention_days smallint not null default 30,
+      add column rollup_1h_retention_days smallint not null default 1825,
+      add column rollup_min_backend_seconds smallint not null default 3,
+      add column last_rollup_1m_ts int4,
+      add column last_rollup_1h_ts int4;
+  end if;
+end $$;
+
 -- Wait event dictionary
 create table if not exists ash.wait_event_map (
   id    smallint primary key generated always as identity (start with 1),
