@@ -1578,6 +1578,15 @@ jobs:
             assert (select rollup_min_backend_seconds from ash.config where singleton) = 3,
               'rollup_min_backend_seconds default should be 3';
 
+            -- Clear data from prior tests (rotate() calls rollup_minute internally,
+            -- and rotation/sampler tests insert raw samples).
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m;
+            truncate ash.rollup_1h;
+            update ash.config
+            set last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+
             -- === Rollup with no data returns 0 ===
             select ash.rollup_minute() into v_result;
             assert v_result = 0, 'rollup_minute with no data should return 0';
