@@ -4,7 +4,7 @@
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/pg_ash)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/NikolayS/pg_ash/blob/main/LICENSE)
 [![Pure SQL](https://img.shields.io/badge/Pure_SQL-no_C_extension-green)](https://github.com/NikolayS/pg_ash)
-[![Functions tested](https://img.shields.io/badge/functions_tested-38%2F38_(100%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
+[![Functions tested](https://img.shields.io/badge/functions_tested-54%2F54_(100%25)-brightgreen)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
 
 Active Session History for Postgres — lightweight wait event sampling with zero bloat.
 
@@ -92,11 +92,15 @@ select * from ash.status();
 
 | Function | Description |
 |----------|-------------|
-| `ash.start(interval)` | Start sampling (default: `'1 second'`). Uses pg_cron if available, otherwise prints external scheduling instructions |
-| `ash.stop()` | Stop sampling (removes pg_cron jobs or reminds to stop external scheduler) |
-| `ash.status()` | Sampling status, version, partition info, debug_logging state |
+| `ash.start(interval)` | Start sampling (default: `'1 second'`). Uses pg_cron if available, otherwise prints external scheduling instructions. Also schedules rollup jobs |
+| `ash.stop()` | Stop sampling and rollups (removes pg_cron jobs, sets `sampling_enabled = false`) |
+| `ash.status()` | Sampling status, version, partition info, rollup metrics, debug_logging state |
 | `ash.take_sample()` | Take one sample manually (called automatically by the scheduler) |
-| `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers) |
+| `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers). Runs pre-truncation rollup to prevent data loss |
+| `ash.rebuild_partitions(N)` | Change partition count (3–32). **Destructive** — all raw sample data is lost. Rollup tables survive. Call `ash.start()` after to resume |
+| `ash.rollup_minute([batch])` | Aggregate raw samples into per-minute rollups. Watermark-based with catch-up. Default batch: 60 minutes |
+| `ash.rollup_hour()` | Aggregate minute rollups into hourly rollups. Watermark-based |
+| `ash.rollup_cleanup()` | Delete expired rollup rows per retention config |
 | `ash.set_debug_logging([bool])` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call with no argument to check current state |
 | `ash.uninstall('yes')` | Drop the ash schema and remove pg_cron jobs |
 
@@ -133,6 +137,26 @@ All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 
 
 Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 
+### Long-term trends (from rollup tables)
+
+| Function | Description |
+|----------|-------------|
+| `ash.minute_waits(interval, limit)` | Top wait events from minute rollups (default: last 1 hour) |
+| `ash.minute_waits_at(start, end, limit)` | Same, absolute time range |
+| `ash.hourly_queries(interval, limit)` | Top queries from hourly rollups with pg_stat_statements text (default: last 1 day) |
+| `ash.hourly_queries_at(start, end, limit)` | Same, absolute time range |
+| `ash.daily_peak_backends(interval)` | Peak and average backends per day (default: last 7 days) |
+| `ash.daily_peak_backends_at(start, end)` | Same, absolute time range |
+
+Rollup readers query `rollup_1m` / `rollup_1h` tables — they work even after raw samples have rotated away.
+
+### Helpers
+
+| Function | Description |
+|----------|-------------|
+| `ash.ts_from_timestamptz(timestamptz)` | Convert timestamptz to internal int4 epoch offset (useful for querying rollup tables directly) |
+| `ash.ts_to_timestamptz(int4)` | Convert int4 epoch offset back to timestamptz |
+
 ## Usage
 
 ### Check status
@@ -144,11 +168,15 @@ select * from ash.status();
 ```
            metric           |             value
 ----------------------------+-------------------------------
- version                    | 1.3
+ version                    | 1.4
  color                      | off
+ num_partitions             | 3
+ sampling_enabled           | true
+ skipped_samples            | 0
  current_slot               | 0
  sample_interval            | 00:00:01
  rotation_period            | 1 day
+ raw_retention              | 1 day + current partial
  include_bg_workers         | false
  debug_logging              | false
  installed_at               | 2026-02-16 08:30:00.000000+00
@@ -160,6 +188,12 @@ select * from ash.status();
  wait_event_map_count       | 11
  wait_event_map_utilization | 0.03%
  query_map_count            | 8
+ rollup_1m_rows             | 540
+ rollup_1m_oldest           | 2026-02-16 08:30:00+00
+ rollup_1m_newest           | 2026-02-16 08:39:00+00
+ rollup_1m_retention        | 30 days
+ rollup_1h_rows             | 0
+ rollup_1h_retention        | 1825 days
  pg_cron_available          | yes
 ```
 
@@ -504,7 +538,9 @@ select * from ash.top_queries_with_text('10 minutes');
 | Table | Purpose |
 |-------|---------|
 | `ash.wait_event_map` | Maps `(state, wait_event_type, wait_event)` to integer IDs |
-| `ash.query_map_0/1/2` | Maps `query_id` (from `pg_stat_activity`) to integer IDs (partitioned with samples) |
+| `ash.query_map_0..{N-1}` | Maps `query_id` (from `pg_stat_activity`) to integer IDs (one per sample partition, truncated on rotation) |
+| `ash.rollup_1m` | Per-minute aggregated samples (30-day retention) |
+| `ash.rollup_1h` | Per-hour aggregated rollups (5-year retention) |
 
 Dictionaries are auto-populated by the sampler. Wait events are stable (~600 entries max across all Postgres versions). Query map grows as new queries appear and is garbage-collected based on `last_seen`.
 
@@ -514,16 +550,16 @@ Encoding version is tracked in `ash.config.encoding_version`, not in the array i
 
 ### Rotation
 
-Skytools PGQ-style 3-partition ring buffer. Three physical tables (`sample_0`, `sample_1`, `sample_2`) rotate daily. TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
+Skytools PGQ-style N-partition ring buffer (default N=3, configurable 3–32 via `ash.rebuild_partitions(N)`). Physical tables (`sample_0` through `sample_{N-1}`) rotate at `rotation_period` intervals. TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
 
-Only 2 partitions hold data at any time. The third is always empty, ready for the next rotation.
+N-1 partitions hold data at any time. One is always empty, ready for the next rotation. Before truncation, `rotate()` calls `rollup_minute()` to aggregate endangered samples into rollup tables.
 
 ```
-┌──────────┐  ┌───────────┐  ┌──────────┐
-│ sample_0 │  │ sample_1  │  │ sample_2 │
-│ (today)  │  │(yesterday)│  │ (empty)  │
-│ writing  │  │ readable  │  │ next     │
-└──────────┘  └───────────┘  └──────────┘
+┌──────────┐  ┌───────────┐  ┌──────────┐    ┌───────────────┐
+│ sample_0 │  │ sample_1  │  │ sample_2 │    │ sample_{N-1}  │
+│ (today)  │  │(yesterday)│  │ (empty)  │... │ (readable)    │
+│ writing  │  │ readable  │  │ next     │    │               │
+└──────────┘  └───────────┘  └──────────┘    └───────────────┘
                               ↑ TRUNCATE + rotate
 ```
 
@@ -533,7 +569,9 @@ Reader functions decode arrays inline using `generate_subscripts()` with direct 
 
 ## Storage
 
-| Active backends | Storage/day | Max on disk (2 partitions) |
+### Raw samples
+
+| Active backends | Storage/day | Max on disk (N-1 partitions, default N=3) |
 |----------------|------------|---------------------------|
 | 10 | 11 MiB | 22 MiB |
 | 50 | 30 MiB | 60 MiB |
@@ -541,7 +579,16 @@ Reader functions decode arrays inline using `generate_subscripts()` with direct 
 | 200 | 100 MiB | 200 MiB |
 | 500 | 245 MiB | 490 MiB |
 
-At 500+ backends, TOAST LZ4 compression reduces actual storage.
+At 500+ backends, TOAST LZ4 compression reduces actual storage. Increasing `num_partitions` increases the number of days kept, not the daily rate.
+
+### Rollup tables
+
+| Level | Retention | Rows/db | Storage/db |
+|-------|----------|---------|-----------|
+| 1-minute (`rollup_1m`) | 30 days | ~43,200 | ~43 MiB |
+| 1-hour (`rollup_1h`) | 5 years | ~43,800 | ~77 MiB |
+
+Total: ~120 MiB per database for 5 years of trend data.
 
 ## Performance
 
@@ -584,6 +631,87 @@ update ash.config set rotation_period = '12 hours';
 
 -- check current configuration
 select * from ash.status();
+```
+
+### Defaults
+
+All configuration is in the `ash.config` singleton table:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `sample_interval` | `1 second` | Time between samples |
+| `rotation_period` | `1 day` | How often partitions rotate |
+| `num_partitions` | `3` | Number of sample partitions (3–32) |
+| `include_bg_workers` | `false` | Sample autovacuum, logical replication, parallel workers |
+| `debug_logging` | `false` | RAISE LOG for every sampled session |
+| `rollup_1m_retention_days` | `30` | How long to keep minute-level rollups |
+| `rollup_1h_retention_days` | `1825` | How long to keep hourly rollups (5 years) |
+| `rollup_min_backend_seconds` | `3` | Minimum backend-seconds for a query to appear in rollup query_counts |
+
+### Configurable partitions
+
+By default, pg_ash uses 3 partitions (1 day of history + current partial). To keep more raw sample history, increase the partition count:
+
+```sql
+-- keep 7 days of raw samples (9 partitions × 1-day rotation = 7 readable days + current)
+select ash.rebuild_partitions(9);
+
+-- resume sampling after rebuild
+select ash.start();
+
+-- verify
+select * from ash.status();
+--  num_partitions  | 9
+--  raw_retention   | 7 days + current partial
+```
+
+The retention formula is `(N - 2) × rotation_period`. The minimum is 3 (current + previous + one being truncated), the maximum is 32.
+
+`rebuild_partitions()` is **destructive** — all raw samples are lost. Rollup tables survive. You must call `ash.start()` afterward to resume sampling.
+
+### Rollup tables for long-term trends
+
+Raw samples rotate away after `(N-2) × rotation_period`. Rollup tables preserve aggregated data for long-term trend analysis:
+
+- **`rollup_1m`**: per-minute aggregates, kept for 30 days (~43 MiB/db)
+- **`rollup_1h`**: per-hour aggregates, kept for 5 years (~77 MiB/db)
+
+Rollups are populated automatically when pg_cron is available (`ash.start()` schedules them). Without pg_cron, schedule externally:
+
+```bash
+# Every minute: aggregate raw samples into minute rollups
+* * * * * psql -qAtX -d mydb -c "SELECT ash.rollup_minute();"
+
+# Every hour: aggregate minutes into hourly rollups
+0 * * * * psql -qAtX -d mydb -c "SELECT ash.rollup_hour();"
+
+# Daily at 3am: delete expired rollup rows
+0 3 * * * psql -qAtX -d mydb -c "SELECT ash.rollup_cleanup();"
+```
+
+Query rollup data with the rollup reader functions:
+
+```sql
+-- what were the top wait events in the last 6 hours? (from minute rollups)
+select * from ash.minute_waits('6 hours');
+
+-- top queries over the last week (from hourly rollups)
+select * from ash.hourly_queries('7 days');
+
+-- peak concurrency trend over the last 30 days
+select * from ash.daily_peak_backends('30 days');
+
+-- investigate a specific time range (even if raw samples are gone)
+select * from ash.minute_waits_at('2026-03-01 02:00', '2026-03-01 03:00');
+```
+
+Rollups use backend-seconds as the count unit (Oracle ASH-compatible). Each sample appearance = 1 backend-second at 1s sampling interval.
+
+To change retention:
+
+```sql
+update ash.config set rollup_1m_retention_days = 14 where singleton;   -- keep 2 weeks
+update ash.config set rollup_1h_retention_days = 365 where singleton;  -- keep 1 year
 ```
 
 ### Debug logging
@@ -691,11 +819,16 @@ while True:
     time.sleep(1)
 ```
 
-Don't forget to also schedule `ash.rotate()` — once per `rotation_period` (default: daily):
+Don't forget to also schedule rotation and rollups:
 
 ```bash
 # System cron: rotate daily at midnight
 0 0 * * * psql -qAtX -d mydb -c "SELECT ash.rotate();"
+
+# Rollup: every minute, every hour, daily cleanup
+* * * * * psql -qAtX -d mydb -c "SELECT ash.rollup_minute();"
+0 * * * * psql -qAtX -d mydb -c "SELECT ash.rollup_hour();"
+0 3 * * * psql -qAtX -d mydb -c "SELECT ash.rollup_cleanup();"
 ```
 
 ## Known limitations
@@ -703,7 +836,7 @@ Don't forget to also schedule `ash.rotate()` — once per `rotation_period` (def
 - **Primary only** — pg_ash requires writes (`INSERT` into sample tables, `TRUNCATE` on rotation), so it cannot run on physical standbys or read replicas. Install it on the primary; it samples all databases from there.
 - **Observer-effect protection** — the sampler pg_cron command includes `SET statement_timeout = '500ms'` to prevent `take_sample()` from becoming a problem on overloaded servers. If `pg_stat_activity` is slow (thousands of backends), the sample is canceled rather than piling up. Normal execution is ~50ms — the 500ms cap gives 10× headroom. Adjust in `cron.job` if needed.
 - **Sampling gaps under heavy load** — pg_cron runs in a single background worker and under heavy load (lock storms, many concurrent sessions) it can't always keep up with the 1-second schedule. You may see gaps of 8s, 13s, or even 30s+ between samples — ironically during the most interesting moments. This is a fundamental pg_cron limitation, not a bug. If precise 1-second sampling matters, use an [external sampler](#scheduling-without-pg_cron) which is more reliable under load.
-- **24-hour queries are slow** (~6s for full-day scan) — aggregate rollup tables are [planned](blueprints/ROLLUP_DESIGN.md).
+- **24-hour raw sample queries are slow** (~6s for full-day scan) — use rollup reader functions (`ash.minute_waits`, `ash.hourly_queries`, `ash.daily_peak_backends`) for queries over long time ranges.
 - **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
 - **query_map hard cap at 50k entries** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. This can flood the query_map partitions. A hard cap of 50,000 entries per partition prevents unbounded growth — queries beyond the cap are tracked as "unknown." PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
