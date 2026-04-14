@@ -82,6 +82,9 @@ select ash.uninstall('yes');
 -- from 1.2 to 1.3
 \i sql/ash-1.2-to-1.3.sql
 
+-- from 1.3 to 1.4
+\i sql/ash-1.3-to-1.4.sql
+
 -- check version
 select * from ash.status();
 ```
