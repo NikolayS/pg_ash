@@ -85,8 +85,10 @@ create table if not exists ash.config (
   version                    text not null default '1.4',
   rotated_at                 timestamptz not null default clock_timestamp(),
   installed_at               timestamptz not null default clock_timestamp(),
-  rollup_1m_retention_days   smallint not null default 30,
-  rollup_1h_retention_days   smallint not null default 1825,
+  rollup_1m_retention_days   smallint not null default 30
+                               check (rollup_1m_retention_days >= 1),
+  rollup_1h_retention_days   smallint not null default 1825
+                               check (rollup_1h_retention_days >= 1),
   rollup_min_backend_seconds smallint not null default 3,
   last_rollup_1m_ts          int4,
   last_rollup_1h_ts          int4,
@@ -123,6 +125,27 @@ alter table ash.config
   -- registrations are being silently dropped for that sample (those sessions
   -- won't appear in encoded data for this tick). Surfaced by ash.status().
   add column if not exists register_wait_cap_hits bigint not null default 0;
+
+-- Ensure retention CHECK constraints exist for both fresh and upgrade paths.
+-- ADD COLUMN IF NOT EXISTS above doesn't apply CHECKs to pre-existing columns,
+-- so add them explicitly here (guarded by a not-exists probe for idempotency).
+do $$
+begin
+  if not exists (
+    select from pg_constraint where conname = 'config_rollup_1m_retention_days_check'
+  ) then
+    alter table ash.config
+      add constraint config_rollup_1m_retention_days_check
+      check (rollup_1m_retention_days >= 1);
+  end if;
+  if not exists (
+    select from pg_constraint where conname = 'config_rollup_1h_retention_days_check'
+  ) then
+    alter table ash.config
+      add constraint config_rollup_1h_retention_days_check
+      check (rollup_1h_retention_days >= 1);
+  end if;
+end $$;
 
 -- Wait event dictionary
 -- M-BUG-6 / H-SEC-3: id stays smallint (matches legacy upgrade scripts; a
@@ -1711,9 +1734,42 @@ create table if not exists ash.rollup_1h (
   primary key (ts, datid)
 );
 
+-- Array concatenation aggregates: flat-concatenate arrays of varying lengths.
+-- PostgreSQL's built-in array_agg() on arrays requires equal dimensions and
+-- produces a multi-dimensional result. These use array_cat() to produce a
+-- flat 1-D result, which _merge_wait_counts/_merge_query_counts expect.
+do $$
+begin
+  if not exists (
+    select from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'ash' and p.proname = '_int4_array_cat_agg'
+      and p.prokind = 'a'
+  ) then
+    create aggregate ash._int4_array_cat_agg(int4[]) (
+      sfunc = array_cat,
+      stype = int4[],
+      initcond = '{}'
+    );
+  end if;
+
+  if not exists (
+    select from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'ash' and p.proname = '_int8_array_cat_agg'
+      and p.prokind = 'a'
+  ) then
+    create aggregate ash._int8_array_cat_agg(int8[]) (
+      sfunc = array_cat,
+      stype = int8[],
+      initcond = '{}'
+    );
+  end if;
+end $$;
+
 -- Merge multiple wait_counts arrays: sum counts for matching wait_ids.
--- Input: flat int4[] from array_agg(wait_counts) — PG concatenates
--- the pairs into one flat array. The function extracts id/count pairs
+-- Input: flat int4[] from _int4_array_cat_agg(wait_counts) — concatenated
+-- pairs into one flat array. The function extracts id/count pairs
 -- by position parity, groups by id, sums counts, and re-interleaves.
 -- Uses CROSS JOIN LATERAL (VALUES ...) for correct pair ordering
 -- (avoids the ORDER BY v DESC bug that swaps id/count when count > id).
@@ -2072,11 +2128,11 @@ begin
       sum(samples)::smallint,
       max(peak_backends)::smallint,
       ash._merge_wait_counts(
-        array_agg(wait_counts) filter (where wait_counts <> '{}')
+        ash._int4_array_cat_agg(wait_counts) filter (where wait_counts <> '{}')
       ),
       ash._truncate_pairs(
         ash._merge_query_counts(
-          array_agg(query_counts) filter (where query_counts <> '{}')
+          ash._int8_array_cat_agg(query_counts) filter (where query_counts <> '{}')
         ),
         100  -- top 100 queries per hour
       )
@@ -4429,6 +4485,8 @@ begin
   execute format('revoke all on function ash._merge_wait_counts(int4[]) from public');
   execute format('revoke all on function ash._merge_query_counts(int8[]) from public');
   execute format('revoke all on function ash._truncate_pairs(int8[], int) from public');
+  execute format('revoke all on function ash._int4_array_cat_agg(int4[]) from public');
+  execute format('revoke all on function ash._int8_array_cat_agg(int8[]) from public');
 
   execute format('grant execute on function ash.start(interval) to %I', v_owner);
   execute format('grant execute on function ash.stop() to %I', v_owner);
@@ -4445,6 +4503,8 @@ begin
   execute format('grant execute on function ash._merge_wait_counts(int4[]) to %I', v_owner);
   execute format('grant execute on function ash._merge_query_counts(int8[]) to %I', v_owner);
   execute format('grant execute on function ash._truncate_pairs(int8[], int) to %I', v_owner);
+  execute format('grant execute on function ash._int4_array_cat_agg(int4[]) to %I', v_owner);
+  execute format('grant execute on function ash._int8_array_cat_agg(int8[]) to %I', v_owner);
 
   -- ts helpers: grant to PUBLIC (harmless read-only conversion, useful for Grafana panels)
   -- ts_from_timestamptz and ts_to_timestamptz are already PUBLIC by default
