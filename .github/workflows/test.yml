@@ -1722,6 +1722,60 @@ jobs:
             raise notice 'Rollup tests PASSED';
           end;
           $$;
+
+          -- Test rollup_hour with different-length arrays
+          -- Regression test: array_agg() on arrays of different lengths
+          -- crashes with "cannot accumulate arrays of different dimensionality".
+          -- Fixed by using _int4_array_cat_agg / _int8_array_cat_agg.
+          do $$
+          declare
+            v_wait_id1 smallint;
+            v_wait_id2 smallint;
+            v_hour_ts int4;
+            v_result int;
+            v_hr record;
+          begin
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait_id1;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_wait_id2;
+
+            truncate ash.rollup_1h;
+
+            v_hour_ts := (ash.ts_from_timestamptz(
+              date_trunc('hour', now() - interval '5 hours')
+            ) / 3600) * 3600;
+
+            -- Minute 1: 2 wait types (4-element array), 2 queries (4-element array)
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            values (v_hour_ts, 0::oid, 30, 5,
+              array[v_wait_id1, 60, v_wait_id2, 40]::int4[],
+              '{12345,60,67890,20}'::int8[])
+            on conflict (ts, datid) do nothing;
+
+            -- Minute 2: 1 wait type (2-element array), 1 query (2-element array)
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            values (v_hour_ts + 60, 0::oid, 30, 3,
+              array[v_wait_id1, 50]::int4[],
+              '{12345,40}'::int8[])
+            on conflict (ts, datid) do nothing;
+
+            update ash.config set last_rollup_1h_ts = null where singleton;
+            select ash.rollup_hour() into v_result;
+            assert v_result > 0,
+              'rollup_hour should handle different-length arrays';
+
+            select * into v_hr from ash.rollup_1h
+            where ts = v_hour_ts and datid = 0::oid;
+
+            assert v_hr.samples = 60,
+              'samples should be 60 (30+30), got ' || v_hr.samples;
+            assert v_hr.peak_backends = 5,
+              'peak should be 5, got ' || v_hr.peak_backends;
+            assert v_hr.wait_counts[1] = v_wait_id1 and v_hr.wait_counts[2] = 110,
+              'CPU* merged count should be 110 (60+50), got ' || v_hr.wait_counts::text;
+
+            raise notice 'Rollup hour different-length arrays test PASSED';
+          end;
+          $$;
           EOF
 
       - name: "Test v1.4: rollup reader functions"
@@ -1919,6 +1973,27 @@ jobs:
             raise notice 'rollup_cleanup retention tests PASSED';
           end;
           $$;
+
+          -- Test CHECK constraint prevents negative retention
+          do $$
+          begin
+            begin
+              update ash.config set rollup_1m_retention_days = 0 where singleton;
+              assert false, 'should not allow retention_days = 0';
+            exception when check_violation then
+              null; -- expected
+            end;
+
+            begin
+              update ash.config set rollup_1h_retention_days = -1 where singleton;
+              assert false, 'should not allow negative retention_days';
+            exception when check_violation then
+              null; -- expected
+            end;
+
+            raise notice 'Retention CHECK constraint tests PASSED';
+          end;
+          $$;
           EOF
 
       - name: "Test v1.4: advisory lock visibility"
@@ -1955,12 +2030,39 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Verify v1.4 rollup objects exist before uninstall
+          do $$
+          begin
+            assert exists (select from pg_tables
+              where schemaname = 'ash' and tablename = 'rollup_1m'),
+              'rollup_1m should exist before uninstall';
+            assert exists (select from pg_tables
+              where schemaname = 'ash' and tablename = 'rollup_1h'),
+              'rollup_1h should exist before uninstall';
+            assert exists (select from pg_proc
+              where proname = 'rollup_minute' and pronamespace = 'ash'::regnamespace),
+              'rollup_minute() should exist before uninstall';
+            assert exists (select from pg_proc
+              where proname = 'rebuild_partitions' and pronamespace = 'ash'::regnamespace),
+              'rebuild_partitions() should exist before uninstall';
+          end;
+          $$;
+
           select ash.uninstall('yes');
+
           do $$
           begin
             assert not exists (select from pg_namespace where nspname = 'ash'),
               'schema not dropped after uninstall';
-            raise notice 'Uninstall test PASSED';
+            -- All v1.4 objects gone (CASCADE)
+            assert not exists (select from pg_tables
+              where schemaname = 'ash'),
+              'no ash tables should remain after uninstall';
+            assert not exists (select from pg_proc p
+              join pg_namespace n on n.oid = p.pronamespace
+              where n.nspname = 'ash'),
+              'no ash functions should remain after uninstall';
+            raise notice 'Uninstall test PASSED (including v1.4 rollup objects)';
           end;
           $$;
           EOF
