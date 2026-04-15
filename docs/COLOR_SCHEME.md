@@ -91,3 +91,36 @@ Functions that support color:
 - `query_waits()` / `query_waits_at()` — bar column
 - `waits_by_type()` / `waits_by_type_at()` — bar column
 - `timeline_chart()` / `timeline_chart_at()` — chart column
+
+## Comparison with other tools
+
+Color assignments vary across PostgreSQL monitoring tools. CPU = green is the only
+universal convention. Exact hex codes are available only for open-source tools
+(extracted from source code); commercial/SaaS tools don't publish their palettes.
+
+| Wait event type | pg_ash | PASH-Viewer / ASH-Viewer | AWS PI | Cloud SQL QI |
+|---|---|---|---|---|
+| CPU | $\color{#50FA7B}{\rule{40pt}{12pt}}$ green | $\color{#00CC00}{\rule{40pt}{12pt}}$ green | green | green |
+| IO | $\color{#1E64FF}{\rule{40pt}{12pt}}$ vivid blue | $\color{#004AE7}{\rule{40pt}{12pt}}$ deep blue | orange | blue |
+| Lock | $\color{#FF5555}{\rule{40pt}{12pt}}$ red | $\color{#C02800}{\rule{40pt}{12pt}}$ dark red | — | orange |
+| LWLock | $\color{#FF79C6}{\rule{40pt}{12pt}}$ pink | $\color{#8B1A00}{\rule{40pt}{12pt}}$ darker red | purple | — |
+| IPC | $\color{#00C8FF}{\rule{40pt}{12pt}}$ cyan | $\color{#F06EAA}{\rule{40pt}{12pt}}$ pink | — | — |
+| Client | $\color{#FFDC64}{\rule{40pt}{12pt}}$ yellow | $\color{#9F9371}{\rule{40pt}{12pt}}$ tan | — | — |
+| Timeout | $\color{#FFA500}{\rule{40pt}{12pt}}$ orange | $\color{#54381C}{\rule{40pt}{12pt}}$ brown | — | — |
+| BufferPin | $\color{#00D2B4}{\rule{40pt}{12pt}}$ teal | $\color{#00A1E6}{\rule{40pt}{12pt}}$ light blue | — | — |
+| Activity | $\color{#9664FF}{\rule{40pt}{12pt}}$ purple | $\color{#FFA500}{\rule{40pt}{12pt}}$ orange | — | — |
+| Extension | $\color{#BE96FF}{\rule{40pt}{12pt}}$ light purple | $\color{#007B14}{\rule{40pt}{12pt}}$ dark green | — | — |
+
+"—" = color not publicly documented. AWS PI and Cloud SQL QI colors are
+confirmed from blog posts only; exact hex codes are not published.
+
+Sources:
+- [PASH-Viewer](https://github.com/dbacvetkov/PASH-Viewer) / [ASH-Viewer](https://github.com/akardapolov/ASH-Viewer) — identical palettes, common codebase ancestry
+- [AWS PI blog](https://aws.amazon.com/blogs/database/analyzing-amazon-rds-database-workload-with-performance-insights/)
+- [Cloud SQL QI blog](https://www.dbi-services.com/blog/google_insights/)
+
+Notable differences:
+- **IO**: pg_ash and PASH-Viewer use blue; AWS PI uses orange
+- **Lock vs LWLock**: PASH-Viewer uses two similar dark reds (`#C02800` / `#8B1A00`),
+  making them hard to distinguish. pg_ash uses red vs pink for clear separation.
+- **Activity**: PASH-Viewer uses orange (same hex as pg_ash's Timeout), pg_ash uses purple
