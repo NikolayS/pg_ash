@@ -6,20 +6,20 @@ Grafana dashboards (Dashboard 4 — Wait Sampling).
 
 ## Color mapping
 
-| Wait type | Color | Hex | RGB | ANSI code |
+| Wait event type | Color | Hex | RGB | ANSI code |
 |---|---|---|---|---|
-| CPU* | green | `#50FA7B` | 80, 250, 123 | `\033[38;2;80;250;123m` |
-| IdleTx | light yellow | `#F1FA8C` | 241, 250, 140 | `\033[38;2;241;250;140m` |
-| IO | vivid blue | `#1E64FF` | 30, 100, 255 | `\033[38;2;30;100;255m` |
-| Lock | red | `#FF5555` | 255, 85, 85 | `\033[38;2;255;85;85m` |
-| LWLock | pink | `#FF79C6` | 255, 121, 198 | `\033[38;2;255;121;198m` |
-| IPC | cyan | `#00C8FF` | 0, 200, 255 | `\033[38;2;0;200;255m` |
-| Client | yellow | `#FFDC64` | 255, 220, 100 | `\033[38;2;255;220;100m` |
-| Timeout | orange | `#FFA500` | 255, 165, 0 | `\033[38;2;255;165;0m` |
-| BufferPin | teal | `#00D2B4` | 0, 210, 180 | `\033[38;2;0;210;180m` |
-| Activity | purple | `#9664FF` | 150, 100, 255 | `\033[38;2;150;100;255m` |
-| Extension | light purple | `#BE96FF` | 190, 150, 255 | `\033[38;2;190;150;255m` |
-| Unknown/Other | gray | `#B4B4B4` | 180, 180, 180 | `\033[38;2;180;180;180m` |
+| CPU* | $\color{#50FA7B}{\rule{12pt}{12pt}}$ green | `#50FA7B` | 80, 250, 123 | `\033[38;2;80;250;123m` |
+| IdleTx | $\color{#F1FA8C}{\rule{12pt}{12pt}}$ light yellow | `#F1FA8C` | 241, 250, 140 | `\033[38;2;241;250;140m` |
+| IO | $\color{#1E64FF}{\rule{12pt}{12pt}}$ vivid blue | `#1E64FF` | 30, 100, 255 | `\033[38;2;30;100;255m` |
+| Lock | $\color{#FF5555}{\rule{12pt}{12pt}}$ red | `#FF5555` | 255, 85, 85 | `\033[38;2;255;85;85m` |
+| LWLock | $\color{#FF79C6}{\rule{12pt}{12pt}}$ pink | `#FF79C6` | 255, 121, 198 | `\033[38;2;255;121;198m` |
+| IPC | $\color{#00C8FF}{\rule{12pt}{12pt}}$ cyan | `#00C8FF` | 0, 200, 255 | `\033[38;2;0;200;255m` |
+| Client | $\color{#FFDC64}{\rule{12pt}{12pt}}$ yellow | `#FFDC64` | 255, 220, 100 | `\033[38;2;255;220;100m` |
+| Timeout | $\color{#FFA500}{\rule{12pt}{12pt}}$ orange | `#FFA500` | 255, 165, 0 | `\033[38;2;255;165;0m` |
+| BufferPin | $\color{#00D2B4}{\rule{12pt}{12pt}}$ teal | `#00D2B4` | 0, 210, 180 | `\033[38;2;0;210;180m` |
+| Activity | $\color{#9664FF}{\rule{12pt}{12pt}}$ purple | `#9664FF` | 150, 100, 255 | `\033[38;2;150;100;255m` |
+| Extension | $\color{#BE96FF}{\rule{12pt}{12pt}}$ light purple | `#BE96FF` | 190, 150, 255 | `\033[38;2;190;150;255m` |
+| Unknown/Other | $\color{#B4B4B4}{\rule{12pt}{12pt}}$ gray | `#B4B4B4` | 180, 180, 180 | `\033[38;2;180;180;180m` |
 
 Reset code: `\033[0m`
 
