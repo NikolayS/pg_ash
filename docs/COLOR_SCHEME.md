@@ -95,15 +95,14 @@ Functions that support color:
 ## Comparison with other tools
 
 Color assignments vary across PostgreSQL monitoring tools. CPU = green is the only
-universal convention. Exact hex codes are available only for open-source tools
-(extracted from source code); commercial/SaaS tools don't publish their palettes.
+universal convention.
 
-| Wait event type | pg_ash | PASH-Viewer / ASH-Viewer | AWS PI | Cloud SQL QI |
+| Wait event type | pg_ash | PASH-Viewer / ASH-Viewer | AWS PI¹ | AlloyDB QI² |
 |---|---|---|---|---|
-| CPU | $\color{#50FA7B}{\rule{40pt}{12pt}}$ green | $\color{#00CC00}{\rule{40pt}{12pt}}$ green | green | green |
-| IO | $\color{#1E64FF}{\rule{40pt}{12pt}}$ vivid blue | $\color{#004AE7}{\rule{40pt}{12pt}}$ deep blue | orange | blue |
-| Lock | $\color{#FF5555}{\rule{40pt}{12pt}}$ red | $\color{#C02800}{\rule{40pt}{12pt}}$ dark red | — | orange |
-| LWLock | $\color{#FF79C6}{\rule{40pt}{12pt}}$ pink | $\color{#8B1A00}{\rule{40pt}{12pt}}$ darker red | purple | — |
+| CPU | $\color{#50FA7B}{\rule{40pt}{12pt}}$ green | $\color{#00CC00}{\rule{40pt}{12pt}}$ green | $\color{#2CA02C}{\rule{40pt}{12pt}}$ green | $\color{#579B11}{\rule{40pt}{12pt}}$ green |
+| IO | $\color{#1E64FF}{\rule{40pt}{12pt}}$ vivid blue | $\color{#004AE7}{\rule{40pt}{12pt}}$ deep blue | $\color{#FF7F0E}{\rule{40pt}{12pt}}$ orange | $\color{#F9023D}{\rule{40pt}{12pt}}$ red |
+| Lock | $\color{#FF5555}{\rule{40pt}{12pt}}$ red | $\color{#C02800}{\rule{40pt}{12pt}}$ dark red | $\color{#C49C94}{\rule{40pt}{12pt}}$ light brown | $\color{#0451ED}{\rule{40pt}{12pt}}$ blue |
+| LWLock | $\color{#FF79C6}{\rule{40pt}{12pt}}$ pink | $\color{#8B1A00}{\rule{40pt}{12pt}}$ darker red | $\color{#E377C2}{\rule{40pt}{12pt}}$ pink | $\color{#178D95}{\rule{40pt}{12pt}}$ teal |
 | IPC | $\color{#00C8FF}{\rule{40pt}{12pt}}$ cyan | $\color{#F06EAA}{\rule{40pt}{12pt}}$ pink | — | — |
 | Client | $\color{#FFDC64}{\rule{40pt}{12pt}}$ yellow | $\color{#9F9371}{\rule{40pt}{12pt}}$ tan | — | — |
 | Timeout | $\color{#FFA500}{\rule{40pt}{12pt}}$ orange | $\color{#54381C}{\rule{40pt}{12pt}}$ brown | — | — |
@@ -111,16 +110,28 @@ universal convention. Exact hex codes are available only for open-source tools
 | Activity | $\color{#9664FF}{\rule{40pt}{12pt}}$ purple | $\color{#FFA500}{\rule{40pt}{12pt}}$ orange | — | — |
 | Extension | $\color{#BE96FF}{\rule{40pt}{12pt}}$ light purple | $\color{#007B14}{\rule{40pt}{12pt}}$ dark green | — | — |
 
-"—" = color not publicly documented. AWS PI and Cloud SQL QI colors are
-confirmed from blog posts only; exact hex codes are not published.
+¹ **AWS Performance Insights** uses the D3.js Category20 palette with **dynamic**
+positional assignment — colors depend on rank by AAS contribution, not on the wait
+event type. CPU reliably gets green (`#2CA02C`) because it is almost always the
+top contributor. The remaining colors shown above are typical but can shift between
+dashboard views. Hex codes extracted from official AWS blog post screenshots.
+
+² **AlloyDB Advanced Query Insights** colors extracted from the
+[Google Cloud blog](https://cloud.google.com/blog/products/databases/new-query-insights-capabilities-for-cloud-sql-enterprise-plus)
+GIF screenshots. The basic Cloud SQL Query Insights view only shows three categories
+(CPU = green, IO Wait = blue, Lock Wait = orange) with no per-type breakdown.
+
+"—" = not observed in available screenshots.
 
 Sources:
 - [PASH-Viewer](https://github.com/dbacvetkov/PASH-Viewer) / [ASH-Viewer](https://github.com/akardapolov/ASH-Viewer) — identical palettes, common codebase ancestry
-- [AWS PI blog](https://aws.amazon.com/blogs/database/analyzing-amazon-rds-database-workload-with-performance-insights/)
+- [AWS PI blog](https://aws.amazon.com/blogs/database/analyzing-amazon-rds-database-workload-with-performance-insights/) — screenshots analyzed for pixel colors
+- [AlloyDB QI blog](https://cloud.google.com/blog/products/databases/new-query-insights-capabilities-for-cloud-sql-enterprise-plus) — GIF frames analyzed for legend swatches
 - [Cloud SQL QI blog](https://www.dbi-services.com/blog/google_insights/)
 
 Notable differences:
-- **IO**: pg_ash and PASH-Viewer use blue; AWS PI uses orange
+- **IO**: pg_ash and PASH-Viewer use blue; AWS PI uses orange; AlloyDB uses red
+- **Lock**: pg_ash uses red; AlloyDB uses blue; AWS PI uses light brown (dynamic)
 - **Lock vs LWLock**: PASH-Viewer uses two similar dark reds (`#C02800` / `#8B1A00`),
   making them hard to distinguish. pg_ash uses red vs pink for clear separation.
 - **Activity**: PASH-Viewer uses orange (same hex as pg_ash's Timeout), pg_ash uses purple
