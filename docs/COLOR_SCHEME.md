@@ -94,44 +94,86 @@ Functions that support color:
 
 ## Comparison with other tools
 
-Color assignments vary across PostgreSQL monitoring tools. CPU = green is the only
-universal convention.
+Color assignments vary across tools. CPU = green is the only universal convention.
+All hex codes below are from source code or pixel-sampled from published screenshots.
 
-| Wait event type | pg_ash | PASH-Viewer / ASH-Viewer | AWS PI¹ | AlloyDB QI² |
-|---|---|---|---|---|
-| CPU | $\color{#50FA7B}{\rule{40pt}{12pt}}$ green | $\color{#00CC00}{\rule{40pt}{12pt}}$ green | $\color{#2CA02C}{\rule{40pt}{12pt}}$ green | $\color{#579B11}{\rule{40pt}{12pt}}$ green |
-| IO | $\color{#1E64FF}{\rule{40pt}{12pt}}$ vivid blue | $\color{#004AE7}{\rule{40pt}{12pt}}$ deep blue | $\color{#FF7F0E}{\rule{40pt}{12pt}}$ orange | $\color{#F9023D}{\rule{40pt}{12pt}}$ red |
-| Lock | $\color{#FF5555}{\rule{40pt}{12pt}}$ red | $\color{#C02800}{\rule{40pt}{12pt}}$ dark red | $\color{#C49C94}{\rule{40pt}{12pt}}$ light brown | $\color{#0451ED}{\rule{40pt}{12pt}}$ blue |
-| LWLock | $\color{#FF79C6}{\rule{40pt}{12pt}}$ pink | $\color{#8B1A00}{\rule{40pt}{12pt}}$ darker red | $\color{#E377C2}{\rule{40pt}{12pt}}$ pink | $\color{#178D95}{\rule{40pt}{12pt}}$ teal |
-| IPC | $\color{#00C8FF}{\rule{40pt}{12pt}}$ cyan | $\color{#F06EAA}{\rule{40pt}{12pt}}$ pink | — | — |
-| Client | $\color{#FFDC64}{\rule{40pt}{12pt}}$ yellow | $\color{#9F9371}{\rule{40pt}{12pt}}$ tan | — | — |
-| Timeout | $\color{#FFA500}{\rule{40pt}{12pt}}$ orange | $\color{#54381C}{\rule{40pt}{12pt}}$ brown | — | — |
-| BufferPin | $\color{#00D2B4}{\rule{40pt}{12pt}}$ teal | $\color{#00A1E6}{\rule{40pt}{12pt}}$ light blue | — | — |
-| Activity | $\color{#9664FF}{\rule{40pt}{12pt}}$ purple | $\color{#FFA500}{\rule{40pt}{12pt}}$ orange | — | — |
-| Extension | $\color{#BE96FF}{\rule{40pt}{12pt}}$ light purple | $\color{#007B14}{\rule{40pt}{12pt}}$ dark green | — | — |
+### PostgreSQL tools
 
-¹ **AWS Performance Insights** uses the D3.js Category20 palette with **dynamic**
-positional assignment — colors depend on rank by AAS contribution, not on the wait
-event type. CPU reliably gets green (`#2CA02C`) because it is almost always the
-top contributor. The remaining colors shown above are typical but can shift between
-dashboard views. Hex codes extracted from official AWS blog post screenshots.
+| Type | pg_ash | PASH-Viewer¹ | PostgresAI² | Pigsty | pg_profile | AWS PI³ | AlloyDB⁴ |
+|---|---|---|---|---|---|---|---|
+| CPU | $\color{#50FA7B}{\rule{30pt}{10pt}}$ | $\color{#00CC00}{\rule{30pt}{10pt}}$ | $\color{#73BF69}{\rule{30pt}{10pt}}$ | $\color{#C8F2C2}{\rule{30pt}{10pt}}$ | — | $\color{#2CA02C}{\rule{30pt}{10pt}}$ | $\color{#579B11}{\rule{30pt}{10pt}}$ |
+| IO | $\color{#1E64FF}{\rule{30pt}{10pt}}$ | $\color{#004AE7}{\rule{30pt}{10pt}}$ | $\color{#5794F2}{\rule{30pt}{10pt}}$ | $\color{#F7CB67}{\rule{30pt}{10pt}}$ | $\color{#FFAA4D}{\rule{30pt}{10pt}}$ | $\color{#FF7F0E}{\rule{30pt}{10pt}}$ | $\color{#F9023D}{\rule{30pt}{10pt}}$ |
+| Lock | $\color{#FF5555}{\rule{30pt}{10pt}}$ | $\color{#C02800}{\rule{30pt}{10pt}}$ | $\color{#F2495C}{\rule{30pt}{10pt}}$ | $\color{#E02F44}{\rule{30pt}{10pt}}$ | $\color{#F2495C}{\rule{30pt}{10pt}}$ | $\color{#C49C94}{\rule{30pt}{10pt}}$ | $\color{#0451ED}{\rule{30pt}{10pt}}$ |
+| LWLock | $\color{#FF79C6}{\rule{30pt}{10pt}}$ | $\color{#8B1A00}{\rule{30pt}{10pt}}$ | $\color{#C4162A}{\rule{30pt}{10pt}}$ | $\color{#CC4637}{\rule{30pt}{10pt}}$ | $\color{#C48C2D}{\rule{30pt}{10pt}}$ | $\color{#E377C2}{\rule{30pt}{10pt}}$ | $\color{#178D95}{\rule{30pt}{10pt}}$ |
+| IPC | $\color{#00C8FF}{\rule{30pt}{10pt}}$ | $\color{#F06EAA}{\rule{30pt}{10pt}}$ | $\color{#FADE2A}{\rule{30pt}{10pt}}$ | $\color{#5B9CD5}{\rule{30pt}{10pt}}$ | — | — | — |
+| Client | $\color{#FFDC64}{\rule{30pt}{10pt}}$ | $\color{#9F9371}{\rule{30pt}{10pt}}$ | $\color{#FFF899}{\rule{30pt}{10pt}}$ | $\color{#3E668F}{\rule{30pt}{10pt}}$ | $\color{#FADE2A}{\rule{30pt}{10pt}}$ | — | — |
+| Timeout | $\color{#FFA500}{\rule{30pt}{10pt}}$ | $\color{#54381C}{\rule{30pt}{10pt}}$ | $\color{#6F450C}{\rule{30pt}{10pt}}$ | $\color{#7F7F7F}{\rule{30pt}{10pt}}$ | $\color{#3400E6}{\rule{30pt}{10pt}}$ | — | — |
+| BufferPin | $\color{#00D2B4}{\rule{30pt}{10pt}}$ | $\color{#00A1E6}{\rule{30pt}{10pt}}$ | $\color{#FF9830}{\rule{30pt}{10pt}}$ | — | $\color{#49F841}{\rule{30pt}{10pt}}$ | — | — |
+| Activity | $\color{#9664FF}{\rule{30pt}{10pt}}$ | $\color{#FFA500}{\rule{30pt}{10pt}}$ | $\color{#B877D9}{\rule{30pt}{10pt}}$ | — | $\color{#B877D9}{\rule{30pt}{10pt}}$ | — | — |
+| Extension | $\color{#BE96FF}{\rule{30pt}{10pt}}$ | $\color{#007B14}{\rule{30pt}{10pt}}$ | $\color{#CA95E5}{\rule{30pt}{10pt}}$ | $\color{#7771A4}{\rule{30pt}{10pt}}$ | $\color{#00AF4A}{\rule{30pt}{10pt}}$ | — | — |
 
-² **AlloyDB Advanced Query Insights** colors extracted from the
+¹ [PASH-Viewer](https://github.com/dbacvetkov/PASH-Viewer) /
+[ASH-Viewer](https://github.com/akardapolov/ASH-Viewer) — identical PG palettes,
+common codebase ancestry. Colors from `EventColors.java` / `Options.java`.
+
+² [PostgresAI](https://gitlab.com/postgres-ai/postgresai) Grafana dashboards
+(Dashboard 4 — Wait Sampling). pg_ash's semantic mapping (CPU=green, Lock=red, etc.)
+is aligned with these dashboards. Hex values are Grafana dark-theme interpretations
+of named colors (`green` → `#73BF69`, `red` → `#F2495C`, etc.).
+
+³ **AWS Performance Insights** uses the D3.js Category20 palette with **dynamic**
+positional assignment — colors depend on rank by AAS, not on the wait event type.
+CPU reliably gets green (`#2CA02C`) because it is almost always the top contributor.
+Hex codes pixel-sampled from
+[AWS blog](https://aws.amazon.com/blogs/database/analyzing-amazon-rds-database-workload-with-performance-insights/)
+screenshots.
+
+⁴ **AlloyDB Advanced Query Insights** — pixel-sampled from
 [Google Cloud blog](https://cloud.google.com/blog/products/databases/new-query-insights-capabilities-for-cloud-sql-enterprise-plus)
-GIF screenshots. The basic Cloud SQL Query Insights view only shows three categories
-(CPU = green, IO Wait = blue, Lock Wait = orange) with no per-type breakdown.
+GIF legend swatches. The basic Cloud SQL Query Insights view only shows three
+categories (CPU = green, IO Wait = blue, Lock Wait = orange).
 
-"—" = not observed in available screenshots.
+Other sources:
+[Pigsty](https://github.com/Vonng/pigsty) `pgsql-session.json`,
+[pg_profile](https://github.com/zubkov-andrei/pg_profile) `pg_profile_activity.json`.
 
-Sources:
-- [PASH-Viewer](https://github.com/dbacvetkov/PASH-Viewer) / [ASH-Viewer](https://github.com/akardapolov/ASH-Viewer) — identical palettes, common codebase ancestry
-- [AWS PI blog](https://aws.amazon.com/blogs/database/analyzing-amazon-rds-database-workload-with-performance-insights/) — screenshots analyzed for pixel colors
-- [AlloyDB QI blog](https://cloud.google.com/blog/products/databases/new-query-insights-capabilities-for-cloud-sql-enterprise-plus) — GIF frames analyzed for legend swatches
-- [Cloud SQL QI blog](https://www.dbi-services.com/blog/google_insights/)
+"—" = not defined or not observed.
 
-Notable differences:
-- **IO**: pg_ash and PASH-Viewer use blue; AWS PI uses orange; AlloyDB uses red
-- **Lock**: pg_ash uses red; AlloyDB uses blue; AWS PI uses light brown (dynamic)
+### Oracle ASH (the origin)
+
+Oracle's Active Session History introduced the color conventions that inspired all
+PostgreSQL ASH tools. The palette changed significantly between OEM 10g/11g
+(Grid Control) and EMCC 13.5 (Cloud Control).
+
+| Wait class | EMCC 13.5 | OEM 10g/11g | PG equivalent |
+|---|---|---|---|
+| CPU Used | $\color{#35C387}{\rule{30pt}{10pt}}$ teal-green | $\color{#00B300}{\rule{30pt}{10pt}}$ green | CPU |
+| CPU Wait | $\color{#A9F89C}{\rule{30pt}{10pt}}$ light green | $\color{#85FF85}{\rule{30pt}{10pt}}$ light green | — |
+| User I/O | $\color{#0072CA}{\rule{30pt}{10pt}}$ blue | $\color{#002EE6}{\rule{30pt}{10pt}}$ deep blue | IO |
+| System I/O | $\color{#04DEDE}{\rule{30pt}{10pt}}$ cyan | $\color{#00A1E6}{\rule{30pt}{10pt}}$ sky blue | IO |
+| Concurrency | $\color{#8B60C9}{\rule{30pt}{10pt}}$ purple | $\color{#993333}{\rule{30pt}{10pt}}$ dark red | LWLock |
+| Application | $\color{#FF5C38}{\rule{30pt}{10pt}}$ red-orange | $\color{#C24747}{\rule{30pt}{10pt}}$ red | Lock |
+| Commit | $\color{#FFB146}{\rule{30pt}{10pt}}$ amber | $\color{#C28547}{\rule{30pt}{10pt}}$ brown | — |
+| Configuration | $\color{#FAF37D}{\rule{30pt}{10pt}}$ yellow | $\color{#54381C}{\rule{30pt}{10pt}}$ dark brown | Timeout |
+| Administrative | $\color{#FFCC48}{\rule{30pt}{10pt}}$ gold | $\color{#54541D}{\rule{30pt}{10pt}}$ olive | — |
+| Network | $\color{#00C0F0}{\rule{30pt}{10pt}}$ sky blue | $\color{#9C9D6C}{\rule{30pt}{10pt}}$ olive-gray | Client |
+| Queueing | $\color{#C5B79B}{\rule{30pt}{10pt}}$ tan | $\color{#757575}{\rule{30pt}{10pt}}$ gray | IPC |
+| Cluster | $\color{#CBC2AF}{\rule{30pt}{10pt}}$ beige | $\color{#E8E8E8}{\rule{30pt}{10pt}}$ light gray | — |
+| Other | $\color{#F76AAE}{\rule{30pt}{10pt}}$ pink | $\color{#FF578F}{\rule{30pt}{10pt}}$ hot pink | Activity |
+
+EMCC 13.5 hex codes from [modb.pro](https://www.modb.pro/db/188688) (pixel-sampled
+from the interface). OEM 10g/11g hex codes from
+[ASH-Viewer](https://github.com/akardapolov/ASH-Viewer) source
+(`Options.java` → `loadTopActivityColorOracle()`).
+
+### Notable patterns
+
+- **CPU = green** is universal — every tool uses some shade of green for CPU
+- **IO**: pg_ash, PASH-Viewer, PostgresAI use blue (following Oracle User I/O);
+  AWS PI, Pigsty, pg_profile use orange/yellow; AlloyDB uses red
+- **Lock = red** is common (pg_ash, PostgresAI, Pigsty, pg_profile) but not universal
+  — AlloyDB uses blue, AWS PI assigns dynamically
 - **Lock vs LWLock**: PASH-Viewer uses two similar dark reds (`#C02800` / `#8B1A00`),
-  making them hard to distinguish. pg_ash uses red vs pink for clear separation.
-- **Activity**: PASH-Viewer uses orange (same hex as pg_ash's Timeout), pg_ash uses purple
+  making them hard to distinguish. pg_ash uses red vs pink for clear separation
+- **Oracle's palette shifted dramatically** between OEM 10g/11g and EMCC 13.5 — e.g.
+  Concurrency went from dark red to purple, Configuration from dark brown to yellow
