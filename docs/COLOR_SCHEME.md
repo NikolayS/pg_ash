@@ -99,18 +99,18 @@ All hex codes below are from source code or pixel-sampled from published screens
 
 ### PostgreSQL tools
 
-| Type | pg_ash | PASH-Viewer¹ | PostgresAI² | Pigsty | pg_profile | AWS PI³ | AlloyDB⁴ |
-|---|---|---|---|---|---|---|---|
-| CPU | $\color{#50FA7B}{\rule{30pt}{10pt}}$ | $\color{#00CC00}{\rule{30pt}{10pt}}$ | $\color{#73BF69}{\rule{30pt}{10pt}}$ | $\color{#C8F2C2}{\rule{30pt}{10pt}}$ | — | $\color{#2CA02C}{\rule{30pt}{10pt}}$ | $\color{#579B11}{\rule{30pt}{10pt}}$ |
-| IO | $\color{#1E64FF}{\rule{30pt}{10pt}}$ | $\color{#004AE7}{\rule{30pt}{10pt}}$ | $\color{#5794F2}{\rule{30pt}{10pt}}$ | $\color{#F7CB67}{\rule{30pt}{10pt}}$ | $\color{#FFAA4D}{\rule{30pt}{10pt}}$ | $\color{#FF7F0E}{\rule{30pt}{10pt}}$ | $\color{#F9023D}{\rule{30pt}{10pt}}$ |
-| Lock | $\color{#FF5555}{\rule{30pt}{10pt}}$ | $\color{#C02800}{\rule{30pt}{10pt}}$ | $\color{#F2495C}{\rule{30pt}{10pt}}$ | $\color{#E02F44}{\rule{30pt}{10pt}}$ | $\color{#F2495C}{\rule{30pt}{10pt}}$ | $\color{#C49C94}{\rule{30pt}{10pt}}$ | $\color{#0451ED}{\rule{30pt}{10pt}}$ |
-| LWLock | $\color{#FF79C6}{\rule{30pt}{10pt}}$ | $\color{#8B1A00}{\rule{30pt}{10pt}}$ | $\color{#C4162A}{\rule{30pt}{10pt}}$ | $\color{#CC4637}{\rule{30pt}{10pt}}$ | $\color{#C48C2D}{\rule{30pt}{10pt}}$ | $\color{#E377C2}{\rule{30pt}{10pt}}$ | $\color{#178D95}{\rule{30pt}{10pt}}$ |
-| IPC | $\color{#00C8FF}{\rule{30pt}{10pt}}$ | $\color{#F06EAA}{\rule{30pt}{10pt}}$ | $\color{#FADE2A}{\rule{30pt}{10pt}}$ | $\color{#5B9CD5}{\rule{30pt}{10pt}}$ | — | — | — |
-| Client | $\color{#FFDC64}{\rule{30pt}{10pt}}$ | $\color{#9F9371}{\rule{30pt}{10pt}}$ | $\color{#FFF899}{\rule{30pt}{10pt}}$ | $\color{#3E668F}{\rule{30pt}{10pt}}$ | $\color{#FADE2A}{\rule{30pt}{10pt}}$ | — | — |
-| Timeout | $\color{#FFA500}{\rule{30pt}{10pt}}$ | $\color{#54381C}{\rule{30pt}{10pt}}$ | $\color{#6F450C}{\rule{30pt}{10pt}}$ | $\color{#7F7F7F}{\rule{30pt}{10pt}}$ | $\color{#3400E6}{\rule{30pt}{10pt}}$ | — | — |
-| BufferPin | $\color{#00D2B4}{\rule{30pt}{10pt}}$ | $\color{#00A1E6}{\rule{30pt}{10pt}}$ | $\color{#FF9830}{\rule{30pt}{10pt}}$ | — | $\color{#49F841}{\rule{30pt}{10pt}}$ | — | — |
-| Activity | $\color{#9664FF}{\rule{30pt}{10pt}}$ | $\color{#FFA500}{\rule{30pt}{10pt}}$ | $\color{#B877D9}{\rule{30pt}{10pt}}$ | — | $\color{#B877D9}{\rule{30pt}{10pt}}$ | — | — |
-| Extension | $\color{#BE96FF}{\rule{30pt}{10pt}}$ | $\color{#007B14}{\rule{30pt}{10pt}}$ | $\color{#CA95E5}{\rule{30pt}{10pt}}$ | $\color{#7771A4}{\rule{30pt}{10pt}}$ | $\color{#00AF4A}{\rule{30pt}{10pt}}$ | — | — |
+| Type | pg_ash | PASH-Viewer¹ | PostgresAI² | AWS PI³ | AlloyDB⁴ |
+|---|---|---|---|---|---|
+| CPU | $\color{#50FA7B}{\rule{30pt}{10pt}}$ | $\color{#00CC00}{\rule{30pt}{10pt}}$ | $\color{#73BF69}{\rule{30pt}{10pt}}$ | $\color{#2CA02C}{\rule{30pt}{10pt}}$ | $\color{#579B11}{\rule{30pt}{10pt}}$ |
+| IO | $\color{#1E64FF}{\rule{30pt}{10pt}}$ | $\color{#004AE7}{\rule{30pt}{10pt}}$ | $\color{#5794F2}{\rule{30pt}{10pt}}$ | $\color{#FF7F0E}{\rule{30pt}{10pt}}$ | $\color{#F9023D}{\rule{30pt}{10pt}}$ |
+| Lock | $\color{#FF5555}{\rule{30pt}{10pt}}$ | $\color{#C02800}{\rule{30pt}{10pt}}$ | $\color{#F2495C}{\rule{30pt}{10pt}}$ | $\color{#C49C94}{\rule{30pt}{10pt}}$ | $\color{#0451ED}{\rule{30pt}{10pt}}$ |
+| LWLock | $\color{#FF79C6}{\rule{30pt}{10pt}}$ | $\color{#8B1A00}{\rule{30pt}{10pt}}$ | $\color{#C4162A}{\rule{30pt}{10pt}}$ | $\color{#E377C2}{\rule{30pt}{10pt}}$ | $\color{#178D95}{\rule{30pt}{10pt}}$ |
+| IPC | $\color{#00C8FF}{\rule{30pt}{10pt}}$ | $\color{#F06EAA}{\rule{30pt}{10pt}}$ | $\color{#FADE2A}{\rule{30pt}{10pt}}$ | — | — |
+| Client | $\color{#FFDC64}{\rule{30pt}{10pt}}$ | $\color{#9F9371}{\rule{30pt}{10pt}}$ | $\color{#FFF899}{\rule{30pt}{10pt}}$ | — | — |
+| Timeout | $\color{#FFA500}{\rule{30pt}{10pt}}$ | $\color{#54381C}{\rule{30pt}{10pt}}$ | $\color{#6F450C}{\rule{30pt}{10pt}}$ | — | — |
+| BufferPin | $\color{#00D2B4}{\rule{30pt}{10pt}}$ | $\color{#00A1E6}{\rule{30pt}{10pt}}$ | $\color{#FF9830}{\rule{30pt}{10pt}}$ | — | — |
+| Activity | $\color{#9664FF}{\rule{30pt}{10pt}}$ | $\color{#FFA500}{\rule{30pt}{10pt}}$ | $\color{#B877D9}{\rule{30pt}{10pt}}$ | — | — |
+| Extension | $\color{#BE96FF}{\rule{30pt}{10pt}}$ | $\color{#007B14}{\rule{30pt}{10pt}}$ | $\color{#CA95E5}{\rule{30pt}{10pt}}$ | — | — |
 
 ¹ [PASH-Viewer](https://github.com/dbacvetkov/PASH-Viewer) /
 [ASH-Viewer](https://github.com/akardapolov/ASH-Viewer) — identical PG palettes,
@@ -132,10 +132,6 @@ screenshots.
 [Google Cloud blog](https://cloud.google.com/blog/products/databases/new-query-insights-capabilities-for-cloud-sql-enterprise-plus)
 GIF legend swatches. The basic Cloud SQL Query Insights view only shows three
 categories (CPU = green, IO Wait = blue, Lock Wait = orange).
-
-Other sources:
-[Pigsty](https://github.com/Vonng/pigsty) `pgsql-session.json`,
-[pg_profile](https://github.com/zubkov-andrei/pg_profile) `pg_profile_activity.json`.
 
 "—" = not defined or not observed.
 
@@ -170,8 +166,8 @@ from the interface). OEM 10g/11g hex codes from
 
 - **CPU = green** is universal — every tool uses some shade of green for CPU
 - **IO**: pg_ash, PASH-Viewer, PostgresAI use blue (following Oracle User I/O);
-  AWS PI, Pigsty, pg_profile use orange/yellow; AlloyDB uses red
-- **Lock = red** is common (pg_ash, PostgresAI, Pigsty, pg_profile) but not universal
+  AWS PI uses orange; AlloyDB uses red
+- **Lock = red** is common (pg_ash, PASH-Viewer, PostgresAI) but not universal
   — AlloyDB uses blue, AWS PI assigns dynamically
 - **Lock vs LWLock**: PASH-Viewer uses two similar dark reds (`#C02800` / `#8B1A00`),
   making them hard to distinguish. pg_ash uses red vs pink for clear separation
