@@ -46,6 +46,14 @@ create schema if not exists ash;
 -- Epoch function: 2026-01-01 00:00:00 UTC
 -- WARNING: This value must NEVER change after installation. All sample_ts
 -- values are seconds since this epoch. Changing it corrupts all timestamps.
+--
+-- OVERFLOW HORIZON (issue #37 INFO): sample_ts is stored as int4 seconds since
+-- 2026-01-01 UTC. int4 max is 2,147,483,647 seconds (~68.1 years), so this
+-- counter wraps at roughly 2094-01-19 03:14:07 UTC. ash.status() surfaces the
+-- remaining seconds as `epoch_seconds_remaining` for observability. Before
+-- ~2090, a bigint migration of the sample_ts column (and all readers) is
+-- required to avoid silent overflow. Do NOT change ash.epoch() to buy time —
+-- that corrupts every historical sample. The fix is a column-type migration.
 create or replace function ash.epoch()
 returns timestamptz
 language sql
@@ -1064,6 +1072,13 @@ begin
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
   metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
+
+  -- Epoch overflow horizon (issue #37): sample_ts is int4 seconds since
+  -- 2026-01-01 UTC and wraps circa 2094-01-19. Surface remaining seconds so
+  -- operators can plan the bigint migration well before the wrap.
+  metric := 'epoch_seconds_remaining';
+  value := (2147483647::bigint - extract(epoch from (now() - ash.epoch()))::bigint)::text;
+  return next;
 
   -- pg_cron status if available
   if ash._pg_cron_available() then
