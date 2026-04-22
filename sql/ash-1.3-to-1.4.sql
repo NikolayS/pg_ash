@@ -337,6 +337,20 @@ $$;
 do $$
 declare
   r record;
+  -- Functions that reference pg_stat_statements unqualified need public on
+  -- the search_path so the view (installed by CREATE EXTENSION pg_stat_statements
+  -- into public by default on RDS/Cloud SQL/Supabase/AlloyDB/Neon) is visible.
+  -- Without this, the probe "perform 1 from pg_stat_statements" fails with
+  -- "relation does not exist", the catch-block sets v_has_pgss=false, and the
+  -- caller either raises "pg_stat_statements extension is not installed"
+  -- (top_queries_with_text, event_queries, event_queries_at) or silently
+  -- degrades with a misleading warning (top_queries, top_queries_at, samples,
+  -- samples_at). Keep public last so ash.* still wins for ash objects.
+  v_pgss_readers text[] := array[
+    'top_queries', 'top_queries_at', 'top_queries_with_text',
+    'samples', 'samples_at',
+    'event_queries', 'event_queries_at'
+  ];
 begin
   -- Apply search_path guard to every non-trigger function in ash.*.
   -- alter function ... set search_path is idempotent.
@@ -348,8 +362,13 @@ begin
     where n.nspname = 'ash'
       and p.prokind = 'f'
   loop
-    execute format('alter function ash.%I(%s) set search_path = pg_catalog, ash',
-                   r.proname, r.args);
+    if r.proname = any(v_pgss_readers) then
+      execute format('alter function ash.%I(%s) set search_path = pg_catalog, ash, public',
+                     r.proname, r.args);
+    else
+      execute format('alter function ash.%I(%s) set search_path = pg_catalog, ash',
+                     r.proname, r.args);
+    end if;
   end loop;
 end $$;
 

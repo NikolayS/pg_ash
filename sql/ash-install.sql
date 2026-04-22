@@ -1316,7 +1316,11 @@ returns table (
 language plpgsql
 stable
 set jit = off
-set search_path = pg_catalog, ash
+-- search_path includes public so unqualified pg_stat_statements resolves to
+-- the view created by CREATE EXTENSION pg_stat_statements (default schema
+-- public on RDS/Cloud SQL/Supabase/AlloyDB/Neon). Keep public last so ash.*
+-- names still win over any user-created objects in public.
+set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
@@ -1464,7 +1468,8 @@ returns table (
 language plpgsql
 stable
 set jit = off
-set search_path = pg_catalog, ash
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
@@ -1725,7 +1730,8 @@ returns table (
 language plpgsql
 stable
 set jit = off
-set search_path = pg_catalog, ash
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2483,7 +2489,8 @@ returns table (
 language plpgsql
 stable
 set jit = off
-set search_path = pg_catalog, ash
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2587,7 +2594,8 @@ returns table (
 language plpgsql
 stable
 set jit = off
-set search_path = pg_catalog, ash
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2723,7 +2731,8 @@ returns table (
 language plpgsql
 stable
 set jit = off
-set search_path = pg_catalog, ash
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2829,7 +2838,8 @@ returns table (
 language plpgsql
 stable
 set jit = off
-set search_path = pg_catalog, ash
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
