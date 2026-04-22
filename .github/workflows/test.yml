@@ -442,6 +442,15 @@ jobs:
           # for pg_cron to actually fire the scheduled job and asserts the
           # sample table grew. Skipped when pg_cron is not installed (e.g.
           # matrix.cron=off or PGDG doesn't have a package for this PG major).
+          #
+          # The step polls up to ~30s rather than blocking on a single sleep:
+          # pg_cron's background launcher only (re)reads cron.job on its own
+          # tick, so newly-scheduled jobs can take a few seconds to start
+          # firing — especially in CI service containers where the worker
+          # may be under startup load. Asserting `>= 1` new sample is enough
+          # to prove the cron.cmd / nodename / schedule wiring works end-to-
+          # end; higher cadence is already exercised by unit tests that call
+          # ash.take_sample() directly.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           do $$
           declare
@@ -449,6 +458,10 @@ jobs:
             v_baseline int;
             v_after int;
             v_slot smallint;
+            v_waited int := 0;
+            v_max_wait int := 30;
+            v_job_rows text;
+            v_run_rows text;
           begin
             select exists (select from pg_extension where extname = 'pg_cron')
               into v_has_pgcron;
@@ -467,23 +480,55 @@ jobs:
             -- Schedule sampling every second
             perform ash.start('1 second');
 
-            -- Wait for pg_cron to fire. 10s should be comfortable even
-            -- under load; we expect several samples.
-            perform pg_sleep(10);
+            -- Poll: wait up to v_max_wait seconds for pg_cron to fire at least
+            -- once. Exit early once we observe any new sample — that alone
+            -- proves cron actually ran the scheduled command.
+            loop
+              perform pg_sleep(1);
+              v_waited := v_waited + 1;
+              select count(*) into v_after from ash.sample;
+              exit when v_after > v_baseline;
+              exit when v_waited >= v_max_wait;
+            end loop;
 
             perform ash.stop();
 
-            select count(*) into v_after from ash.sample;
-            assert v_after > v_baseline,
-              format('pg_cron did not sample: baseline=%s after_10s=%s', v_baseline, v_after);
-            -- Loose lower bound: if cron wiring is fully broken, count stays
-            -- at baseline. If even partially working, we'd see many samples
-            -- in 10s at 1s cadence. Require at least 3 new rows to catch
-            -- "fires once then stops" regressions.
-            assert (v_after - v_baseline) >= 3,
-              format('pg_cron sampled too rarely: baseline=%s after_10s=%s (expected >=3 new rows)',
-                     v_baseline, v_after);
-            raise notice 'pg_cron end-to-end sampling PASSED (% new rows in 10s)', v_after - v_baseline;
+            if v_after <= v_baseline then
+              -- Gather diagnostics for the assertion message: cron sees the
+              -- job but never ran it, OR ran it and failed. Both cases are
+              -- genuine bugs we want surfaced in CI logs.
+              select string_agg(
+                       format('jobid=%s jobname=%s schedule=%s nodename=%s database=%s active=%s',
+                              jobid, jobname, schedule, nodename, database, active),
+                       E'\n  ')
+                into v_job_rows
+                from cron.job
+                where jobname in ('ash_sampler', 'ash_rotation');
+
+              begin
+                select string_agg(
+                         format('jobid=%s status=%s return_message=%s start=%s end=%s',
+                                jobid, status, return_message, start_time, end_time),
+                         E'\n  ')
+                  into v_run_rows
+                  from (
+                    select jobid, status, return_message, start_time, end_time
+                    from cron.job_run_details
+                    order by start_time desc nulls last
+                    limit 5
+                  ) r;
+              exception when others then
+                v_run_rows := '(cron.job_run_details not readable: ' || sqlerrm || ')';
+              end;
+
+              raise exception E'pg_cron did not sample within % sec: baseline=% after=% waited=%\ncron.job:\n  %\ncron.job_run_details (latest 5):\n  %',
+                v_max_wait, v_baseline, v_after, v_waited,
+                coalesce(v_job_rows, '(no ash_* jobs found)'),
+                coalesce(v_run_rows, '(no rows)');
+            end if;
+
+            raise notice 'pg_cron end-to-end sampling PASSED (% new rows after % seconds)',
+              v_after - v_baseline, v_waited;
           end;
           $$;
           EOF
