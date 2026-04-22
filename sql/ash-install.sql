@@ -51,6 +51,7 @@ returns timestamptz
 language sql
 immutable
 parallel safe
+set search_path = pg_catalog, ash
 as $$
   select '2026-01-01 00:00:00+00'::timestamptz
 $$;
@@ -113,6 +114,7 @@ returns smallint
 language sql
 stable
 parallel safe
+set search_path = pg_catalog, ash
 as $$
   select current_slot from ash.config where singleton
 $$;
@@ -146,6 +148,7 @@ create index if not exists sample_2_datid_ts_idx on ash.sample_2 (datid, sample_
 create or replace function ash._register_wait(p_state text, p_type text, p_event text)
 returns smallint
 language plpgsql
+set search_path = pg_catalog, ash
 as $$
 declare
   v_id smallint;
@@ -187,6 +190,7 @@ create or replace function ash._validate_data(p_data integer[])
 returns boolean
 language plpgsql
 immutable
+set search_path = pg_catalog, ash
 as $$
 declare
   v_len int;
@@ -258,6 +262,7 @@ $$;
 create or replace function ash.take_sample()
 returns int
 language plpgsql
+set search_path = pg_catalog, ash
 as $$
 declare
   v_sample_ts int4;
@@ -489,6 +494,7 @@ returns table (
 )
 language plpgsql
 stable
+set search_path = pg_catalog, ash
 as $$
 declare
   v_len int;
@@ -590,6 +596,7 @@ $$;
 create or replace function ash.rotate()
 returns text
 language plpgsql
+set search_path = pg_catalog, ash
 as $$
 declare
   v_old_slot smallint;
@@ -678,6 +685,7 @@ create or replace function ash._pg_cron_available()
 returns boolean
 language sql
 stable
+set search_path = pg_catalog, ash
 as $$
   select exists (
     select from pg_extension where extname = 'pg_cron'
@@ -688,6 +696,7 @@ $$;
 create or replace function ash.start(p_interval interval default '1 second')
 returns table (job_type text, job_id bigint, status text)
 language plpgsql
+set search_path = pg_catalog, ash
 as $$
 declare
   v_sampler_job bigint;
@@ -882,6 +891,7 @@ $$;
 create or replace function ash.stop()
 returns table (job_type text, job_id bigint, status text)
 language plpgsql
+set search_path = pg_catalog, ash
 as $$
 declare
   v_job_id bigint;
@@ -939,6 +949,7 @@ $$;
 create or replace function ash.set_debug_logging(p_enabled bool default null)
 returns text
 language plpgsql
+set search_path = pg_catalog, ash
 as $$
 declare
   v_current bool;
@@ -963,6 +974,7 @@ $$;
 create or replace function ash.uninstall(p_confirm text default null)
 returns text
 language plpgsql
+set search_path = pg_catalog, ash
 as $$
 declare
   v_rec record;
@@ -996,6 +1008,7 @@ create or replace function ash._active_slots()
 returns smallint[]
 language sql
 stable
+set search_path = pg_catalog, ash
 as $$
   select array[
     current_slot,
@@ -1014,6 +1027,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_config record;
@@ -1115,6 +1129,7 @@ create or replace function ash._color_on(p_color boolean default false)
 returns boolean
 language sql
 stable
+set search_path = pg_catalog, ash
 as $$
   select p_color or coalesce(current_setting('ash.color', true), '') in ('on', 'true', '1');
 $$;
@@ -1123,6 +1138,7 @@ create or replace function ash._wait_color(p_event text, p_color boolean default
 returns text
 language sql
 stable
+set search_path = pg_catalog, ash
 as $$
   -- All escapes padded to 19 chars: \033[38;2;RRR;GGG;BBBm
   -- Uniform length prevents pspg right-border misalignment.
@@ -1149,6 +1165,7 @@ create or replace function ash._reset(p_color boolean default false)
 returns text
 language sql
 stable
+set search_path = pg_catalog, ash
 as $$
   select case when ash._color_on(p_color) then E'\033[0m' else '' end;
 $$;
@@ -1166,6 +1183,7 @@ create or replace function ash._bar(
 returns text
 language sql
 stable
+set search_path = pg_catalog, ash
 as $$
   -- All color escapes are now exactly 19 chars (zero-padded RGB).
   -- reset is always 4 chars. Total invisible = 23 when color on, 0 when off.
@@ -1193,6 +1211,7 @@ returns table (
 language sql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
   with waits as (
     select
@@ -1257,6 +1276,7 @@ returns table (
 language sql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
   with waits as (
     select
@@ -1296,6 +1316,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_has_pgss boolean := false;
@@ -1389,6 +1410,7 @@ returns table (
 language sql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
   with waits as (
     select
@@ -1442,6 +1464,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_has_pgss boolean := false;
@@ -1513,6 +1536,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 begin
   -- Check if this query_id exists in any partition
@@ -1585,6 +1609,7 @@ returns table (
 language sql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
   select
     coalesce(d.datname, '<background>') as database_name,
@@ -1610,6 +1635,7 @@ create or replace function ash._to_sample_ts(p_ts timestamptz)
 returns int4
 language sql
 immutable
+set search_path = pg_catalog, ash
 as $$
   select extract(epoch from p_ts - ash.epoch())::int4
 $$;
@@ -1631,6 +1657,7 @@ returns table (
 language sql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
   with waits as (
     select
@@ -1698,6 +1725,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_has_pgss boolean := false;
@@ -1780,6 +1808,7 @@ returns table (
 language sql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
   with waits as (
     select
@@ -1818,6 +1847,7 @@ returns table (
 language sql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
   with waits as (
     select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
@@ -1865,6 +1895,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_start int4 := ash._to_sample_ts(p_start);
@@ -1936,6 +1967,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_total_samples bigint;
@@ -2036,6 +2068,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_reset text := ash._reset(p_color);
@@ -2243,6 +2276,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_reset text := ash._reset(p_color);
@@ -2449,6 +2483,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2552,6 +2587,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2687,6 +2723,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2792,6 +2829,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+set search_path = pg_catalog, ash
 as $$
 declare
   v_has_pgss boolean := false;
@@ -2902,12 +2940,16 @@ exception when others then
 end $$;
 
 -------------------------------------------------------------------------------
--- Security: restrict write/admin functions to the installing role.
--- Reader functions remain PUBLIC (read-only, no side effects).
+-- Security: restrict all ash schema access. Admin functions belong only to
+-- the installing role; reader functions and underlying tables are revoked
+-- from PUBLIC so tenants on shared clusters cannot see observability data
+-- (query text, waits, config) unless the owner explicitly grants access.
+-- The owner retains full access by virtue of owning the objects.
 -------------------------------------------------------------------------------
 do $$
 declare
   v_owner text := (select nspowner::regrole::text from pg_namespace where nspname = 'ash');
+  r record;
 begin
   -- Admin functions: only the schema owner
   execute format('revoke all on function ash.start(interval) from public');
@@ -2923,4 +2965,41 @@ begin
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
   execute format('grant execute on function ash.set_debug_logging(bool) to %I', v_owner);
+
+  -- Reader/helper functions: revoke EXECUTE from PUBLIC for every non-trigger
+  -- function in ash.*. Signatures are resolved dynamically via pg_proc so
+  -- default arguments and future overloads do not cause drift. Admin
+  -- functions above are re-revoked here (harmless: REVOKE is idempotent).
+  for r in
+    select p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.prokind = 'f'
+  loop
+    execute format('revoke execute on function ash.%I(%s) from public',
+                   r.proname, r.args);
+  end loop;
+
+  -- Reader tables/views: revoke SELECT from PUBLIC for objects holding
+  -- sample data, query text, and configuration. REVOKE on a partitioned
+  -- parent does not cascade to partitions in PostgreSQL, so sample_N and
+  -- query_map_N are enumerated dynamically below.
+  execute 'revoke select on table ash.sample from public';
+  execute 'revoke select on table ash.query_map_all from public';
+  execute 'revoke select on table ash.config from public';
+  execute 'revoke select on table ash.wait_event_map from public';
+
+  -- Per-slot partition/dictionary tables: sample_N and query_map_N.
+  for r in
+    select c.relname
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on c.relnamespace = n.oid
+    where n.nspname = 'ash'
+      and c.relkind in ('r', 'p')
+      and (c.relname ~ '^query_map_[0-9]+$' or c.relname ~ '^sample_[0-9]+$')
+  loop
+    execute format('revoke select on ash.%I from public', r.relname);
+  end loop;
 end $$;
