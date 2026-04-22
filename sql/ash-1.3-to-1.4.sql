@@ -5,6 +5,8 @@
 --     silently dropping the sample. Returns -1 on timeout. (#28)
 --   - New missed_samples counter in ash.config — incremented on every
 --     caught timeout, visible in ash.status(). (#27, #28)
+--   - status() surfaces epoch_seconds_remaining for the 2094 overflow
+--     horizon of sample_ts (int4). (#37)
 
 -- Add missed_samples column to config if missing
 do $$
@@ -307,6 +309,13 @@ begin
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
   metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
+
+  -- Epoch overflow horizon (issue #37): sample_ts is int4 seconds since
+  -- 2026-01-01 UTC and wraps circa 2094-01-19. Surface remaining seconds so
+  -- operators can plan the bigint migration well before the wrap.
+  metric := 'epoch_seconds_remaining';
+  value := (2147483647::bigint - extract(epoch from (now() - ash.epoch()))::bigint)::text;
+  return next;
 
   -- pg_cron status if available
   if ash._pg_cron_available() then
