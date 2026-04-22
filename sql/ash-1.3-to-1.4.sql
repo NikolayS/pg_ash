@@ -327,3 +327,86 @@ begin
 end;
 $$;
 
+-------------------------------------------------------------------------------
+-- Privilege hardening (mirrors ash-install.sql changes in PR #45, issue #37).
+-- Applies search_path = pg_catalog, ash to every ash.* function and revokes
+-- SELECT/EXECUTE from PUBLIC on reader functions, underlying tables, and
+-- per-slot partitions. Dynamic so it covers functions/partitions created by
+-- earlier upgrade scripts. All statements are idempotent.
+-------------------------------------------------------------------------------
+do $$
+declare
+  r record;
+begin
+  -- Apply search_path guard to every non-trigger function in ash.*.
+  -- alter function ... set search_path is idempotent.
+  for r in
+    select p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.prokind = 'f'
+  loop
+    execute format('alter function ash.%I(%s) set search_path = pg_catalog, ash',
+                   r.proname, r.args);
+  end loop;
+end $$;
+
+do $$
+declare
+  v_owner text := (select nspowner::regrole::text from pg_namespace where nspname = 'ash');
+  r record;
+begin
+  -- Admin functions: only the schema owner
+  execute format('revoke all on function ash.start(interval) from public');
+  execute format('revoke all on function ash.stop() from public');
+  execute format('revoke all on function ash.uninstall(text) from public');
+  execute format('revoke all on function ash.rotate() from public');
+  execute format('revoke all on function ash.take_sample() from public');
+  execute format('revoke all on function ash.set_debug_logging(bool) from public');
+
+  execute format('grant execute on function ash.start(interval) to %I', v_owner);
+  execute format('grant execute on function ash.stop() to %I', v_owner);
+  execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
+  execute format('grant execute on function ash.rotate() to %I', v_owner);
+  execute format('grant execute on function ash.take_sample() to %I', v_owner);
+  execute format('grant execute on function ash.set_debug_logging(bool) to %I', v_owner);
+
+  -- Reader/helper functions: revoke EXECUTE from PUBLIC for every non-trigger
+  -- function in ash.*. Signatures are resolved dynamically via pg_proc so
+  -- default arguments and future overloads do not cause drift. Admin
+  -- functions above are re-revoked here (harmless: REVOKE is idempotent).
+  for r in
+    select p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.prokind = 'f'
+  loop
+    execute format('revoke execute on function ash.%I(%s) from public',
+                   r.proname, r.args);
+  end loop;
+
+  -- Reader tables/views: revoke SELECT from PUBLIC for objects holding
+  -- sample data, query text, and configuration. REVOKE on a partitioned
+  -- parent does not cascade to partitions in PostgreSQL, so sample_N and
+  -- query_map_N are enumerated dynamically below.
+  execute 'revoke select on table ash.sample from public';
+  execute 'revoke select on table ash.query_map_all from public';
+  execute 'revoke select on table ash.config from public';
+  execute 'revoke select on table ash.wait_event_map from public';
+
+  -- Per-slot partition/dictionary tables: sample_N and query_map_N.
+  for r in
+    select c.relname
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on c.relnamespace = n.oid
+    where n.nspname = 'ash'
+      and c.relkind in ('r', 'p')
+      and (c.relname ~ '^query_map_[0-9]+$' or c.relname ~ '^sample_[0-9]+$')
+  loop
+    execute format('revoke select on ash.%I from public', r.relname);
+  end loop;
+end $$;
