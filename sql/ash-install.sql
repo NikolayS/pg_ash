@@ -73,9 +73,18 @@ create table if not exists ash.config (
 -- Insert initial row if not exists
 insert into ash.config (singleton) values (true) on conflict do nothing;
 
+-- M-BUG-4: track rows silently dropped by take_sample()'s inner exception handler.
+-- Idempotent ALTER so fresh installs and re-runs both succeed without
+-- competing with the `create table if not exists` above.
+alter table ash.config add column if not exists insert_errors bigint not null default 0;
+
 -- Wait event dictionary
+-- M-BUG-6 / H-SEC-3: id widened from smallint to int4 to eliminate the
+-- 32767 exhaustion ceiling. Combined with the 50k cap enforced in
+-- _register_wait (mirrors the query_map pattern), this makes unbounded
+-- registration by an unprivileged user a non-issue rather than a DoS.
 create table if not exists ash.wait_event_map (
-  id    smallint primary key generated always as identity (start with 1),
+  id    int primary key generated always as identity (start with 1),
   state text not null,
   type  text not null,
   event text not null,
@@ -143,12 +152,19 @@ create index if not exists sample_1_datid_ts_idx on ash.sample_1 (datid, sample_
 create index if not exists sample_2_datid_ts_idx on ash.sample_2 (datid, sample_ts);
 
 -- Register wait event function (upsert, returns id)
+-- M-BUG-6 / H-SEC-3: return type widened smallint -> int to match the
+-- widened wait_event_map.id, and a 50 000-row cap now protects the
+-- dictionary from unbounded growth (same pattern as query_map partitions).
+-- When the cap is reached we skip the INSERT and return a sentinel id of
+-- 1, which is guaranteed to exist (seeded by migration or the very first
+-- register); callers still get a valid id so encoding does not crash.
 create or replace function ash._register_wait(p_state text, p_type text, p_event text)
-returns smallint
+returns int
 language plpgsql
 as $$
 declare
-  v_id smallint;
+  v_id    int;
+  v_count bigint;
 begin
   -- Try to get existing
   select id into v_id
@@ -157,6 +173,22 @@ begin
 
   if v_id is not null then
     return v_id;
+  end if;
+
+  -- Enforce dictionary size cap before inserting (mirrors the query_map 50k
+  -- guard in take_sample()). Use reltuples for a cheap estimate — exact
+  -- count would add a scan on every fresh wait-event observation.
+  select reltuples::bigint into v_count
+  from pg_class where oid = 'ash.wait_event_map'::regclass;
+
+  if v_count >= 50000 then
+    raise notice 'ash._register_wait: wait_event_map at cap (50 000 rows); skipping insert for (state=%, type=%, event=%)',
+      p_state, p_type, p_event;
+    -- Return a sentinel pointing at id=1 (the first registered row). The
+    -- caller needs a non-null id; the resulting decode is imprecise but
+    -- bounded. Callers aware of the cap can inspect wait_event_map size.
+    select min(id) into v_id from ash.wait_event_map;
+    return coalesce(v_id, 1);
   end if;
 
   -- Insert new entry
@@ -267,7 +299,7 @@ declare
   v_datid_rec record;
   v_data integer[];
   v_active_count smallint;
-  v_current_wait_id smallint;
+  v_current_wait_id int;
   v_current_slot smallint;
   v_rows_inserted int := 0;
   v_missed_count bigint;
@@ -453,6 +485,12 @@ begin
       end if;
 
     exception when others then
+      -- M-BUG-4: previously a CHECK violation on ash.sample.data (or any
+      -- other INSERT-time error) was silently swallowed with just a WARNING,
+      -- dropping a row of observability data without any durable signal.
+      -- Bump insert_errors so ash.status() can surface the count, and keep
+      -- the warning so live log watchers still see it.
+      update ash.config set insert_errors = insert_errors + 1 where singleton;
       raise warning 'ash.take_sample: error inserting sample for datid % [%]: %', v_datid_rec.datid, sqlstate, sqlerrm;
     end;
   end loop;
@@ -481,6 +519,13 @@ $$;
 -- Decode sample function
 -- p_slot: when provided, look up query_ids from that partition only.
 -- When NULL (default), search all partitions via query_map_all view.
+--
+-- M-BUG-9: validate the entire array shape before emitting ANY rows.
+-- Previously the function interleaved validation with `return next`, so a
+-- malformed trailing segment still produced one or more valid-looking rows
+-- followed by a WARNING. Callers saw silently truncated, partially correct
+-- output. Now: walk once to verify shape, then walk again to emit — on
+-- validation failure raise a single warning and return zero rows.
 create or replace function ash.decode_sample(p_data integer[], p_slot smallint default null)
 returns table (
   wait_event text,
@@ -493,7 +538,7 @@ as $$
 declare
   v_len int;
   v_idx int;
-  v_wait_id smallint;
+  v_wait_id int;
   v_count int;
   v_qid_idx int;
   v_map_id int4;
@@ -514,23 +559,46 @@ begin
     return;
   end if;
 
-  -- Walk the structure
+  -- ---- Pass 1: validate shape only, emit nothing ----
+  -- Reuses the same walker logic the old code had, but exits with a single
+  -- warning and RETURN (no partial rows) if anything is wrong.
   v_idx := 1;
   while v_idx <= v_len loop
-    -- Get wait event id (negative marker)
     if p_data[v_idx] >= 0 then
       raise warning 'ash.decode_sample: expected negative wait_id at position %', v_idx;
       return;
     end if;
-
-    v_wait_id := -p_data[v_idx];
     v_idx := v_idx + 1;
 
-    -- Get count
     if v_idx > v_len then
-      raise warning 'ash.decode_sample: unexpected end of array at position %', v_idx;
+      raise warning 'ash.decode_sample: unexpected end of array at position % (missing count)', v_idx;
       return;
     end if;
+    v_count := p_data[v_idx];
+    if v_count <= 0 then
+      raise warning 'ash.decode_sample: non-positive count % at position %', v_count, v_idx;
+      return;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx + v_count - 1 > v_len then
+      raise warning 'ash.decode_sample: not enough query_ids for count % at position %', v_count, v_idx;
+      return;
+    end if;
+    for v_qid_idx in 1..v_count loop
+      if p_data[v_idx] < 0 then
+        raise warning 'ash.decode_sample: expected non-negative query_id at position %', v_idx;
+        return;
+      end if;
+      v_idx := v_idx + 1;
+    end loop;
+  end loop;
+
+  -- ---- Pass 2: emit rows (shape is known good) ----
+  v_idx := 1;
+  while v_idx <= v_len loop
+    v_wait_id := -p_data[v_idx];
+    v_idx := v_idx + 1;
 
     v_count := p_data[v_idx];
     v_idx := v_idx + 1;
@@ -543,11 +611,6 @@ begin
 
     -- Process each query_id
     for v_qid_idx in 1..v_count loop
-      if v_idx > v_len then
-        raise warning 'ash.decode_sample: not enough query_ids for count %', v_count;
-        return;
-      end if;
-
       v_map_id := p_data[v_idx];
       v_idx := v_idx + 1;
 
@@ -708,59 +771,13 @@ begin
     return;
   end if;
 
-  -- If pg_cron is not available, just record the interval and advise on external scheduling
-  if not ash._pg_cron_available() then
-    update ash.config set sample_interval = p_interval where singleton;
-
-    job_type := 'sampler';
-    job_id := null;
-    status := format('interval set to %s — schedule externally (pg_cron not available)', p_interval);
-    return next;
-
-    job_type := 'rotation';
-    job_id := null;
-    status := format('rotation_period is %s — schedule ash.rotate() externally', (select rotation_period from ash.config where singleton));
-    return next;
-
-    raise notice 'pg_cron is not installed. To sample, call ash.take_sample() from an external scheduler:';
-    raise notice '  system cron:    * * * * * psql -qAtX -c "select ash.take_sample()" (for per-second, use a loop)';
-    raise notice '  psql:           SELECT ash.take_sample() \watch 1';
-    raise notice '  any language:   execute "SELECT ash.take_sample()" in a loop with sleep';
-    raise notice 'Also schedule ash.rotate() at the rotation_period interval (default: daily).';
-
-    return;
-  end if;
-
-  -- Check pg_cron version (need >= 1.5 for sub-minute scheduling)
-  select extversion into v_cron_version
-  from pg_extension where extname = 'pg_cron';
-
-  if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
-    if v_seconds < 60 then
-      job_type := 'error';
-      job_id := null;
-      status := format('pg_cron version %s too old for sub-minute scheduling (need >= 1.5). Use external scheduler or upgrade pg_cron.', v_cron_version);
-      return next;
-      return;
-    end if;
-  end if;
-
-  -- Detect whether we need to UPDATE cron.job.nodename after scheduling.
-  -- Skip when cron.use_background_workers = on (nodename irrelevant)
-  -- or cron.host is already '' or a socket path (cron.schedule() inherits it).
-  begin
-    v_skip_nodename_update :=
-      coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
-      or coalesce(current_setting('cron.host', true), 'localhost') = ''
-      or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
-  exception when others then
-    v_skip_nodename_update := false;
-  end;
-
-  -- Convert interval to pg_cron schedule format
-  -- pg_cron supports: '[1-59] seconds' for sub-minute, or cron syntax for minute+
-
-  -- Build schedule: seconds format for <60s, cron format for 60s+
+  -- H-BUG-1: validate interval shape BEFORE branching on pg_cron availability.
+  -- Previously, the no-pg_cron branch returned early (below), skipping the
+  -- seconds/minutes/hours checks. Same input must produce the same accept/
+  -- reject outcome regardless of whether pg_cron is installed.
+  --
+  -- Build schedule string here (also used later when pg_cron is available):
+  -- seconds format for <60s, cron format for 60s+.
   if v_seconds <= 59 then
     v_schedule := v_seconds || ' seconds';
   elsif v_seconds < 3600 then
@@ -797,15 +814,88 @@ begin
     end if;
   end if;
 
+  -- If pg_cron is not available, just record the interval and advise on external scheduling
+  if not ash._pg_cron_available() then
+    update ash.config set sample_interval = p_interval where singleton;
+
+    job_type := 'sampler';
+    job_id := null;
+    status := format('interval set to %s — schedule externally (pg_cron not available)', p_interval);
+    return next;
+
+    job_type := 'rotation';
+    job_id := null;
+    status := format('rotation_period is %s — schedule ash.rotate() externally', (select rotation_period from ash.config where singleton));
+    return next;
+
+    raise notice 'pg_cron is not installed. To sample, call ash.take_sample() from an external scheduler:';
+    raise notice '  system cron:    * * * * * psql -qAtX -c "select ash.take_sample()" (for per-second, use a loop)';
+    raise notice '  psql:           SELECT ash.take_sample() \watch 1';
+    raise notice '  any language:   execute "SELECT ash.take_sample()" in a loop with sleep';
+    raise notice 'Also schedule ash.rotate() at the rotation_period interval (default: daily).';
+
+    return;
+  end if;
+
+  -- Check pg_cron version (need >= 1.5 for sub-minute scheduling)
+  select extversion into v_cron_version
+  from pg_extension where extname = 'pg_cron';
+
+  -- M-BUG-8: defend against malformed extversion. If regexp_replace() strips
+  -- everything (e.g. extversion is 'dev', empty, or starts with '.'),
+  -- string_to_array(...)::int[] raises 'invalid input syntax for type integer'
+  -- and bubbles up as a crash. Require a leading MAJOR.MINOR pattern before
+  -- parsing; if it doesn't match, assume a modern pg_cron (>= 1.5) rather
+  -- than failing the call.
+  if v_cron_version ~ '^\d+\.\d+' then
+    begin
+      if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
+        if v_seconds < 60 then
+          job_type := 'error';
+          job_id := null;
+          status := format('pg_cron version %s too old for sub-minute scheduling (need >= 1.5). Use external scheduler or upgrade pg_cron.', v_cron_version);
+          return next;
+          return;
+        end if;
+      end if;
+    exception when others then
+      -- Unparseable version — assume modern pg_cron (>= 1.5) and proceed.
+      raise notice 'ash.start: could not parse pg_cron version "%" — assuming modern (>= 1.5)', v_cron_version;
+    end;
+  else
+    raise notice 'ash.start: unrecognized pg_cron version "%" — assuming modern (>= 1.5)', v_cron_version;
+  end if;
+
+  -- Detect whether we need to UPDATE cron.job.nodename after scheduling.
+  -- Skip when cron.use_background_workers = on (nodename irrelevant)
+  -- or cron.host is already '' or a socket path (cron.schedule() inherits it).
+  begin
+    v_skip_nodename_update :=
+      coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
+      or coalesce(current_setting('cron.host', true), 'localhost') = ''
+      or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
+  exception when others then
+    v_skip_nodename_update := false;
+  end;
+
+  -- (schedule string v_schedule already built above, before the pg_cron
+  -- availability branch — see H-BUG-1 fix.)
+
   -- Check for existing sampler job (idempotent)
   select jobid into v_sampler_job
   from cron.job
   where jobname = 'ash_sampler';
 
   if v_sampler_job is not null then
+    -- H-BUG-2: re-sync the pg_cron schedule when the job already exists.
+    -- Previously ash.start(new_interval) updated ash.config.sample_interval
+    -- (further below) but never touched cron.job.schedule, so pg_cron kept
+    -- firing at the old cadence — a silent behavioral divergence between
+    -- configured and actual sampling rate.
+    perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
     job_type := 'sampler';
     job_id := v_sampler_job;
-    status := 'already exists';
+    status := format('already exists — schedule updated to %s', v_schedule);
     return next;
   else
     -- Create sampler job
@@ -1048,6 +1138,10 @@ begin
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
   metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
   metric := 'missed_samples'; value := v_config.missed_samples::text; return next;
+  -- M-BUG-4: surface the counter of rows dropped by take_sample()'s inner
+  -- exception handler (CHECK violations and similar). Non-zero = silent
+  -- data loss occurred — check server log for the matching WARNINGs.
+  metric := 'insert_errors'; value := v_config.insert_errors::text; return next;
   metric := 'installed_at'; value := v_config.installed_at::text; return next;
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
@@ -1062,7 +1156,9 @@ begin
   metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
   metric := 'samples_total'; value := v_samples_total::text; return next;
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
-  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
+  -- M-BUG-6 / H-SEC-3: denominator changed from 32767 (old smallint ceiling)
+  -- to the new 50 000 cap enforced in _register_wait.
+  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 50000 * 100, 2)::text || '%'; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
 
   -- pg_cron status if available
@@ -1200,7 +1296,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
-    where wm.id = (-s.data[i])::smallint
+    where wm.id = (-s.data[i])::int
       and s.slot = any(ash._active_slots())
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
       and s.data[i] < 0
@@ -1261,7 +1357,7 @@ as $$
   with waits as (
     select
       ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
-      (-s.data[i])::smallint as wait_id,
+      (-s.data[i])::int as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
@@ -1392,7 +1488,7 @@ set jit = off
 as $$
   with waits as (
     select
-      (-s.data[i])::smallint as wait_id,
+      (-s.data[i])::int as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
@@ -1529,7 +1625,7 @@ begin
     -- Find every position where the query appears in a sample,
     -- then walk backwards to find the wait group marker
     select
-      (select (- s.data[j])::smallint
+      (select (- s.data[j])::int
       from generate_series(i, 1, -1) j
       where s.data[j] < 0
       limit 1
@@ -1638,7 +1734,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
-    where wm.id = (-s.data[i])::smallint
+    where wm.id = (-s.data[i])::int
       and s.slot = any(ash._active_slots())
       and s.sample_ts >= ash._to_sample_ts(p_start)
       and s.sample_ts < ash._to_sample_ts(p_end)
@@ -1784,7 +1880,7 @@ as $$
   with waits as (
     select
       ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
-      (-s.data[i])::smallint as wait_id,
+      (-s.data[i])::int as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
@@ -1820,7 +1916,7 @@ stable
 set jit = off
 as $$
   with waits as (
-    select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
+    select (-s.data[i])::int as wait_id, s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
       and s.sample_ts >= ash._to_sample_ts(p_start)
@@ -1880,7 +1976,7 @@ begin
   ),
   hits as (
     select
-      (select (- s.data[j])::smallint
+      (select (- s.data[j])::int
       from generate_series(i, 1, -1) j
       where s.data[j] < 0 limit 1
       ) as wait_id
@@ -2077,7 +2173,7 @@ begin
           as bucket_fraction
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::smallint
+      where wm.id = (-s.data[i])::int
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts
         and s.data[i] < 0
@@ -2140,7 +2236,7 @@ begin
         sum(s.data[i + 1]) as cnt
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::smallint
+      where wm.id = (-s.data[i])::int
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts
         and s.data[i] < 0
@@ -2286,7 +2382,7 @@ begin
           as bucket_fraction
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::smallint
+      where wm.id = (-s.data[i])::int
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
         and s.data[i] < 0
@@ -2347,7 +2443,7 @@ begin
         sum(s.data[i + 1]) as cnt
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::smallint
+      where wm.id = (-s.data[i])::int
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
         and s.data[i] < 0
@@ -2471,7 +2567,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::smallint as wait_id,
+        (-s.data[i])::int as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2507,7 +2603,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::smallint as wait_id,
+        (-s.data[i])::int as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2576,7 +2672,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::smallint as wait_id,
+        (-s.data[i])::int as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2612,7 +2708,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::smallint as wait_id,
+        (-s.data[i])::int as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2726,7 +2822,7 @@ begin
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_min_ts
         and s.data[i] < 0
-        and (-s.data[i])::smallint = mw.wait_id
+        and (-s.data[i])::int = mw.wait_id
         and i + 2 + gs.n <= array_length(s.data, 1)
         and s.data[i + 2 + gs.n] >= 0
     ),
@@ -2830,7 +2926,7 @@ begin
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and s.data[i] < 0
-        and (-s.data[i])::smallint = mw.wait_id
+        and (-s.data[i])::int = mw.wait_id
         and i + 2 + gs.n <= array_length(s.data, 1)
         and s.data[i + 2 + gs.n] >= 0
     ),
