@@ -1,9 +1,10 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.3 (latest)
+-- Version: 1.4 (latest)
 -- Fresh install: \i sql/ash-install.sql
--- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql
--- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql
--- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql
+-- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql
 
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
