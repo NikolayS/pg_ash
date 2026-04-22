@@ -1,0 +1,2 @@
+# Claude Code agent worktrees — ephemeral per-session scratch dirs
+.claude/
