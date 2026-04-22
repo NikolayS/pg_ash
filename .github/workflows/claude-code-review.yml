@@ -12,28 +12,29 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Only review PRs from trusted authors — prevents external contributors
+    # from causing runs that consume CLAUDE_CODE_OAUTH_TOKEN (#37 M-SEC-6).
+    if: |
+      github.event.pull_request.author_association == 'OWNER'
+      || github.event.pull_request.author_association == 'MEMBER'
+      || github.event.pull_request.author_association == 'COLLABORATOR'
 
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
       issues: read
-      id-token: write
+      id-token: write # TODO: confirm claude-code-action needs OIDC; drop if unused (#37 H-SEC-4)
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 1
 
       - name: Run Claude Code Review
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@4e5d8b13ca281a6d163cdb287d8917b216e00d6f # v1.0.103
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'

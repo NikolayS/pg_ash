@@ -70,6 +70,28 @@ select ash.uninstall('yes');
 - The default and recommended interval is `'1 second'` for high-resolution sampling
 - See `select * from ash.status()` for the current sampling interval
 
+### Privileges
+
+The role that runs sampling (the owner of `ash.take_sample()`, or the pg_cron
+job owner) should be a superuser **or** a member of the built-in
+`pg_read_all_stats` role. Without it, `pg_stat_activity.query_id` is visible
+only for activity owned by the sampling role; queries run by other users come
+back with `query_id = NULL`, which ash records under the sentinel value `0`.
+
+This silently skews `ash.top_queries*`, `ash.query_waits`, and any per-query
+drill-downs — all of that "other-user" traffic collapses into a single
+`query_id = 0` bucket. To grant the role:
+
+```sql
+-- as a superuser
+grant pg_read_all_stats to <sampling_role>;
+```
+
+On managed services where `pg_read_all_stats` is already granted to the
+primary admin (RDS `rds_superuser`, Cloud SQL `cloudsqlsuperuser`, Supabase
+`postgres`), installing and running ash as that role is sufficient. Always
+verify with `select pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER');`.
+
 ### Upgrade
 
 ```sql
