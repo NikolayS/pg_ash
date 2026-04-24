@@ -372,6 +372,199 @@ jobs:
           drop role ash_test_unpriv;
           EOF
 
+      - name: Test ash.grant_reader / ash.revoke_reader helpers (#52)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Set up: a monitoring-style role with no privileges yet.
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_grafana') then
+              create role ash_grafana login password 'x';
+            end if;
+          end $$;
+
+          -- Sanity: role cannot use schema ash before grant_reader.
+          do $$
+          begin
+            assert not has_schema_privilege('ash_grafana', 'ash', 'USAGE'),
+              'ash_grafana must NOT have USAGE on ash before grant_reader';
+            assert not has_function_privilege('ash_grafana', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'ash_grafana must NOT have EXECUTE on ash.top_waits before grant_reader';
+            assert not has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
+              'ash_grafana must NOT have EXECUTE on ash.status before grant_reader';
+            assert not has_function_privilege('ash_grafana', 'ash.minute_waits(interval,int)', 'EXECUTE'),
+              'ash_grafana must NOT have EXECUTE on ash.minute_waits before grant_reader';
+            assert not has_table_privilege('ash_grafana', 'ash.sample', 'SELECT'),
+              'ash_grafana must NOT have SELECT on ash.sample before grant_reader';
+            assert not has_table_privilege('ash_grafana', 'ash.rollup_1m', 'SELECT'),
+              'ash_grafana must NOT have SELECT on ash.rollup_1m before grant_reader';
+            assert not has_table_privilege('ash_grafana', 'ash.sample_0', 'SELECT'),
+              'ash_grafana must NOT have SELECT on ash.sample_0 before grant_reader';
+          end $$;
+
+          -- Validation: non-existent role must raise a clear error and not partial-grant.
+          do $$
+          declare
+            v_succeeded bool := false;
+          begin
+            begin
+              perform ash.grant_reader('nope_does_not_exist');
+              v_succeeded := true;
+            exception when raise_exception then
+              null; -- expected: function raised because role missing
+            end;
+            assert not v_succeeded,
+              'grant_reader must reject non-existent role';
+          end $$;
+
+          -- GRANT: hand out the reader bundle.
+          select ash.grant_reader('ash_grafana');
+
+          -- Verify the granted set.
+          do $$
+          begin
+            assert has_schema_privilege('ash_grafana', 'ash', 'USAGE'),
+              'grant_reader: ash_grafana must have USAGE on ash';
+
+            -- Reader functions across the family
+            assert has_function_privilege('ash_grafana', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'grant_reader: ash.top_waits must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.top_queries(interval,int)', 'EXECUTE'),
+              'grant_reader: ash.top_queries must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
+              'grant_reader: ash.status must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.samples(interval,int)', 'EXECUTE'),
+              'grant_reader: ash.samples must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.minute_waits(interval,int)', 'EXECUTE'),
+              'grant_reader: ash.minute_waits must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.hourly_queries(interval,int)', 'EXECUTE'),
+              'grant_reader: ash.hourly_queries must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.daily_peak_backends(interval)', 'EXECUTE'),
+              'grant_reader: ash.daily_peak_backends must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.activity_summary(interval)', 'EXECUTE'),
+              'grant_reader: ash.activity_summary must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.timeline_chart(interval,interval,int,int,boolean)', 'EXECUTE'),
+              'grant_reader: ash.timeline_chart must be EXECUTE-able';
+
+            -- Reader-helpers the readers depend on
+            assert has_function_privilege('ash_grafana', 'ash._active_slots()', 'EXECUTE'),
+              'grant_reader: ash._active_slots must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash._wait_color(text,boolean)', 'EXECUTE'),
+              'grant_reader: ash._wait_color must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.epoch()', 'EXECUTE'),
+              'grant_reader: ash.epoch must be EXECUTE-able';
+
+            -- Admin functions stay locked down
+            assert not has_function_privilege('ash_grafana', 'ash.start(interval)', 'EXECUTE'),
+              'grant_reader: ash.start must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.stop()', 'EXECUTE'),
+              'grant_reader: ash.stop must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.take_sample()', 'EXECUTE'),
+              'grant_reader: ash.take_sample must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.rotate()', 'EXECUTE'),
+              'grant_reader: ash.rotate must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.uninstall(text)', 'EXECUTE'),
+              'grant_reader: ash.uninstall must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.set_debug_logging(bool)', 'EXECUTE'),
+              'grant_reader: ash.set_debug_logging must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.rollup_minute(int)', 'EXECUTE'),
+              'grant_reader: ash.rollup_minute must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.rollup_hour()', 'EXECUTE'),
+              'grant_reader: ash.rollup_hour must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.rollup_cleanup()', 'EXECUTE'),
+              'grant_reader: ash.rollup_cleanup must remain admin-only';
+            -- The helpers themselves are admin-only too: a reader role
+            -- that could grant_reader/revoke_reader could escalate.
+            assert not has_function_privilege('ash_grafana', 'ash.grant_reader(name)', 'EXECUTE'),
+              'grant_reader: ash.grant_reader must remain admin-only';
+            assert not has_function_privilege('ash_grafana', 'ash.revoke_reader(name)', 'EXECUTE'),
+              'grant_reader: ash.revoke_reader must remain admin-only';
+
+            -- Reader tables
+            assert has_table_privilege('ash_grafana', 'ash.sample', 'SELECT'),
+              'grant_reader: SELECT on ash.sample';
+            assert has_table_privilege('ash_grafana', 'ash.query_map_all', 'SELECT'),
+              'grant_reader: SELECT on ash.query_map_all';
+            assert has_table_privilege('ash_grafana', 'ash.config', 'SELECT'),
+              'grant_reader: SELECT on ash.config';
+            assert has_table_privilege('ash_grafana', 'ash.wait_event_map', 'SELECT'),
+              'grant_reader: SELECT on ash.wait_event_map';
+            assert has_table_privilege('ash_grafana', 'ash.rollup_1m', 'SELECT'),
+              'grant_reader: SELECT on ash.rollup_1m';
+            assert has_table_privilege('ash_grafana', 'ash.rollup_1h', 'SELECT'),
+              'grant_reader: SELECT on ash.rollup_1h';
+
+            -- Per-slot partitions get SELECT (parent grants do not cascade in PG)
+            assert has_table_privilege('ash_grafana', 'ash.sample_0', 'SELECT'),
+              'grant_reader: SELECT on ash.sample_0 (partition)';
+            assert has_table_privilege('ash_grafana', 'ash.query_map_0', 'SELECT'),
+              'grant_reader: SELECT on ash.query_map_0 (dictionary)';
+
+            raise notice 'grant_reader granted set verified';
+          end $$;
+
+          -- Idempotency: second grant_reader is a no-op error-free.
+          select ash.grant_reader('ash_grafana');
+
+          -- Behavioral check: actually call a reader as the role.
+          -- Avoid ash.status() here: it reads cron.job when pg_cron is
+          -- loaded, which requires USAGE on schema cron — out of scope
+          -- for grant_reader (and a separate, pre-existing limitation).
+          set role ash_grafana;
+          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
+          select count(*) from ash.minute_waits('1 hour'::interval, 5);
+          -- direct table read works too
+          do $$ begin perform 1 from ash.sample limit 1; end $$;
+          reset role;
+
+          -- REVOKE: take everything back.
+          select ash.revoke_reader('ash_grafana');
+
+          do $$
+          begin
+            assert not has_schema_privilege('ash_grafana', 'ash', 'USAGE'),
+              'revoke_reader: USAGE on ash must be revoked';
+            assert not has_function_privilege('ash_grafana', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'revoke_reader: EXECUTE on ash.top_waits must be revoked';
+            assert not has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
+              'revoke_reader: EXECUTE on ash.status must be revoked';
+            assert not has_function_privilege('ash_grafana', 'ash.minute_waits(interval,int)', 'EXECUTE'),
+              'revoke_reader: EXECUTE on ash.minute_waits must be revoked';
+            assert not has_table_privilege('ash_grafana', 'ash.sample', 'SELECT'),
+              'revoke_reader: SELECT on ash.sample must be revoked';
+            assert not has_table_privilege('ash_grafana', 'ash.rollup_1m', 'SELECT'),
+              'revoke_reader: SELECT on ash.rollup_1m must be revoked';
+            assert not has_table_privilege('ash_grafana', 'ash.sample_0', 'SELECT'),
+              'revoke_reader: SELECT on ash.sample_0 must be revoked';
+
+            raise notice 'revoke_reader fully removed reader privileges';
+          end $$;
+
+          -- After revoke, calling a reader as the role must fail with 42501.
+          set role ash_grafana;
+          do $$
+          declare
+            v_succeeded bool := false;
+          begin
+            begin
+              perform ash.top_waits('1 hour'::interval, 5, 0);
+              v_succeeded := true;
+            exception when insufficient_privilege then
+              null; -- expected: 42501 permission denied
+            end;
+            assert not v_succeeded,
+              'expected permission denied after revoke_reader, got success';
+          end $$;
+          reset role;
+
+          -- Idempotency: second revoke_reader is a no-op.
+          select ash.revoke_reader('ash_grafana');
+
+          drop role ash_grafana;
+          EOF
+
       - name: Test sampler and decoder
         env:
           PGPASSWORD: postgres
