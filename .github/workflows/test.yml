@@ -1550,8 +1550,33 @@ jobs:
             v_result text;
             v_slot smallint;
           begin
+            -- === Confirmation token required (issue #53) ===
+            -- Without 'yes': raises and leaves state untouched.
+            begin
+              perform ash.rebuild_partitions(4);
+              assert false,
+                'rebuild_partitions(4) without confirm should raise';
+            exception when others then
+              null; -- expected
+            end;
+            -- Sampling must still be enabled (no destructive side effects).
+            assert (select sampling_enabled from ash.config where singleton) = true,
+              'rebuild_partitions without confirm must not change sampling_enabled';
+            -- num_partitions must still be 3 (no partitions dropped).
+            assert (select num_partitions from ash.config where singleton) = 3,
+              'rebuild_partitions without confirm must not change num_partitions';
+
+            -- With 'yes': proceeds.
+            select ash.rebuild_partitions(4, 'yes') into v_result;
+            assert v_result like 'rebuilt: 3 -> 4%',
+              'rebuild_partitions(4, ''yes'') should succeed, got: ' || v_result;
+            -- Reset to baseline 3 for the rest of this test block.
+            update ash.config set sampling_enabled = true where singleton;
+            select ash.rebuild_partitions(3, 'yes') into v_result;
+            update ash.config set sampling_enabled = true where singleton;
+
             -- === Rebuild to 5 partitions ===
-            select ash.rebuild_partitions(5) into v_result;
+            select ash.rebuild_partitions(5, 'yes') into v_result;
             assert v_result like 'rebuilt: 3 -> 5%',
               'rebuild should report 3 -> 5, got: ' || v_result;
 
@@ -1608,7 +1633,7 @@ jobs:
             assert v_count = 0, 'sample_2 should be empty after rotation';
 
             -- === Rebuild back to 3 ===
-            select ash.rebuild_partitions(3) into v_result;
+            select ash.rebuild_partitions(3, 'yes') into v_result;
             assert v_result like 'rebuilt: 5 -> 3%',
               'rebuild should report 5 -> 3';
 
@@ -1622,14 +1647,14 @@ jobs:
 
             -- === Edge case: rebuild with invalid N ===
             begin
-              perform ash.rebuild_partitions(2);
+              perform ash.rebuild_partitions(2, 'yes');
               assert false, 'should reject N=2';
             exception when others then
               null; -- expected
             end;
 
             begin
-              perform ash.rebuild_partitions(33);
+              perform ash.rebuild_partitions(33, 'yes');
               assert false, 'should reject N=33';
             exception when others then
               null; -- expected
@@ -2199,7 +2224,7 @@ jobs:
           begin
             -- rebuild_partitions should be denied
             begin
-              perform ash.rebuild_partitions(3);
+              perform ash.rebuild_partitions(3, 'yes');
               assert false, 'rebuild_partitions should be denied for unprivileged user';
             exception when insufficient_privilege then
               null; -- expected

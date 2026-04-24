@@ -23,4 +23,6 @@
 --   - search_path guard on every ash.* function + pgss-schema-aware readers;
 --     REVOKE EXECUTE on all ash.* functions and SELECT on reader tables from
 --     PUBLIC (#45).
+--   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
+--     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
 \ir ash-install.sql
