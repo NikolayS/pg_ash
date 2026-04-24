@@ -608,6 +608,7 @@ on first encounter), that's a signal to optimize the caching strategy.
 - **Requires `compute_query_id = on`** — default since Postgres 14, but can be turned off.
 - **Requires pg_cron >= 1.5** — for second-granularity scheduling. Most managed providers ship this or newer.
 - **Requires `pg_read_all_stats`** — sampler role must see all backends in `pg_stat_activity`.
+- **Legacy upgrade-script idempotency is bounded** — finalized legacy upgrade scripts are guaranteed to be idempotent only on the version just below them. `ash-1.1-to-1.2.sql` may be re-applied on a 1.2 install; `ash-1.1.sql` may NOT be re-applied on a 1.4+ install. Concrete example: between 1.1 and 1.4 the OUT-column list of `ash.top_queries_with_text` was extended (`mean_time_ms` → `calls, total_exec_time_ms, mean_exec_time_ms`), and `CREATE OR REPLACE FUNCTION` cannot change OUT parameters, so re-applying `ash-1.1.sql` on a 1.4 install fails with `ERROR: cannot change return type of existing function`. Forward upgrade (one-shot `1.0 → 1.1 → 1.2 → 1.3 → 1.4`) IS supported and exercised in CI; replaying old installer/upgrade scripts on a much newer install is not. CI's "Dev workflow: re-apply migrations (idempotent)" therefore re-applies only `ash-1.1-to-1.2.sql` and later on a fresh 1.4 install. See issue [#50](https://github.com/NikolayS/pg_ash/issues/50).
 
 ## 8. Future Ideas
 
