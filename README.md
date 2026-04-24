@@ -70,6 +70,33 @@ select ash.uninstall('yes');
 - The default and recommended interval is `'1 second'` for high-resolution sampling
 - See `select * from ash.status()` for the current sampling interval
 
+### Privileges
+
+The role that runs sampling (the owner of `ash.take_sample()`, or the pg_cron
+job owner) should be a superuser **or** a member of the built-in
+`pg_read_all_stats` role. Without it, `pg_stat_activity.query_id` is visible
+only for activity owned by the sampling role; queries run by other users come
+back with `query_id = NULL`, which ash records under the sentinel value `0`.
+
+This silently skews `ash.top_queries*`, `ash.query_waits`, and any per-query
+drill-downs — all of that "other-user" traffic collapses into a single
+`query_id = 0` bucket. To grant the role:
+
+```sql
+-- as a superuser
+grant pg_read_all_stats to <sampling_role>;
+```
+
+On managed services where `pg_read_all_stats` is already granted to the
+primary admin (RDS `rds_superuser`, Cloud SQL `cloudsqlsuperuser`, Supabase
+`postgres`), installing and running ash as that role is sufficient. Always
+verify with `select pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER');`.
+
+If the privilege probe itself errors (e.g. missing `pg_roles` access on a
+locked-down managed service), `ash.start()` does not abort — it emits a
+`RAISE NOTICE 'privilege probe failed: ...'` so the skipped check remains
+visible in server / CI logs.
+
 ### Upgrade
 
 ```sql
@@ -81,6 +108,9 @@ select ash.uninstall('yes');
 
 -- from 1.2 to 1.3
 \i sql/ash-1.2-to-1.3.sql
+
+-- from 1.3 to 1.4
+\i sql/ash-1.3-to-1.4.sql
 
 -- check version
 select * from ash.status();
@@ -326,6 +356,25 @@ select * from ash.samples('10 minutes', 20);
 -- raw samples during an incident
 select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 50);
 ```
+
+### Dump samples to CSV
+
+Always go through `ash.samples()` / `ash.samples_at()` — the underlying `ash.sample`
+table stores a packed `integer[]` and cannot be joined directly. The defaults for
+`ash.samples()` are `p_interval => '1 hour'` and `p_limit => 100`; pass a large
+`p_limit` when dumping.
+
+```sql
+-- dump every sample from the last hour
+\copy (select * from ash.samples('1 hour'::interval, 10000000)) to '/tmp/ash.csv' csv header
+
+-- dump a specific incident window
+\copy (select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 10000000)) to '/tmp/incident.csv' csv header
+```
+
+Use `\copy` (psql) rather than server-side `COPY TO` if `/tmp` isn't writable by
+the Postgres user (managed services), and check the exit status — silently
+redirecting stderr to `/dev/null` will hide errors like typos in table names.
 
 ### Timeline chart
 
@@ -842,6 +891,7 @@ Don't forget to also schedule rotation and rollups:
 - **query_map hard cap at 50k entries** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. This can flood the query_map partitions. A hard cap of 50,000 entries per partition prevents unbounded growth — queries beyond the cap are tracked as "unknown." PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
 - **Parallel query workers counted individually** — parallel workers share the same `query_id` as the leader but are counted as separate backends. This inflates the apparent "weight" of parallel queries in `top_queries()`. `leader_pid` grouping is not yet implemented.
 - **WAL overhead** — 1-second sampling generates ~29 KiB WAL per sample (~2.4 GiB/day), dominated by `full_page_writes`. This is significant for WAL-sensitive replication setups. Consider 5-second or 10-second sampling intervals (`ash.start('5 seconds')`) if WAL volume is a concern. The overhead scales linearly with sampling frequency.
+- **Epoch overflow horizon (~2094)** — `sample_ts` is stored as `int4` seconds since 2026-01-01 UTC and `int4` is exhausted around 2094-01-19. Past that point, the `::int4` cast in `ash.take_sample()` raises `ERROR: integer out of range` and sampling hard-fails (it does NOT silently wrap). `ash.status()` exposes `epoch_seconds_remaining` so operators can plan a `bigint` migration of the column well before the horizon. See issue [#37](https://github.com/NikolayS/pg_ash/issues/37).
 
 ## License
 

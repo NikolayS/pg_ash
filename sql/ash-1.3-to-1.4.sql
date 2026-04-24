@@ -10,4 +10,6 @@
 --   - take_sample() catches statement_timeout (missed_samples counter)
 --   - Dynamic SQL in take_sample()/rotate() (replaces hardcoded 3-partition logic)
 --   - Pre-truncation rollup in rotate()
+--   - status() surfaces epoch_seconds_remaining for the 2094 overflow
+--     horizon of sample_ts (int4). (#37)
 \ir ash-install.sql
