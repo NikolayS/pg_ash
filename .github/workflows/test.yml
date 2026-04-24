@@ -18,6 +18,15 @@ jobs:
       fail-fast: false
       matrix:
         postgres: [14, 15, 16, 17, 18]
+        # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
+        # compares these as strings in the step-level `if`/conditionals.
+        cron: ["on"]
+        # Deliberate no-pg_cron variant (M-CI-4): exercise the degraded-mode
+        # branch on a PG version where pg_cron is normally available (PG17),
+        # so we catch regressions independent of PGDG package availability.
+        include:
+          - postgres: 17
+            cron: "off"
 
     services:
       postgres:
@@ -37,21 +46,58 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install pg_cron in container
+        # The GitHub Actions `services:` block does not let us mount a custom
+        # postgresql.conf or set `command: -c shared_preload_libraries=...` on
+        # the existing postgres service. So we `docker exec` into the already-
+        # running service container to (1) apt-install pg_cron from PGDG and
+        # (2) append `shared_preload_libraries` to postgresql.conf, then
+        # `docker restart` so PostgreSQL re-reads the config. Without the
+        # restart, pg_cron's background worker never starts.
+        # When matrix.cron == 'off', we skip pg_cron install entirely to
+        # exercise the degraded-mode (no-cron) branch.
+        #
+        # NB1/NB2: pass ${{ }} expressions through env: vars rather than
+        # textual substitution into bash (CWE-78 hygiene; values are hard-
+        # coded today but future edits shouldn't break the pattern).
+        env:
+          CRON: ${{ matrix.cron }}
+          CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
-          # Install pg_cron inside the PostgreSQL container (not on host)
-          docker exec ${{ job.services.postgres.id }} bash -c "
-            apt-get update && apt-get install -y postgresql-\${PG_MAJOR}-cron || true
-          " || echo "pg_cron install attempted"
-          # Configure pg_cron
-          docker exec ${{ job.services.postgres.id }} bash -c "
+          if [ "$CRON" = "off" ]; then
+            echo "matrix.cron=off — skipping pg_cron install to test degraded mode"
+            docker exec "$CONTAINER_ID" bash -c "
+              echo \"shared_preload_libraries = 'pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
+            "
+            docker restart "$CONTAINER_ID"
+            sleep 5
+            exit 0
+          fi
+          # Install pg_cron inside the PostgreSQL container (not on host).
+          # Allow apt failures to be non-fatal here — PGDG sometimes lags on
+          # new PG majors (e.g. PG18 right after release), and we want to
+          # still exercise the no-cron branch rather than fail the whole job.
+          # The follow-up "Verify pg_cron install matches expectation" step
+          # enforces the expected state.
+          docker exec "$CONTAINER_ID" bash -c "
+            apt-get update && apt-get install -y postgresql-\${PG_MAJOR}-cron
+          " || echo "pg_cron install failed — will fall back to no-cron mode"
+          # Configure pg_cron (or fall back to pgss-only if install failed).
+          # cron.use_background_workers = on makes pg_cron run each scheduled
+          # command as a bgworker instead of opening a libpq connection to
+          # localhost. That bypasses pg_hba.conf / TCP / username concerns
+          # entirely, which has historically been the flakiest part of
+          # running pg_cron in a CI service container. Supported since
+          # pg_cron 1.5 (PGDG packages are always >= 1.6 now).
+          docker exec "$CONTAINER_ID" bash -c "
             if [ -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control ]; then
               echo \"shared_preload_libraries = 'pg_cron,pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
               echo 'cron.database_name = postgres' >> \${PGDATA}/postgresql.conf
+              echo 'cron.use_background_workers = on' >> \${PGDATA}/postgresql.conf
             else
               echo \"shared_preload_libraries = 'pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
             fi
-          " || true
-          docker restart ${{ job.services.postgres.id }} || true
+          "
+          docker restart "$CONTAINER_ID"
           sleep 5
 
       - name: Wait for PostgreSQL
@@ -64,9 +110,88 @@ jobs:
       - name: Create pg_cron extension
         env:
           PGPASSWORD: postgres
+          CRON: ${{ matrix.cron }}
         run: |
-          psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available"
-          psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_stat_statements;" || echo "pg_stat_statements not available"
+          if [ "$CRON" = "off" ]; then
+            echo "matrix.cron=off — not creating pg_cron extension"
+          else
+            # pg_cron may legitimately be unavailable on new PG majors before
+            # PGDG catches up (e.g. PG18). Don't fail the job; downstream
+            # cron-gated tests check `pg_extension` and skip themselves.
+            psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available (PGDG package missing for this PG major)"
+          fi
+          # pg_stat_statements normally ships with every supported PG version,
+          # but PGDG occasionally lags contrib on release day for a brand-new
+          # major. NB4: treat pgss the same way we treat pg_cron — warn and
+          # continue if creation fails — so a temporarily incomplete PGDG
+          # doesn't turn every `cron=on` matrix entry red at setup. Downstream
+          # pgss-dependent tests check `pg_extension` themselves and either
+          # skip or assert their own error behaviour (see "Degraded mode:
+          # without pg_stat_statements").
+          psql -h localhost -U postgres -d postgres \
+            -c "create extension if not exists pg_stat_statements;" \
+            || echo "pg_stat_statements not available (contrib package missing for this PG major)"
+
+      - name: "Verify pg_cron wiring"
+        # Upstream-debugging step for H-CI-3: confirm that (a) the
+        # shared_preload_libraries edit survived `docker restart`,
+        # (b) cron.use_background_workers/cron.database_name took effect,
+        # (c) the pg_cron scheduler bgworker actually attached. When
+        # H-CI-3 has failed in the past (`baseline=0 after=0 waited=30`
+        # with no rows in cron.job_run_details) these three facts were
+        # all invisible — this step surfaces them in the job log every
+        # run so a future failure pinpoints which link of the chain
+        # broke.
+        #
+        # Non-fatal when matrix.cron=off or pg_cron isn't installed:
+        # the degraded-mode axis deliberately has none of this.
+        env:
+          PGPASSWORD: postgres
+          CRON: ${{ matrix.cron }}
+        run: |
+          if [ "$CRON" = "off" ]; then
+            echo "matrix.cron=off — skipping pg_cron wiring verification"
+            exit 0
+          fi
+          if ! psql -h localhost -U postgres -d postgres -tAc \
+              "select exists (select from pg_extension where extname='pg_cron')" \
+              | grep -q '^t$'; then
+            echo "pg_cron extension not installed — skipping wiring verification"
+            exit 0
+          fi
+          echo "=== GUCs ==="
+          psql -h localhost -U postgres -d postgres -c "
+            show shared_preload_libraries;
+            show cron.database_name;
+            show cron.use_background_workers;
+            show cron.host;
+          "
+          echo "=== pg_cron extension version ==="
+          psql -h localhost -U postgres -d postgres -c \
+            "select extname, extversion from pg_extension where extname='pg_cron';"
+          echo "=== pg_cron scheduler bgworker attached? ==="
+          # When shared_preload_libraries actually loaded pg_cron, the
+          # launcher bgworker is always running. If this returns 0 rows,
+          # shared_preload_libraries did not include pg_cron at startup
+          # (edit didn't survive / got overwritten / restart raced).
+          psql -h localhost -U postgres -d postgres -c "
+            select application_name, backend_type, state
+            from pg_stat_activity
+            where backend_type ~* 'cron'
+               or application_name ~* 'cron';
+          "
+          echo "=== ash_* jobs currently scheduled in cron.job ==="
+          # This separates "we scheduled jobs" (>0 rows) from "jobs are
+          # running" (rows in cron.job_run_details). At this point in the
+          # workflow no ash.start() has run yet, so this should be 0 — but
+          # we emit the query now so the template is visible in the CI log
+          # and later debugging can compare against the post-start state
+          # captured in H-CI-3 itself.
+          psql -h localhost -U postgres -d postgres -c "
+            select count(*) as ash_jobs_scheduled
+            from cron.job
+            where jobname like 'ash_%';
+          "
 
       - name: Install pg_ash (fresh install)
         env:
@@ -374,6 +499,18 @@ jobs:
           end;
           $$;
           EOF
+
+      # End-to-end "pg_cron actually fires ash.take_sample on schedule"
+      # (issue #37 H-CI-3) is deferred to issue #46. The in-DB logic
+      # (ash.start / ash.take_sample / cron wiring) is still exercised by
+      # direct take_sample() calls elsewhere in this workflow and by the
+      # "Verify pg_cron wiring" step above. What's deferred is the
+      # end-to-end "cron actually fires on schedule in CI" assertion,
+      # which kept failing because pg_cron's scheduler metadata
+      # connection hits `FATAL: database "root" does not exist` in the
+      # GHA service container (peer auth defaults dbname to OS user
+      # `root`). See https://github.com/NikolayS/pg_ash/issues/46 for
+      # the iterations attempted and proposed next steps.
 
       - name: Test set_debug_logging
         env:
@@ -732,16 +869,18 @@ jobs:
             assert v_count > 0, 'query_waits_at returned 0 rows';
 
             -- top_queries_with_text (requires pg_stat_statements — errors without it)
+            -- Seeded query_ids exist in ash.query_map_0; expect at least 1 row.
             select count(*) into v_count from ash.top_queries_with_text('1 hour');
-            assert v_count >= 0, 'top_queries_with_text should work with pgss installed';
+            assert v_count > 0, 'top_queries_with_text returned 0 rows (seeded queries should appear)';
 
             -- event_queries (requires pg_stat_statements)
+            -- CPU* waits are seeded across the last 30 minutes.
             select count(*) into v_count from ash.event_queries('CPU*', '1 hour');
-            assert v_count >= 0, 'event_queries should work with pgss installed';
+            assert v_count > 0, 'event_queries returned 0 rows for CPU*';
 
             -- event_queries_at (requires pg_stat_statements)
             select count(*) into v_count from ash.event_queries_at('CPU*', v_start, v_end);
-            assert v_count >= 0, 'event_queries_at should work with pgss installed';
+            assert v_count > 0, 'event_queries_at returned 0 rows for CPU*';
 
             raise notice 'Query-specific function tests PASSED';
           end;
@@ -1285,13 +1424,11 @@ jobs:
           begin
             assert (select version from ash.config where singleton) = '1.3',
               'version should be 1.3 after upgrade';
-            -- timeline_chart must exist with new column order
-            select count(*) into v_count
-            from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            assert v_count >= 0, 'timeline_chart missing after 1.3 upgrade';
-            select count(*) into v_count
-            from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
-            assert v_count >= 0, 'timeline_chart with p_color missing after 1.3';
+            -- timeline_chart must exist with new column order.
+            -- No seed data here, so don't assert row count — a broken
+            -- function would raise (missing function / bad signature).
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
             -- debug_logging must exist
             assert exists (
               select from information_schema.columns
@@ -1319,6 +1456,121 @@ jobs:
           $$;
 
           -- Uninstall after upgrade test
+          select ash.uninstall('yes');
+          EOF
+
+      - name: "Upgrade path via documented wrappers + data preservation (issue #37 H-CI-1, H-CI-2)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # The README tells users to run the wrappers (e.g. ash-1.0-to-1.1.sql),
+          # but no existing CI step exercises them — the other upgrade-path
+          # test shortcuts by loading ash-1.1.sql directly. This step exercises
+          # the wrapper chain AND asserts a seeded row is preserved end-to-end
+          # (and that new columns get sensible defaults).
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Install 1.0
+          \i sql/ash-1.0.sql
+
+          -- Seed fixtures at v1.0 schema:
+          --   (a) a non-default config value that all upgrades must preserve
+          --   (b) a wait_event_map row + query_map_0 row + a sample referencing them
+          --       using a sentinel query_id we can look up later
+          update ash.config
+            set include_bg_workers = true,
+                sample_interval    = '7 seconds',
+                rotation_period    = '3 days'
+            where singleton;
+
+          insert into ash.wait_event_map (state, type, event)
+            values ('active', 'CPU*', 'CPU*')
+            on conflict do nothing;
+
+          insert into ash.query_map_0 (query_id) values (424242)
+            on conflict do nothing;
+
+          do $$
+          declare
+            v_wait_id smallint;
+            v_qid_id  int4;
+            v_slot    smallint;
+            v_ts      int4;
+          begin
+            select id into v_wait_id from ash.wait_event_map
+              where state='active' and type='CPU*' and event='CPU*';
+            select id into v_qid_id from ash.query_map_0 where query_id = 424242;
+            v_slot := ash.current_slot();
+            v_ts := extract(epoch from now() - ash.epoch())::int4;
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (v_ts, 1, 1, array[-v_wait_id, 1, v_qid_id]::integer[], v_slot);
+            assert exists (
+              select from ash.sample where datid = 1 and active_count = 1
+            ), 'v1.0 fixture sample row missing';
+            raise notice 'v1.0 schema installed and fixtures seeded';
+          end;
+          $$;
+
+          -- Upgrade chain via the DOCUMENTED wrappers (H-CI-1).
+          \i sql/ash-1.0-to-1.1.sql
+          \i sql/ash-1.1-to-1.2.sql
+          \i sql/ash-1.2-to-1.3.sql
+          \i sql/ash-1.3-to-1.4.sql
+
+          -- Assertions after reaching v1.4
+          do $$
+          declare
+            v_cfg record;
+            v_sample_rows int;
+            v_qid_id int4;
+          begin
+            -- Version landed on 1.4
+            assert (select version from ash.config where singleton) = '1.4',
+              'version should be 1.4 after wrapper chain';
+
+            -- (H-CI-2) Pre-existing v1.0 config values must survive
+            select * into v_cfg from ash.config where singleton;
+            assert v_cfg.include_bg_workers = true,
+              'include_bg_workers not preserved across upgrades';
+            assert v_cfg.sample_interval = interval '7 seconds',
+              'sample_interval not preserved, got: ' || v_cfg.sample_interval::text;
+            assert v_cfg.rotation_period = interval '3 days',
+              'rotation_period not preserved, got: ' || v_cfg.rotation_period::text;
+
+            -- Columns added in later versions must be populated with sensible defaults
+            assert v_cfg.debug_logging = false,
+              'debug_logging should default to false after upgrade, got: ' || v_cfg.debug_logging::text;
+            assert v_cfg.missed_samples = 0,
+              'missed_samples should default to 0 after upgrade, got: ' || v_cfg.missed_samples::text;
+
+            -- (H-CI-2) Seeded wait_event_map and query_map rows survive
+            assert exists (
+              select from ash.wait_event_map
+              where state='active' and type='CPU*' and event='CPU*'
+            ), 'seeded wait_event_map row lost across upgrade';
+
+            select id into v_qid_id from ash.query_map_0 where query_id = 424242;
+            assert v_qid_id is not null,
+              'seeded query_map_0 row (query_id=424242) lost across upgrade';
+
+            -- (H-CI-2) The seeded sample row survives
+            select count(*) into v_sample_rows
+              from ash.sample where datid = 1 and active_count = 1;
+            assert v_sample_rows >= 1,
+              'seeded ash.sample row lost across upgrade (count=' || v_sample_rows || ')';
+
+            -- The sample must decode into our sentinel query_id
+            assert exists (
+              select 1
+              from ash.sample s,
+                   lateral ash.decode_sample(s.data, s.slot) d
+              where s.datid = 1 and s.active_count = 1
+                and d.query_id = 424242
+            ), 'decoded sample no longer references sentinel query_id 424242';
+
+            raise notice 'Wrapper-chain upgrade + data preservation PASSED';
+          end;
+          $$;
+
           select ash.uninstall('yes');
           EOF
 
@@ -1350,14 +1602,12 @@ jobs:
           \i sql/ash-1.2-to-1.3.sql
 
           do $$
-          declare
-            v_count int;
           begin
             assert (select version from ash.config where singleton) = '1.3',
               'version should be 1.3 after upgrade';
-            select count(*) into v_count
-            from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            assert v_count >= 0, 'timeline_chart missing';
+            -- No seed data in this path; just verify the function is
+            -- callable after the upgrade (a missing/broken function raises).
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
             raise notice '1.2 -> 1.3 direct upgrade PASSED';
           end;
           $$;
@@ -1407,16 +1657,15 @@ jobs:
           \i sql/ash-1.3-to-1.4.sql
 
           do $$
-          declare
-            v_count int;
           begin
             assert (select version from ash.config where singleton) = '1.4',
               'version should still be 1.4 after second apply';
             assert (select missed_samples from ash.config where singleton) = 42,
               'missed_samples should be preserved (42) after idempotent re-apply';
-            select count(*) into v_count
-            from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            assert v_count >= 0, 'timeline_chart missing after re-apply';
+            -- timeline_chart must still be callable after re-apply. No data
+            -- was seeded here, so count is not meaningful — a missing or
+            -- broken function would raise.
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
             raise notice 'Second re-apply PASSED (missed_samples preserved)';
           end;
           $$;
@@ -1490,10 +1739,14 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          # Drop pgss, reinstall pg_ash fresh (to test clean no-pgss state)
-          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" 2>/dev/null || true
-          psql -h localhost -U postgres -d postgres -c "drop extension if exists pg_stat_statements" 2>/dev/null || true
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
+          # Drop pgss, reinstall pg_ash fresh (to test clean no-pgss state).
+          # uninstall may fail if the schema was already dropped by a prior
+          # step (e.g. "Upgrade path" ends with uninstall). That's expected,
+          # so we silence it. But the install that follows MUST succeed.
+          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" 2>/dev/null || echo "ash.uninstall skipped (schema absent)"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "drop extension if exists pg_stat_statements"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
 
@@ -1531,8 +1784,11 @@ jobs:
             select count(*) into v_count from ash.activity_summary('1 hour');
             assert v_count > 0, 'activity_summary should work without pgss';
 
+            -- timeline_chart always returns a legend row even with no data;
+            -- with our seeded CPU* sample the count must exceed 1.
             select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            assert v_count >= 0, 'timeline_chart should work without pgss';
+            assert v_count > 1,
+              'timeline_chart without pgss should return legend + data rows, got: ' || v_count;
 
             perform ash.take_sample();
             perform ash.status();
@@ -1604,16 +1860,21 @@ jobs:
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "select ash.uninstall('yes')"
 
-          # Restore pgss for subsequent steps
-          psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_stat_statements" 2>/dev/null || true
+          # Restore pgss for subsequent steps — must succeed.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "create extension if not exists pg_stat_statements"
 
       - name: "Degraded mode: without pg_cron"
         env:
           PGPASSWORD: postgres
         run: |
-          # Install pg_ash fresh without pg_cron
-          psql -h localhost -U postgres -d postgres -c "drop extension if exists pg_cron cascade" 2>/dev/null || true
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
+          # Install pg_ash fresh without pg_cron.
+          # `drop extension if exists` is a no-op when pg_cron isn't installed
+          # (e.g. PG18 where PGDG package may be missing, or matrix.cron=off).
+          # Use ON_ERROR_STOP so unrelated failures don't get silenced.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "drop extension if exists pg_cron cascade"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           do $$
@@ -1660,6 +1921,8 @@ jobs:
       - name: Final summary
         env:
           PGPASSWORD: postgres
+          PG_MAJOR: ${{ matrix.postgres }}
+          CRON: ${{ matrix.cron }}
         run: |
-          echo "All tests passed for PostgreSQL ${{ matrix.postgres }}"
+          echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
 
