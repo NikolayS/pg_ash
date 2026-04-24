@@ -417,6 +417,121 @@ jobs:
           $$;
           EOF
 
+      - name: Test decode_sample convenience overloads (int4, timestamptz)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_sample_ts int4;
+            v_wait_id smallint;
+            v_qid_a int4;
+            v_qid_b int4;
+            v_decoded_int_count int;
+            v_decoded_ts_count int;
+            v_decoded_int_total int;
+            v_decoded_ts_total int;
+            v_packed_total int;
+            v_distinct_datids int;
+            v_ts timestamptz;
+            v_slot smallint;
+          begin
+            -- Run a real take_sample() first so the call path exercises the
+            -- live sampler at least once.
+            perform ash.take_sample();
+
+            -- Build a deterministic test sample_ts so the assertions don't
+            -- depend on whether the CI runner happens to have active
+            -- backends right now. Use a sample_ts in the future to avoid
+            -- colliding with anything take_sample() inserted.
+            v_sample_ts := ash.ts_from_timestamptz(now()) + 86400;
+            v_slot := ash.current_slot();
+
+            -- Ensure dictionary entries exist (may already exist from earlier
+            -- decoder test step; on conflict do nothing).
+            insert into ash.wait_event_map (state, type, event)
+            values ('active', 'CPU*', 'CPU*') on conflict do nothing;
+            select id into v_wait_id from ash.wait_event_map
+            where state = 'active' and type = 'CPU*' and event = 'CPU*';
+
+            insert into ash.query_map_0 (query_id) values (777001) on conflict do nothing;
+            insert into ash.query_map_0 (query_id) values (777002) on conflict do nothing;
+            select id into v_qid_a from ash.query_map_0 where query_id = 777001;
+            select id into v_qid_b from ash.query_map_0 where query_id = 777002;
+
+            -- Insert two synthetic ash.sample rows for the same sample_ts
+            -- but different datids, so the int4 overload has more than one
+            -- ash.sample row to walk and the datid column is exercised.
+            -- datid 1 = template1, 2 = postgres in most installs, but we
+            -- only need oid values that are distinct and stable.
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values
+              (v_sample_ts, 1::oid, 2, array[-v_wait_id, 2, v_qid_a, v_qid_b]::integer[], v_slot),
+              (v_sample_ts, 2::oid, 1, array[-v_wait_id, 1, v_qid_a]::integer[], v_slot);
+
+            -- decode_sample(int4): expect 3 decoded rows (2 + 1 backends),
+            -- each with count=1 and a datid that matches one of the rows we
+            -- inserted.
+            select count(*), coalesce(sum(d.count), 0), count(distinct d.datid)
+              into v_decoded_int_count, v_decoded_int_total, v_distinct_datids
+            from ash.decode_sample(v_sample_ts) d;
+            assert v_decoded_int_count = 3,
+              'decode_sample(int4) row count expected 3, got ' || v_decoded_int_count;
+            assert v_decoded_int_total = 3,
+              'decode_sample(int4) sum(count) expected 3, got ' || v_decoded_int_total;
+            assert v_distinct_datids = 2,
+              'decode_sample(int4) distinct datids expected 2, got ' || v_distinct_datids;
+
+            -- Sanity vs. packed active_count.
+            select coalesce(sum(active_count), 0) into v_packed_total
+            from ash.sample where sample_ts = v_sample_ts;
+            assert v_decoded_int_count = v_packed_total,
+              'decoded rows ' || v_decoded_int_count
+              || ' != packed active_count total ' || v_packed_total;
+
+            -- Verify wait_event + query_id resolution is correct for each
+            -- decoded row (uses the row's slot internally, so query_ids are
+            -- unambiguous).
+            assert exists (
+              select 1 from ash.decode_sample(v_sample_ts) d
+              where d.datid = 1::oid and d.wait_event = 'CPU*' and d.query_id = 777001
+            ), 'decode_sample(int4) missing expected (datid=1, CPU*, 777001) row';
+            assert exists (
+              select 1 from ash.decode_sample(v_sample_ts) d
+              where d.datid = 1::oid and d.wait_event = 'CPU*' and d.query_id = 777002
+            ), 'decode_sample(int4) missing expected (datid=1, CPU*, 777002) row';
+            assert exists (
+              select 1 from ash.decode_sample(v_sample_ts) d
+              where d.datid = 2::oid and d.wait_event = 'CPU*' and d.query_id = 777001
+            ), 'decode_sample(int4) missing expected (datid=2, CPU*, 777001) row';
+
+            -- timestamptz overload: round-trip and confirm we get identical
+            -- decoded rows.
+            v_ts := ash.ts_to_timestamptz(v_sample_ts);
+            select count(*), coalesce(sum(d.count), 0)
+              into v_decoded_ts_count, v_decoded_ts_total
+            from ash.decode_sample(v_ts) d;
+            assert v_decoded_ts_count = v_decoded_int_count,
+              'decode_sample(timestamptz) row count ' || v_decoded_ts_count
+              || ' != decode_sample(int4) ' || v_decoded_int_count;
+            assert v_decoded_ts_total = v_decoded_int_total,
+              'decode_sample(timestamptz) sum(count) ' || v_decoded_ts_total
+              || ' != decode_sample(int4) ' || v_decoded_int_total;
+
+            -- Empty input: a sample_ts with no rows must return zero rows.
+            assert (select count(*) from ash.decode_sample(-1)) = 0,
+              'decode_sample(int4) on missing sample_ts should return 0 rows';
+
+            -- Clean up the synthetic rows so later steps see a normal table.
+            delete from ash.sample where sample_ts = v_sample_ts;
+            delete from ash.query_map_0 where query_id in (777001, 777002);
+
+            raise notice 'decode_sample overload tests PASSED';
+          end;
+          $$;
+          EOF
+
       - name: Test missed_samples counter (timeout catching)
         env:
           PGPASSWORD: postgres

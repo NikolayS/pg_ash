@@ -186,6 +186,21 @@ Rollup readers query `rollup_1m` / `rollup_1h` tables — they work even after r
 |----------|-------------|
 | `ash.ts_from_timestamptz(timestamptz)` | Convert timestamptz to internal int4 epoch offset (useful for querying rollup tables directly) |
 | `ash.ts_to_timestamptz(int4)` | Convert int4 epoch offset back to timestamptz |
+| `ash.decode_sample(integer[], smallint)` | Decode a single packed `ash.sample.data` array. Pass `slot` for unambiguous query_id resolution |
+| `ash.decode_sample(int4)` | Convenience: decode every `ash.sample` row at the given `sample_ts` (across all datids/slots). Returns `(datid, wait_event, query_id, count)` |
+| `ash.decode_sample(timestamptz)` | Same as above but accepts `timestamptz` (converted via `ts_from_timestamptz`) |
+
+`decode_sample` overloads have `EXECUTE` revoked from `PUBLIC` (per the privilege hardening in #45). Grant explicitly to roles that need them, e.g. `grant execute on function ash.decode_sample(int4) to my_reader;`.
+
+#### Example
+
+```sql
+-- All decoded backends recorded at a specific moment, by database:
+select db.datname, d.wait_event, d.query_id, d.count
+from ash.decode_sample('2026-04-19 14:30:00+00'::timestamptz) d
+join pg_database db on db.oid = d.datid
+order by db.datname, d.wait_event;
+```
 
 ## Usage
 
