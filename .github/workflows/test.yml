@@ -2736,6 +2736,19 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          # Idempotency scope (issue #50, blueprints/SPEC.md "Legacy
+          # upgrade-script idempotency"): legacy upgrade scripts are
+          # idempotent only on the version just below — i.e. ash-1.1-to-1.2
+          # is safe to re-run on a 1.2 install, but NOT guaranteed on a 1.4+
+          # install. ash-1.0.sql, ash-1.0-to-1.1.sql, and ash-1.1.sql are
+          # intentionally EXCLUDED from this re-apply test: ash-1.1.sql
+          # redefines top_queries_with_text with a narrower OUT-parameter
+          # list than 1.4 ships, so re-applying on a 1.4 install fails with
+          # "cannot change return type of existing function" (CREATE OR
+          # REPLACE cannot change OUT params). The 1.0 bootstrap and the
+          # 1.0-to-1.1 wrapper hit the same path. Those finalized legacy
+          # scripts remain immutable and are still exercised end-to-end by
+          # the one-shot upgrade-chain tests above (fresh DB, 1.0 → 1.4).
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           \i sql/ash-install.sql
 
