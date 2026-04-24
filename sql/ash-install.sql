@@ -84,26 +84,19 @@ insert into ash.config (singleton) values (true) on conflict do nothing;
 
 -- Migration: add v1.4 columns if upgrading from pre-1.4.
 -- Must run before any code reads these columns.
-do $$
-begin
-  if not exists (
-    select from information_schema.columns
-    where table_schema = 'ash' and table_name = 'config'
-      and column_name = 'num_partitions'
-  ) then
-    alter table ash.config
-      add column num_partitions smallint not null default 3
-        check (num_partitions between 3 and 32),
-      add column sampling_enabled bool not null default true,
-      add column skipped_samples int4 not null default 0,
-      add column missed_samples bigint not null default 0,
-      add column rollup_1m_retention_days smallint not null default 30,
-      add column rollup_1h_retention_days smallint not null default 1825,
-      add column rollup_min_backend_seconds smallint not null default 3,
-      add column last_rollup_1m_ts int4,
-      add column last_rollup_1h_ts int4;
-  end if;
-end $$;
+-- Uses per-column IF NOT EXISTS so the block is safe when some columns
+-- (e.g. missed_samples from the PR #29 upgrade) were already added.
+alter table ash.config
+  add column if not exists num_partitions smallint not null default 3
+    check (num_partitions between 3 and 32),
+  add column if not exists sampling_enabled bool not null default true,
+  add column if not exists skipped_samples int4 not null default 0,
+  add column if not exists missed_samples bigint not null default 0,
+  add column if not exists rollup_1m_retention_days smallint not null default 30,
+  add column if not exists rollup_1h_retention_days smallint not null default 1825,
+  add column if not exists rollup_min_backend_seconds smallint not null default 3,
+  add column if not exists last_rollup_1m_ts int4,
+  add column if not exists last_rollup_1h_ts int4;
 
 -- Wait event dictionary
 create table if not exists ash.wait_event_map (
@@ -610,8 +603,15 @@ $$;
 -- Decode sample function
 -- p_slot: when provided, look up query_ids from that partition only.
 -- When NULL (default), search all partitions via query_map_all view.
+-- decode_sample(): return one row per backend.
+-- Note: wait_id is the canonical ash.wait_event_map.id, which uniquely
+-- identifies (state, type, event). Always join aggregations on wait_id
+-- (not on wait_event text) — the wait_event string collapses across
+-- states (e.g., ClientRead under 'active' vs 'idle in transaction'),
+-- and joining on text double-counts.
 create or replace function ash.decode_sample(p_data integer[], p_slot smallint default null)
 returns table (
+  wait_id smallint,
   wait_event text,
   query_id int8,
   count int
@@ -698,6 +698,7 @@ begin
         limit 1;
       end if;
 
+      wait_id := v_wait_id;
       wait_event := case when v_event = v_type then v_event else v_type || ':' || v_event end;
       query_id := v_query_id;
       count := 1;
@@ -1705,16 +1706,20 @@ begin
       group by datid
     ),
     wait_agg as (
+      -- Aggregate by canonical wait_event_map.id (includes state).
+      -- Joining on wait_event text would match multiple map rows when the
+      -- same (type, event) exists under multiple states (e.g., ClientRead
+      -- under both 'active' and 'idle in transaction') and double-count.
       select
         d.datid,
-        wm.id as wait_id,
+        d.wait_id::int4 as wait_id,
         count(*)::int4 as cnt,
-        row_number() over (partition by d.datid order by count(*) desc, wm.id asc) as rn
+        row_number() over (
+          partition by d.datid
+          order by count(*) desc, d.wait_id asc
+        ) as rn
       from decoded d
-      join ash.wait_event_map wm
-        on d.wait_event = case when wm.event = wm.type then wm.event
-                                else wm.type || ':' || wm.event end
-      group by d.datid, wm.id
+      group by d.datid, d.wait_id
     ),
     wait_interleaved as (
       select datid, v, rn, sub

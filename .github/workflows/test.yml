@@ -1719,6 +1719,85 @@ jobs:
               end;
             end;
 
+            -- === Regression: wait event under multiple states must not be double-counted ===
+            -- ClientRead can appear under both 'active' and 'idle in transaction'.
+            -- wait_event_map has UNIQUE (state, type, event) so each (state, type, event)
+            -- triple has its own id. rollup_minute() must aggregate by canonical wait_id
+            -- (not by text wait_event) — otherwise a single decoded event would match
+            -- multiple wait_event_map rows and inflate the count.
+            declare
+              v_active_cr_id smallint;
+              v_idle_cr_id smallint;
+              v_cr_minute_ts int4;
+              v_row record;
+              v_i int;
+              v_total_count int4;
+            begin
+              -- Register the same (type, event) under two different states
+              select ash._register_wait('active', 'Client', 'ClientRead')
+                into v_active_cr_id;
+              select ash._register_wait('idle in transaction', 'Client', 'ClientRead')
+                into v_idle_cr_id;
+
+              assert v_active_cr_id <> v_idle_cr_id,
+                'active/ClientRead and idle/ClientRead must have distinct wait_ids';
+
+              -- Clear sample/rollup and reset watermark so we rollup a fresh minute
+              truncate ash.sample;
+              truncate ash.rollup_1m;
+              update ash.config set last_rollup_1m_ts = null where singleton;
+
+              -- Pick a fresh complete minute 3 minutes ago
+              v_cr_minute_ts := (ash.ts_from_timestamptz(
+                date_trunc('minute', now() - interval '3 minutes')
+              ) / 60) * 60;
+
+              -- Seed 3 samples each referencing ONLY v_active_cr_id (one backend each).
+              -- If rollup_minute's join inflates via the second wm row
+              -- (same type+event, different state), the stored count would become 6.
+              for v_i in 0 .. 2 loop
+                insert into ash.sample (sample_ts, datid, active_count, data, slot)
+                values (
+                  v_cr_minute_ts + v_i * 15,
+                  0::oid,
+                  1::smallint,
+                  array[-v_active_cr_id, 1, 0]::integer[],
+                  0::smallint
+                );
+              end loop;
+
+              select ash.rollup_minute() into v_result;
+              assert v_result > 0, 'rollup_minute should process ClientRead samples';
+
+              select * into v_row from ash.rollup_1m
+              where ts = v_cr_minute_ts and datid = 0::oid;
+
+              assert v_row is not null, 'rollup_1m row for ClientRead minute missing';
+              assert v_row.samples = 3,
+                'samples should be 3, got ' || v_row.samples;
+
+              -- wait_counts is [wait_id, cnt, wait_id, cnt, ...]. Sum every other
+              -- element starting from index 2. Total must equal 3 (one backend per
+              -- sample), not 6 (which is the double-counted result).
+              v_total_count := 0;
+              for v_i in 2 .. coalesce(array_length(v_row.wait_counts, 1), 0) by 2 loop
+                v_total_count := v_total_count + v_row.wait_counts[v_i];
+              end loop;
+              assert v_total_count = 3,
+                'wait_counts total should be 3 (not double-counted across states), got '
+                  || v_total_count || ' — wait_counts=' || v_row.wait_counts::text;
+
+              -- Only the 'active' wait_id should appear, never the 'idle' one
+              -- (no sample referenced idle in transaction/ClientRead).
+              assert not (v_idle_cr_id::int4 = any(v_row.wait_counts)),
+                'idle-state ClientRead wait_id must not appear in wait_counts: '
+                  || v_row.wait_counts::text;
+              assert v_active_cr_id::int4 = any(v_row.wait_counts),
+                'active-state ClientRead wait_id must appear in wait_counts';
+
+              raise notice 'ClientRead state-disambiguation regression test PASSED';
+            end;
+
             raise notice 'Rollup tests PASSED';
           end;
           $$;
