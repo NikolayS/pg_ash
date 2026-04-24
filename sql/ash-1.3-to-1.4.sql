@@ -39,6 +39,9 @@
 --     `slot = any(...)` JOINs naturally yield empty — honoring the
 --     oversized-interval NOTICE's "older samples not available" promise
 --     instead of silently returning all retained data (#51).
+--   - status() catches insufficient_privilege when reading cron.job so
+--     non-superuser monitoring roles can call it even when pg_cron is
+--     loaded (#61).
 --   - ash.grant_reader(role) / ash.revoke_reader(role) convenience helpers
 --     to provision a monitoring role (Grafana, Datadog, etc.) with the
 --     minimum privileges to call every public reader. Owner-only, idempotent
