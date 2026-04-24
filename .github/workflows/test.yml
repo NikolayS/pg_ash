@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Default to least-privilege; this workflow only runs tests against a service
+# container and needs no write access to repo contents, issues, or PRs.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,7 +34,7 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install pg_cron in container
         run: |
