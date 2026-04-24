@@ -29,6 +29,10 @@
 --     with datid. Existing decode_sample(integer[], smallint) is unchanged.
 --     decode_sample_at() (rather than a third decode_sample overload) is
 --     used to avoid a decode_sample(unknown-typed literal) ambiguity. (#54)
+--   - ash.grant_reader(role) / ash.revoke_reader(role) convenience helpers
+--     to provision a monitoring role (Grafana, Datadog, etc.) with the
+--     minimum privileges to call every public reader. Owner-only, idempotent
+--     symmetric undo. (#52)
 --   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
 --     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
 \ir ash-install.sql
