@@ -4465,6 +4465,12 @@ begin
                    r.proname, r.args);
   end loop;
 
+  -- Re-grant EXECUTE on ts helpers to PUBLIC: these are pure, immutable
+  -- timestamp <-> int4 conversion utilities with no access to sample data.
+  -- Useful for Grafana panels and ad-hoc queries against rollup views.
+  execute 'grant execute on function ash.ts_from_timestamptz(timestamptz) to public';
+  execute 'grant execute on function ash.ts_to_timestamptz(int4) to public';
+
   -- Reader tables/views: revoke SELECT from PUBLIC for objects holding
   -- sample data, query text, and configuration. REVOKE on a partitioned
   -- parent does not cascade to partitions in PostgreSQL, so sample_N and
