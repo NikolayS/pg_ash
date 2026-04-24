@@ -359,6 +359,8 @@ begin
   -- Existence probe at the 50000th row: one index lookup, and — unlike
   -- pg_class.reltuples — immediately accurate after TRUNCATE (reltuples
   -- can remain stale or be -1 until autovacuum/ANALYZE catches up).
+  -- TODO: verify via EXPLAIN that the uncorrelated probe subquery is
+  -- hoisted to InitPlan (executed once) rather than re-evaluated per row.
   if v_current_slot = 0 then
     insert into ash.query_map_0 (query_id)
     select distinct sa.query_id
@@ -1586,7 +1588,6 @@ begin
       case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
     from hits h
     join ash.wait_event_map wm on wm.id = h.wait_id
-    where h.wait_id is not null
   ),
   totals as (
     select evt, count(*) as cnt
@@ -1964,7 +1965,6 @@ begin
       case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
     from hits h
     join ash.wait_event_map wm on wm.id = h.wait_id
-    where h.wait_id is not null
   ),
   totals as (
     select evt, count(*) as cnt from named_hits group by evt
