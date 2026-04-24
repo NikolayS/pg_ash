@@ -904,6 +904,8 @@ quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
 
 **Note:** If you subsequently change the partition count via `ash.rebuild_partitions(N, 'yes')`, previously-granted reader roles will lose access to the new partition tables. Re-run `ash.grant_reader(...)` for each monitoring role after any `rebuild_partitions` call.
 
+**Note on pg_cron visibility:** `ash.grant_reader()` does **not** grant `USAGE ON SCHEMA cron`, since pg_cron is not an `ash` object. When pg_cron is loaded but the monitoring role lacks USAGE on schema `cron`, `ash.status()` emits a single fallback row of the form `cron_jobs = '<no cron.job access; grant USAGE ON SCHEMA cron TO <role>>'` instead of per-job `cron_job_*` rows. To surface real cron job details, either run `grant usage on schema cron to <role>` (and `grant select on cron.job to <role>`) once, or simply ignore the row.
+
 If you prefer manual control, the equivalent explicit grants are:
 
 ```sql

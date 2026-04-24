@@ -1743,7 +1743,10 @@ begin
       end loop;
     exception when insufficient_privilege then
       metric := 'cron_jobs';
-      value := '<no cron.job access; grant USAGE ON SCHEMA cron to this role>';
+      value := format(
+        '<no cron.job access; grant USAGE ON SCHEMA cron TO %I>',
+        current_user
+      );
       return next;
     end;
   else

@@ -2507,6 +2507,21 @@ jobs:
           revoke usage on schema cron from public;
           revoke usage on schema cron from ash_status_reader;
 
+          -- Precondition guard: if some test infra leaves USAGE granted
+          -- to ash_status_reader directly (or via a future pg_cron default
+          -- change), the denied-path test would silently pass without
+          -- exercising the fallback. Assert FALSE; otherwise REVOKE again.
+          do $$
+          begin
+            if has_schema_privilege('ash_status_reader', 'cron', 'USAGE') then
+              raise notice 'cron USAGE still granted to ash_status_reader — explicit revoke';
+              revoke usage on schema cron from ash_status_reader;
+              if has_schema_privilege('ash_status_reader', 'cron', 'USAGE') then
+                raise exception 'precondition failed: ash_status_reader still has USAGE on schema cron';
+              end if;
+            end if;
+          end $$;
+
           set role ash_status_reader;
 
           do $$
@@ -2533,10 +2548,56 @@ jobs:
                    and v_cron_marker like '%no cron.job access%',
               'expected denied-access fallback row, got: ' || coalesce(v_cron_marker, '<null>');
 
-            raise notice '#61 cron.job ACL test PASSED: status() ran without privilege error';
+            raise notice '#61 cron.job ACL test PASSED (denied path): status() ran without privilege error';
           end $$;
 
           reset role;
+
+          -- Sub-test: GRANT USAGE on schema cron and assert the role now
+          -- sees real cron_job_* rows instead of the cron_jobs fallback.
+          -- pg_cron RLS filters cron.job by `username = current_user`, so
+          -- the sentinel ash_sampler job has to be scheduled BY the
+          -- reader role (or its username altered) for status() to see it.
+          grant usage on schema cron to ash_status_reader;
+          grant select on cron.job to ash_status_reader;
+          grant execute on function cron.schedule(text, text, text) to ash_status_reader;
+
+          set role ash_status_reader;
+          do $$
+          begin
+            perform cron.schedule('ash_sampler', '1 second', 'select 1');
+          end $$;
+
+          do $$
+          declare
+            v_fallback text;
+            v_jobs int;
+          begin
+            -- Fallback row must NOT appear when the caller has access.
+            select value into v_fallback
+            from ash.status() where metric = 'cron_jobs';
+            assert v_fallback is null,
+              'expected no cron_jobs fallback row when granted, got: ' || coalesce(v_fallback, '<null>');
+
+            -- Real per-job rows must appear (sentinel ash_sampler scheduled above).
+            select count(*) into v_jobs
+            from ash.status()
+            where metric like 'cron_job_%';
+            assert v_jobs > 0,
+              'expected at least one cron_job_* row when granted, got 0';
+
+            raise notice '#61 cron.job ACL test PASSED (granted path): % cron_job_* rows visible', v_jobs;
+          end $$;
+
+          do $$
+          begin
+            perform cron.unschedule('ash_sampler');
+          end $$;
+          reset role;
+          revoke execute on function cron.schedule(text, text, text) from ash_status_reader;
+          revoke select on cron.job from ash_status_reader;
+          revoke usage on schema cron from ash_status_reader;
+
           revoke execute on function ash._pg_cron_available() from ash_status_reader;
           revoke execute on function ash._color_on(boolean) from ash_status_reader;
           revoke select on table ash.rollup_1h from ash_status_reader;
