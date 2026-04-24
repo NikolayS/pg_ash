@@ -698,6 +698,37 @@ Don't forget to also schedule `ash.rotate()` — once per `rotation_period` (def
 0 0 * * * psql -qAtX -d mydb -c "SELECT ash.rotate();"
 ```
 
+## Privileges
+
+pg_ash installs with a locked-down privilege model: admin functions (`ash.start()`, `ash.stop()`, `ash.rotate()`, `ash.take_sample()`, `ash.set_debug_logging()`, `ash.uninstall()`) are restricted to the schema owner, and EXECUTE on all reader functions plus SELECT on reader tables (`ash.sample`, `ash.query_map_all`, `ash.config`, `ash.wait_event_map`, and per-slot partitions) is revoked from `PUBLIC`. The installing role retains full access.
+
+Grant access to a monitoring or read-only role explicitly:
+
+```sql
+-- allow a monitoring role to call the readers
+grant usage on schema ash to my_monitor_role;
+grant execute on function ash.top_waits(interval, int, int)           to my_monitor_role;
+grant execute on function ash.top_queries(interval, int)              to my_monitor_role;
+grant execute on function ash.top_queries_with_text(interval, int)    to my_monitor_role;
+grant execute on function ash.samples(interval, int)                  to my_monitor_role;
+grant execute on function ash.status()                                to my_monitor_role;
+
+-- or grant all reader functions at once
+grant execute on all functions in schema ash to my_monitor_role;
+
+-- grant direct read on raw tables for ad-hoc SQL (optional)
+grant select on all tables in schema ash to my_monitor_role;
+```
+
+### pg_stat_statements in a non-default schema
+
+pgss reader functions (`top_queries`, `top_queries_at`, `top_queries_with_text`, `samples`, `samples_at`, `event_queries`, `event_queries_at`) need the pg_stat_statements schema on their `search_path`. Install detects it automatically. If you install pg_stat_statements **after** pg_ash, or move it to a non-default schema, re-apply:
+
+```sql
+-- detect the pgss schema and re-apply search_path on pgss readers
+select ash._apply_pgss_search_path();
+```
+
 ## Known limitations
 
 - **Primary only** — pg_ash requires writes (`INSERT` into sample tables, `TRUNCATE` on rotation), so it cannot run on physical standbys or read replicas. Install it on the primary; it samples all databases from there.

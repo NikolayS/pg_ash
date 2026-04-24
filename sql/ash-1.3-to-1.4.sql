@@ -333,25 +333,100 @@ $$;
 -- SELECT/EXECUTE from PUBLIC on reader functions, underlying tables, and
 -- per-slot partitions. Dynamic so it covers functions/partitions created by
 -- earlier upgrade scripts. All statements are idempotent.
+--
+-- IMPORTANT: the v_pgss_readers list below must stay in sync with the same
+-- list inside ash._apply_pgss_search_path() in ash-install.sql. If you add or
+-- remove a function that probes pg_stat_statements, update both places.
 -------------------------------------------------------------------------------
+
+-- Helper: detect the schema that holds the pg_stat_statements view so reader
+-- functions keep working when pgss lives outside `public` (self-hosted
+-- installs, schema-isolated setups). Mirrors ash-install.sql.
+create or replace function ash._pgss_schema()
+returns text
+language sql
+stable
+set search_path = pg_catalog
+as $$
+  select n.nspname::text
+  from pg_extension e
+  join pg_namespace n on n.oid = e.extnamespace
+  where e.extname = 'pg_stat_statements'
+$$;
+
+comment on function ash._pgss_schema() is
+  'Returns the schema name of the installed pg_stat_statements extension, or NULL if not installed. Used to keep reader functions portable across managed services and custom install schemas.';
+
+create or replace function ash._apply_pgss_search_path()
+returns text
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_pgss_schema text := ash._pgss_schema();
+  -- Keep in sync with v_pgss_readers in the DO block below AND with the same
+  -- list in ash-install.sql (ash._apply_pgss_search_path).
+  v_readers text[] := array[
+    'top_queries', 'top_queries_at', 'top_queries_with_text',
+    'samples', 'samples_at',
+    'event_queries', 'event_queries_at'
+  ];
+  v_path text;
+  r record;
+begin
+  if v_pgss_schema is null or v_pgss_schema in ('pg_catalog', 'ash', 'public') then
+    v_path := 'pg_catalog, ash, public';
+  else
+    v_path := format('pg_catalog, ash, public, %I', v_pgss_schema);
+  end if;
+
+  for r in
+    select p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.prokind = 'f'
+      and p.proname = any(v_readers)
+  loop
+    execute format('alter function ash.%I(%s) set search_path = %s',
+                   r.proname, r.args, v_path);
+  end loop;
+
+  return v_path;
+end;
+$$;
+
+comment on function ash._apply_pgss_search_path() is
+  'Re-applies search_path on pgss reader functions using the currently detected pg_stat_statements schema. Run after installing pg_stat_statements if it lives outside the public schema.';
+
 do $$
 declare
   r record;
-  -- Functions that reference pg_stat_statements unqualified need public on
-  -- the search_path so the view (installed by CREATE EXTENSION pg_stat_statements
-  -- into public by default on RDS/Cloud SQL/Supabase/AlloyDB/Neon) is visible.
+  v_pgss_schema text := ash._pgss_schema();
+  v_pgss_path text;
+  -- Functions that reference pg_stat_statements unqualified need public (or
+  -- the detected pgss schema) on the search_path so the view is visible.
   -- Without this, the probe "perform 1 from pg_stat_statements" fails with
   -- "relation does not exist", the catch-block sets v_has_pgss=false, and the
   -- caller either raises "pg_stat_statements extension is not installed"
   -- (top_queries_with_text, event_queries, event_queries_at) or silently
   -- degrades with a misleading warning (top_queries, top_queries_at, samples,
   -- samples_at). Keep public last so ash.* still wins for ash objects.
+  -- NOTE: keep this list in sync with v_readers in ash._apply_pgss_search_path()
+  -- (both in this file and in ash-install.sql).
   v_pgss_readers text[] := array[
     'top_queries', 'top_queries_at', 'top_queries_with_text',
     'samples', 'samples_at',
     'event_queries', 'event_queries_at'
   ];
 begin
+  if v_pgss_schema is null or v_pgss_schema in ('pg_catalog', 'ash', 'public') then
+    v_pgss_path := 'pg_catalog, ash, public';
+  else
+    v_pgss_path := format('pg_catalog, ash, public, %I', v_pgss_schema);
+  end if;
+
   -- Apply search_path guard to every non-trigger function in ash.*.
   -- alter function ... set search_path is idempotent.
   for r in
@@ -363,8 +438,8 @@ begin
       and p.prokind = 'f'
   loop
     if r.proname = any(v_pgss_readers) then
-      execute format('alter function ash.%I(%s) set search_path = pg_catalog, ash, public',
-                     r.proname, r.args);
+      execute format('alter function ash.%I(%s) set search_path = %s',
+                     r.proname, r.args, v_pgss_path);
     else
       execute format('alter function ash.%I(%s) set search_path = pg_catalog, ash',
                      r.proname, r.args);

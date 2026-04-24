@@ -139,6 +139,109 @@ jobs:
           $$;
           EOF
 
+      - name: Test privilege hardening (REVOKE from PUBLIC)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Create an unprivileged role to represent a "random tenant"
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_test_unpriv') then
+              create role ash_test_unpriv login password 'x';
+            end if;
+          end $$;
+
+          do $$
+          begin
+            -- PUBLIC has no EXECUTE on reader functions
+            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.top_waits';
+            assert not has_function_privilege('public', 'ash.top_queries(interval,int)', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.top_queries';
+            assert not has_function_privilege('public', 'ash.status()', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.status';
+            assert not has_function_privilege('public', 'ash.samples(interval,int)', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.samples';
+
+            -- PUBLIC has no EXECUTE on admin functions
+            assert not has_function_privilege('public', 'ash.start(interval)', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.start';
+            assert not has_function_privilege('public', 'ash.stop()', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.stop';
+            assert not has_function_privilege('public', 'ash.rotate()', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.rotate';
+            assert not has_function_privilege('public', 'ash.take_sample()', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.take_sample';
+            assert not has_function_privilege('public', 'ash.set_debug_logging(bool)', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.set_debug_logging';
+
+            -- PUBLIC has no SELECT on reader tables
+            assert not has_table_privilege('public', 'ash.sample', 'SELECT'),
+              'PUBLIC should NOT have SELECT on ash.sample';
+            assert not has_table_privilege('public', 'ash.config', 'SELECT'),
+              'PUBLIC should NOT have SELECT on ash.config';
+            assert not has_table_privilege('public', 'ash.wait_event_map', 'SELECT'),
+              'PUBLIC should NOT have SELECT on ash.wait_event_map';
+            assert not has_table_privilege('public', 'ash.query_map_all', 'SELECT'),
+              'PUBLIC should NOT have SELECT on ash.query_map_all';
+            assert not has_table_privilege('public', 'ash.sample_0', 'SELECT'),
+              'PUBLIC should NOT have SELECT on ash.sample_0';
+            assert not has_table_privilege('public', 'ash.query_map_0', 'SELECT'),
+              'PUBLIC should NOT have SELECT on ash.query_map_0';
+
+            -- Unprivileged role (non-owner) cannot execute readers either
+            assert not has_function_privilege('ash_test_unpriv', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'non-owner role should NOT have EXECUTE on ash.top_waits';
+            assert not has_function_privilege('ash_test_unpriv', 'ash.top_queries(interval,int)', 'EXECUTE'),
+              'non-owner role should NOT have EXECUTE on ash.top_queries';
+
+            -- Owner (postgres) retains EXECUTE by virtue of ownership
+            assert has_function_privilege('postgres', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'owner SHOULD have EXECUTE on ash.top_waits';
+            assert has_function_privilege('postgres', 'ash.start(interval)', 'EXECUTE'),
+              'owner SHOULD have EXECUTE on ash.start';
+            assert has_function_privilege('postgres', 'ash.take_sample()', 'EXECUTE'),
+              'owner SHOULD have EXECUTE on ash.take_sample';
+            assert has_table_privilege('postgres', 'ash.sample', 'SELECT'),
+              'owner SHOULD have SELECT on ash.sample';
+
+            raise notice 'Privilege hardening tests PASSED';
+          end;
+          $$;
+
+          -- Behavioral check: call as the unprivileged role, expect 42501
+          set role ash_test_unpriv;
+          do $$
+          begin
+            begin
+              perform ash.top_waits('1 hour'::interval, 10, 0);
+              raise exception 'expected permission denied, but call succeeded';
+            exception when insufficient_privilege then
+              -- expected path
+              null;
+            end;
+          end;
+          $$;
+          reset role;
+
+          -- GRANT flow smoke-test: owner can hand out EXECUTE, then REVOKE it
+          grant execute on function ash.top_waits(interval, int, int, boolean) to ash_test_unpriv;
+          do $$
+          begin
+            assert has_function_privilege('ash_test_unpriv', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'GRANT to non-owner role should succeed';
+          end $$;
+          revoke execute on function ash.top_waits(interval, int, int, boolean) from ash_test_unpriv;
+          do $$
+          begin
+            assert not has_function_privilege('ash_test_unpriv', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'REVOKE from non-owner role should succeed';
+          end $$;
+
+          drop role ash_test_unpriv;
+          EOF
+
       - name: Test sampler and decoder
         env:
           PGPASSWORD: postgres
