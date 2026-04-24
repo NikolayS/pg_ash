@@ -603,16 +603,8 @@ $$;
 -- Decode sample function
 -- p_slot: when provided, look up query_ids from that partition only.
 -- When NULL (default), search all partitions via query_map_all view.
--- decode_sample(): return one row per backend.
--- Note: wait_id is the canonical ash.wait_event_map.id, which uniquely
--- identifies (state, type, event). Always join aggregations on wait_id
--- (not on wait_event text) — the wait_event string collapses across
--- states (e.g., ClientRead under 'active' vs 'idle in transaction'),
--- and joining on text double-counts.
-drop function if exists ash.decode_sample(integer[], smallint);
 create or replace function ash.decode_sample(p_data integer[], p_slot smallint default null)
 returns table (
-  wait_id smallint,
   wait_event text,
   query_id int8,
   count int
@@ -699,7 +691,6 @@ begin
         limit 1;
       end if;
 
-      wait_id := v_wait_id;
       wait_event := case when v_event = v_type then v_event else v_type || ':' || v_event end;
       query_id := v_query_id;
       count := 1;
@@ -1685,6 +1676,12 @@ begin
 
     -- Decode samples once, then aggregate wait_counts and query_counts together.
     -- Previous version decoded samples 3x per datid (outer + 2 correlated subqueries).
+    -- We walk the packed data[] array inline (same pattern as ash.samples())
+    -- rather than calling ash.decode_sample(), so we can group directly on
+    -- the canonical wait_event_map.id (negative markers in data[]). Grouping
+    -- on wait_event text would collapse states (e.g., ClientRead under
+    -- 'active' vs 'idle in transaction') and double-count via the unique
+    -- (state, type, event) rows in wait_event_map.
     insert into ash.rollup_1m (
       ts, datid, samples, peak_backends, wait_counts, query_counts
     )
@@ -1693,10 +1690,17 @@ begin
         s.datid,
         s.sample_ts,
         s.active_count,
-        (ash.decode_sample(s.data, s.slot)).*
-      from ash.sample s
+        s.slot,
+        (-s.data[i])::smallint as wait_id,
+        s.data[i + 2 + gs.n] as map_id
+      from ash.sample s,
+        generate_subscripts(s.data, 1) i,
+        generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
       where s.sample_ts >= v_minute_start
         and s.sample_ts < v_minute_end
+        and s.data[i] < 0
+        and i + 1 <= array_length(s.data, 1)
+        and i + 2 + gs.n <= array_length(s.data, 1)
     ),
     base as (
       select
@@ -1735,17 +1739,22 @@ begin
       group by datid
     ),
     query_agg as (
+      -- Resolve map_id -> query_id via the per-slot query_map partition.
+      -- map_id = 0 is the sentinel for "no query_id" and is skipped.
       select
         d.datid,
-        d.query_id,
+        qm.query_id,
         count(*)::int8 as cnt,
         row_number() over (
           partition by d.datid
-          order by count(*) desc, d.query_id asc
+          order by count(*) desc, qm.query_id asc
         ) as rn
       from decoded d
-      where d.query_id is not null and d.query_id <> 0
-      group by d.datid, d.query_id
+      join ash.query_map_all qm
+        on qm.slot = d.slot and qm.id = d.map_id
+      where d.map_id <> 0
+        and qm.query_id is not null
+      group by d.datid, qm.query_id
       having count(*) >= v_min_backend_seconds
     ),
     query_top as (
