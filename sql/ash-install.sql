@@ -4668,7 +4668,7 @@ end;
 $$;
 
 comment on function ash.grant_reader(name) is
-  'Grants the minimum privileges (USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables incl. partitions) to a monitoring role. Idempotent. Inverse: ash.revoke_reader(name).';
+  'Grants the minimum privileges (USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables incl. partitions) to a monitoring role. Idempotent. Inverse: ash.revoke_reader(name). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
 
 create or replace function ash.revoke_reader(p_role name)
 returns void
@@ -4743,7 +4743,7 @@ end;
 $$;
 
 comment on function ash.revoke_reader(name) is
-  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name).';
+  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
 
 -- Lock down the helpers themselves: only the schema owner may hand out
 -- (or take back) privileges. PUBLIC must not be able to call them.

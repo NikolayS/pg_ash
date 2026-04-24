@@ -901,6 +901,8 @@ select ash.revoke_reader('grafana');
 Both helpers are owner-only, validate the role exists in `pg_roles`,
 quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
 
+**Note:** If you subsequently change the partition count via `ash.rebuild_partitions(N, 'yes')`, previously-granted reader roles will lose access to the new partition tables. Re-run `ash.grant_reader(...)` for each monitoring role after any `rebuild_partitions` call.
+
 If you prefer manual control, the equivalent explicit grants are:
 
 ```sql
