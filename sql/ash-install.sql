@@ -1508,10 +1508,13 @@ as $$
 $$;
 
 -- Helper used by reader functions that accept a user-supplied interval.
--- Returns the same array as ash._active_slots(), but also emits a single
--- NOTICE per transaction when p_interval exceeds 2 * rotation_period — so
--- callers get a clear signal instead of a silent empty set. Never clamps
--- the caller's interval — the returned row set stays honest.
+-- Returns the same array as ash._active_slots() for in-range intervals.
+-- For intervals beyond 2 * rotation_period, returns an empty array so
+-- reader `slot = any(...)` JOINs naturally yield zero rows — honoring
+-- the NOTICE's "older samples not available" promise (and avoiding the
+-- int4-epoch underflow that would otherwise raise `integer out of range`).
+-- A single NOTICE is emitted per transaction in that case so callers get
+-- a clear signal instead of a silent empty set.
 -- Deduplication uses a transaction-scoped GUC (ash.notice_oversized) so
 -- multi-query readers (e.g. activity_summary) don't spam the log with one
 -- NOTICE per partition/sub-query.
@@ -3537,7 +3540,7 @@ begin
         sum(s.data[i + 1])::numeric
           / nullif(count(distinct s.sample_ts), 0) as avg_active,
         count(distinct s.sample_ts - (s.sample_ts % v_bucket_secs))::numeric
-          / nullif(greatest(1, (extract(epoch from p_interval)::int4 / v_bucket_secs)), 0)
+          / nullif(greatest(1, (least(extract(epoch from p_interval), 2147483647)::int4 / v_bucket_secs)), 0)
           as bucket_fraction
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
