@@ -138,6 +138,22 @@ jobs:
                 if pg_isready -h localhost -p 5432 -U postgres; then break; fi
                 sleep 1
               done
+
+              # pg_cron's scheduler bgworker opens its own metadata connection
+              # to `cron.database_name` using the OS user running postgres.
+              # The official postgres:N docker image runs postgres as OS user
+              # `root` in GitHub Actions service containers (the entrypoint
+              # forks to a different UID inside, but the launcher inherits the
+              # outer UID). When no matching PG role exists, every scheduler
+              # tick logs `FATAL: role "root" does not exist` and jobs never
+              # fire — cron.job shows the rows, cron.job_run_details stays
+              # empty, and H-CI-3 times out waiting for a sample. Creating a
+              # superuser role `root` makes peer-auth succeed with no other
+              # config changes. Idempotent so rerunning the step is safe.
+              psql -h localhost -U postgres -d postgres -tAc \
+                "select 1 from pg_roles where rolname='root'" | grep -q 1 \
+                || psql -h localhost -U postgres -d postgres \
+                     -c "create role root superuser login;"
             fi
           fi
           # pg_stat_statements normally ships with every supported PG version,
@@ -765,6 +781,28 @@ jobs:
         run: |
           echo "=== postgres container logs (last 400 lines) ==="
           docker logs --tail 400 "$CONTAINER_ID" 2>&1 || echo "(docker logs unavailable)"
+
+      - name: "Reset state leaked by H-CI-3"
+        # H-CI-3 enables debug_logging for diagnostics and normally resets it
+        # at the end of its SQL block. With `continue-on-error: true`, any
+        # failure skips H-CI-3's own cleanup and leaves debug_logging=true,
+        # which then breaks the very next step (`Test set_debug_logging`,
+        # which asserts the default is false). Also resets ash.sample /
+        # ash.config / cron.job in case future diagnostic additions leave
+        # those non-pristine too. `if: always()` so this runs even when
+        # H-CI-3 fails (its outcome is masked to success, but this block
+        # is agnostic either way). No-op on matrix.cron=off / no-pg_cron
+        # branches: ash.stop() is safe when no jobs are scheduled, and
+        # set_debug_logging(false) is idempotent.
+        if: always()
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=0 << 'EOF'
+          select ash.set_debug_logging(false);
+          select ash.stop();
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          EOF
 
       - name: Test set_debug_logging
         env:
