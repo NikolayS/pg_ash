@@ -609,6 +609,7 @@ $$;
 -- (not on wait_event text) — the wait_event string collapses across
 -- states (e.g., ClientRead under 'active' vs 'idle in transaction'),
 -- and joining on text double-counts.
+drop function if exists ash.decode_sample(integer[], smallint);
 create or replace function ash.decode_sample(p_data integer[], p_slot smallint default null)
 returns table (
   wait_id smallint,
