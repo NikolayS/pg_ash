@@ -23,6 +23,10 @@
 --   - search_path guard on every ash.* function + pgss-schema-aware readers;
 --     REVOKE EXECUTE on all ash.* functions and SELECT on reader tables from
 --     PUBLIC (#45).
+--   - ash.grant_reader(role) / ash.revoke_reader(role) convenience helpers
+--     to provision a monitoring role (Grafana, Datadog, etc.) with the
+--     minimum privileges to call every public reader. Owner-only, idempotent
+--     symmetric undo. (#52)
 --   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
 --     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
 \ir ash-install.sql
