@@ -131,7 +131,7 @@ select * from ash.status();
 | `ash.status()` | Sampling status, version, partition info, rollup metrics, debug_logging state |
 | `ash.take_sample()` | Take one sample manually (called automatically by the scheduler) |
 | `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers). Runs pre-truncation rollup to prevent data loss |
-| `ash.rebuild_partitions(N)` | Change partition count (3–32). **Destructive** — all raw sample data is lost. Rollup tables survive. Call `ash.start()` after to resume |
+| `ash.rebuild_partitions(N, 'yes')` | Change partition count (3–32). **Destructive** — all raw sample data is lost; requires `'yes'` confirmation token. Rollup tables survive. Call `ash.start()` after to resume |
 | `ash.rollup_minute([batch])` | Aggregate raw samples into per-minute rollups. Watermark-based with catch-up. Default batch: 60 minutes |
 | `ash.rollup_hour()` | Aggregate minute rollups into hourly rollups. Watermark-based |
 | `ash.rollup_cleanup()` | Delete expired rollup rows per retention config |
@@ -603,7 +603,7 @@ Encoding version is tracked in `ash.config.encoding_version`, not in the array i
 
 ### Rotation
 
-Skytools PGQ-style N-partition ring buffer (default N=3, configurable 3–32 via `ash.rebuild_partitions(N)`). Physical tables (`sample_0` through `sample_{N-1}`) rotate at `rotation_period` intervals. TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
+Skytools PGQ-style N-partition ring buffer (default N=3, configurable 3–32 via `ash.rebuild_partitions(N, 'yes')`). Physical tables (`sample_0` through `sample_{N-1}`) rotate at `rotation_period` intervals. TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
 
 N-1 partitions hold data at any time. One is always empty, ready for the next rotation. Before truncation, `rotate()` calls `rollup_minute()` to aggregate endangered samples into rollup tables.
 
@@ -707,7 +707,8 @@ By default, pg_ash uses 3 partitions (1 day of history + current partial). To ke
 
 ```sql
 -- keep 7 days of raw samples (9 partitions × 1-day rotation = 7 readable days + current)
-select ash.rebuild_partitions(9);
+-- 'yes' is required because the call drops all raw sample data
+select ash.rebuild_partitions(9, 'yes');
 
 -- resume sampling after rebuild
 select ash.start();
@@ -720,7 +721,7 @@ select * from ash.status();
 
 The retention formula is `(N - 2) × rotation_period`. The minimum is 3 (current + previous + one being truncated), the maximum is 32.
 
-`rebuild_partitions()` is **destructive** — all raw samples are lost. Rollup tables survive. You must call `ash.start()` afterward to resume sampling.
+`rebuild_partitions()` is **destructive** — all raw samples are lost. To prevent accidents, the call requires a `'yes'` confirmation token (e.g. `ash.rebuild_partitions(9, 'yes')`); calling it without `'yes'` raises an error and changes nothing. Rollup tables survive. You must call `ash.start()` afterward to resume sampling.
 
 ### Rollup tables for long-term trends
 
@@ -888,7 +889,26 @@ Don't forget to also schedule rotation and rollups:
 
 pg_ash installs with a locked-down privilege model: admin functions (`ash.start()`, `ash.stop()`, `ash.rotate()`, `ash.take_sample()`, `ash.set_debug_logging()`, `ash.uninstall()`) are restricted to the schema owner, and EXECUTE on all reader functions plus SELECT on reader tables (`ash.sample`, `ash.query_map_all`, `ash.config`, `ash.wait_event_map`, and per-slot partitions) is revoked from `PUBLIC`. The installing role retains full access.
 
-Grant access to a monitoring or read-only role explicitly:
+Grant access to a monitoring or read-only role with the convenience helpers:
+
+```sql
+-- one call, minimum privileges: USAGE on schema ash, EXECUTE on every
+-- public reader function, SELECT on the tables readers depend on
+-- (sample + partitions, query_map_all + partitions, config, wait_event_map,
+-- rollup_1m, rollup_1h). Idempotent.
+create role grafana login password 'xxx';
+select ash.grant_reader('grafana');
+
+-- ...later, take it back. Symmetric undo of grant_reader().
+select ash.revoke_reader('grafana');
+```
+
+Both helpers are owner-only, validate the role exists in `pg_roles`,
+quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
+
+**Note:** If you subsequently change the partition count via `ash.rebuild_partitions(N, 'yes')`, previously-granted reader roles will lose access to the new partition tables. Re-run `ash.grant_reader(...)` for each monitoring role after any `rebuild_partitions` call.
+
+If you prefer manual control, the equivalent explicit grants are:
 
 ```sql
 -- allow a monitoring role to call the readers
