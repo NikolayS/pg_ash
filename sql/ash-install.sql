@@ -713,7 +713,18 @@ declare
   v_hours int;
   v_schedule text;
   v_skip_nodename_update boolean := false;
+  v_debug_logging boolean := false;
+  v_pg_cron_available boolean;
 begin
+  -- Read debug_logging flag so we can trace the pg_cron detection / scheduling
+  -- path when ash.start() appears to no-op. Treat an error here as "debug off"
+  -- so ash.start() still works in half-installed / upgrading states.
+  begin
+    select debug_logging into v_debug_logging from ash.config where singleton;
+  exception when others then
+    v_debug_logging := false;
+  end;
+
   -- Validate interval
   v_seconds := extract(epoch from p_interval)::int;
   if v_seconds < 1 then
@@ -741,8 +752,14 @@ begin
     raise notice 'privilege probe failed: %', sqlerrm;
   end;
 
+  v_pg_cron_available := ash._pg_cron_available();
+  if v_debug_logging then
+    raise log 'ash.start: pg_cron_available=% interval=% seconds=%',
+      v_pg_cron_available, p_interval, v_seconds;
+  end if;
+
   -- If pg_cron is not available, just record the interval and advise on external scheduling
-  if not ash._pg_cron_available() then
+  if not v_pg_cron_available then
     update ash.config set sample_interval = p_interval where singleton;
 
     job_type := 'sampler';
@@ -855,6 +872,11 @@ begin
     -- or cron.host is already '' / a socket path (already correct).
     if not v_skip_nodename_update then
       update cron.job set nodename = '' where jobid = v_sampler_job;
+    end if;
+
+    if v_debug_logging then
+      raise log 'ash.start: scheduled ash_sampler jobid=% schedule=% skip_nodename_update=%',
+        v_sampler_job, v_schedule, v_skip_nodename_update;
     end if;
 
     job_type := 'sampler';
