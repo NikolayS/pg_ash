@@ -50,13 +50,20 @@ jobs:
         # restart, pg_cron's background worker never starts.
         # When matrix.cron == 'off', we skip pg_cron install entirely to
         # exercise the degraded-mode (no-cron) branch.
+        #
+        # NB1/NB2: pass ${{ }} expressions through env: vars rather than
+        # textual substitution into bash (CWE-78 hygiene; values are hard-
+        # coded today but future edits shouldn't break the pattern).
+        env:
+          CRON: ${{ matrix.cron }}
+          CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
-          if [ "${{ matrix.cron }}" = "off" ]; then
+          if [ "$CRON" = "off" ]; then
             echo "matrix.cron=off — skipping pg_cron install to test degraded mode"
-            docker exec ${{ job.services.postgres.id }} bash -c "
+            docker exec "$CONTAINER_ID" bash -c "
               echo \"shared_preload_libraries = 'pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
             "
-            docker restart ${{ job.services.postgres.id }}
+            docker restart "$CONTAINER_ID"
             sleep 5
             exit 0
           fi
@@ -66,19 +73,26 @@ jobs:
           # still exercise the no-cron branch rather than fail the whole job.
           # The follow-up "Verify pg_cron install matches expectation" step
           # enforces the expected state.
-          docker exec ${{ job.services.postgres.id }} bash -c "
+          docker exec "$CONTAINER_ID" bash -c "
             apt-get update && apt-get install -y postgresql-\${PG_MAJOR}-cron
           " || echo "pg_cron install failed — will fall back to no-cron mode"
           # Configure pg_cron (or fall back to pgss-only if install failed).
-          docker exec ${{ job.services.postgres.id }} bash -c "
+          # cron.use_background_workers = on makes pg_cron run each scheduled
+          # command as a bgworker instead of opening a libpq connection to
+          # localhost. That bypasses pg_hba.conf / TCP / username concerns
+          # entirely, which has historically been the flakiest part of
+          # running pg_cron in a CI service container. Supported since
+          # pg_cron 1.5 (PGDG packages are always >= 1.6 now).
+          docker exec "$CONTAINER_ID" bash -c "
             if [ -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control ]; then
               echo \"shared_preload_libraries = 'pg_cron,pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
               echo 'cron.database_name = postgres' >> \${PGDATA}/postgresql.conf
+              echo 'cron.use_background_workers = on' >> \${PGDATA}/postgresql.conf
             else
               echo \"shared_preload_libraries = 'pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
             fi
           "
-          docker restart ${{ job.services.postgres.id }}
+          docker restart "$CONTAINER_ID"
           sleep 5
 
       - name: Wait for PostgreSQL
@@ -91,8 +105,9 @@ jobs:
       - name: Create pg_cron extension
         env:
           PGPASSWORD: postgres
+          CRON: ${{ matrix.cron }}
         run: |
-          if [ "${{ matrix.cron }}" = "off" ]; then
+          if [ "$CRON" = "off" ]; then
             echo "matrix.cron=off — not creating pg_cron extension"
           else
             # pg_cron may legitimately be unavailable on new PG majors before
@@ -100,13 +115,17 @@ jobs:
             # cron-gated tests check `pg_extension` and skip themselves.
             psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available (PGDG package missing for this PG major)"
           fi
-          # pg_stat_statements ships with every supported PG version — if this
-          # fails, something is deeply wrong, so error out hard.
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -c "create extension if not exists pg_stat_statements;"
-          psql -h localhost -U postgres -d postgres -tAc \
-            "select 1 from pg_extension where extname='pg_stat_statements'" \
-            | grep -q 1 || { echo "pg_stat_statements extension missing after create"; exit 1; }
+          # pg_stat_statements normally ships with every supported PG version,
+          # but PGDG occasionally lags contrib on release day for a brand-new
+          # major. NB4: treat pgss the same way we treat pg_cron — warn and
+          # continue if creation fails — so a temporarily incomplete PGDG
+          # doesn't turn every `cron=on` matrix entry red at setup. Downstream
+          # pgss-dependent tests check `pg_extension` themselves and either
+          # skip or assert their own error behaviour (see "Degraded mode:
+          # without pg_stat_statements").
+          psql -h localhost -U postgres -d postgres \
+            -c "create extension if not exists pg_stat_statements;" \
+            || echo "pg_stat_statements not available (contrib package missing for this PG major)"
 
       - name: Install pg_ash (fresh install)
         env:
@@ -451,17 +470,26 @@ jobs:
           # to prove the cron.cmd / nodename / schedule wiring works end-to-
           # end; higher cadence is already exercised by unit tests that call
           # ash.take_sample() directly.
+          #
+          # NOTE: we capture cron.job / cron.job_run_details diagnostics
+          # BEFORE calling ash.stop() — otherwise the unschedule would wipe
+          # cron.job by the time we read it (a real test-ordering bug in the
+          # original version of this step).
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Enable debug logging so ash.start() emits RAISE LOG lines we can
+          -- grep out of the server log if this test ever fails again. Server
+          -- log is already included in the job summary below on failure.
+          select ash.set_debug_logging(true);
           do $$
           declare
             v_has_pgcron boolean;
             v_baseline int;
             v_after int;
-            v_slot smallint;
             v_waited int := 0;
             v_max_wait int := 30;
             v_job_rows text;
             v_run_rows text;
+            v_start_jobs text;
           begin
             select exists (select from pg_extension where extname = 'pg_cron')
               into v_has_pgcron;
@@ -470,15 +498,34 @@ jobs:
               return;
             end if;
 
-            -- Reset to a clean state so baseline is unambiguous
+            -- Reset to a clean state. Truncate ALL sample partitions (P1):
+            -- ash.sample is a partitioned parent that unions all three slots,
+            -- so a single-slot truncate would leave older samples seeded by
+            -- earlier steps and poison the baseline. After this, v_baseline
+            -- must be 0 — assert it, since a non-zero baseline means a later
+            -- unrelated write is racing this test and we want to know.
             perform ash.stop();
-            v_slot := ash.current_slot();
-            execute format('truncate ash.sample_%s', v_slot);
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
 
             select count(*) into v_baseline from ash.sample;
+            assert v_baseline = 0,
+              'baseline should be 0 after truncating all slots, got: ' || v_baseline;
 
             -- Schedule sampling every second
             perform ash.start('1 second');
+
+            -- Snapshot cron.job state right after scheduling so we can show
+            -- it in the failure message — ash.stop() at the end of the test
+            -- would otherwise wipe this evidence.
+            select string_agg(
+                     format('jobid=%s jobname=%s schedule=%s nodename=%s database=%s username=%s active=%s',
+                            jobid, jobname, schedule, nodename, database, username, active),
+                     E'\n  ')
+              into v_start_jobs
+              from cron.job
+              where jobname in ('ash_sampler', 'ash_rotation');
+            raise notice E'cron.job after ash.start():\n  %',
+              coalesce(v_start_jobs, '(no ash_* jobs scheduled — ash.start() silently skipped the pg_cron branch)');
 
             -- Poll: wait up to v_max_wait seconds for pg_cron to fire at least
             -- once. Exit early once we observe any new sample — that alone
@@ -491,25 +538,31 @@ jobs:
               exit when v_waited >= v_max_wait;
             end loop;
 
-            perform ash.stop();
-
+            -- Capture diagnostics BEFORE ash.stop(). The original version
+            -- of this test called ash.stop() first, which unschedules the
+            -- jobs — so the subsequent "cron.job" read always returned
+            -- "(no ash_* jobs found)" regardless of whether scheduling
+            -- had actually worked. Read diagnostics first, then stop.
             if v_after <= v_baseline then
-              -- Gather diagnostics for the assertion message: cron sees the
-              -- job but never ran it, OR ran it and failed. Both cases are
-              -- genuine bugs we want surfaced in CI logs.
+              -- cron sees the job but never ran it, OR ran it and failed.
+              -- Both cases are genuine bugs we want surfaced in CI logs.
               select string_agg(
-                       format('jobid=%s jobname=%s schedule=%s nodename=%s database=%s active=%s',
-                              jobid, jobname, schedule, nodename, database, active),
+                       format('jobid=%s jobname=%s schedule=%s nodename=%s database=%s username=%s active=%s',
+                              jobid, jobname, schedule, nodename, database, username, active),
                        E'\n  ')
                 into v_job_rows
                 from cron.job
                 where jobname in ('ash_sampler', 'ash_rotation');
 
               begin
+                -- P3: order the aggregation itself so "latest 5" is honoured
+                -- in the concatenated string (string_agg without ORDER BY
+                -- has unspecified aggregation order).
                 select string_agg(
                          format('jobid=%s status=%s return_message=%s start=%s end=%s',
                                 jobid, status, return_message, start_time, end_time),
-                         E'\n  ')
+                         E'\n  '
+                         order by start_time desc nulls last)
                   into v_run_rows
                   from (
                     select jobid, status, return_message, start_time, end_time
@@ -521,16 +574,22 @@ jobs:
                 v_run_rows := '(cron.job_run_details not readable: ' || sqlerrm || ')';
               end;
 
-              raise exception E'pg_cron did not sample within % sec: baseline=% after=% waited=%\ncron.job:\n  %\ncron.job_run_details (latest 5):\n  %',
+              -- Now safe to stop (jobs already captured above).
+              perform ash.stop();
+
+              raise exception E'pg_cron did not sample within % sec: baseline=% after=% waited=%\ncron.job (at failure time, before stop):\n  %\ncron.job_run_details (latest 5):\n  %',
                 v_max_wait, v_baseline, v_after, v_waited,
-                coalesce(v_job_rows, '(no ash_* jobs found)'),
-                coalesce(v_run_rows, '(no rows)');
+                coalesce(v_job_rows, '(no ash_* jobs found — ash.start() did not schedule)'),
+                coalesce(v_run_rows, '(no rows — pg_cron never executed the job)');
             end if;
 
+            perform ash.stop();
             raise notice 'pg_cron end-to-end sampling PASSED (% new rows after % seconds)',
               v_after - v_baseline, v_waited;
           end;
           $$;
+          -- Leave debug_logging off by default so other tests aren't noisy.
+          select ash.set_debug_logging(false);
           EOF
 
       - name: Test set_debug_logging
@@ -1954,6 +2013,8 @@ jobs:
       - name: Final summary
         env:
           PGPASSWORD: postgres
+          PG_MAJOR: ${{ matrix.postgres }}
+          CRON: ${{ matrix.cron }}
         run: |
-          echo "All tests passed for PostgreSQL ${{ matrix.postgres }} (pg_cron=${{ matrix.cron }})"
+          echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
 
