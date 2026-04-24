@@ -20,4 +20,7 @@
 --   - start() validates interval shape before branching on pg_cron; re-syncs
 --     cron.job.schedule on re-invocation; defends against malformed pg_cron
 --     extversion. (H-BUG-1, H-BUG-2, M-BUG-8)
+--   - search_path guard on every ash.* function + pgss-schema-aware readers;
+--     REVOKE EXECUTE on all ash.* functions and SELECT on reader tables from
+--     PUBLIC (#45).
 \ir ash-install.sql
