@@ -106,6 +106,7 @@ jobs:
         env:
           PGPASSWORD: postgres
           CRON: ${{ matrix.cron }}
+          CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
           if [ "$CRON" = "off" ]; then
             echo "matrix.cron=off — not creating pg_cron extension"
@@ -114,6 +115,30 @@ jobs:
             # PGDG catches up (e.g. PG18). Don't fail the job; downstream
             # cron-gated tests check `pg_extension` and skip themselves.
             psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available (PGDG package missing for this PG major)"
+
+            # Refresh pg_cron launcher's view of cron.job.
+            # When shared_preload_libraries was updated in the previous step
+            # and postgres was restarted, the pg_cron launcher bgworker
+            # started BEFORE the `cron` schema existed (CREATE EXTENSION had
+            # not run yet). Some pg_cron versions cache the absence of the
+            # cron.job table at launcher startup and never re-scan, so jobs
+            # scheduled after CREATE EXTENSION are never fired — even when
+            # `cron.job_run_details` has zero rows throughout a 90s window
+            # (the exact symptom re-reviewers observed for PR #44).
+            # Restarting postgres NOW — after CREATE EXTENSION — starts the
+            # launcher with cron.job already present, so subsequent INSERTs
+            # into cron.job (via cron.schedule()) are picked up immediately.
+            if psql -h localhost -U postgres -d postgres -tAc \
+                "select exists (select from pg_extension where extname='pg_cron')" \
+                | grep -q '^t$'; then
+              echo "Restarting postgres container to refresh pg_cron launcher with cron.job present"
+              docker restart "$CONTAINER_ID"
+              sleep 5
+              for i in {1..30}; do
+                if pg_isready -h localhost -p 5432 -U postgres; then break; fi
+                sleep 1
+              done
+            fi
           fi
           # pg_stat_statements normally ships with every supported PG version,
           # but PGDG occasionally lags contrib on release day for a brand-new
@@ -174,6 +199,18 @@ jobs:
             from pg_stat_activity
             where backend_type ~* 'cron'
                or application_name ~* 'cron';
+          "
+          echo "=== ash_* jobs currently scheduled in cron.job ==="
+          # This separates "we scheduled jobs" (>0 rows) from "jobs are
+          # running" (rows in cron.job_run_details). At this point in the
+          # workflow no ash.start() has run yet, so this should be 0 — but
+          # we emit the query now so the template is visible in the CI log
+          # and later debugging can compare against the post-start state
+          # captured in H-CI-3 itself.
+          psql -h localhost -U postgres -d postgres -c "
+            select count(*) as ash_jobs_scheduled
+            from cron.job
+            where jobname like 'ash_%';
           "
 
       - name: Install pg_ash (fresh install)
@@ -502,6 +539,20 @@ jobs:
           EOF
 
       - name: "End-to-end: pg_cron actually schedules take_sample (issue #37 H-CI-3)"
+        # H-CI-3 exercises a timing-dependent path (pg_cron launcher
+        # bgworker, docker restart races, sub-minute schedule cold-start)
+        # that is inherently less stable than the other steps. A single
+        # legitimate H-CI-3 failure should NOT cancel the intervals /
+        # readers / upgrades / schema-equivalence / uninstall steps that
+        # follow — those signals are independently valuable. With
+        # `continue-on-error: true`, a failure here flips the step's
+        # conclusion to success (so the job keeps running) but leaves
+        # steps.h_ci_3.outcome == 'failure' visible to the diagnostic
+        # dump step below (which uses that explicit check instead of
+        # `if: failure()`, because `failure()` is based on job status
+        # and never trips when continue-on-error masks the failure).
+        id: h_ci_3
+        continue-on-error: true
         env:
           PGPASSWORD: postgres
         run: |
@@ -704,7 +755,11 @@ jobs:
         # fire the job (so the bug is in take_sample) or never did (so the
         # bug is in scheduling / bgworker dispatch) — impossible to tell
         # from the psql-side diagnostic alone.
-        if: failure()
+        # Uses explicit `steps.h_ci_3.outcome == 'failure'` rather than
+        # `failure()` because H-CI-3 has `continue-on-error: true`, which
+        # prevents `failure()` from tripping (the job is still considered
+        # passing at that point).
+        if: always() && steps.h_ci_3.outcome == 'failure'
         env:
           CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
