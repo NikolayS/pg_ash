@@ -356,6 +356,126 @@ exception when query_canceled then
 end;
 $$;
 
+-- Re-create decode_sample with two-pass validation (M-BUG-9): previously a
+-- malformed trailing segment produced partial rows followed by a WARNING;
+-- now validation runs first and emits zero rows on failure.
+create or replace function ash.decode_sample(p_data integer[], p_slot smallint default null)
+returns table (
+  wait_event text,
+  query_id int8,
+  count int
+)
+language plpgsql
+stable
+as $$
+declare
+  v_len int;
+  v_idx int;
+  v_wait_id int;
+  v_count int;
+  v_qid_idx int;
+  v_map_id int4;
+  v_type text;
+  v_event text;
+  v_query_id int8;
+begin
+  -- Basic validation
+  if p_data is null or array_length(p_data, 1) is null then
+    return;
+  end if;
+
+  v_len := array_length(p_data, 1);
+
+  -- Basic structure check: first element must be negative (wait_id marker)
+  if v_len < 3 or p_data[1] >= 0 then
+    raise warning 'ash.decode_sample: invalid data array';
+    return;
+  end if;
+
+  -- ---- Pass 1: validate shape only, emit nothing ----
+  -- Reuses the same walker logic the old code had, but exits with a single
+  -- warning and RETURN (no partial rows) if anything is wrong.
+  v_idx := 1;
+  while v_idx <= v_len loop
+    if p_data[v_idx] >= 0 then
+      raise warning 'ash.decode_sample: expected negative wait_id at position %', v_idx;
+      return;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx > v_len then
+      raise warning 'ash.decode_sample: unexpected end of array at position % (missing count)', v_idx;
+      return;
+    end if;
+    v_count := p_data[v_idx];
+    if v_count <= 0 then
+      raise warning 'ash.decode_sample: non-positive count % at position %', v_count, v_idx;
+      return;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx + v_count - 1 > v_len then
+      raise warning 'ash.decode_sample: not enough query_ids for count % at position %', v_count, v_idx;
+      return;
+    end if;
+    for v_qid_idx in 1..v_count loop
+      if p_data[v_idx] < 0 then
+        raise warning 'ash.decode_sample: expected non-negative query_id at position %', v_idx;
+        return;
+      end if;
+      v_idx := v_idx + 1;
+    end loop;
+  end loop;
+
+  -- ---- Pass 2: emit rows (shape is known good) ----
+  v_idx := 1;
+  while v_idx <= v_len loop
+    v_wait_id := -p_data[v_idx];
+    v_idx := v_idx + 1;
+
+    v_count := p_data[v_idx];
+    v_idx := v_idx + 1;
+
+    -- Look up wait event info
+    select w.type, w.event
+    into v_type, v_event
+    from ash.wait_event_map w
+    where w.id = v_wait_id;
+
+    -- Process each query_id
+    for v_qid_idx in 1..v_count loop
+      v_map_id := p_data[v_idx];
+      v_idx := v_idx + 1;
+
+      -- Handle sentinel (0 = NULL query_id)
+      if v_map_id = 0 then
+        v_query_id := null;
+      elsif p_slot is not null then
+        select m.query_id into v_query_id
+        from ash.query_map_all m
+        where m.slot = p_slot and m.id = v_map_id;
+      else
+        -- No slot context — search all partitions (less efficient).
+        -- WARNING: after rotation, the same id may exist in multiple
+        -- partitions with different query_ids (independent sequences).
+        -- Result is nondeterministic. Always pass p_slot when available.
+        select m.query_id into v_query_id
+        from ash.query_map_all m
+        where m.id = v_map_id
+        limit 1;
+      end if;
+
+      wait_event := case when v_event = v_type then v_event else v_type || ':' || v_event end;
+      query_id := v_query_id;
+      count := 1;
+      return next;
+    end loop;
+  end loop;
+
+  return;
+end;
+$$;
+
 -- Re-create start() with pre-branch validation (H-BUG-1), schedule re-sync
 -- (H-BUG-2), and defensive extversion parsing (M-BUG-8).
 create or replace function ash.start(p_interval interval default '1 second')
