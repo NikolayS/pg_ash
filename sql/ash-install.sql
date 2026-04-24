@@ -1686,17 +1686,28 @@ begin
   -- pg_cron status if available
   if ash._pg_cron_available() then
     metric := 'pg_cron_available'; value := 'yes'; return next;
-    for metric, value in
-      select 'cron_job_' || jobname,
-         format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
-      from cron.job
-      where jobname in (
-        'ash_sampler', 'ash_rotation',
-        'ash_rollup_1m', 'ash_rollup_1h', 'ash_rollup_gc'
-      )
-    loop
+    -- Issue #61: cron.job is owned by the pg_cron extension and requires
+    -- USAGE on schema cron + SELECT on cron.job. Monitoring roles granted
+    -- only ash.* readers will hit insufficient_privilege here, which used
+    -- to abort status() entirely. Catch and surface a single fallback row
+    -- so operators can see *why* cron details are missing.
+    begin
+      for metric, value in
+        select 'cron_job_' || jobname,
+           format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
+        from cron.job
+        where jobname in (
+          'ash_sampler', 'ash_rotation',
+          'ash_rollup_1m', 'ash_rollup_1h', 'ash_rollup_gc'
+        )
+      loop
+        return next;
+      end loop;
+    exception when insufficient_privilege then
+      metric := 'cron_jobs';
+      value := '<no cron.job access; grant USAGE ON SCHEMA cron to this role>';
       return next;
-    end loop;
+    end;
   else
     metric := 'pg_cron_available'; value := 'no (use external scheduler)'; return next;
   end if;

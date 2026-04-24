@@ -23,4 +23,7 @@
 --   - search_path guard on every ash.* function + pgss-schema-aware readers;
 --     REVOKE EXECUTE on all ash.* functions and SELECT on reader tables from
 --     PUBLIC (#45).
+--   - status() catches insufficient_privilege when reading cron.job so
+--     non-superuser monitoring roles can call it even when pg_cron is
+--     loaded (#61).
 \ir ash-install.sql

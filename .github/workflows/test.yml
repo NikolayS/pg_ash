@@ -2243,6 +2243,79 @@ jobs:
           drop role ash_test_user;
           EOF
 
+      - name: "Test #61: status() works for non-superuser without cron.job access"
+        if: matrix.cron == 'on'
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Skip cleanly if pg_cron isn't actually installed (e.g. PGDG
+          # package missing on a new PG major); the cron=on matrix entry
+          # tolerates that.
+          HAS_CRON=$(psql -h localhost -U postgres -d postgres -tAX -c \
+            "select exists (select from pg_extension where extname='pg_cron')")
+          if [ "$HAS_CRON" != "t" ]; then
+            echo "pg_cron not installed — skipping #61 cron.job ACL test"
+            exit 0
+          fi
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Reproduce the bug: a role granted ash readers but NOT
+          -- USAGE on schema cron used to get insufficient_privilege from
+          -- ash.status() because of the unguarded `from cron.job` lookup.
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_status_reader') then
+              create role ash_status_reader login;
+            end if;
+          end $$;
+
+          grant usage on schema ash to ash_status_reader;
+          grant execute on function ash.status() to ash_status_reader;
+          -- Deliberately deny USAGE on schema cron (pg_cron grants it to
+          -- PUBLIC by default — revoke from public + the role to ensure
+          -- the test role really lacks access).
+          revoke usage on schema cron from public;
+          revoke usage on schema cron from ash_status_reader;
+
+          set role ash_status_reader;
+
+          do $$
+          declare
+            v_rows int;
+            v_cron_avail text;
+            v_cron_marker text;
+          begin
+            -- Must not raise insufficient_privilege.
+            select count(*) into v_rows from ash.status();
+            assert v_rows > 0, 'status() returned no rows for monitoring role';
+
+            -- Sanity: pg_cron_available row still emitted.
+            select value into v_cron_avail
+            from ash.status() where metric = 'pg_cron_available';
+            assert v_cron_avail = 'yes',
+              'expected pg_cron_available=yes, got: ' || coalesce(v_cron_avail, '<null>');
+
+            -- Caller is denied — must get the informative fallback row,
+            -- not silent emptiness.
+            select value into v_cron_marker
+            from ash.status() where metric = 'cron_jobs';
+            assert v_cron_marker is not null
+                   and v_cron_marker like '%no cron.job access%',
+              'expected denied-access fallback row, got: ' || coalesce(v_cron_marker, '<null>');
+
+            raise notice '#61 cron.job ACL test PASSED: status() ran without privilege error';
+          end $$;
+
+          reset role;
+          revoke execute on function ash.status() from ash_status_reader;
+          revoke usage on schema ash from ash_status_reader;
+          drop role ash_status_reader;
+          -- Restore pg_cron's default PUBLIC USAGE so subsequent test
+          -- steps that read cron.job as superuser-but-with-search_path
+          -- aren't affected (superuser bypasses ACLs, but be safe).
+          grant usage on schema cron to public;
+          EOF
+
       - name: "Test v1.4: rollup_cleanup retention"
         env:
           PGPASSWORD: postgres
