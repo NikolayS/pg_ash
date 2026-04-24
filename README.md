@@ -885,7 +885,26 @@ Don't forget to also schedule rotation and rollups:
 
 pg_ash installs with a locked-down privilege model: admin functions (`ash.start()`, `ash.stop()`, `ash.rotate()`, `ash.take_sample()`, `ash.set_debug_logging()`, `ash.uninstall()`) are restricted to the schema owner, and EXECUTE on all reader functions plus SELECT on reader tables (`ash.sample`, `ash.query_map_all`, `ash.config`, `ash.wait_event_map`, and per-slot partitions) is revoked from `PUBLIC`. The installing role retains full access.
 
-Grant access to a monitoring or read-only role explicitly:
+Grant access to a monitoring or read-only role with the convenience helpers:
+
+```sql
+-- one call, minimum privileges: USAGE on schema ash, EXECUTE on every
+-- public reader function, SELECT on the tables readers depend on
+-- (sample + partitions, query_map_all + partitions, config, wait_event_map,
+-- rollup_1m, rollup_1h). Idempotent.
+create role grafana login password 'xxx';
+select ash.grant_reader('grafana');
+
+-- ...later, take it back. Symmetric undo of grant_reader().
+select ash.revoke_reader('grafana');
+```
+
+Both helpers are owner-only, validate the role exists in `pg_roles`,
+quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
+
+**Note:** If you subsequently change the partition count via `ash.rebuild_partitions(N, 'yes')`, previously-granted reader roles will lose access to the new partition tables. Re-run `ash.grant_reader(...)` for each monitoring role after any `rebuild_partitions` call.
+
+If you prefer manual control, the equivalent explicit grants are:
 
 ```sql
 -- allow a monitoring role to call the readers

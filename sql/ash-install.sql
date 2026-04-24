@@ -4604,3 +4604,202 @@ begin
     execute format('revoke select on ash.%I from public', r.relname);
   end loop;
 end $$;
+
+--------------------------------------------------------------------------------
+-- STEP 7: Convenience helpers for monitoring roles
+--------------------------------------------------------------------------------
+
+-- ash.grant_reader(role) / ash.revoke_reader(role)
+--
+-- Convenience helpers that hand a monitoring role (Grafana, Datadog, an
+-- on-call dashboard, etc.) the *minimum* privileges needed to invoke every
+-- public reader function and read from the tables the readers depend on.
+-- They are the inverse of the REVOKE-from-PUBLIC hardening above: instead
+-- of opening up the schema globally, the operator names a specific role.
+--
+-- Granted set:
+--   - USAGE on schema ash
+--   - EXECUTE on every ash.* function EXCEPT the admin set (start, stop,
+--     uninstall, rotate, take_sample, set_debug_logging, rebuild_partitions,
+--     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
+--     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
+--     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg). Defining
+--     "reader" by exclusion (rather than enumeration) keeps the helpers
+--     correct as new readers and reader-internal helpers are added.
+--   - SELECT on ash.sample (+ every sample_N partition), ash.query_map_all
+--     (+ every query_map_N partition), ash.config, ash.wait_event_map,
+--     ash.rollup_1m, ash.rollup_1h.
+--
+-- Both helpers are idempotent (safe to re-run), validate the role exists
+-- via pg_roles, quote_ident() the role name, and emit a RAISE NOTICE
+-- summarizing what was changed. revoke_reader() is the symmetric undo.
+create or replace function ash.grant_reader(p_role name)
+returns void
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  r record;
+  v_role text;
+  v_admin_funcs constant text[] := array[
+    'start', 'stop', 'uninstall', 'rotate', 'take_sample',
+    'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
+    'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
+    '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
+    '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
+    -- the helpers themselves: granting them to a reader role would let
+    -- that role hand out privileges. keep them admin-only.
+    'grant_reader', 'revoke_reader'
+  ];
+  v_func_count int := 0;
+  v_table_count int := 0;
+begin
+  if p_role is null or length(trim(p_role::text)) = 0 then
+    raise exception 'ash.grant_reader: role name must not be null or empty';
+  end if;
+
+  -- Validate role exists. quote_ident() defends against SQL injection in
+  -- the dynamic GRANT statements below, but a non-existent role would
+  -- raise a confusing "role does not exist" from inside the loop —
+  -- surface a clear error up front instead.
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = p_role) then
+    raise exception 'ash.grant_reader: role % does not exist', quote_literal(p_role);
+  end if;
+
+  v_role := quote_ident(p_role);
+
+  execute format('grant usage on schema ash to %s', v_role);
+
+  -- EXECUTE on every reader function (= every ash.* function not in the
+  -- admin set). Signatures are resolved dynamically via pg_proc so default
+  -- arguments and future overloads do not cause drift.
+  for r in
+    select p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.prokind = 'f'
+      and p.proname::text <> all (v_admin_funcs)
+  loop
+    execute format('grant execute on function ash.%I(%s) to %s',
+                   r.proname, r.args, v_role);
+    v_func_count := v_func_count + 1;
+  end loop;
+
+  -- SELECT on reader tables. Partitioned-parent grants do not cascade to
+  -- partitions in PostgreSQL, so sample_N and query_map_N are enumerated.
+  execute format('grant select on table ash.sample to %s', v_role);
+  execute format('grant select on table ash.query_map_all to %s', v_role);
+  execute format('grant select on table ash.config to %s', v_role);
+  execute format('grant select on table ash.wait_event_map to %s', v_role);
+  execute format('grant select on table ash.rollup_1m to %s', v_role);
+  execute format('grant select on table ash.rollup_1h to %s', v_role);
+  v_table_count := v_table_count + 6;
+
+  for r in
+    select c.relname
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on c.relnamespace = n.oid
+    where n.nspname = 'ash'
+      and c.relkind in ('r', 'p')
+      and (c.relname ~ '^query_map_[0-9]+$' or c.relname ~ '^sample_[0-9]+$')
+  loop
+    execute format('grant select on ash.%I to %s', r.relname, v_role);
+    v_table_count := v_table_count + 1;
+  end loop;
+
+  raise notice 'ash.grant_reader: granted USAGE on schema ash, EXECUTE on % reader function(s), SELECT on % table(s) to %',
+    v_func_count, v_table_count, v_role;
+end;
+$$;
+
+comment on function ash.grant_reader(name) is
+  'Grants the minimum privileges (USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables incl. partitions) to a monitoring role. Idempotent. Inverse: ash.revoke_reader(name). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
+
+create or replace function ash.revoke_reader(p_role name)
+returns void
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  r record;
+  v_role text;
+  v_admin_funcs constant text[] := array[
+    'start', 'stop', 'uninstall', 'rotate', 'take_sample',
+    'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
+    'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
+    '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
+    '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
+    'grant_reader', 'revoke_reader'
+  ];
+  v_func_count int := 0;
+  v_table_count int := 0;
+begin
+  if p_role is null or length(trim(p_role::text)) = 0 then
+    raise exception 'ash.revoke_reader: role name must not be null or empty';
+  end if;
+
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = p_role) then
+    raise exception 'ash.revoke_reader: role % does not exist', quote_literal(p_role);
+  end if;
+
+  v_role := quote_ident(p_role);
+
+  for r in
+    select p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.prokind = 'f'
+      and p.proname::text <> all (v_admin_funcs)
+  loop
+    execute format('revoke execute on function ash.%I(%s) from %s',
+                   r.proname, r.args, v_role);
+    v_func_count := v_func_count + 1;
+  end loop;
+
+  execute format('revoke select on table ash.sample from %s', v_role);
+  execute format('revoke select on table ash.query_map_all from %s', v_role);
+  execute format('revoke select on table ash.config from %s', v_role);
+  execute format('revoke select on table ash.wait_event_map from %s', v_role);
+  execute format('revoke select on table ash.rollup_1m from %s', v_role);
+  execute format('revoke select on table ash.rollup_1h from %s', v_role);
+  v_table_count := v_table_count + 6;
+
+  for r in
+    select c.relname
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on c.relnamespace = n.oid
+    where n.nspname = 'ash'
+      and c.relkind in ('r', 'p')
+      and (c.relname ~ '^query_map_[0-9]+$' or c.relname ~ '^sample_[0-9]+$')
+  loop
+    execute format('revoke select on ash.%I from %s', r.relname, v_role);
+    v_table_count := v_table_count + 1;
+  end loop;
+
+  -- USAGE last so the in-flight statements above can still resolve ash.*
+  -- by name even if the role had no other path to it. Idempotent.
+  execute format('revoke usage on schema ash from %s', v_role);
+
+  raise notice 'ash.revoke_reader: revoked USAGE on schema ash, EXECUTE on % reader function(s), SELECT on % table(s) from %',
+    v_func_count, v_table_count, v_role;
+end;
+$$;
+
+comment on function ash.revoke_reader(name) is
+  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
+
+-- Lock down the helpers themselves: only the schema owner may hand out
+-- (or take back) privileges. PUBLIC must not be able to call them.
+do $$
+declare
+  v_owner text := (select nspowner::regrole::text from pg_namespace where nspname = 'ash');
+begin
+  execute format('revoke all on function ash.grant_reader(name) from public');
+  execute format('revoke all on function ash.revoke_reader(name) from public');
+  execute format('grant execute on function ash.grant_reader(name) to %I', v_owner);
+  execute format('grant execute on function ash.revoke_reader(name) to %I', v_owner);
+end $$;
