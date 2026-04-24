@@ -11,7 +11,8 @@
 --   - _register_wait() enforces a 32 000-row cap on wait_event_map to prevent
 --     DoS via unbounded dictionary growth; bumps register_wait_cap_hits in
 --     ash.config when the cap is hit. (M-BUG-6 / H-SEC-3)
---   - status() surfaces the two new counters.
+--   - status() surfaces the two new counters, plus epoch_seconds_remaining
+--     for the 2094 overflow horizon of sample_ts (int4). (#37)
 --   - start() validates the interval shape before branching on pg_cron
 --     availability so the accept/reject outcome is independent of pg_cron.
 --     (H-BUG-1)
@@ -544,6 +545,23 @@ begin
     end if;
   end if;
 
+  -- Privilege check: without pg_read_all_stats (or superuser), query_id is
+  -- hidden for activity owned by other roles and collapses to the sentinel 0,
+  -- silently skewing top_queries / query_waits results.
+  begin
+    if not (
+      (select rolsuper from pg_roles where rolname = current_user)
+      or pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
+    ) then
+      raise notice 'warning: role % is not a superuser and not a member of pg_read_all_stats.', current_user;
+      raise notice '  query_id will be NULL for activity owned by other roles and bucketed under 0,';
+      raise notice '  skewing top_queries / query_waits. Fix: grant pg_read_all_stats to %;', current_user;
+    end if;
+  exception when others then
+    -- don't let the privilege probe block ash.start(), but surface the failure
+    raise notice 'privilege probe failed: %', sqlerrm;
+  end;
+
   -- If pg_cron is not available, just record the interval and advise on external scheduling
   if not ash._pg_cron_available() then
     update ash.config set sample_interval = p_interval where singleton;
@@ -765,6 +783,16 @@ begin
   metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32000 * 100, 2)::text || '%'; return next;
   metric := 'register_wait_cap_hits'; value := v_config.register_wait_cap_hits::text; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
+
+  -- Epoch overflow horizon (issue #37): sample_ts is int4 seconds since
+  -- 2026-01-01 UTC and int4 is exhausted circa 2094-01-19 — at which point
+  -- the ::int4 cast in take_sample() raises ERROR and sampling hard-fails
+  -- (no silent wrap). Surface remaining seconds so operators can plan the
+  -- bigint migration well before the horizon. Value goes negative past the
+  -- horizon (by design — indicates how long ago sampling would have stopped).
+  metric := 'epoch_seconds_remaining';
+  value := (2147483647::bigint - extract(epoch from (now() - ash.epoch()))::bigint)::text;
+  return next;
 
   -- pg_cron status if available
   if ash._pg_cron_available() then
