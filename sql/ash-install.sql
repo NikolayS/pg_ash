@@ -301,6 +301,32 @@ begin
   end loop;
 end $$;
 
+-- Migration (issue #49): align sample.data check across upgrade paths.
+-- v1.0 shipped `array_length(data, 1) >= 2`; v1.1 tightened it to `>= 3`,
+-- but no legacy upgrade script rewrote the constraint, so installs that
+-- started at 1.0 still carry the looser form. Detect and fix in place.
+-- Idempotent: only rewrites when the current definition is missing or
+-- the old `>= 2` form. Drops on the partitioned parent cascade to all
+-- partitions; ADD CONSTRAINT on the parent propagates back to children.
+do $$
+declare
+  v_def text;
+begin
+  select pg_get_constraintdef(c.oid) into v_def
+  from pg_constraint c
+  where c.conrelid = 'ash.sample'::regclass
+    and c.conname  = 'sample_data_check';
+
+  if v_def is null or v_def !~ 'array_length\(data, 1\) >= 3' then
+    if v_def is not null then
+      alter table ash.sample drop constraint sample_data_check;
+    end if;
+    alter table ash.sample
+      add constraint sample_data_check
+      check (data[1] < 0 and array_length(data, 1) >= 3);
+  end if;
+end $$;
+
 -- Convert timestamptz to int4 epoch offset
 create or replace function ash.ts_from_timestamptz(p_ts timestamptz)
 returns int4
