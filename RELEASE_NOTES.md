@@ -1,3 +1,32 @@
+# pg_ash 1.4 release notes
+
+Upgrade from 1.3: `\i sql/ash-1.3-to-1.4.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`. The upgrade script is idempotent and safe to re-run.
+
+## What changed
+
+### Fixed: take_sample() no longer silently drops samples on statement_timeout
+
+`take_sample()` now catches `query_canceled` (raised by `statement_timeout`, and also by `pg_cancel_backend()`) instead of letting the exception propagate and leave the sample unrecorded. When the sampler is interrupted, it emits a `WARNING` and returns `-1` so the caller (pg_cron or external scheduler) can observe the miss. Use `pg_terminate_backend()` if you need to hard-cancel a running sampler. (#28)
+
+### New: missed_samples counter
+
+`ash.config` gains a `missed_samples bigint not null default 0` column. Every caught `query_canceled` in `take_sample()` increments it atomically. The new value is surfaced in `ash.status()` as the `missed_samples` metric, making sampler starvation easy to spot without digging through server logs. (#27, #28)
+
+### Improved: ash.status() output
+
+`status()` now emits a `missed_samples` row alongside the existing configuration and sampling metrics. All other columns and ordering are unchanged.
+
+## Functions
+
+| Function | Description |
+|---|---|
+| `take_sample()` | **Enhanced** — catches `query_canceled`, increments `missed_samples`, returns `-1` on miss |
+| `status()` | **Enhanced** — reports the new `missed_samples` metric |
+
+All other functions unchanged from 1.3. See README for the full reference.
+
+---
+
 # pg_ash 1.3 release notes
 
 32 commits since v1.2. Upgrade from 1.2: `\i sql/ash-1.2-to-1.3.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`.
