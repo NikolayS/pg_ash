@@ -2563,7 +2563,7 @@ as $$
          ash.wait_event_map wm
     where wm.id = (-s.data[i])::smallint
       and s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
       and s.data[i] < 0
   ),
   totals as (
@@ -2627,7 +2627,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
       and s.data[i] < 0
   )
   select
@@ -2685,7 +2685,7 @@ begin
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
       where s.slot = any(ash._active_slots_for(p_interval))
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
         and i > 1                   -- guard: data[0] is NULL
         and s.data[i] >= 0          -- not a wait_id marker
         and s.data[i - 1] >= 0      -- not a count (count follows negative marker)
@@ -2717,7 +2717,7 @@ begin
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
       where s.slot = any(ash._active_slots_for(p_interval))
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
         and i > 1
         and s.data[i] >= 0
         and s.data[i - 1] >= 0
@@ -2768,7 +2768,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
       and s.data[i] < 0
   ),
   totals as (
@@ -2834,7 +2834,7 @@ begin
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
       where s.slot = any(ash._active_slots_for(p_interval))
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
         and i > 1
         and s.data[i] >= 0
         and s.data[i - 1] >= 0
@@ -2904,7 +2904,7 @@ begin
     select s.ctid, s.slot, s.data
     from ash.sample s
     where s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
   ),
   -- Unpack each sample once and use a running-group window so each
   -- element carries the nearest preceding negative wait marker. This
@@ -3014,7 +3014,7 @@ as $$
   from ash.sample s
   left join pg_database d on d.oid = s.datid
   where s.slot = any(ash._active_slots_for(p_interval))
-    and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+    and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
   group by s.datid, d.datname
   order by total_backends desc
 $$;
@@ -3404,7 +3404,7 @@ declare
   r record;
   v_rank int;
 begin
-  v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_min_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
 
   -- Basic counts
   select count(*), coalesce(sum(active_count), 0), max(active_count)
@@ -3514,7 +3514,7 @@ declare
   v_i int;
   v_legend_len int;
 begin
-  v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_start_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
   -- Rank by avg active sessions weighted by bucket presence
@@ -3915,7 +3915,7 @@ declare
   v_has_pgss boolean := false;
   v_min_ts int4;
 begin
-  v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_min_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
 
   begin
     perform 1 from pg_stat_statements limit 1;
@@ -4167,7 +4167,7 @@ declare
   v_has_pgss boolean := false;
   v_min_ts int4;
 begin
-  v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_min_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
 
   begin
     perform 1 from pg_stat_statements limit 1;

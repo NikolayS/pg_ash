@@ -23,4 +23,10 @@
 --   - search_path guard on every ash.* function + pgss-schema-aware readers;
 --     REVOKE EXECUTE on all ash.* functions and SELECT on reader tables from
 --     PUBLIC (#45).
+--   - Reader interval-to-int4 underflow clamp: top_waits / top_queries /
+--     top_by_type / wait_timeline / samples_by_database / samples /
+--     activity_summary / timeline_chart / event_queries (and pgss variants)
+--     no longer raise `integer out of range` on absurd intervals
+--     (e.g. '1000 years'); they return empty as the oversized-interval
+--     NOTICE already promises (#51).
 \ir ash-install.sql
