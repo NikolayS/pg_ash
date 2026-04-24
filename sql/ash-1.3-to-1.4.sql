@@ -29,4 +29,6 @@
 --     with datid. Existing decode_sample(integer[], smallint) is unchanged.
 --     decode_sample_at() (rather than a third decode_sample overload) is
 --     used to avoid a decode_sample(unknown-typed literal) ambiguity. (#54)
+--   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
+--     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
 \ir ash-install.sql
