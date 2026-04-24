@@ -311,8 +311,11 @@ begin
   metric := 'query_map_count'; value := v_query_ids::text; return next;
 
   -- Epoch overflow horizon (issue #37): sample_ts is int4 seconds since
-  -- 2026-01-01 UTC and wraps circa 2094-01-19. Surface remaining seconds so
-  -- operators can plan the bigint migration well before the wrap.
+  -- 2026-01-01 UTC and int4 is exhausted circa 2094-01-19 — at which point
+  -- the ::int4 cast in take_sample() raises ERROR and sampling hard-fails
+  -- (no silent wrap). Surface remaining seconds so operators can plan the
+  -- bigint migration well before the horizon. Value goes negative past the
+  -- horizon (by design — indicates how long ago sampling would have stopped).
   metric := 'epoch_seconds_remaining';
   value := (2147483647::bigint - extract(epoch from (now() - ash.epoch()))::bigint)::text;
   return next;
