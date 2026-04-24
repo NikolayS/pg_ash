@@ -2271,6 +2271,18 @@ jobs:
 
           grant usage on schema ash to ash_status_reader;
           grant execute on function ash.status() to ash_status_reader;
+          -- PR #45 hardening REVOKE'd readers/helpers from PUBLIC, so the
+          -- test role needs explicit grants on every object ash.status()
+          -- touches (besides ash.epoch / ash.ts_to_timestamptz, which are
+          -- re-granted to PUBLIC in install.sql).
+          grant select on table ash.config to ash_status_reader;
+          grant select on table ash.sample to ash_status_reader;
+          grant select on table ash.wait_event_map to ash_status_reader;
+          grant select on table ash.query_map_all to ash_status_reader;
+          grant select on table ash.rollup_1m to ash_status_reader;
+          grant select on table ash.rollup_1h to ash_status_reader;
+          grant execute on function ash._color_on(boolean) to ash_status_reader;
+          grant execute on function ash._pg_cron_available() to ash_status_reader;
           -- Deliberately deny USAGE on schema cron (pg_cron grants it to
           -- PUBLIC by default — revoke from public + the role to ensure
           -- the test role really lacks access).
@@ -2307,6 +2319,14 @@ jobs:
           end $$;
 
           reset role;
+          revoke execute on function ash._pg_cron_available() from ash_status_reader;
+          revoke execute on function ash._color_on(boolean) from ash_status_reader;
+          revoke select on table ash.rollup_1h from ash_status_reader;
+          revoke select on table ash.rollup_1m from ash_status_reader;
+          revoke select on table ash.query_map_all from ash_status_reader;
+          revoke select on table ash.wait_event_map from ash_status_reader;
+          revoke select on table ash.sample from ash_status_reader;
+          revoke select on table ash.config from ash_status_reader;
           revoke execute on function ash.status() from ash_status_reader;
           revoke usage on schema ash from ash_status_reader;
           drop role ash_status_reader;
