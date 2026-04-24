@@ -50,8 +50,8 @@ Encoding: `[-wait_event_id, count, query_map_id, ..., -next_wait, ...]`
 - Following N values → dictionary-encoded query_ids (from `ash.query_map`, int4 PK)
 - **Invariant:** `count` MUST equal the number of following query_id elements
   before the next negative marker (or end of array). The encoder guarantees
-  this; `_validate_data()` checks it. `count` exists for fast summation without
-  walking individual elements.
+  this; the CHECK constraint catches gross corruption. `count` exists for fast
+  summation without walking individual elements.
 - Wait event IDs start at 1 (`id=1` = CPU*). This avoids the `-0 = 0` ambiguity
   in the encoding — every wait marker is strictly negative.
 - `0` in a query_id position = unknown/NULL query_id (sentinel)
@@ -67,13 +67,9 @@ effectively unlimited. Cost: ~390 bytes/row vs 221 for smallint[] (50 backends).
 At 1s sampling: ~33 MiB/day. Still very manageable.
 
 **Structural validation:** The encoding is positional with no framing — a
-malformed array silently produces garbage downstream. Two levels of validation:
-
-- **Cheap CHECK constraint** on the table: `data[1] < 0 AND array_length(data, 1) >= 2`.
-  Catches gross corruption without adding CPU on the hot 1s insert path.
-- **`ash._validate_data()`** — full structural walk (negative marker → positive
-  count → N query_ids → next marker). Used in reader functions and `ash.status()`
-  diagnostics. Never on the insert path.
+malformed array silently produces garbage downstream. Guarded by a cheap
+CHECK constraint on the table: `data[1] < 0 AND array_length(data, 1) >= 2`.
+Catches gross corruption without adding CPU on the hot 1s insert path.
 
 See [STORAGE_BRAINSTORM.md](STORAGE_BRAINSTORM.md) for the full design exploration
 (8 approaches benchmarked on Postgres 17, 50 backends, 8,640 samples).
@@ -394,7 +390,6 @@ range scans. Worth benchmarking at Step 6, but B-tree is the safe default.
 | `ash.take_sample()` | Snapshots `pg_stat_activity` into `ash.sample` |
 | `ash._register_wait(state, type, event)` | Auto-inserts unknown wait events, returns id |
 | `ash._register_query(int8)` | Auto-inserts unknown query_ids, returns int4 id |
-| `ash._validate_data(integer[])` | Validates encoded array structure, returns bool |
 | `ash.decode_sample(integer[])` | Decodes array → `TABLE(state text, type text, event text, query_id int8, count int)` |
 | `ash.rotate()` | Advances the current slot and truncates the recycled partition |
 | `ash.start(interval)` | Creates pg_cron jobs, returns job IDs |
