@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# record.sh — End-to-end demo recorder for pg_ash.
+#
+# Pipeline (all local, no cloud):
+#   1. Start postgres:18 in Docker with pg_cron + pg_stat_statements.
+#   2. Install pg_ash via `\i sql/ash-install.sql`, seed pgbench, start sampling.
+#   3. Kick off a workload that transitions baseline -> row-lock spike -> tail.
+#   4. After the spike is well underway, start tmux + asciinema with psql
+#      attached to the demo DB in the container.
+#   5. Drive the tmux pane via `tmux send-keys` to walk the investigation.
+#   6. Convert the .cast -> .gif via agg.
+#
+# Output: demos/ash_demo.cast, demos/ash_demo.gif
+# Run:    ./demos/record.sh
+# Clean:  ./demos/record.sh clean
+
+set -Eeuo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+CONTAINER="pg_ash_demo"
+IMAGE="postgres:18"
+SESSION="ash-demo"
+CAST="$HERE/ash_demo.cast"
+GIF="$HERE/ash_demo.gif"
+
+# Terminal geometry tuned for GitHub README embedding (~800 px rendered width).
+# 100 cols fits ash.timeline_chart + ash.event_queries without wrapping while
+# still keeping the rendered GIF narrow enough to embed cleanly on GitHub.
+COLS="${COLS:-100}"
+ROWS="${ROWS:-28}"
+
+WARMUP_SEC="${WARMUP_SEC:-45}"  # baseline + full spike before we record
+POST_WAIT="${POST_WAIT:-3}"
+
+DOCKER="${DOCKER:-docker}"
+
+log()  { printf '\033[36m[record %s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
+die()  { printf '\033[31m[record %s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
+
+require() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
+
+cleanup() {
+  local rc=$?
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  if [ "${KEEP_CONTAINER:-0}" != "1" ]; then
+    log "stopping container $CONTAINER"
+    $DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  else
+    log "KEEP_CONTAINER=1 — leaving $CONTAINER running"
+  fi
+  return $rc
+}
+trap cleanup EXIT INT TERM
+
+if [ "${1:-}" = "clean" ]; then
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  $DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  rm -f "$CAST" "$GIF"
+  log "cleaned container, cast, gif"
+  trap - EXIT
+  exit 0
+fi
+
+for t in docker tmux asciinema agg; do require "$t"; done
+
+# --- 1. Start container ------------------------------------------------------
+$DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+log "starting $IMAGE as $CONTAINER"
+$DOCKER run -d --name "$CONTAINER" \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=postgres \
+  -v "$REPO":/repo:ro \
+  "$IMAGE" \
+  -c track_activity_query_size=4096 \
+  -c log_min_messages=warning \
+  >/dev/null
+
+log "waiting for first-boot PostgreSQL"
+until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+
+log "installing pg_cron package + configuring shared_preload_libraries"
+$DOCKER exec "$CONTAINER" bash -c '
+  set -e
+  apt-get update -qq >/dev/null 2>&1
+  apt-get install -y -qq "postgresql-${PG_MAJOR}-cron" >/dev/null 2>&1
+  cat >> "${PGDATA}/postgresql.conf" <<CONF
+
+# --- pg_ash demo ---
+shared_preload_libraries = '"'"'pg_cron,pg_stat_statements'"'"'
+cron.database_name = '"'"'demo'"'"'
+cron.use_background_workers = on
+CONF
+' >/dev/null 2>&1
+
+log "restarting container so pg_cron + pg_stat_statements load"
+$DOCKER restart "$CONTAINER" >/dev/null
+until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+
+# --- 2. Install pg_ash + seed + start sampling + workload --------------------
+log "installing pg_ash, seeding pgbench, starting sampling, kicking off workload"
+$DOCKER exec -d "$CONTAINER" bash /repo/demos/container-entrypoint.sh
+
+# --- 3. Warm up --------------------------------------------------------------
+log "warming up (${WARMUP_SEC}s — baseline + spike accumulate)"
+sleep "$WARMUP_SEC"
+
+# Pre-stage a psqlrc inside the container that tightens the look of each query.
+# Critically: disable the pager. psql's default `less`-based pager intercepts
+# keystrokes from the recorder, corrupting the demo. We always want every row
+# rendered straight to stdout.
+$DOCKER exec "$CONTAINER" bash -c "cat >/root/.psqlrc <<'PSQLRC'
+\\set QUIET on
+\\pset pager off
+\\pset border 2
+\\pset linestyle unicode
+\\pset unicode_border_linestyle single
+\\pset unicode_column_linestyle single
+\\pset unicode_header_linestyle single
+\\pset null ''
+\\pset format aligned
+\\pset tuples_only off
+\\unset QUIET
+PSQLRC
+"
+
+rm -f "$CAST"
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+# --- 4. Record ---------------------------------------------------------------
+# asciinema v3 CLI: --command for the command to record, --window-size for
+# geometry; positional arg is the output cast file.
+# Ship a tiny splash script into the container. It prints a coloured banner
+# (that becomes the GIF's first frame / GitHub thumbnail) and then execs psql.
+# Width is 98 chars (2 cols of padding on each side of a 100-col terminal).
+$DOCKER exec "$CONTAINER" bash -c 'cat >/tmp/ash_splash.sh <<"SPLASH"
+#!/bin/bash
+printf "\033[38;2;080;250;123m"
+cat <<BANNER
+╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                                  ║
+║   pg_ash v1.4   —   Active Session History for Postgres                                          ║
+║                                                                                                  ║
+║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                  ║
+║                                                                                                  ║
+║   Investigation: something just spiked in the last minute. Let'"'"'s find out what.                  ║
+║                                                                                                  ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
+BANNER
+printf "\033[0m\n"
+exec psql -U postgres -d demo
+SPLASH
+chmod +x /tmp/ash_splash.sh
+'
+
+tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
+  "asciinema rec --overwrite --idle-time-limit 3 \
+     --window-size ${COLS}x${ROWS} \
+     --capture-env TERM,SHELL \
+     --command 'docker exec -it -e TERM=xterm-256color -e LC_ALL=C.UTF-8 -e LANG=C.UTF-8 $CONTAINER /tmp/ash_splash.sh' \
+     '$CAST'"
+sleep 3.0
+
+# Send a line of text followed by Enter. Two-step form avoids tmux's
+# command-language parsing. The trailing space is load-bearing: tmux drops a
+# trailing `;` from -l args (even in literal mode), so we suffix a space to
+# preserve it. The space is harmless in psql.
+send() {
+  tmux send-keys -t "$SESSION" -l "$1 "
+  tmux send-keys -t "$SESSION" Enter
+}
+
+# Act 1 — the splash is already on screen from the wrapper. Let it breathe
+# ~1.5s so GitHub's still-thumbnail shows the banner, then run the first
+# investigation query.
+#
+# NOTE: psql treats any unterminated statement as continuation; every select
+# MUST end with `;`. (The `send()` helper uses tmux `-l` literal mode, so
+# semicolons are fine — they don't trigger tmux command parsing.)
+sleep 1.5
+
+# Act 2 — status: already sampling, version 1.4, pg_cron wired.
+send "select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
+sleep 3.8
+
+# Act 3 — top wait events: culprit is obvious.
+send '\echo -- Q1: which wait event is dominating in the last minute?'
+sleep 1.2
+send "select * from ash.top_waits('1 minute', 6);"
+sleep 4.2
+
+# Act 4 — timeline: when did the spike land?
+send '\echo -- Q2: when did the spike land?'
+sleep 1.1
+send "select bucket_start::time as t, active, chart from ash.timeline_chart('1 minute','10 seconds',4,32);"
+sleep 4.6
+
+# Act 5 — drill into the culprit wait event -> guilty queries.
+send '\echo -- Q3: which query is stuck on Lock:tuple?'
+sleep 1.2
+send "select query_id, samples, pct, bar, substr(query_text,1,42) as q from ash.event_queries('Lock:tuple','1 minute',3);"
+sleep 4.4
+
+# Act 6 — full wait profile of the #1 guilty query (closes the loop:
+# top_waits -> event_queries -> query_waits, mirroring the LLM-assisted
+# investigation flow in the main README). \gset captures the top query_id
+# silently into :top_qid; we then call query_waits with it.
+send '\echo -- Q4: full wait profile of the top guilty query?'
+sleep 1.2
+send "select query_id as top_qid from ash.event_queries('Lock:tuple','1 minute',1) \\gset"
+sleep 0.4
+send "select wait_event, samples, pct, bar from ash.query_waits(:top_qid, '1 minute');"
+sleep 4.4
+
+# Act 7 — closing lines. Held on screen for the "still" moment viewers see
+# when the gif loops back around.
+send '\echo '
+sleep 0.2
+send '\echo -- Root cause: concurrent UPDATEs on the same row.'
+sleep 1.4
+send '\echo -- pg_ash: pure SQL. No extension. No restart. Works everywhere.'
+sleep 3.5
+
+# Quit psql cleanly.
+send '\q'
+sleep 0.6
+
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+sleep "$POST_WAIT"
+
+[ -s "$CAST" ] || die "asciinema did not produce $CAST"
+log "cast written: $(du -h "$CAST" | cut -f1)"
+
+# --- 5. Shift the first cast event to t=0 ------------------------------------
+# asciinema records the command banner ~70 ms after the session starts; agg
+# renders frame 0 at t=0, which is before that banner, so the resulting GIF
+# opens with an empty terminal. That empty frame becomes GitHub's thumbnail
+# for the embedded GIF. To avoid it, we rewrite the first event's timestamp
+# from ~0.07 to 0.0 so the splash IS the first frame. Subsequent event
+# timings are unchanged (they are relative deltas from the previous event).
+python3 - "$CAST" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    lines = f.readlines()
+header = lines[0]
+events = [json.loads(line) for line in lines[1:] if line.strip()]
+if events:
+    events[0][0] = 0.0
+with open(path, 'w') as f:
+    f.write(header)
+    for e in events:
+        f.write(json.dumps(e) + '\n')
+PY
+
+# --- 6. Render GIF -----------------------------------------------------------
+log "rendering gif via agg (cols=$COLS rows=$ROWS)"
+agg \
+  --font-size 16 \
+  --theme monokai \
+  --speed 1.0 \
+  --fps-cap 15 \
+  --idle-time-limit 1.5 \
+  --last-frame-duration 3 \
+  "$CAST" "$GIF"
+
+log "gif (pre-optim): $(du -h "$GIF" | cut -f1)"
+
+# --- 7. Optional optimisation pass -------------------------------------------
+# gifsicle halves the file size with no visible quality loss (palette merge +
+# transparency optimisation). Skip gracefully if it's not installed.
+if command -v gifsicle >/dev/null 2>&1 && [ "${SKIP_GIFSICLE:-0}" != "1" ]; then
+  log "optimizing with gifsicle"
+  gifsicle -O3 --lossy=40 --colors 128 "$GIF" -o "$GIF.opt" && mv "$GIF.opt" "$GIF"
+  log "gif (final): $(du -h "$GIF" | cut -f1)"
+fi
+
+log "done."
+log "cast: $CAST"
+log "gif:  $GIF"

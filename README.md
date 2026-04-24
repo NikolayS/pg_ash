@@ -10,6 +10,10 @@ Active Session History for Postgres — lightweight wait event sampling with zer
 
 **The anti-extension.** Pure SQL + PL/pgSQL that works on any Postgres 14+ — including RDS, Cloud SQL, AlloyDB, Supabase, Neon, and every other managed provider. No C extension, no `shared_preload_libraries`, no provider approval, no restart. Just `\i` and go.
 
+![pg_ash v1.4 investigation flow](demos/ash_demo.gif)
+
+*Short walkthrough of the [LLM-assisted investigation](#llm-assisted-investigation) flow against a live row-lock spike in Postgres 18. Source: [`demos/`](demos/).*
+
 ## Why
 
 Postgres has no built-in session history. When something was slow an hour ago, there is nothing to look at. pg_ash samples `pg_stat_activity` every second and stores the results in a compact format queryable with plain SQL.
