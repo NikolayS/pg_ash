@@ -127,7 +127,7 @@ select * from ash.status();
 | `ash.status()` | Sampling status, version, partition info, rollup metrics, debug_logging state |
 | `ash.take_sample()` | Take one sample manually (called automatically by the scheduler) |
 | `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers). Runs pre-truncation rollup to prevent data loss |
-| `ash.rebuild_partitions(N)` | Change partition count (3–32). **Destructive** — all raw sample data is lost. Rollup tables survive. Call `ash.start()` after to resume |
+| `ash.rebuild_partitions(N, 'yes')` | Change partition count (3–32). **Destructive** — all raw sample data is lost; requires `'yes'` confirmation token. Rollup tables survive. Call `ash.start()` after to resume |
 | `ash.rollup_minute([batch])` | Aggregate raw samples into per-minute rollups. Watermark-based with catch-up. Default batch: 60 minutes |
 | `ash.rollup_hour()` | Aggregate minute rollups into hourly rollups. Watermark-based |
 | `ash.rollup_cleanup()` | Delete expired rollup rows per retention config |
@@ -599,7 +599,7 @@ Encoding version is tracked in `ash.config.encoding_version`, not in the array i
 
 ### Rotation
 
-Skytools PGQ-style N-partition ring buffer (default N=3, configurable 3–32 via `ash.rebuild_partitions(N)`). Physical tables (`sample_0` through `sample_{N-1}`) rotate at `rotation_period` intervals. TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
+Skytools PGQ-style N-partition ring buffer (default N=3, configurable 3–32 via `ash.rebuild_partitions(N, 'yes')`). Physical tables (`sample_0` through `sample_{N-1}`) rotate at `rotation_period` intervals. TRUNCATE replaces the oldest partition — zero dead tuples, zero bloat, no VACUUM needed for sample tables.
 
 N-1 partitions hold data at any time. One is always empty, ready for the next rotation. Before truncation, `rotate()` calls `rollup_minute()` to aggregate endangered samples into rollup tables.
 
@@ -703,7 +703,8 @@ By default, pg_ash uses 3 partitions (1 day of history + current partial). To ke
 
 ```sql
 -- keep 7 days of raw samples (9 partitions × 1-day rotation = 7 readable days + current)
-select ash.rebuild_partitions(9);
+-- 'yes' is required because the call drops all raw sample data
+select ash.rebuild_partitions(9, 'yes');
 
 -- resume sampling after rebuild
 select ash.start();
@@ -716,7 +717,7 @@ select * from ash.status();
 
 The retention formula is `(N - 2) × rotation_period`. The minimum is 3 (current + previous + one being truncated), the maximum is 32.
 
-`rebuild_partitions()` is **destructive** — all raw samples are lost. Rollup tables survive. You must call `ash.start()` afterward to resume sampling.
+`rebuild_partitions()` is **destructive** — all raw samples are lost. To prevent accidents, the call requires a `'yes'` confirmation token (e.g. `ash.rebuild_partitions(9, 'yes')`); calling it without `'yes'` raises an error and changes nothing. Rollup tables survive. You must call `ash.start()` afterward to resume sampling.
 
 ### Rollup tables for long-term trends
 

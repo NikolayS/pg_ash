@@ -27,4 +27,6 @@
 --     to provision a monitoring role (Grafana, Datadog, etc.) with the
 --     minimum privileges to call every public reader. Owner-only, idempotent
 --     symmetric undo. (#52)
+--   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
+--     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
 \ir ash-install.sql
