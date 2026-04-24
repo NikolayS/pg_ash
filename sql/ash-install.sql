@@ -924,13 +924,32 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Helper to get active slots (current and previous).
--- If p_interval is provided and exceeds 2 * rotation_period, emit a single
--- NOTICE per transaction so reader callers get a clear signal instead of a
--- silent empty set. Never clamps the caller's interval — the returned row set
--- stays honest. Deduplication uses a transaction-scoped GUC
--- (ash.notice_oversized) so multi-query readers (e.g. activity_summary) don't
--- spam the log with one NOTICE per partition/sub-query.
-create or replace function ash._active_slots(p_interval interval default null)
+create or replace function ash._active_slots()
+returns smallint[]
+language sql
+stable
+as $$
+  select array[
+    current_slot,
+    ((current_slot - 1 + 3) % 3)::smallint
+  ]
+  from ash.config
+  where singleton
+$$;
+
+-- Helper used by reader functions that accept a user-supplied interval.
+-- Returns the same array as ash._active_slots(), but also emits a single
+-- NOTICE per transaction when p_interval exceeds 2 * rotation_period — so
+-- callers get a clear signal instead of a silent empty set. Never clamps
+-- the caller's interval — the returned row set stays honest.
+-- Deduplication uses a transaction-scoped GUC (ash.notice_oversized) so
+-- multi-query readers (e.g. activity_summary) don't spam the log with one
+-- NOTICE per partition/sub-query.
+--
+-- NB: distinct name (not an overload of ash._active_slots()) because the
+-- upgrade scripts re-create the zero-arg form on idempotent re-apply; an
+-- overloaded pair would make bare ash._active_slots() ambiguous.
+create or replace function ash._active_slots_for(p_interval interval)
 returns smallint[]
 language plpgsql
 stable
@@ -1160,7 +1179,7 @@ as $$
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
     where wm.id = (-s.data[i])::smallint
-      and s.slot = any(ash._active_slots(p_interval))
+      and s.slot = any(ash._active_slots_for(p_interval))
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
       and s.data[i] < 0
   ),
@@ -1223,7 +1242,7 @@ as $$
       (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots(p_interval))
+    where s.slot = any(ash._active_slots_for(p_interval))
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
       and s.data[i] < 0
   )
@@ -1272,7 +1291,7 @@ begin
     with qids as (
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
-      where s.slot = any(ash._active_slots(p_interval))
+      where s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
         and i > 1                   -- guard: data[0] is NULL
         and s.data[i] >= 0          -- not a wait_id marker
@@ -1304,7 +1323,7 @@ begin
     with qids as (
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
-      where s.slot = any(ash._active_slots(p_interval))
+      where s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
         and i > 1
         and s.data[i] >= 0
@@ -1354,7 +1373,7 @@ as $$
       (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots(p_interval))
+    where s.slot = any(ash._active_slots_for(p_interval))
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
       and s.data[i] < 0
   ),
@@ -1418,7 +1437,7 @@ begin
     with qids as (
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
-      where s.slot = any(ash._active_slots(p_interval))
+      where s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
         and i > 1
         and s.data[i] >= 0
@@ -1494,7 +1513,7 @@ begin
       limit 1
       ) as wait_id
     from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots(p_interval))
+    where s.slot = any(ash._active_slots_for(p_interval))
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
       and i > 1
       and s.data[i] >= 0
@@ -1556,7 +1575,7 @@ as $$
     sum(s.active_count) as total_backend_samples
   from ash.sample s
   left join pg_database d on d.oid = s.datid
-  where s.slot = any(ash._active_slots(p_interval))
+  where s.slot = any(ash._active_slots_for(p_interval))
     and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
   group by s.datid, d.datname
   order by total_backend_samples desc
@@ -1916,7 +1935,7 @@ begin
   select count(*), coalesce(sum(active_count), 0), max(active_count)
   into v_total_samples, v_total_backends, v_peak_backends
   from ash.sample
-  where slot = any(ash._active_slots(p_interval))
+  where slot = any(ash._active_slots_for(p_interval))
     and sample_ts >= v_min_ts;
 
   if v_total_samples = 0 then
@@ -1928,7 +1947,7 @@ begin
   select ash.epoch() + sample_ts * interval '1 second'
   into v_peak_ts
   from ash.sample
-  where slot = any(ash._active_slots(p_interval))
+  where slot = any(ash._active_slots_for(p_interval))
     and sample_ts >= v_min_ts
   order by active_count desc
   limit 1;
@@ -1936,7 +1955,7 @@ begin
   -- Distinct databases
   select count(distinct datid) into v_databases
   from ash.sample
-  where slot = any(ash._active_slots(p_interval))
+  where slot = any(ash._active_slots_for(p_interval))
     and sample_ts >= v_min_ts;
 
   return query select 'time_range'::text, p_interval::text;
@@ -2041,7 +2060,7 @@ begin
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
-        and s.slot = any(ash._active_slots(p_interval))
+        and s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= v_start_ts
         and s.data[i] < 0
       group by 1
@@ -2068,7 +2087,7 @@ begin
       sum(s.data[i + 1])::numeric
         / nullif(count(distinct s.sample_ts), 0) as avg_total
     from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots(p_interval))
+    where s.slot = any(ash._active_slots_for(p_interval))
       and s.sample_ts >= v_start_ts
       and s.data[i] < 0
     group by 1
@@ -2104,7 +2123,7 @@ begin
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
-        and s.slot = any(ash._active_slots(p_interval))
+        and s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= v_start_ts
         and s.data[i] < 0
       group by 1, 2
@@ -2114,7 +2133,7 @@ begin
         s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
         count(distinct s.sample_ts) as n_samples
       from ash.sample s
-      where s.slot = any(ash._active_slots(p_interval))
+      where s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= v_start_ts
       group by 1
     ),
@@ -2439,7 +2458,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots(p_interval))
+      where s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= v_min_ts
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
@@ -2475,7 +2494,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots(p_interval))
+      where s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= v_min_ts
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
@@ -2686,7 +2705,7 @@ begin
         generate_subscripts(s.data, 1) i,
         matching_waits mw,
         lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots(p_interval))
+      where s.slot = any(ash._active_slots_for(p_interval))
         and s.sample_ts >= v_min_ts
         and s.data[i] < 0
         and (-s.data[i])::smallint = mw.wait_id
