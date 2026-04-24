@@ -142,6 +142,12 @@ create index if not exists sample_0_datid_ts_idx on ash.sample_0 (datid, sample_
 create index if not exists sample_1_datid_ts_idx on ash.sample_1 (datid, sample_ts);
 create index if not exists sample_2_datid_ts_idx on ash.sample_2 (datid, sample_ts);
 
+comment on table ash.sample is
+$$Packed wait-event samples. One row per (sample_ts, datid). Do not join directly — use ash.samples() / ash.samples_at() for decoded rows, or ash.decode_sample(data, slot) if you need a single sample's contents.$$;
+
+comment on column ash.sample.data is
+$$Packed int4[] encoding the sample's wait events and their query_map ids. Layout: groups of (-wait_id, count, query_map_id_1, ..., query_map_id_count). A negative marker starts each group; wait_id is negated for the marker so a positive count cannot be mistaken for a group boundary. Decode via ash.samples(), ash.samples_at(), or ash.decode_sample(data, slot).$$;
+
 -- Register wait event function (upsert, returns id)
 create or replace function ash._register_wait(p_state text, p_type text, p_event text)
 returns smallint
@@ -2640,6 +2646,15 @@ begin
   end if;
 end;
 $$;
+
+comment on function ash.samples(interval, int) is
+$$Decoded wait-event samples over the last p_interval (default '1 hour'), newest first, up to p_limit rows (default 100). Returns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text requires pg_stat_statements; NULL otherwise.$$;
+
+comment on function ash.samples_at(timestamptz, timestamptz, int) is
+$$Decoded wait-event samples between p_start and p_end, newest first, up to p_limit rows (default 100). Same return shape as ash.samples().$$;
+
+comment on function ash.decode_sample(integer[], smallint) is
+$$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows. Pass p_slot (ash.sample.slot) to resolve query_ids unambiguously; omitting it searches all query_map partitions and may return a stale id after rotation.$$;
 
 -- Migration: add version column if upgrading from older version
 do $$

@@ -293,6 +293,25 @@ select * from ash.samples('10 minutes', 20);
 select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 50);
 ```
 
+### Dump samples to CSV
+
+Always go through `ash.samples()` / `ash.samples_at()` — the underlying `ash.sample`
+table stores a packed `integer[]` and cannot be joined directly. The defaults for
+`ash.samples()` are `p_interval => '1 hour'` and `p_limit => 100`; pass a large
+`p_limit` when dumping.
+
+```sql
+-- dump every sample from the last hour
+\copy (select * from ash.samples('1 hour'::interval, 10000000)) to '/tmp/ash.csv' csv header
+
+-- dump a specific incident window
+\copy (select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 10000000)) to '/tmp/incident.csv' csv header
+```
+
+Use `\copy` (psql) rather than server-side `COPY TO` if `/tmp` isn't writable by
+the Postgres user (managed services), and check the exit status — silently
+redirecting stderr to `/dev/null` will hide errors like typos in table names.
+
 ### Timeline chart
 
 Visualize wait event patterns over time — spot spikes, correlate with deployments, see what changed.
