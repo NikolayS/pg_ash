@@ -40,7 +40,6 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
-      id-token: write # TODO: confirm claude-code-action needs OIDC; drop if unused (#37 H-SEC-4)
       actions: read # Required for Claude to read CI results on PRs
     steps:
       - name: Checkout repository

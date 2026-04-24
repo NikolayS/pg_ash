@@ -92,6 +92,11 @@ primary admin (RDS `rds_superuser`, Cloud SQL `cloudsqlsuperuser`, Supabase
 `postgres`), installing and running ash as that role is sufficient. Always
 verify with `select pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER');`.
 
+If the privilege probe itself errors (e.g. missing `pg_roles` access on a
+locked-down managed service), `ash.start()` does not abort — it emits a
+`RAISE NOTICE 'privilege probe failed: ...'` so the skipped check remains
+visible in server / CI logs.
+
 ### Upgrade
 
 ```sql

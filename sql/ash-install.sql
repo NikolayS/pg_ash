@@ -721,7 +721,8 @@ begin
       raise notice '  skewing top_queries / query_waits. Fix: grant pg_read_all_stats to %;', current_user;
     end if;
   exception when others then
-    null; -- don't let the privilege probe block ash.start()
+    -- don't let the privilege probe block ash.start(), but surface the failure
+    raise notice 'privilege probe failed: %', sqlerrm;
   end;
 
   -- If pg_cron is not available, just record the interval and advise on external scheduling
