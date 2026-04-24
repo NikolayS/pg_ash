@@ -364,8 +364,11 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_pgss_schema text := ash._pgss_schema();
-  -- Keep in sync with v_pgss_readers in the DO block below AND with the same
-  -- list in ash-install.sql (ash._apply_pgss_search_path).
+  -- B2: keep this list in sync with v_pgss_readers in sql/ash-1.3-to-1.4.sql
+  -- (and any future upgrade scripts) AND with the per-function `set
+  -- search_path = pg_catalog, ash, public` clauses in this file. Any reader
+  -- that probes pg_stat_statements must appear here so its search_path
+  -- resolves the view across managed-service and custom pgss install schemas.
   v_readers text[] := array[
     'top_queries', 'top_queries_at', 'top_queries_with_text',
     'samples', 'samples_at',
@@ -374,6 +377,10 @@ declare
   v_path text;
   r record;
 begin
+  -- Always keep public in the path as a fallback (matches the managed-service
+  -- default and preserves behavior when pgss is not yet installed). If the
+  -- extension lives elsewhere, append that schema after public so ash.* still
+  -- wins over any user-created objects in public/<pgss_schema>.
   if v_pgss_schema is null or v_pgss_schema in ('pg_catalog', 'ash', 'public') then
     v_path := 'pg_catalog, ash, public';
   else
