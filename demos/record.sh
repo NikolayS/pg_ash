@@ -144,7 +144,7 @@ cat <<BANNER
 ║                                                                                                  ║
 ║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                  ║
 ║                                                                                                  ║
-║   Investigation: something just spiked in the last minute. Lets find out what.                   ║
+║   Investigation: something just spiked in the last minute. Let'"'"'s find out what.                  ║
 ║                                                                                                  ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
 BANNER
@@ -202,7 +202,18 @@ sleep 1.2
 send "select query_id, samples, pct, bar, substr(query_text,1,42) as q from ash.event_queries('Lock:tuple','1 minute',3);"
 sleep 4.4
 
-# Act 6 — closing lines. Held on screen for the "still" moment viewers see
+# Act 6 — full wait profile of the #1 guilty query (closes the loop:
+# top_waits -> event_queries -> query_waits, mirroring the LLM-assisted
+# investigation flow in the main README). \gset captures the top query_id
+# silently into :top_qid; we then call query_waits with it.
+send '\echo -- Q4: full wait profile of the top guilty query?'
+sleep 1.2
+send "select query_id as top_qid from ash.event_queries('Lock:tuple','1 minute',1) \\gset"
+sleep 0.4
+send "select wait_event, samples, pct, bar from ash.query_waits(:top_qid, '1 minute');"
+sleep 4.4
+
+# Act 7 — closing lines. Held on screen for the "still" moment viewers see
 # when the gif loops back around.
 send '\echo '
 sleep 0.2

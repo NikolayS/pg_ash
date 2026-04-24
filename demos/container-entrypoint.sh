@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-export PGPASSWORD="${PGPASSWORD:-postgres}"
+# UNIX-socket peer auth — no PGPASSWORD needed.
 export PSQL="psql -X -qAt -U postgres -h /var/run/postgresql"
 
 echo "[entry] waiting for PostgreSQL..."

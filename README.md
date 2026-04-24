@@ -12,7 +12,7 @@ Active Session History for Postgres — lightweight wait event sampling with zer
 
 ![pg_ash v1.4 investigation flow](demos/ash_demo.gif)
 
-*60-second walkthrough of the [LLM-assisted investigation](#llm-assisted-investigation) flow against a live row-lock spike in Postgres 18. Source: [`demos/`](demos/).*
+*Short walkthrough of the [LLM-assisted investigation](#llm-assisted-investigation) flow against a live row-lock spike in Postgres 18. Source: [`demos/`](demos/).*
 
 ## Why
 
