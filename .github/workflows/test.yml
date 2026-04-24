@@ -610,6 +610,182 @@ jobs:
           $$;
           EOF
 
+      - name: Test decode_sample(int4) and decode_sample_at(timestamptz) convenience
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_sample_ts int4;
+            v_wait_id smallint;
+            v_qid_a int4;
+            v_qid_b int4;
+            v_decoded_int_count int;
+            v_decoded_ts_count int;
+            v_decoded_int_total int;
+            v_decoded_ts_total int;
+            v_packed_total int;
+            v_distinct_datids int;
+            v_diff_count int;
+            v_ts timestamptz;
+            v_slot smallint;
+          begin
+            -- Run a real take_sample() first so the call path exercises the
+            -- live sampler at least once.
+            perform ash.take_sample();
+
+            -- Build a deterministic test sample_ts so the assertions don't
+            -- depend on whether the CI runner happens to have active
+            -- backends right now. Use a sample_ts in the future to avoid
+            -- colliding with anything take_sample() inserted.
+            v_sample_ts := ash.ts_from_timestamptz(now()) + 86400;
+            v_slot := ash.current_slot();
+
+            -- Ensure dictionary entries exist (may already exist from earlier
+            -- decoder test step; on conflict do nothing).
+            insert into ash.wait_event_map (state, type, event)
+            values ('active', 'CPU*', 'CPU*') on conflict do nothing;
+            select id into v_wait_id from ash.wait_event_map
+            where state = 'active' and type = 'CPU*' and event = 'CPU*';
+
+            -- Read the active slot's query_map dynamically so this test
+            -- stays correct after re-ordering of CI steps and across any
+            -- future change to num_partitions.
+            execute format(
+              'insert into ash.query_map_%s (query_id) values (777001) on conflict do nothing',
+              v_slot
+            );
+            execute format(
+              'insert into ash.query_map_%s (query_id) values (777002) on conflict do nothing',
+              v_slot
+            );
+            execute format(
+              'select id from ash.query_map_%s where query_id = 777001',
+              v_slot
+            ) into v_qid_a;
+            execute format(
+              'select id from ash.query_map_%s where query_id = 777002',
+              v_slot
+            ) into v_qid_b;
+
+            -- Insert two synthetic ash.sample rows for the same sample_ts
+            -- but different datids, so the int4 overload has more than one
+            -- ash.sample row to walk and the datid column is exercised.
+            -- datid 1 = template1, 2 = postgres in most installs, but we
+            -- only need oid values that are distinct and stable.
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values
+              (v_sample_ts, 1::oid, 2, array[-v_wait_id, 2, v_qid_a, v_qid_b]::integer[], v_slot),
+              (v_sample_ts, 2::oid, 1, array[-v_wait_id, 1, v_qid_a]::integer[], v_slot);
+
+            -- decode_sample(int4): expect 3 decoded rows (2 + 1 backends),
+            -- each with count=1 and a datid that matches one of the rows we
+            -- inserted.
+            select count(*), coalesce(sum(d.count), 0), count(distinct d.datid)
+              into v_decoded_int_count, v_decoded_int_total, v_distinct_datids
+            from ash.decode_sample(v_sample_ts) d;
+            assert v_decoded_int_count = 3,
+              'decode_sample(int4) row count expected 3, got ' || v_decoded_int_count;
+            assert v_decoded_int_total = 3,
+              'decode_sample(int4) sum(count) expected 3, got ' || v_decoded_int_total;
+            assert v_distinct_datids = 2,
+              'decode_sample(int4) distinct datids expected 2, got ' || v_distinct_datids;
+
+            -- Sanity vs. packed active_count.
+            select coalesce(sum(active_count), 0) into v_packed_total
+            from ash.sample where sample_ts = v_sample_ts;
+            assert v_decoded_int_count = v_packed_total,
+              'decoded rows ' || v_decoded_int_count
+              || ' != packed active_count total ' || v_packed_total;
+
+            -- Verify wait_event + query_id resolution is correct for each
+            -- decoded row (uses the row's slot internally, so query_ids are
+            -- unambiguous).
+            assert exists (
+              select 1 from ash.decode_sample(v_sample_ts) d
+              where d.datid = 1::oid and d.wait_event = 'CPU*' and d.query_id = 777001
+            ), 'decode_sample(int4) missing expected (datid=1, CPU*, 777001) row';
+            assert exists (
+              select 1 from ash.decode_sample(v_sample_ts) d
+              where d.datid = 1::oid and d.wait_event = 'CPU*' and d.query_id = 777002
+            ), 'decode_sample(int4) missing expected (datid=1, CPU*, 777002) row';
+            assert exists (
+              select 1 from ash.decode_sample(v_sample_ts) d
+              where d.datid = 2::oid and d.wait_event = 'CPU*' and d.query_id = 777001
+            ), 'decode_sample(int4) missing expected (datid=2, CPU*, 777001) row';
+
+            -- decode_sample_at(timestamptz): round-trip and confirm we get
+            -- identical decoded rows.
+            v_ts := ash.ts_to_timestamptz(v_sample_ts);
+            select count(*), coalesce(sum(d.count), 0)
+              into v_decoded_ts_count, v_decoded_ts_total
+            from ash.decode_sample_at(v_ts) d;
+            assert v_decoded_ts_count = v_decoded_int_count,
+              'decode_sample_at(timestamptz) row count ' || v_decoded_ts_count
+              || ' != decode_sample(int4) ' || v_decoded_int_count;
+            assert v_decoded_ts_total = v_decoded_int_total,
+              'decode_sample_at(timestamptz) sum(count) ' || v_decoded_ts_total
+              || ' != decode_sample(int4) ' || v_decoded_int_total;
+
+            -- Row-level equality: every (datid, wait_event, query_id, count)
+            -- tuple from decode_sample_at(timestamptz) must match
+            -- decode_sample(int4) exactly, in both directions.
+            select count(*) into v_diff_count from (
+              select datid, wait_event, query_id, count
+              from ash.decode_sample_at(v_ts)
+              except
+              select datid, wait_event, query_id, count
+              from ash.decode_sample(v_sample_ts)
+            ) d;
+            assert v_diff_count = 0,
+              'decode_sample_at(timestamptz) has rows not in decode_sample(int4): '
+              || v_diff_count;
+            select count(*) into v_diff_count from (
+              select datid, wait_event, query_id, count
+              from ash.decode_sample(v_sample_ts)
+              except
+              select datid, wait_event, query_id, count
+              from ash.decode_sample_at(v_ts)
+            ) d;
+            assert v_diff_count = 0,
+              'decode_sample(int4) has rows not in decode_sample_at(timestamptz): '
+              || v_diff_count;
+
+            -- Empty input: a sample_ts with no rows must return zero rows.
+            assert (select count(*) from ash.decode_sample(-1)) = 0,
+              'decode_sample(int4) on missing sample_ts should return 0 rows';
+
+            -- NULL input: NULL-as-int4 should return zero rows (not error).
+            -- The 1-arg unknown-NULL case is covered by the existing
+            -- decoder corner-cases step via ::integer[] cast; here we
+            -- verify the int4 overload behaves the same.
+            assert (select count(*) from ash.decode_sample(null::int4)) = 0,
+              'decode_sample(null::int4) should return 0 rows';
+            assert (select count(*) from ash.decode_sample_at(null::timestamptz)) = 0,
+              'decode_sample_at(null::timestamptz) should return 0 rows';
+
+            -- Regression for #54: an unadorned integer literal must resolve
+            -- unambiguously to decode_sample(int4). 0 is the epoch boundary,
+            -- which has no rows in CI -- so a successful overload bind
+            -- returns exactly 0 rows. If the call ever errors with
+            -- "function ash.decode_sample(unknown) is not unique", or if it
+            -- mis-binds and returns rows from another partition, this fails.
+            assert (select count(*) from ash.decode_sample(0)) = 0,
+              'decode_sample(<unadorned literal>) must resolve to int4 overload and return 0 rows at epoch';
+
+            -- Clean up the synthetic rows so later steps see a normal table.
+            delete from ash.sample where sample_ts = v_sample_ts;
+            execute format(
+              'delete from ash.query_map_%s where query_id in (777001, 777002)',
+              v_slot
+            );
+
+            raise notice 'decode_sample(int4) / decode_sample_at(timestamptz) tests PASSED';
+          end;
+          $$;
+          EOF
+
       - name: Test missed_samples counter (timeout catching)
         env:
           PGPASSWORD: postgres
@@ -1458,6 +1634,69 @@ jobs:
             select count(*) into v_count from ash.top_by_type('1 second');
             select count(*) into v_count from ash.wait_timeline('1 second', '1 second');
 
+            -- === Absurd intervals (regression: #51) ===
+            -- now() - '1000 years' would underflow int4 epoch offset; readers
+            -- must clamp and return empty (the NOTICE promises "older samples
+            -- not available"), not raise integer-out-of-range.
+            select count(*) into v_count from ash.top_waits('1000 years');
+            assert v_count = 0, 'top_waits(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.wait_timeline('1000 years');
+            assert v_count = 0, 'wait_timeline(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.top_queries('1000 years');
+            assert v_count = 0, 'top_queries(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.top_by_type('1000 years');
+            assert v_count = 0, 'top_by_type(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.top_queries_with_text('1000 years');
+            assert v_count = 0,
+              'top_queries_with_text(1000 years) should return 0 rows, got: ' || v_count;
+
+            -- query_waits short-circuits on unknown query_id before reaching
+            -- the interval clamp, so pick a real query_id (any registered one)
+            -- to ensure the clamp path is exercised. Falls back to a synthetic
+            -- id if query_map_all is empty (still valid: short-circuit returns
+            -- 0 rows without hitting int4 math).
+            declare
+              v_qid bigint;
+            begin
+              select query_id into v_qid from ash.query_map_all limit 1;
+              v_qid := coalesce(v_qid, 111111);
+              select count(*) into v_count from ash.query_waits(v_qid, '1000 years');
+              assert v_count = 0,
+                'query_waits(1000 years) should return 0 rows, got: ' || v_count;
+            end;
+
+            select count(*) into v_count from ash.samples_by_database('1000 years');
+            assert v_count = 0,
+              'samples_by_database(1000 years) should return 0 rows, got: ' || v_count;
+
+            -- activity_summary always emits a "no data in this time range" status
+            -- row when v_total_samples = 0; assert that single-row placeholder
+            -- shape rather than 0 rows.
+            select count(*) into v_count from ash.activity_summary('1000 years');
+            assert v_count = 1,
+              'activity_summary(1000 years) should return 1 placeholder row, got: ' || v_count;
+            select * into v_rec from ash.activity_summary('1000 years') limit 1;
+            assert v_rec.metric = 'status' and v_rec.value = 'no data in this time range',
+              'activity_summary(1000 years) placeholder mismatch: ' ||
+              coalesce(v_rec.metric, '<null>') || '/' || coalesce(v_rec.value, '<null>');
+
+            -- timeline_chart returns no rows when there are no top events
+            -- (v_top_events is null) — empty short-circuit, no legend emitted.
+            select count(*) into v_count from ash.timeline_chart('1000 years');
+            assert v_count = 0,
+              'timeline_chart(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.samples('1000 years');
+            assert v_count = 0, 'samples(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.event_queries('CPU', '1000 years');
+            assert v_count = 0,
+              'event_queries(1000 years) should return 0 rows, got: ' || v_count;
+
             -- === Non-existent queries ===
 
             select count(*) into v_count from ash.query_waits(999999999, '1 hour');
@@ -1469,8 +1708,10 @@ jobs:
 
             -- === decode_sample corner cases ===
 
-            -- Empty/null data
-            select count(*) into v_count from ash.decode_sample(null);
+            -- Empty/null data (cast to integer[] to disambiguate from
+            -- the decode_sample(int4) overload, which would otherwise
+            -- both match an unknown-typed NULL literal).
+            select count(*) into v_count from ash.decode_sample(null::integer[]);
             assert v_count = 0, 'null decode should return 0 rows';
 
             select count(*) into v_count from ash.decode_sample('{}'::integer[]);
