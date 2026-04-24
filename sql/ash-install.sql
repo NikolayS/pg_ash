@@ -4468,6 +4468,8 @@ begin
   -- Re-grant EXECUTE on ts helpers to PUBLIC: these are pure, immutable
   -- timestamp <-> int4 conversion utilities with no access to sample data.
   -- Useful for Grafana panels and ad-hoc queries against rollup views.
+  -- ash.epoch() must also be public since ts_from_timestamptz inlines a call to it.
+  execute 'grant execute on function ash.epoch() to public';
   execute 'grant execute on function ash.ts_from_timestamptz(timestamptz) to public';
   execute 'grant execute on function ash.ts_to_timestamptz(int4) to public';
 
