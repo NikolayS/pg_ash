@@ -2169,6 +2169,7 @@ jobs:
           -- explicitly to the test role before exercising the reader path.
           reset role;
           grant execute on function ash.minute_waits(interval, int) to ash_test_user;
+          grant execute on function ash.minute_waits_at(timestamptz, timestamptz, int) to ash_test_user;
           set role ash_test_user;
 
           do $$
@@ -2182,6 +2183,7 @@ jobs:
 
           reset role;
           revoke execute on function ash.minute_waits(interval, int) from ash_test_user;
+          revoke execute on function ash.minute_waits_at(timestamptz, timestamptz, int) from ash_test_user;
           revoke all on schema ash from ash_test_user;
           revoke all on all tables in schema ash from ash_test_user;
           drop role ash_test_user;
