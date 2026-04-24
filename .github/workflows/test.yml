@@ -127,6 +127,55 @@ jobs:
             -c "create extension if not exists pg_stat_statements;" \
             || echo "pg_stat_statements not available (contrib package missing for this PG major)"
 
+      - name: "Verify pg_cron wiring"
+        # Upstream-debugging step for H-CI-3: confirm that (a) the
+        # shared_preload_libraries edit survived `docker restart`,
+        # (b) cron.use_background_workers/cron.database_name took effect,
+        # (c) the pg_cron scheduler bgworker actually attached. When
+        # H-CI-3 has failed in the past (`baseline=0 after=0 waited=30`
+        # with no rows in cron.job_run_details) these three facts were
+        # all invisible — this step surfaces them in the job log every
+        # run so a future failure pinpoints which link of the chain
+        # broke.
+        #
+        # Non-fatal when matrix.cron=off or pg_cron isn't installed:
+        # the degraded-mode axis deliberately has none of this.
+        env:
+          PGPASSWORD: postgres
+          CRON: ${{ matrix.cron }}
+        run: |
+          if [ "$CRON" = "off" ]; then
+            echo "matrix.cron=off — skipping pg_cron wiring verification"
+            exit 0
+          fi
+          if ! psql -h localhost -U postgres -d postgres -tAc \
+              "select exists (select from pg_extension where extname='pg_cron')" \
+              | grep -q '^t$'; then
+            echo "pg_cron extension not installed — skipping wiring verification"
+            exit 0
+          fi
+          echo "=== GUCs ==="
+          psql -h localhost -U postgres -d postgres -c "
+            show shared_preload_libraries;
+            show cron.database_name;
+            show cron.use_background_workers;
+            show cron.host;
+          "
+          echo "=== pg_cron extension version ==="
+          psql -h localhost -U postgres -d postgres -c \
+            "select extname, extversion from pg_extension where extname='pg_cron';"
+          echo "=== pg_cron scheduler bgworker attached? ==="
+          # When shared_preload_libraries actually loaded pg_cron, the
+          # launcher bgworker is always running. If this returns 0 rows,
+          # shared_preload_libraries did not include pg_cron at startup
+          # (edit didn't survive / got overwritten / restart raced).
+          psql -h localhost -U postgres -d postgres -c "
+            select application_name, backend_type, state
+            from pg_stat_activity
+            where backend_type ~* 'cron'
+               or application_name ~* 'cron';
+          "
+
       - name: Install pg_ash (fresh install)
         env:
           PGPASSWORD: postgres
@@ -462,14 +511,34 @@ jobs:
           # sample table grew. Skipped when pg_cron is not installed (e.g.
           # matrix.cron=off or PGDG doesn't have a package for this PG major).
           #
-          # The step polls up to ~30s rather than blocking on a single sleep:
-          # pg_cron's background launcher only (re)reads cron.job on its own
-          # tick, so newly-scheduled jobs can take a few seconds to start
-          # firing — especially in CI service containers where the worker
-          # may be under startup load. Asserting `>= 1` new sample is enough
-          # to prove the cron.cmd / nodename / schedule wiring works end-to-
-          # end; higher cadence is already exercised by unit tests that call
-          # ash.take_sample() directly.
+          # Wait window tuning (v_max_wait = 90s):
+          # Empirically reproduced locally: after `docker restart` on the
+          # postgres service container, the pg_cron scheduler bgworker starts
+          # within ms, but the FIRST scheduled job fires ~26s later — pg_cron
+          # rounds its initial tick to the next minute boundary for sub-minute
+          # schedules before it enters the fast-tick loop. Subsequent jobs
+          # fire within ~2-6s. Prior iterations of this test used 30s which
+          # lies on the edge of that cold-start window; on a busy CI runner
+          # the first fire can slip past 30s even though wiring is correct.
+          # 90s covers the worst-case "next-minute-boundary + tick + job
+          # execution" chain with plenty of headroom without making the
+          # total job runtime materially longer (the loop exits as soon as
+          # one sample appears — a warm launcher exits in ~2-6s).
+          #
+          # Diagnostic pass 1: "Verify pg_cron wiring" step above confirms
+          # shared_preload_libraries / GUCs / launcher bgworker BEFORE we
+          # reach this test. If that step shows no cron bgworker, this
+          # step's failure is downstream.
+          #
+          # Diagnostic pass 2: this step prints progress every 10 s during
+          # the poll so a future CI log clearly separates
+          # "scheduled but never fired" (cron.job populated, run_details
+          # empty throughout) from "slow first fire" (empty at t=10 s,
+          # populated at t=30 s+).
+          #
+          # Diagnostic pass 3: a follow-up `if: failure()` step dumps the
+          # postgres container logs so the pg_cron scheduler's own LOG
+          # output (which RAISE LOG also lands in) is visible in GHA.
           #
           # NOTE: we capture cron.job / cron.job_run_details diagnostics
           # BEFORE calling ash.stop() — otherwise the unschedule would wipe
@@ -486,10 +555,12 @@ jobs:
             v_baseline int;
             v_after int;
             v_waited int := 0;
-            v_max_wait int := 30;
+            v_max_wait int := 90;
             v_job_rows text;
             v_run_rows text;
             v_start_jobs text;
+            v_cron_bgworkers text;
+            v_runs_count bigint;
           begin
             select exists (select from pg_extension where extname = 'pg_cron')
               into v_has_pgcron;
@@ -497,6 +568,25 @@ jobs:
               raise notice 'pg_cron not installed — skipping real-sampling test (degraded path verified elsewhere)';
               return;
             end if;
+
+            -- Pre-flight: pg_cron launcher bgworker must be running.
+            -- If this is empty, shared_preload_libraries didn't actually
+            -- load pg_cron at postmaster startup (config edit/restart
+            -- raced, or the running image resets PGDATA on restart) and
+            -- no amount of polling will help — fail fast with a clear
+            -- message instead of waiting 90 s only to say "no runs".
+            select string_agg(
+                     format('pid=%s application_name=%s backend_type=%s state=%s',
+                            pid, application_name, backend_type, state),
+                     E'\n  ')
+              into v_cron_bgworkers
+              from pg_stat_activity
+              where backend_type ~* 'cron' or application_name ~* 'cron';
+            if v_cron_bgworkers is null then
+              raise exception
+                'pg_cron launcher bgworker is NOT running — shared_preload_libraries probably did not include pg_cron at postmaster start. Inspect the "Verify pg_cron wiring" step output.';
+            end if;
+            raise notice E'pg_cron bgworkers attached:\n  %', v_cron_bgworkers;
 
             -- Reset to a clean state. Truncate ALL sample partitions (P1):
             -- ash.sample is a partitioned parent that unions all three slots,
@@ -530,12 +620,25 @@ jobs:
             -- Poll: wait up to v_max_wait seconds for pg_cron to fire at least
             -- once. Exit early once we observe any new sample — that alone
             -- proves cron actually ran the scheduled command.
+            -- Emit a progress line every 10 s so a future CI log shows
+            -- whether we're "empty throughout" vs "populated at t=30+".
             loop
               perform pg_sleep(1);
               v_waited := v_waited + 1;
               select count(*) into v_after from ash.sample;
               exit when v_after > v_baseline;
               exit when v_waited >= v_max_wait;
+              if v_waited % 10 = 0 then
+                begin
+                  select count(*) into v_runs_count
+                    from cron.job_run_details;
+                  raise notice 'poll t=%s: ash.sample=% cron.job_run_details.count=%',
+                    v_waited, v_after, v_runs_count;
+                exception when others then
+                  raise notice 'poll t=%s: ash.sample=% cron.job_run_details unreadable: %',
+                    v_waited, v_after, sqlerrm;
+                end;
+              end if;
             end loop;
 
             -- Capture diagnostics BEFORE ash.stop(). The original version
@@ -591,6 +694,22 @@ jobs:
           -- Leave debug_logging off by default so other tests aren't noisy.
           select ash.set_debug_logging(false);
           EOF
+
+      - name: "Dump postgres container logs on H-CI-3 failure"
+        # RAISE LOG emitted by ash.start() / ash.take_sample() lands in the
+        # postgres server log, not in psql output. pg_cron's scheduler logs
+        # every `cron job N starting` / `cron job N COMMAND completed` line
+        # there too. When H-CI-3 fails (e.g. "pg_cron did not sample within
+        # N sec"), the pg_cron log tells us whether the scheduler tried to
+        # fire the job (so the bug is in take_sample) or never did (so the
+        # bug is in scheduling / bgworker dispatch) — impossible to tell
+        # from the psql-side diagnostic alone.
+        if: failure()
+        env:
+          CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          echo "=== postgres container logs (last 400 lines) ==="
+          docker logs --tail 400 "$CONTAINER_ID" 2>&1 || echo "(docker logs unavailable)"
 
       - name: Test set_debug_logging
         env:

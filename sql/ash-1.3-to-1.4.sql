@@ -246,6 +246,243 @@ exception when query_canceled then
 end;
 $$;
 
+-- Re-create ash.start() to mirror sql/ash-install.sql byte-for-byte.
+--
+-- Why this duplication: the source-of-truth function body lives in
+-- ash-install.sql. The schema-equivalence CI test diffs md5(prosrc)
+-- between a fresh install and the full upgrade chain, so any install-side
+-- edit to a function body MUST also appear here — otherwise the upgrade
+-- path produces a different body and the test fails.
+--
+-- CLAUDE.md policy tension: "upgrade scripts are generated at release
+-- time, not in feature PRs". This file has already accepted take_sample()
+-- and status() redefinitions in this PR (for #27/#28/#8) and now needs
+-- start() too. The alternative — deferring this to release — would
+-- leave main red on schema equivalence. Flagging the tension here so the
+-- release-generation step can consolidate.
+--
+-- Changes vs 1.3 version:
+--   - v_debug_logging / v_pg_cron_available locals
+--   - RAISE LOG lines gated on debug_logging (mirrors take_sample()'s
+--     pattern; surfaces silent "took the no-pg_cron branch" bugs)
+-- Everything else is identical to the 1.3 body — exact byte-for-byte
+-- match with ash-install.sql is required for the schema-equivalence
+-- diff to pass.
+create or replace function ash.start(p_interval interval default '1 second')
+returns table (job_type text, job_id bigint, status text)
+language plpgsql
+as $$
+declare
+  v_sampler_job bigint;
+  v_rotation_job bigint;
+  v_cron_version text;
+  v_seconds int;
+  v_hours int;
+  v_schedule text;
+  v_skip_nodename_update boolean := false;
+  v_debug_logging boolean := false;
+  v_pg_cron_available boolean;
+begin
+  -- Read debug_logging flag so we can trace the pg_cron detection / scheduling
+  -- path when ash.start() appears to no-op. Treat an error here as "debug off"
+  -- so ash.start() still works in half-installed / upgrading states.
+  begin
+    select debug_logging into v_debug_logging from ash.config where singleton;
+  exception when others then
+    v_debug_logging := false;
+  end;
+
+  -- Validate interval
+  v_seconds := extract(epoch from p_interval)::int;
+  if v_seconds < 1 then
+    job_type := 'error';
+    job_id := null;
+    status := format('interval must be at least 1 second, got %s', p_interval);
+    return next;
+    return;
+  end if;
+
+  v_pg_cron_available := ash._pg_cron_available();
+  if v_debug_logging then
+    raise log 'ash.start: pg_cron_available=% interval=% seconds=%',
+      v_pg_cron_available, p_interval, v_seconds;
+  end if;
+
+  -- If pg_cron is not available, just record the interval and advise on external scheduling
+  if not v_pg_cron_available then
+    update ash.config set sample_interval = p_interval where singleton;
+
+    job_type := 'sampler';
+    job_id := null;
+    status := format('interval set to %s — schedule externally (pg_cron not available)', p_interval);
+    return next;
+
+    job_type := 'rotation';
+    job_id := null;
+    status := format('rotation_period is %s — schedule ash.rotate() externally', (select rotation_period from ash.config where singleton));
+    return next;
+
+    raise notice 'pg_cron is not installed. To sample, call ash.take_sample() from an external scheduler:';
+    raise notice '  system cron:    * * * * * psql -qAtX -c "select ash.take_sample()" (for per-second, use a loop)';
+    raise notice '  psql:           SELECT ash.take_sample() \watch 1';
+    raise notice '  any language:   execute "SELECT ash.take_sample()" in a loop with sleep';
+    raise notice 'Also schedule ash.rotate() at the rotation_period interval (default: daily).';
+
+    return;
+  end if;
+
+  -- Check pg_cron version (need >= 1.5 for sub-minute scheduling)
+  select extversion into v_cron_version
+  from pg_extension where extname = 'pg_cron';
+
+  if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
+    if v_seconds < 60 then
+      job_type := 'error';
+      job_id := null;
+      status := format('pg_cron version %s too old for sub-minute scheduling (need >= 1.5). Use external scheduler or upgrade pg_cron.', v_cron_version);
+      return next;
+      return;
+    end if;
+  end if;
+
+  -- Detect whether we need to UPDATE cron.job.nodename after scheduling.
+  -- Skip when cron.use_background_workers = on (nodename irrelevant)
+  -- or cron.host is already '' or a socket path (cron.schedule() inherits it).
+  begin
+    v_skip_nodename_update :=
+      coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
+      or coalesce(current_setting('cron.host', true), 'localhost') = ''
+      or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
+  exception when others then
+    v_skip_nodename_update := false;
+  end;
+
+  -- Convert interval to pg_cron schedule format
+  -- pg_cron supports: '[1-59] seconds' for sub-minute, or cron syntax for minute+
+
+  -- Build schedule: seconds format for <60s, cron format for 60s+
+  if v_seconds <= 59 then
+    v_schedule := v_seconds || ' seconds';
+  elsif v_seconds < 3600 then
+    -- Convert to cron: every N minutes
+    if v_seconds % 60 <> 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact minutes (60s, 120s, etc.), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
+  else
+    -- Convert to cron: every N hours (limit to 23 hours max for step syntax)
+    if v_seconds % 3600 <> 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact hours (3600s, 7200s, etc., up to 23h), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_hours := v_seconds / 3600;
+    if v_hours > 23 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval exceeds maximum 23 hours (82800s), got %s = %s hours. Use days or shorter interval.', p_interval, v_hours);
+      return next;
+      return;
+    end if;
+    if v_hours = 1 then
+      v_schedule := '0 * * * *';  -- Every hour at minute 0
+    else
+      v_schedule := '0 */' || v_hours || ' * * *';  -- Every N hours at minute 0
+    end if;
+  end if;
+
+  -- Check for existing sampler job (idempotent)
+  select jobid into v_sampler_job
+  from cron.job
+  where jobname = 'ash_sampler';
+
+  if v_sampler_job is not null then
+    job_type := 'sampler';
+    job_id := v_sampler_job;
+    status := 'already exists';
+    return next;
+  else
+    -- Create sampler job
+    select cron.schedule(
+      'ash_sampler',
+      v_schedule,
+      'set statement_timeout = ''500ms''; select ash.take_sample()'
+    ) into v_sampler_job;
+
+    -- Clear nodename so pg_cron uses Unix socket instead of TCP.
+    -- cron.schedule() sets nodename from cron.host GUC (default 'localhost'),
+    -- which forces TCP and fails when pg_hba.conf only allows sockets.
+    -- Skipped when cron.use_background_workers = on (no libpq connections)
+    -- or cron.host is already '' / a socket path (already correct).
+    if not v_skip_nodename_update then
+      update cron.job set nodename = '' where jobid = v_sampler_job;
+    end if;
+
+    if v_debug_logging then
+      raise log 'ash.start: scheduled ash_sampler jobid=% schedule=% skip_nodename_update=%',
+        v_sampler_job, v_schedule, v_skip_nodename_update;
+    end if;
+
+    job_type := 'sampler';
+    job_id := v_sampler_job;
+    status := 'created';
+    return next;
+  end if;
+
+  -- Check for existing rotation job (idempotent)
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rotation';
+
+  if v_rotation_job is not null then
+    job_type := 'rotation';
+    job_id := v_rotation_job;
+    status := 'already exists';
+    return next;
+  else
+    -- Create rotation job (daily at midnight UTC)
+    select cron.schedule(
+      'ash_rotation',
+      '0 0 * * *',
+      'select ash.rotate()'
+    ) into v_rotation_job;
+
+    if not v_skip_nodename_update then
+      update cron.job set nodename = '' where jobid = v_rotation_job;
+    end if;
+
+    job_type := 'rotation';
+    job_id := v_rotation_job;
+    status := 'created';
+    return next;
+  end if;
+
+  -- Update sample_interval in config (after all validation and job creation)
+  update ash.config set sample_interval = p_interval where singleton;
+
+  -- Warn about pg_cron run history overhead.
+  -- At 1s sampling, cron.job_run_details grows ~12 MiB/day unbounded.
+  -- pg_cron has no built-in purge — only cron.log_run = off (disables entirely).
+  begin
+    if current_setting('cron.log_run', true)::bool then
+      raise notice 'hint: pg_cron logs every sample to cron.job_run_details (~12 MiB/day).';
+      raise notice 'to disable: alter system set cron.log_run = off; select pg_reload_conf();';
+      raise notice 'or schedule periodic cleanup: delete from cron.job_run_details where end_time < now() - interval ''1 day'';';
+    end if;
+  exception when others then
+    null; -- GUC not available
+  end;
+
+  return;
+end;
+$$;
+
 -- Decode sample function
 
 -- Re-create status() with missed_samples metric
