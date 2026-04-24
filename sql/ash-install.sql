@@ -813,6 +813,49 @@ begin
 end;
 $$;
 
+-- Convenience overload: decode every ash.sample row whose sample_ts matches.
+-- Walks all datids/slots and returns decoded rows annotated with datid so the
+-- caller can distinguish them. Implemented as a SQL LATERAL JOIN over the
+-- 2-arg decode_sample(data, slot) SRF (passes slot for unambiguous lookup,
+-- avoiding the "search-all-partitions" branch that can return stale ids
+-- after rotation).
+create or replace function ash.decode_sample(p_sample_ts int4)
+returns table (
+  datid      oid,
+  wait_event text,
+  query_id   int8,
+  count      int
+)
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select s.datid, d.wait_event, d.query_id, d.count
+  from ash.sample s,
+       lateral ash.decode_sample(s.data, s.slot) d
+  where s.sample_ts = p_sample_ts
+$$;
+
+-- Wall-clock convenience: convert timestamptz to the matching sample_ts via
+-- ts_from_timestamptz() and delegate to decode_sample(int4). Same return
+-- shape. Named decode_sample_at() (matching the samples_at / top_waits_at
+-- naming convention) so we don't create a decode_sample(unknown) ambiguity
+-- between int4 and timestamptz overloads.
+create or replace function ash.decode_sample_at(p_ts timestamptz)
+returns table (
+  datid      oid,
+  wait_event text,
+  query_id   int8,
+  count      int
+)
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select d.datid, d.wait_event, d.query_id, d.count
+  from ash.decode_sample(ash.ts_from_timestamptz(p_ts)) d
+$$;
+
 
 --------------------------------------------------------------------------------
 -- STEP 3: Rotation function
@@ -4159,6 +4202,12 @@ $$Decoded wait-event samples between p_start and p_end, newest first, up to p_li
 
 comment on function ash.decode_sample(integer[], smallint) is
 $$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows. Pass p_slot (ash.sample.slot) to resolve query_ids unambiguously; omitting it searches all query_map partitions and may return a stale id after rotation.$$;
+
+comment on function ash.decode_sample(int4) is
+$$Convenience overload: decodes every ash.sample row whose sample_ts equals p_sample_ts (across all datids/slots) and returns (datid, wait_event, query_id, count). Internally calls decode_sample(data, slot) with the row's slot, so query_id resolution is unambiguous.$$;
+
+comment on function ash.decode_sample_at(timestamptz) is
+$$Wall-clock convenience: same as decode_sample(int4) but accepts timestamptz, converting via ts_from_timestamptz() to find the matching sample_ts. Named with the _at suffix (consistent with samples_at, top_waits_at) to avoid an unknown-typed decode_sample(123) literal matching both the int4 and timestamptz overloads.$$;
 
 -- Migration: add version column if upgrading from older version
 do $$
