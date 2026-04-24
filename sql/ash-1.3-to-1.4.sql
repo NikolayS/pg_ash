@@ -5,6 +5,8 @@
 --     silently dropping the sample. Returns -1 on timeout. (#28)
 --   - New missed_samples counter in ash.config — incremented on every
 --     caught timeout, visible in ash.status(). (#27, #28)
+--   - status() surfaces epoch_seconds_remaining for the 2094 overflow
+--     horizon of sample_ts (int4). (#37)
 
 -- Add missed_samples column to config if missing
 do $$
@@ -246,28 +248,110 @@ exception when query_canceled then
 end;
 $$;
 
--- Re-create ash.start() to mirror sql/ash-install.sql byte-for-byte.
+-- ash.start() is re-created below after ash.status() — single consolidated
+-- definition that mirrors sql/ash-install.sql byte-for-byte (required by
+-- schema-equivalence CI which diffs md5(prosrc) between fresh install and
+-- the full upgrade chain).
+
+-- Decode sample function
+
+-- Re-create status() with missed_samples metric
+create or replace function ash.status()
+returns table (
+  metric text,
+  value text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_config record;
+  v_last_sample_ts int4;
+  v_samples_current int;
+  v_samples_total int;
+  v_wait_events int;
+  v_query_ids int;
+begin
+  -- Get config
+  select * into v_config from ash.config where singleton;
+
+  -- Last sample timestamp
+  select max(sample_ts) into v_last_sample_ts from ash.sample;
+
+  -- Samples in current partition
+  select count(*) into v_samples_current
+  from ash.sample where slot = v_config.current_slot;
+
+  -- Total samples
+  select count(*) into v_samples_total from ash.sample;
+
+  -- Dictionary sizes
+  select count(*) into v_wait_events from ash.wait_event_map;
+  select count(*) into v_query_ids from ash.query_map_all;
+
+  metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
+  metric := 'color'; value := case when ash._color_on() then 'on' else 'off' end; return next;
+  metric := 'current_slot'; value := v_config.current_slot::text; return next;
+  metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
+  metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
+  metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
+  metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
+  metric := 'missed_samples'; value := v_config.missed_samples::text; return next;
+  metric := 'installed_at'; value := v_config.installed_at::text; return next;
+  metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
+  metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
+
+  if v_last_sample_ts is not null then
+    metric := 'last_sample_ts'; value := (ash.epoch() + v_last_sample_ts * interval '1 second')::text; return next;
+    metric := 'time_since_last_sample'; value := (now() - (ash.epoch() + v_last_sample_ts * interval '1 second'))::text; return next;
+  else
+    metric := 'last_sample_ts'; value := 'no samples'; return next;
+  end if;
+
+  metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
+  metric := 'samples_total'; value := v_samples_total::text; return next;
+  metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
+  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
+  metric := 'query_map_count'; value := v_query_ids::text; return next;
+
+  -- Epoch overflow horizon (issue #37): sample_ts is int4 seconds since
+  -- 2026-01-01 UTC and int4 is exhausted circa 2094-01-19 — at which point
+  -- the ::int4 cast in take_sample() raises ERROR and sampling hard-fails
+  -- (no silent wrap). Surface remaining seconds so operators can plan the
+  -- bigint migration well before the horizon. Value goes negative past the
+  -- horizon (by design — indicates how long ago sampling would have stopped).
+  metric := 'epoch_seconds_remaining';
+  value := (2147483647::bigint - extract(epoch from (now() - ash.epoch()))::bigint)::text;
+  return next;
+
+  -- pg_cron status if available
+  if ash._pg_cron_available() then
+    metric := 'pg_cron_available'; value := 'yes'; return next;
+    for metric, value in
+      select 'cron_job_' || jobname,
+         format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
+      from cron.job
+      where jobname in ('ash_sampler', 'ash_rotation')
+    loop
+      return next;
+    end loop;
+  else
+    metric := 'pg_cron_available'; value := 'no (use external scheduler)'; return next;
+  end if;
+
+  return;
+end;
+$$;
+
+-- Re-create ash.start() with pg_read_all_stats privilege notice and
+-- debug_logging traces. This body MUST match ash-install.sql byte-for-byte
+-- (schema-equivalence CI diffs md5(prosrc) between fresh install and
+-- upgrade chain).
 --
--- Why this duplication: the source-of-truth function body lives in
--- ash-install.sql. The schema-equivalence CI test diffs md5(prosrc)
--- between a fresh install and the full upgrade chain, so any install-side
--- edit to a function body MUST also appear here — otherwise the upgrade
--- path produces a different body and the test fails.
---
--- CLAUDE.md policy tension: "upgrade scripts are generated at release
--- time, not in feature PRs". This file has already accepted take_sample()
--- and status() redefinitions in this PR (for #27/#28/#8) and now needs
--- start() too. The alternative — deferring this to release — would
--- leave main red on schema equivalence. Flagging the tension here so the
--- release-generation step can consolidate.
---
--- Changes vs 1.3 version:
---   - v_debug_logging / v_pg_cron_available locals
---   - RAISE LOG lines gated on debug_logging (mirrors take_sample()'s
---     pattern; surfaces silent "took the no-pg_cron branch" bugs)
--- Everything else is identical to the 1.3 body — exact byte-for-byte
--- match with ash-install.sql is required for the schema-equivalence
--- diff to pass.
+-- Changes vs 1.3:
+--   - Privilege probe (pg_read_all_stats / superuser) — #40
+--   - debug_logging-gated RAISE LOG lines — PR #44
 create or replace function ash.start(p_interval interval default '1 second')
 returns table (job_type text, job_id bigint, status text)
 language plpgsql
@@ -301,6 +385,23 @@ begin
     return next;
     return;
   end if;
+
+  -- Privilege check: without pg_read_all_stats (or superuser), query_id is
+  -- hidden for activity owned by other roles and collapses to the sentinel 0,
+  -- silently skewing top_queries / query_waits results.
+  begin
+    if not (
+      (select rolsuper from pg_roles where rolname = current_user)
+      or pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
+    ) then
+      raise notice 'warning: role % is not a superuser and not a member of pg_read_all_stats.', current_user;
+      raise notice '  query_id will be NULL for activity owned by other roles and bucketed under 0,';
+      raise notice '  skewing top_queries / query_waits. Fix: grant pg_read_all_stats to %;', current_user;
+    end if;
+  exception when others then
+    -- don't let the privilege probe block ash.start(), but surface the failure
+    raise notice 'privilege probe failed: %', sqlerrm;
+  end;
 
   v_pg_cron_available := ash._pg_cron_available();
   if v_debug_logging then
@@ -478,87 +579,6 @@ begin
   exception when others then
     null; -- GUC not available
   end;
-
-  return;
-end;
-$$;
-
--- Decode sample function
-
--- Re-create status() with missed_samples metric
-create or replace function ash.status()
-returns table (
-  metric text,
-  value text
-)
-language plpgsql
-stable
-set jit = off
-as $$
-declare
-  v_config record;
-  v_last_sample_ts int4;
-  v_samples_current int;
-  v_samples_total int;
-  v_wait_events int;
-  v_query_ids int;
-begin
-  -- Get config
-  select * into v_config from ash.config where singleton;
-
-  -- Last sample timestamp
-  select max(sample_ts) into v_last_sample_ts from ash.sample;
-
-  -- Samples in current partition
-  select count(*) into v_samples_current
-  from ash.sample where slot = v_config.current_slot;
-
-  -- Total samples
-  select count(*) into v_samples_total from ash.sample;
-
-  -- Dictionary sizes
-  select count(*) into v_wait_events from ash.wait_event_map;
-  select count(*) into v_query_ids from ash.query_map_all;
-
-  metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
-  metric := 'color'; value := case when ash._color_on() then 'on' else 'off' end; return next;
-  metric := 'current_slot'; value := v_config.current_slot::text; return next;
-  metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
-  metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
-  metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
-  metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
-  metric := 'missed_samples'; value := v_config.missed_samples::text; return next;
-  metric := 'installed_at'; value := v_config.installed_at::text; return next;
-  metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
-  metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
-
-  if v_last_sample_ts is not null then
-    metric := 'last_sample_ts'; value := (ash.epoch() + v_last_sample_ts * interval '1 second')::text; return next;
-    metric := 'time_since_last_sample'; value := (now() - (ash.epoch() + v_last_sample_ts * interval '1 second'))::text; return next;
-  else
-    metric := 'last_sample_ts'; value := 'no samples'; return next;
-  end if;
-
-  metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
-  metric := 'samples_total'; value := v_samples_total::text; return next;
-  metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
-  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
-  metric := 'query_map_count'; value := v_query_ids::text; return next;
-
-  -- pg_cron status if available
-  if ash._pg_cron_available() then
-    metric := 'pg_cron_available'; value := 'yes'; return next;
-    for metric, value in
-      select 'cron_job_' || jobname,
-         format('id=%s, schedule=%s, active=%s', jobid, schedule, active)
-      from cron.job
-      where jobname in ('ash_sampler', 'ash_rotation')
-    loop
-      return next;
-    end loop;
-  else
-    metric := 'pg_cron_available'; value := 'no (use external scheduler)'; return next;
-  end if;
 
   return;
 end;
