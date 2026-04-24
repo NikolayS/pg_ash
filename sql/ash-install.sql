@@ -1551,10 +1551,9 @@ begin
 end;
 $$;
 
--- BREAKING: column `total_backends` renamed to `total_backend_samples`.
--- The old name implied a distinct-backend count, but the value is
--- sum(active_count) over the returned samples — i.e. backend-samples.
-drop function if exists ash.samples_by_database(interval);
+-- NOTE: `total_backends` is sum(active_count) over returned samples
+-- (i.e. backend-samples, not distinct backends). Rename deferred to
+-- v2.0 breaking-change release.
 create or replace function ash.samples_by_database(
   p_interval interval default '1 hour'
 )
@@ -1562,7 +1561,7 @@ returns table (
   database_name text,
   datid oid,
   samples bigint,
-  total_backend_samples bigint
+  total_backends bigint
 )
 language sql
 stable
@@ -1572,13 +1571,13 @@ as $$
     coalesce(d.datname, '<background>') as database_name,
     s.datid,
     count(*) as samples,
-    sum(s.active_count) as total_backend_samples
+    sum(s.active_count) as total_backends
   from ash.sample s
   left join pg_database d on d.oid = s.datid
   where s.slot = any(ash._active_slots_for(p_interval))
     and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
   group by s.datid, d.datname
-  order by total_backend_samples desc
+  order by total_backends desc
 $$;
 
 -------------------------------------------------------------------------------
