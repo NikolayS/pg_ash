@@ -1,9 +1,10 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.3 (latest)
+-- Version: 1.4 (latest)
 -- Fresh install: \i sql/ash-install.sql
--- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql
--- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql
--- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql
+-- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql
 
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
@@ -46,6 +47,16 @@ create schema if not exists ash;
 -- Epoch function: 2026-01-01 00:00:00 UTC
 -- WARNING: This value must NEVER change after installation. All sample_ts
 -- values are seconds since this epoch. Changing it corrupts all timestamps.
+--
+-- OVERFLOW HORIZON (issue #37 INFO): sample_ts is stored as int4 seconds since
+-- 2026-01-01 UTC. int4 max is 2,147,483,647 seconds (~68.1 years), so this
+-- counter is exhausted at roughly 2094-01-19 03:14:07 UTC. Past that point,
+-- the `::int4` cast in ash.take_sample() raises `ERROR: integer out of range`
+-- and sampling hard-fails — it does NOT silently wrap. ash.status() surfaces
+-- the remaining seconds as `epoch_seconds_remaining` for observability. Before
+-- ~2090, a bigint migration of the sample_ts column (and all readers) is
+-- required to keep sampling working. Do NOT change ash.epoch() to buy time —
+-- that corrupts every historical sample. The fix is a column-type migration.
 create or replace function ash.epoch()
 returns timestamptz
 language sql
@@ -143,6 +154,12 @@ create index if not exists sample_2_ts_idx on ash.sample_2 (sample_ts);
 create index if not exists sample_0_datid_ts_idx on ash.sample_0 (datid, sample_ts);
 create index if not exists sample_1_datid_ts_idx on ash.sample_1 (datid, sample_ts);
 create index if not exists sample_2_datid_ts_idx on ash.sample_2 (datid, sample_ts);
+
+comment on table ash.sample is
+$$Packed wait-event samples. One row per (sample_ts, datid). Do not join directly — use ash.samples() / ash.samples_at() for decoded rows, or ash.decode_sample(data, slot) if you need a single sample's contents.$$;
+
+comment on column ash.sample.data is
+$$Packed int4[] encoding the sample's wait events and their query_map ids. Layout: groups of (-wait_id, count, query_map_id_1, ..., query_map_id_count). A negative marker starts each group; wait_id is negated for the marker so a positive count cannot be mistaken for a group boundary. Decode via ash.samples(), ash.samples_at(), or ash.decode_sample(data, slot).$$;
 
 -- Register wait event function (upsert, returns id)
 create or replace function ash._register_wait(p_state text, p_type text, p_event text)
@@ -717,6 +734,23 @@ begin
     return;
   end if;
 
+  -- Privilege check: without pg_read_all_stats (or superuser), query_id is
+  -- hidden for activity owned by other roles and collapses to the sentinel 0,
+  -- silently skewing top_queries / query_waits results.
+  begin
+    if not (
+      (select rolsuper from pg_roles where rolname = current_user)
+      or pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
+    ) then
+      raise notice 'warning: role % is not a superuser and not a member of pg_read_all_stats.', current_user;
+      raise notice '  query_id will be NULL for activity owned by other roles and bucketed under 0,';
+      raise notice '  skewing top_queries / query_waits. Fix: grant pg_read_all_stats to %;', current_user;
+    end if;
+  exception when others then
+    -- don't let the privilege probe block ash.start(), but surface the failure
+    raise notice 'privilege probe failed: %', sqlerrm;
+  end;
+
   -- If pg_cron is not available, just record the interval and advise on external scheduling
   if not ash._pg_cron_available() then
     update ash.config set sample_interval = p_interval where singleton;
@@ -1078,6 +1112,16 @@ begin
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
   metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
+
+  -- Epoch overflow horizon (issue #37): sample_ts is int4 seconds since
+  -- 2026-01-01 UTC and int4 is exhausted circa 2094-01-19 — at which point
+  -- the ::int4 cast in take_sample() raises ERROR and sampling hard-fails
+  -- (no silent wrap). Surface remaining seconds so operators can plan the
+  -- bigint migration well before the horizon. Value goes negative past the
+  -- horizon (by design — indicates how long ago sampling would have stopped).
+  metric := 'epoch_seconds_remaining';
+  value := (2147483647::bigint - extract(epoch from (now() - ash.epoch()))::bigint)::text;
+  return next;
 
   -- pg_cron status if available
   if ash._pg_cron_available() then
@@ -2688,6 +2732,15 @@ begin
   end if;
 end;
 $$;
+
+comment on function ash.samples(interval, int) is
+$$Decoded wait-event samples over the last p_interval (default '1 hour'), newest first, up to p_limit rows (default 100). Returns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text requires pg_stat_statements; NULL otherwise.$$;
+
+comment on function ash.samples_at(timestamptz, timestamptz, int) is
+$$Decoded wait-event samples between p_start and p_end, newest first, up to p_limit rows (default 100). Same return shape as ash.samples().$$;
+
+comment on function ash.decode_sample(integer[], smallint) is
+$$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows. Pass p_slot (ash.sample.slot) to resolve query_ids unambiguously; omitting it searches all query_map partitions and may return a stale id after rotation.$$;
 
 -- Migration: add version column if upgrading from older version
 do $$
