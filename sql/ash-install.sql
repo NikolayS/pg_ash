@@ -199,6 +199,9 @@ begin
 
   if v_count >= 32000 then
     -- Bump the cap-hit counter so ash.status() can surface the drop.
+    -- Note: counts *registration drops* here — not the number of sampled
+    -- backends observed for this (state,type,event). Many concurrent
+    -- backends blocked on the same dropped event only bump it once per tick.
     -- Wrap in an inner block: if the UPDATE itself fails (e.g. config row
     -- missing mid-uninstall), we still want the outer WARNING to fire and
     -- the function to return NULL without aborting take_sample().

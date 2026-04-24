@@ -5,6 +5,25 @@
 --     silently dropping the sample. Returns -1 on timeout. (#28)
 --   - New missed_samples counter in ash.config — incremented on every
 --     caught timeout, visible in ash.status(). (#27, #28)
+--   - take_sample() inner exception handler now bumps an insert_errors
+--     counter in ash.config instead of silently dropping data with just a
+--     WARNING. (M-BUG-4)
+--   - _register_wait() enforces a 32 000-row cap on wait_event_map to prevent
+--     DoS via unbounded dictionary growth; bumps register_wait_cap_hits in
+--     ash.config when the cap is hit. (M-BUG-6 / H-SEC-3)
+--   - status() surfaces the two new counters.
+--   - start() validates the interval shape before branching on pg_cron
+--     availability so the accept/reject outcome is independent of pg_cron.
+--     (H-BUG-1)
+--   - start() re-syncs cron.job.schedule on re-invocation when the sampler
+--     job already exists. (H-BUG-2)
+--   - start() defends against malformed pg_cron extversion. (M-BUG-8)
+--
+-- NOTE on CLAUDE.md: "Upgrade scripts are generated at release time, not in
+-- feature PRs." This script ships in a feature PR because test.yml runs the
+-- full upgrade chain on every PR and enforces schema equivalence against
+-- ash-install.sql — so the upgrade script must track install.sql changes to
+-- keep CI green. Revisit the policy once there's a dedicated release process.
 
 -- Add missed_samples column to config if missing
 do $$
@@ -18,11 +37,85 @@ begin
   end if;
 end $$;
 
+-- M-BUG-4: track rows silently dropped by take_sample()'s inner exception handler.
+alter table ash.config add column if not exists insert_errors bigint not null default 0;
+
+-- M-BUG-6 / H-SEC-3: track how often _register_wait hits the dictionary cap
+-- and has to skip a new (state,type,event). Non-zero means wait-event
+-- registrations are being silently dropped for that sample (those sessions
+-- won't appear in encoded data for this tick). Surfaced by ash.status().
+alter table ash.config add column if not exists register_wait_cap_hits bigint not null default 0;
+
 -- Update version (both data and column default for schema parity)
 update ash.config set version = '1.4' where singleton;
 alter table ash.config alter column version set default '1.4';
 
--- Re-create take_sample with query_canceled handler
+-- Re-create _register_wait with dictionary size cap (M-BUG-6 / H-SEC-3)
+create or replace function ash._register_wait(p_state text, p_type text, p_event text)
+returns smallint
+language plpgsql
+as $$
+declare
+  v_id    smallint;
+  v_count bigint;
+begin
+  -- Try to get existing
+  select id into v_id
+  from ash.wait_event_map
+  where state = p_state and type = p_type and event = p_event;
+
+  if v_id is not null then
+    return v_id;
+  end if;
+
+  -- Enforce dictionary size cap before inserting. 32 000 stays well below
+  -- smallint's 32 767 ceiling while still leaving room for genuine event
+  -- diversity (real wait-event inventories measure in the hundreds).
+  -- reltuples is a cheap estimate; an exact count would add a scan on
+  -- every fresh wait-event observation on the sampler's hot path.
+  select reltuples::bigint into v_count
+  from pg_class where oid = 'ash.wait_event_map'::regclass;
+
+  if v_count >= 32000 then
+    -- Bump the cap-hit counter so ash.status() can surface the drop.
+    -- Note: counts *registration drops* here — not the number of sampled
+    -- backends observed for this (state,type,event). Many concurrent
+    -- backends blocked on the same dropped event only bump it once per tick.
+    -- Wrap in an inner block: if the UPDATE itself fails (e.g. config row
+    -- missing mid-uninstall), we still want the outer WARNING to fire and
+    -- the function to return NULL without aborting take_sample().
+    begin
+      update ash.config set register_wait_cap_hits = register_wait_cap_hits + 1
+        where singleton;
+    exception when others then
+      null;  -- counter bump is best-effort
+    end;
+    raise warning 'ash._register_wait: wait_event_map at cap (>= 32 000 rows); skipping (state=%, type=%, event=%) — see ash.status()',
+      p_state, p_type, p_event;
+    return null;  -- caller PERFORMs this; snapshot JOIN drops the session
+  end if;
+
+  -- Insert new entry
+  insert into ash.wait_event_map (state, type, event)
+  values (p_state, p_type, p_event)
+  on conflict (state, type, event) do nothing
+  returning id into v_id;
+
+  -- If insert succeeded, return it
+  if v_id is not null then
+    return v_id;
+  end if;
+
+  -- Race condition: another session inserted, fetch it
+  select id into v_id
+  from ash.wait_event_map
+  where state = p_state and type = p_type and event = p_event;
+
+  return v_id;
+end;
+$$;
+
+-- Re-create take_sample with query_canceled handler and insert_errors counter
 create or replace function ash.take_sample()
 returns int
 language plpgsql
@@ -221,6 +314,23 @@ begin
       end if;
 
     exception when others then
+      -- M-BUG-4: previously a CHECK violation on ash.sample.data (or any
+      -- other INSERT-time error) was silently swallowed with just a WARNING,
+      -- dropping a row of observability data without any durable signal.
+      -- Bump insert_errors so ash.status() can surface the count, and keep
+      -- the warning so live log watchers still see it.
+      --
+      -- Nested BEGIN/EXCEPTION around the counter UPDATE: the outer
+      -- `exception when others` is a terminal handler, but the UPDATE
+      -- itself can fail (e.g. config row absent mid-uninstall, lock
+      -- timeout) and propagate out of this block. Before widening this
+      -- handler to do bookkeeping, no propagation path existed — preserve
+      -- that property so a flaky UPDATE never aborts the whole sampler.
+      begin
+        update ash.config set insert_errors = insert_errors + 1 where singleton;
+      exception when others then
+        null;  -- counter bump is best-effort; don't let it abort take_sample()
+      end;
       raise warning 'ash.take_sample: error inserting sample for datid % [%]: %', v_datid_rec.datid, sqlstate, sqlerrm;
     end;
   end loop;
@@ -246,9 +356,229 @@ exception when query_canceled then
 end;
 $$;
 
--- Decode sample function
+-- Re-create start() with pre-branch validation (H-BUG-1), schedule re-sync
+-- (H-BUG-2), and defensive extversion parsing (M-BUG-8).
+create or replace function ash.start(p_interval interval default '1 second')
+returns table (job_type text, job_id bigint, status text)
+language plpgsql
+as $$
+declare
+  v_sampler_job bigint;
+  v_rotation_job bigint;
+  v_cron_version text;
+  v_seconds int;
+  v_hours int;
+  v_schedule text;
+  v_skip_nodename_update boolean := false;
+begin
+  -- Validate interval
+  v_seconds := extract(epoch from p_interval)::int;
+  if v_seconds < 1 then
+    job_type := 'error';
+    job_id := null;
+    status := format('interval must be at least 1 second, got %s', p_interval);
+    return next;
+    return;
+  end if;
 
--- Re-create status() with missed_samples metric
+  -- H-BUG-1: validate interval shape BEFORE branching on pg_cron availability.
+  -- Previously, the no-pg_cron branch returned early (below), skipping the
+  -- seconds/minutes/hours checks. Same input must produce the same accept/
+  -- reject outcome regardless of whether pg_cron is installed.
+  --
+  -- Build schedule string here (also used later when pg_cron is available):
+  -- seconds format for <60s, cron format for 60s+.
+  if v_seconds <= 59 then
+    v_schedule := v_seconds || ' seconds';
+  elsif v_seconds < 3600 then
+    -- Convert to cron: every N minutes
+    if v_seconds % 60 <> 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact minutes (60s, 120s, etc.), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
+  else
+    -- Convert to cron: every N hours (limit to 23 hours max for step syntax)
+    if v_seconds % 3600 <> 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact hours (3600s, 7200s, etc., up to 23h), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_hours := v_seconds / 3600;
+    if v_hours > 23 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval exceeds maximum 23 hours (82800s), got %s = %s hours. Use days or shorter interval.', p_interval, v_hours);
+      return next;
+      return;
+    end if;
+    if v_hours = 1 then
+      v_schedule := '0 * * * *';  -- Every hour at minute 0
+    else
+      v_schedule := '0 */' || v_hours || ' * * *';  -- Every N hours at minute 0
+    end if;
+  end if;
+
+  -- If pg_cron is not available, just record the interval and advise on external scheduling
+  if not ash._pg_cron_available() then
+    update ash.config set sample_interval = p_interval where singleton;
+
+    job_type := 'sampler';
+    job_id := null;
+    status := format('interval set to %s — schedule externally (pg_cron not available)', p_interval);
+    return next;
+
+    job_type := 'rotation';
+    job_id := null;
+    status := format('rotation_period is %s — schedule ash.rotate() externally', (select rotation_period from ash.config where singleton));
+    return next;
+
+    raise notice 'pg_cron is not installed. To sample, call ash.take_sample() from an external scheduler:';
+    raise notice '  system cron:    * * * * * psql -qAtX -c "select ash.take_sample()" (for per-second, use a loop)';
+    raise notice '  psql:           SELECT ash.take_sample() \watch 1';
+    raise notice '  any language:   execute "SELECT ash.take_sample()" in a loop with sleep';
+    raise notice 'Also schedule ash.rotate() at the rotation_period interval (default: daily).';
+
+    return;
+  end if;
+
+  -- Check pg_cron version (need >= 1.5 for sub-minute scheduling)
+  select extversion into v_cron_version
+  from pg_extension where extname = 'pg_cron';
+
+  -- M-BUG-8: defend against malformed extversion. If regexp_replace() strips
+  -- everything (e.g. extversion is 'dev', empty, or starts with '.'),
+  -- string_to_array(...)::int[] raises 'invalid input syntax for type integer'
+  -- and bubbles up as a crash. Require a leading MAJOR.MINOR pattern before
+  -- parsing; if it doesn't match, assume a modern pg_cron (>= 1.5) rather
+  -- than failing the call.
+  if v_cron_version ~ '^\d+\.\d+' then
+    begin
+      if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
+        if v_seconds < 60 then
+          job_type := 'error';
+          job_id := null;
+          status := format('pg_cron version %s too old for sub-minute scheduling (need >= 1.5). Use external scheduler or upgrade pg_cron.', v_cron_version);
+          return next;
+          return;
+        end if;
+      end if;
+    exception when others then
+      -- Unparseable version — assume modern pg_cron (>= 1.5) and proceed.
+      raise notice 'ash.start: could not parse pg_cron version "%" — assuming modern (>= 1.5)', v_cron_version;
+    end;
+  else
+    raise notice 'ash.start: unrecognized pg_cron version "%" — assuming modern (>= 1.5)', v_cron_version;
+  end if;
+
+  -- Detect whether we need to UPDATE cron.job.nodename after scheduling.
+  -- Skip when cron.use_background_workers = on (nodename irrelevant)
+  -- or cron.host is already '' or a socket path (cron.schedule() inherits it).
+  begin
+    v_skip_nodename_update :=
+      coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
+      or coalesce(current_setting('cron.host', true), 'localhost') = ''
+      or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
+  exception when others then
+    v_skip_nodename_update := false;
+  end;
+
+  -- (schedule string v_schedule already built above, before the pg_cron
+  -- availability branch — see H-BUG-1 fix.)
+
+  -- Check for existing sampler job (idempotent)
+  select jobid into v_sampler_job
+  from cron.job
+  where jobname = 'ash_sampler';
+
+  if v_sampler_job is not null then
+    -- H-BUG-2: re-sync the pg_cron schedule when the job already exists.
+    -- Previously ash.start(new_interval) updated ash.config.sample_interval
+    -- (further below) but never touched cron.job.schedule, so pg_cron kept
+    -- firing at the old cadence — a silent behavioral divergence between
+    -- configured and actual sampling rate.
+    perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
+    job_type := 'sampler';
+    job_id := v_sampler_job;
+    status := format('already exists — schedule updated to %s', v_schedule);
+    return next;
+  else
+    -- Create sampler job
+    select cron.schedule(
+      'ash_sampler',
+      v_schedule,
+      'set statement_timeout = ''500ms''; select ash.take_sample()'
+    ) into v_sampler_job;
+
+    -- Clear nodename so pg_cron uses Unix socket instead of TCP.
+    -- cron.schedule() sets nodename from cron.host GUC (default 'localhost'),
+    -- which forces TCP and fails when pg_hba.conf only allows sockets.
+    -- Skipped when cron.use_background_workers = on (no libpq connections)
+    -- or cron.host is already '' / a socket path (already correct).
+    if not v_skip_nodename_update then
+      update cron.job set nodename = '' where jobid = v_sampler_job;
+    end if;
+
+    job_type := 'sampler';
+    job_id := v_sampler_job;
+    status := 'created';
+    return next;
+  end if;
+
+  -- Check for existing rotation job (idempotent)
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rotation';
+
+  if v_rotation_job is not null then
+    job_type := 'rotation';
+    job_id := v_rotation_job;
+    status := 'already exists';
+    return next;
+  else
+    -- Create rotation job (daily at midnight UTC)
+    select cron.schedule(
+      'ash_rotation',
+      '0 0 * * *',
+      'select ash.rotate()'
+    ) into v_rotation_job;
+
+    if not v_skip_nodename_update then
+      update cron.job set nodename = '' where jobid = v_rotation_job;
+    end if;
+
+    job_type := 'rotation';
+    job_id := v_rotation_job;
+    status := 'created';
+    return next;
+  end if;
+
+  -- Update sample_interval in config (after all validation and job creation)
+  update ash.config set sample_interval = p_interval where singleton;
+
+  -- Warn about pg_cron run history overhead.
+  -- At 1s sampling, cron.job_run_details grows ~12 MiB/day unbounded.
+  -- pg_cron has no built-in purge — only cron.log_run = off (disables entirely).
+  begin
+    if current_setting('cron.log_run', true)::bool then
+      raise notice 'hint: pg_cron logs every sample to cron.job_run_details (~12 MiB/day).';
+      raise notice 'to disable: alter system set cron.log_run = off; select pg_reload_conf();';
+      raise notice 'or schedule periodic cleanup: delete from cron.job_run_details where end_time < now() - interval ''1 day'';';
+    end if;
+  exception when others then
+    null; -- GUC not available
+  end;
+
+  return;
+end;
+$$;
+
+-- Re-create status() with missed_samples, insert_errors, register_wait_cap_hits
 create or replace function ash.status()
 returns table (
   metric text,
@@ -291,6 +621,10 @@ begin
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
   metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
   metric := 'missed_samples'; value := v_config.missed_samples::text; return next;
+  -- M-BUG-4: surface the counter of rows dropped by take_sample()'s inner
+  -- exception handler (CHECK violations and similar). Non-zero = silent
+  -- data loss occurred — check server log for the matching WARNINGs.
+  metric := 'insert_errors'; value := v_config.insert_errors::text; return next;
   metric := 'installed_at'; value := v_config.installed_at::text; return next;
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
@@ -305,7 +639,11 @@ begin
   metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
   metric := 'samples_total'; value := v_samples_total::text; return next;
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
-  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
+  -- M-BUG-6 / H-SEC-3: denominator tracks the 32 000 cap enforced in
+  -- _register_wait (stays within smallint's 32 767 ceiling so we don't
+  -- have to widen the id column / function signature).
+  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32000 * 100, 2)::text || '%'; return next;
+  metric := 'register_wait_cap_hits'; value := v_config.register_wait_cap_hits::text; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
 
   -- pg_cron status if available
@@ -326,4 +664,3 @@ begin
   return;
 end;
 $$;
-
