@@ -23,6 +23,16 @@
 --   - search_path guard on every ash.* function + pgss-schema-aware readers;
 --     REVOKE EXECUTE on all ash.* functions and SELECT on reader tables from
 --     PUBLIC (#45).
+--   - Reader interval-to-int4 over/underflow clamp + oversized-interval
+--     short-circuit: top_waits / top_queries / top_queries_with_text /
+--     top_by_type / wait_timeline / query_waits / samples_by_database /
+--     samples / activity_summary / timeline_chart / event_queries (and
+--     pgss variants) no longer raise `integer out of range` on absurd
+--     intervals (e.g. '1000 years'). _active_slots_for() returns `{}`
+--     once the interval exceeds 2 * rotation_period, so reader
+--     `slot = any(...)` JOINs naturally yield empty — honoring the
+--     oversized-interval NOTICE's "older samples not available" promise
+--     instead of silently returning all retained data (#51).
 --   - ash.grant_reader(role) / ash.revoke_reader(role) convenience helpers
 --     to provision a monitoring role (Grafana, Datadog, etc.) with the
 --     minimum privileges to call every public reader. Owner-only, idempotent

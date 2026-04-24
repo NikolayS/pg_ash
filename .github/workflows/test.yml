@@ -1458,6 +1458,69 @@ jobs:
             select count(*) into v_count from ash.top_by_type('1 second');
             select count(*) into v_count from ash.wait_timeline('1 second', '1 second');
 
+            -- === Absurd intervals (regression: #51) ===
+            -- now() - '1000 years' would underflow int4 epoch offset; readers
+            -- must clamp and return empty (the NOTICE promises "older samples
+            -- not available"), not raise integer-out-of-range.
+            select count(*) into v_count from ash.top_waits('1000 years');
+            assert v_count = 0, 'top_waits(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.wait_timeline('1000 years');
+            assert v_count = 0, 'wait_timeline(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.top_queries('1000 years');
+            assert v_count = 0, 'top_queries(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.top_by_type('1000 years');
+            assert v_count = 0, 'top_by_type(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.top_queries_with_text('1000 years');
+            assert v_count = 0,
+              'top_queries_with_text(1000 years) should return 0 rows, got: ' || v_count;
+
+            -- query_waits short-circuits on unknown query_id before reaching
+            -- the interval clamp, so pick a real query_id (any registered one)
+            -- to ensure the clamp path is exercised. Falls back to a synthetic
+            -- id if query_map_all is empty (still valid: short-circuit returns
+            -- 0 rows without hitting int4 math).
+            declare
+              v_qid bigint;
+            begin
+              select query_id into v_qid from ash.query_map_all limit 1;
+              v_qid := coalesce(v_qid, 111111);
+              select count(*) into v_count from ash.query_waits(v_qid, '1000 years');
+              assert v_count = 0,
+                'query_waits(1000 years) should return 0 rows, got: ' || v_count;
+            end;
+
+            select count(*) into v_count from ash.samples_by_database('1000 years');
+            assert v_count = 0,
+              'samples_by_database(1000 years) should return 0 rows, got: ' || v_count;
+
+            -- activity_summary always emits a "no data in this time range" status
+            -- row when v_total_samples = 0; assert that single-row placeholder
+            -- shape rather than 0 rows.
+            select count(*) into v_count from ash.activity_summary('1000 years');
+            assert v_count = 1,
+              'activity_summary(1000 years) should return 1 placeholder row, got: ' || v_count;
+            select * into v_rec from ash.activity_summary('1000 years') limit 1;
+            assert v_rec.metric = 'status' and v_rec.value = 'no data in this time range',
+              'activity_summary(1000 years) placeholder mismatch: ' ||
+              coalesce(v_rec.metric, '<null>') || '/' || coalesce(v_rec.value, '<null>');
+
+            -- timeline_chart returns no rows when there are no top events
+            -- (v_top_events is null) — empty short-circuit, no legend emitted.
+            select count(*) into v_count from ash.timeline_chart('1000 years');
+            assert v_count = 0,
+              'timeline_chart(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.samples('1000 years');
+            assert v_count = 0, 'samples(1000 years) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.event_queries('CPU', '1000 years');
+            assert v_count = 0,
+              'event_queries(1000 years) should return 0 rows, got: ' || v_count;
+
             -- === Non-existent queries ===
 
             select count(*) into v_count from ash.query_waits(999999999, '1 hour');
