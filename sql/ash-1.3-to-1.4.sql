@@ -33,4 +33,6 @@
 --     `slot = any(...)` JOINs naturally yield empty — honoring the
 --     oversized-interval NOTICE's "older samples not available" promise
 --     instead of silently returning all retained data (#51).
+--   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
+--     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
 \ir ash-install.sql

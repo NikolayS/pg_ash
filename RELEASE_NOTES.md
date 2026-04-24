@@ -1,3 +1,25 @@
+# pg_ash — Unreleased (since 1.4)
+
+## Breaking changes
+
+### `rebuild_partitions()` now requires a `'yes'` confirmation token
+
+`ash.rebuild_partitions(N)` drops every raw sample partition and is irreversible. To prevent accidental data loss, the function now takes a second argument and refuses to proceed unless it equals `'yes'`. Wording mirrors `ash.uninstall('yes')`.
+
+```sql
+-- before (1.4): silently destructive
+select ash.rebuild_partitions(9);
+
+-- now: explicit confirmation required
+select ash.rebuild_partitions(9, 'yes');
+```
+
+Calling `ash.rebuild_partitions(N)` without the `'yes'` token raises an error and changes nothing — `sampling_enabled`, pg_cron jobs, and partition tables are all left untouched. The argument-validation runs before any destructive action. (#53)
+
+The `(int)` overload is dropped on upgrade. Existing callers (scripts, runbooks) must be updated to pass `'yes'`.
+
+---
+
 # pg_ash 1.4 release notes
 
 Upgrade from 1.3: `\i sql/ash-1.3-to-1.4.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`. The upgrade script is idempotent and safe to re-run.

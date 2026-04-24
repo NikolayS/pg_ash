@@ -31,7 +31,8 @@ begin
         'top_queries_with_text',
         '_validate_data',
         'uninstall',
-        'debug_logging'
+        'debug_logging',
+        'rebuild_partitions'
       )
   loop
     execute 'drop function if exists ' || r.sig;
@@ -299,6 +300,32 @@ begin
       'on ash.sample_%s (datid, sample_ts)', i, i
     );
   end loop;
+end $$;
+
+-- Migration (issue #49): align sample.data check across upgrade paths.
+-- v1.0 shipped `array_length(data, 1) >= 2`; v1.1 tightened it to `>= 3`,
+-- but no legacy upgrade script rewrote the constraint, so installs that
+-- started at 1.0 still carry the looser form. Detect and fix in place.
+-- Idempotent: only rewrites when the current definition is missing or
+-- the old `>= 2` form. Drops on the partitioned parent cascade to all
+-- partitions; ADD CONSTRAINT on the parent propagates back to children.
+do $$
+declare
+  v_def text;
+begin
+  select pg_get_constraintdef(c.oid) into v_def
+  from pg_constraint c
+  where c.conrelid = 'ash.sample'::regclass
+    and c.conname  = 'sample_data_check';
+
+  if v_def is null or v_def !~ 'array_length\(data, 1\) >= 3' then
+    if v_def is not null then
+      alter table ash.sample drop constraint sample_data_check;
+    end if;
+    alter table ash.sample
+      add constraint sample_data_check
+      check (data[1] < 0 and array_length(data, 1) >= 3);
+  end if;
 end $$;
 
 -- Convert timestamptz to int4 epoch offset
@@ -883,7 +910,10 @@ $$;
 -- All raw sample data is lost. Rollup tables survive.
 -- WARNING: failure after acquiring lock leaves sampling_enabled = false.
 -- Manual recovery: UPDATE ash.config SET sampling_enabled = true; SELECT ash.start();
-create or replace function ash.rebuild_partitions(p_num int default null)
+create or replace function ash.rebuild_partitions(
+  p_num_partitions int,
+  p_confirm text default null
+)
 returns text
 language plpgsql
 set search_path = pg_catalog, ash
@@ -892,8 +922,16 @@ declare
   v_old_n int;
   v_new_n int;
 begin
+  -- Destructive: drops all raw sample partitions. Require explicit confirmation
+  -- BEFORE touching any state (sampling_enabled, pg_cron jobs, partitions).
+  if p_confirm is distinct from 'yes' then
+    raise exception 'rebuild_partitions is destructive — all raw sample data '
+      'will be lost. To proceed, call: '
+      'select ash.rebuild_partitions(%, ''yes'')', p_num_partitions;
+  end if;
+
   select num_partitions into v_old_n from ash.config where singleton;
-  v_new_n := coalesce(p_num, v_old_n);
+  v_new_n := coalesce(p_num_partitions, v_old_n);
 
   if v_new_n < 3 or v_new_n > 32 then
     raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
@@ -4485,7 +4523,7 @@ begin
   execute format('revoke all on function ash.rotate() from public');
   execute format('revoke all on function ash.take_sample() from public');
   execute format('revoke all on function ash.set_debug_logging(bool) from public');
-  execute format('revoke all on function ash.rebuild_partitions(int) from public');
+  execute format('revoke all on function ash.rebuild_partitions(int, text) from public');
   execute format('revoke all on function ash._drop_all_partitions() from public');
   execute format('revoke all on function ash._rebuild_query_map_view() from public');
   execute format('revoke all on function ash.rollup_minute(int) from public');
@@ -4503,7 +4541,7 @@ begin
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
   execute format('grant execute on function ash.set_debug_logging(bool) to %I', v_owner);
-  execute format('grant execute on function ash.rebuild_partitions(int) to %I', v_owner);
+  execute format('grant execute on function ash.rebuild_partitions(int, text) to %I', v_owner);
   execute format('grant execute on function ash._drop_all_partitions() to %I', v_owner);
   execute format('grant execute on function ash._rebuild_query_map_view() to %I', v_owner);
   execute format('grant execute on function ash.rollup_minute(int) to %I', v_owner);
