@@ -725,6 +725,23 @@ begin
     return;
   end if;
 
+  -- Privilege check: without pg_read_all_stats (or superuser), query_id is
+  -- hidden for activity owned by other roles and collapses to the sentinel 0,
+  -- silently skewing top_queries / query_waits results.
+  begin
+    if not (
+      (select rolsuper from pg_roles where rolname = current_user)
+      or pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
+    ) then
+      raise notice 'warning: role % is not a superuser and not a member of pg_read_all_stats.', current_user;
+      raise notice '  query_id will be NULL for activity owned by other roles and bucketed under 0,';
+      raise notice '  skewing top_queries / query_waits. Fix: grant pg_read_all_stats to %;', current_user;
+    end if;
+  exception when others then
+    -- don't let the privilege probe block ash.start(), but surface the failure
+    raise notice 'privilege probe failed: %', sqlerrm;
+  end;
+
   -- If pg_cron is not available, just record the interval and advise on external scheduling
   if not ash._pg_cron_available() then
     update ash.config set sample_interval = p_interval where singleton;
