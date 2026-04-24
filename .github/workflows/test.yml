@@ -1550,8 +1550,33 @@ jobs:
             v_result text;
             v_slot smallint;
           begin
+            -- === Confirmation token required (issue #53) ===
+            -- Without 'yes': raises and leaves state untouched.
+            begin
+              perform ash.rebuild_partitions(4);
+              assert false,
+                'rebuild_partitions(4) without confirm should raise';
+            exception when others then
+              null; -- expected
+            end;
+            -- Sampling must still be enabled (no destructive side effects).
+            assert (select sampling_enabled from ash.config where singleton) = true,
+              'rebuild_partitions without confirm must not change sampling_enabled';
+            -- num_partitions must still be 3 (no partitions dropped).
+            assert (select num_partitions from ash.config where singleton) = 3,
+              'rebuild_partitions without confirm must not change num_partitions';
+
+            -- With 'yes': proceeds.
+            select ash.rebuild_partitions(4, 'yes') into v_result;
+            assert v_result like 'rebuilt: 3 -> 4%',
+              'rebuild_partitions(4, ''yes'') should succeed, got: ' || v_result;
+            -- Reset to baseline 3 for the rest of this test block.
+            update ash.config set sampling_enabled = true where singleton;
+            select ash.rebuild_partitions(3, 'yes') into v_result;
+            update ash.config set sampling_enabled = true where singleton;
+
             -- === Rebuild to 5 partitions ===
-            select ash.rebuild_partitions(5) into v_result;
+            select ash.rebuild_partitions(5, 'yes') into v_result;
             assert v_result like 'rebuilt: 3 -> 5%',
               'rebuild should report 3 -> 5, got: ' || v_result;
 
@@ -1608,7 +1633,7 @@ jobs:
             assert v_count = 0, 'sample_2 should be empty after rotation';
 
             -- === Rebuild back to 3 ===
-            select ash.rebuild_partitions(3) into v_result;
+            select ash.rebuild_partitions(3, 'yes') into v_result;
             assert v_result like 'rebuilt: 5 -> 3%',
               'rebuild should report 5 -> 3';
 
@@ -1622,14 +1647,14 @@ jobs:
 
             -- === Edge case: rebuild with invalid N ===
             begin
-              perform ash.rebuild_partitions(2);
+              perform ash.rebuild_partitions(2, 'yes');
               assert false, 'should reject N=2';
             exception when others then
               null; -- expected
             end;
 
             begin
-              perform ash.rebuild_partitions(33);
+              perform ash.rebuild_partitions(33, 'yes');
               assert false, 'should reject N=33';
             exception when others then
               null; -- expected
@@ -2199,7 +2224,7 @@ jobs:
           begin
             -- rebuild_partitions should be denied
             begin
-              perform ash.rebuild_partitions(3);
+              perform ash.rebuild_partitions(3, 'yes');
               assert false, 'rebuild_partitions should be denied for unprivileged user';
             exception when insufficient_privilege then
               null; -- expected
@@ -2555,6 +2580,82 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
+      - name: "Issue #49: sample_data_check tightened by upgrade chain from 1.0"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Regression for issue #49: v1.0 shipped `array_length(data, 1) >= 2`,
+          # v1.1+ requires `>= 3`. No legacy upgrade script rewrote the check,
+          # so installs that started at 1.0 carried the looser form forever.
+          # ash-install.sql now detects and rewrites it; assert that the full
+          # 1.0 -> 1.4 chain ends with the tightened constraint on both the
+          # partitioned parent and every partition.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i sql/ash-1.0.sql
+
+          -- Sanity-check the precondition: 1.0 ships the looser form.
+          do $$
+          declare
+            v_def text;
+          begin
+            select pg_get_constraintdef(c.oid) into v_def
+            from pg_constraint c
+            where c.conrelid = 'ash.sample'::regclass
+              and c.conname  = 'sample_data_check';
+            assert v_def ~ 'array_length\(data, 1\) >= 2',
+              format('1.0 should ship `>= 2` form; got: %s', v_def);
+          end $$;
+
+          \i sql/ash-1.1.sql
+          \i sql/ash-1.1-to-1.2.sql
+          \i sql/ash-1.2-to-1.3.sql
+          \i sql/ash-1.3-to-1.4.sql
+
+          -- After full chain: parent + every partition must carry `>= 3`,
+          -- and none may carry the legacy `>= 2`.
+          do $$
+          declare
+            v_bad int;
+            v_parent_def text;
+          begin
+            select pg_get_constraintdef(c.oid) into v_parent_def
+            from pg_constraint c
+            where c.conrelid = 'ash.sample'::regclass
+              and c.conname  = 'sample_data_check';
+            assert v_parent_def ~ 'array_length\(data, 1\) >= 3',
+              format('parent constraint not tightened; got: %s', v_parent_def);
+
+            select count(*) into v_bad
+            from pg_constraint c
+            join pg_class    t on t.oid = c.conrelid
+            join pg_namespace n on n.oid = t.relnamespace
+            where n.nspname = 'ash'
+              and t.relname ~ '^sample(_[0-9]+)?$'
+              and c.contype = 'c'
+              and pg_get_constraintdef(c.oid) ~ 'array_length\(data, 1\) >= 2';
+            assert v_bad = 0,
+              format('%s ash.sample* check(s) still carry the legacy `>= 2` form', v_bad);
+
+            select count(*) into v_bad
+            from pg_inherits i
+            join pg_class    p on p.oid = i.inhrelid
+            join pg_namespace n on n.oid = p.relnamespace
+            left join pg_constraint c
+              on c.conrelid = p.oid
+             and c.contype  = 'c'
+             and pg_get_constraintdef(c.oid) ~ 'array_length\(data, 1\) >= 3'
+            where i.inhparent = 'ash.sample'::regclass
+              and n.nspname = 'ash'
+              and c.oid is null;
+            assert v_bad = 0,
+              format('%s partition(s) of ash.sample missing `>= 3` check', v_bad);
+
+            raise notice 'issue #49 regression PASSED: sample_data_check is `>= 3` everywhere';
+          end $$;
+
+          select ash.uninstall('yes');
+          EOF
+
       - name: "Upgrade path via documented wrappers + data preservation (issue #37 H-CI-1, H-CI-2)"
         env:
           PGPASSWORD: postgres
@@ -2728,6 +2829,19 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          # Idempotency scope (issue #50, blueprints/SPEC.md "Legacy
+          # upgrade-script idempotency"): legacy upgrade scripts are
+          # idempotent only on the version just below — i.e. ash-1.1-to-1.2
+          # is safe to re-run on a 1.2 install, but NOT guaranteed on a 1.4+
+          # install. ash-1.0.sql, ash-1.0-to-1.1.sql, and ash-1.1.sql are
+          # intentionally EXCLUDED from this re-apply test: ash-1.1.sql
+          # redefines top_queries_with_text with a narrower OUT-parameter
+          # list than 1.4 ships, so re-applying on a 1.4 install fails with
+          # "cannot change return type of existing function" (CREATE OR
+          # REPLACE cannot change OUT params). The 1.0 bootstrap and the
+          # 1.0-to-1.1 wrapper hit the same path. Those finalized legacy
+          # scripts remain immutable and are still exercised end-to-end by
+          # the one-shot upgrade-chain tests above (fresh DB, 1.0 → 1.4).
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           \i sql/ash-install.sql
 

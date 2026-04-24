@@ -26,4 +26,6 @@
 --   - status() catches insufficient_privilege when reading cron.job so
 --     non-superuser monitoring roles can call it even when pg_cron is
 --     loaded (#61).
+--   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
+--     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
 \ir ash-install.sql
