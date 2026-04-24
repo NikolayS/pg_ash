@@ -23,9 +23,10 @@
 --   - search_path guard on every ash.* function + pgss-schema-aware readers;
 --     REVOKE EXECUTE on all ash.* functions and SELECT on reader tables from
 --     PUBLIC (#45).
---   - decode_sample(int4) and decode_sample(timestamptz) convenience
---     overloads: walk every ash.sample row matching a given sample_ts (or
+--   - decode_sample(int4) and decode_sample_at(timestamptz) convenience
+--     functions: walk every ash.sample row matching a given sample_ts (or
 --     the timestamptz-derived sample_ts) and return decoded rows annotated
 --     with datid. Existing decode_sample(integer[], smallint) is unchanged.
---     (#54)
+--     decode_sample_at() (rather than a third decode_sample overload) is
+--     used to avoid a decode_sample(unknown-typed literal) ambiguity. (#54)
 \ir ash-install.sql

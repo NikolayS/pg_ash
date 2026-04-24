@@ -809,9 +809,12 @@ as $$
   where s.sample_ts = p_sample_ts
 $$;
 
--- Convenience overload: convert timestamptz to the matching sample_ts via
--- ts_from_timestamptz() and delegate to the int4 overload. Same return shape.
-create or replace function ash.decode_sample(p_ts timestamptz)
+-- Wall-clock convenience: convert timestamptz to the matching sample_ts via
+-- ts_from_timestamptz() and delegate to decode_sample(int4). Same return
+-- shape. Named decode_sample_at() (matching the samples_at / top_waits_at
+-- naming convention) so we don't create a decode_sample(unknown) ambiguity
+-- between int4 and timestamptz overloads.
+create or replace function ash.decode_sample_at(p_ts timestamptz)
 returns table (
   datid      oid,
   wait_event text,
@@ -4156,8 +4159,8 @@ $$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows
 comment on function ash.decode_sample(int4) is
 $$Convenience overload: decodes every ash.sample row whose sample_ts equals p_sample_ts (across all datids/slots) and returns (datid, wait_event, query_id, count). Internally calls decode_sample(data, slot) with the row's slot, so query_id resolution is unambiguous.$$;
 
-comment on function ash.decode_sample(timestamptz) is
-$$Convenience overload: same as decode_sample(int4) but accepts timestamptz, converting via ts_from_timestamptz() to find the matching sample_ts.$$;
+comment on function ash.decode_sample_at(timestamptz) is
+$$Wall-clock convenience: same as decode_sample(int4) but accepts timestamptz, converting via ts_from_timestamptz() to find the matching sample_ts. Named with the _at suffix (consistent with samples_at, top_waits_at) to avoid an unknown-typed decode_sample(123) literal matching both the int4 and timestamptz overloads.$$;
 
 -- Migration: add version column if upgrading from older version
 do $$
