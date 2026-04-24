@@ -88,7 +88,11 @@ create table if not exists ash.config (
   rollup_1h_retention_days   smallint not null default 1825,
   rollup_min_backend_seconds smallint not null default 3,
   last_rollup_1m_ts          int4,
-  last_rollup_1h_ts          int4
+  last_rollup_1h_ts          int4,
+  -- M-BUG-4: rows silently dropped by take_sample()'s inner exception handler.
+  insert_errors              bigint not null default 0,
+  -- M-BUG-6 / H-SEC-3: _register_wait dictionary-cap hit counter.
+  register_wait_cap_hits     bigint not null default 0
 );
 
 -- Insert initial row if not exists
@@ -98,6 +102,8 @@ insert into ash.config (singleton) values (true) on conflict do nothing;
 -- Must run before any code reads these columns.
 -- Uses per-column IF NOT EXISTS so the block is safe when some columns
 -- (e.g. missed_samples from the PR #29 upgrade) were already added.
+-- Also idempotent on fresh installs (the columns are already present from
+-- the `create table if not exists` above with matching defaults).
 alter table ash.config
   add column if not exists num_partitions smallint not null default 3
     check (num_partitions between 3 and 32),
@@ -108,9 +114,21 @@ alter table ash.config
   add column if not exists rollup_1h_retention_days smallint not null default 1825,
   add column if not exists rollup_min_backend_seconds smallint not null default 3,
   add column if not exists last_rollup_1m_ts int4,
-  add column if not exists last_rollup_1h_ts int4;
+  add column if not exists last_rollup_1h_ts int4,
+  -- M-BUG-4: track rows silently dropped by take_sample()'s inner exception handler.
+  add column if not exists insert_errors bigint not null default 0,
+  -- M-BUG-6 / H-SEC-3: track how often _register_wait hits the dictionary cap
+  -- and has to skip a new (state,type,event). Non-zero means wait-event
+  -- registrations are being silently dropped for that sample (those sessions
+  -- won't appear in encoded data for this tick). Surfaced by ash.status().
+  add column if not exists register_wait_cap_hits bigint not null default 0;
 
 -- Wait event dictionary
+-- M-BUG-6 / H-SEC-3: id stays smallint (matches legacy upgrade scripts; a
+-- widened type would require a separate, coordinated migration because
+-- `create or replace function` cannot change the return type of
+-- ash._register_wait on a re-apply). DoS mitigation happens via the hard
+-- row cap enforced in _register_wait (same pattern as query_map).
 create table if not exists ash.wait_event_map (
   id    smallint primary key generated always as identity (start with 1),
   state text not null,
@@ -283,12 +301,26 @@ comment on column ash.sample.data is
 $$Packed int4[] encoding the sample's wait events and their query_map ids. Layout: groups of (-wait_id, count, query_map_id_1, ..., query_map_id_count). A negative marker starts each group; wait_id is negated for the marker so a positive count cannot be mistaken for a group boundary. Decode via ash.samples(), ash.samples_at(), or ash.decode_sample(data, slot).$$;
 
 -- Register wait event function (upsert, returns id)
+-- M-BUG-6 / H-SEC-3: signature intentionally preserved (returns smallint).
+-- Widening the return type would break `create or replace` on top of any
+-- legacy upgrade script that shipped the smallint signature (PG raises
+-- `cannot change return type of existing function`), breaking the
+-- re-apply / idempotent-install path. DoS is prevented by a hard row cap
+-- below (mirrors the query_map 50 000 pattern but sized to stay within
+-- smallint's 32 767 range). When the cap is hit we skip the INSERT and
+-- return NULL — callers (take_sample() via PERFORM) ignore the return
+-- value, and the later per-datid snapshot JOIN on wait_event_map simply
+-- excludes sessions whose (state,type,event) is not registered. The
+-- register_wait_cap_hits counter in ash.config surfaces the drop so
+-- ash.status() can alert operators instead of silently mis-attributing
+-- events to whatever row happened to be id=1.
 create or replace function ash._register_wait(p_state text, p_type text, p_event text)
 returns smallint
 language plpgsql
 as $$
 declare
-  v_id smallint;
+  v_id    smallint;
+  v_count bigint;
 begin
   -- Try to get existing
   select id into v_id
@@ -297,6 +329,33 @@ begin
 
   if v_id is not null then
     return v_id;
+  end if;
+
+  -- Enforce dictionary size cap before inserting. 32 000 stays well below
+  -- smallint's 32 767 ceiling while still leaving room for genuine event
+  -- diversity (real wait-event inventories measure in the hundreds).
+  -- reltuples is a cheap estimate; an exact count would add a scan on
+  -- every fresh wait-event observation on the sampler's hot path.
+  select reltuples::bigint into v_count
+  from pg_class where oid = 'ash.wait_event_map'::regclass;
+
+  if v_count >= 32000 then
+    -- Bump the cap-hit counter so ash.status() can surface the drop.
+    -- Note: counts *registration drops* here — not the number of sampled
+    -- backends observed for this (state,type,event). Many concurrent
+    -- backends blocked on the same dropped event only bump it once per tick.
+    -- Wrap in an inner block: if the UPDATE itself fails (e.g. config row
+    -- missing mid-uninstall), we still want the outer WARNING to fire and
+    -- the function to return NULL without aborting take_sample().
+    begin
+      update ash.config set register_wait_cap_hits = register_wait_cap_hits + 1
+        where singleton;
+    exception when others then
+      null;  -- counter bump is best-effort
+    end;
+    raise warning 'ash._register_wait: wait_event_map at cap (>= 32 000 rows); skipping (state=%, type=%, event=%) — see ash.status()',
+      p_state, p_type, p_event;
+    return null;  -- caller PERFORMs this; snapshot JOIN drops the session
   end if;
 
   -- Insert new entry
@@ -526,6 +585,23 @@ begin
       end if;
 
     exception when others then
+      -- M-BUG-4: previously a CHECK violation on ash.sample.data (or any
+      -- other INSERT-time error) was silently swallowed with just a WARNING,
+      -- dropping a row of observability data without any durable signal.
+      -- Bump insert_errors so ash.status() can surface the count, and keep
+      -- the warning so live log watchers still see it.
+      --
+      -- Nested BEGIN/EXCEPTION around the counter UPDATE: the outer
+      -- `exception when others` is a terminal handler, but the UPDATE
+      -- itself can fail (e.g. config row absent mid-uninstall, lock
+      -- timeout) and propagate out of this block. Before widening this
+      -- handler to do bookkeeping, no propagation path existed — preserve
+      -- that property so a flaky UPDATE never aborts the whole sampler.
+      begin
+        update ash.config set insert_errors = insert_errors + 1 where singleton;
+      exception when others then
+        null;  -- counter bump is best-effort; don't let it abort take_sample()
+      end;
       raise warning 'ash.take_sample: error inserting sample for datid % [%]: %', v_datid_rec.datid, sqlstate, sqlerrm;
     end;
   end loop;
@@ -554,6 +630,13 @@ $$;
 -- Decode sample function
 -- p_slot: when provided, look up query_ids from that partition only.
 -- When NULL (default), search all partitions via query_map_all view.
+--
+-- M-BUG-9: validate the entire array shape before emitting ANY rows.
+-- Previously the function interleaved validation with `return next`, so a
+-- malformed trailing segment still produced one or more valid-looking rows
+-- followed by a WARNING. Callers saw silently truncated, partially correct
+-- output. Now: walk once to verify shape, then walk again to emit — on
+-- validation failure raise a single warning and return zero rows.
 create or replace function ash.decode_sample(p_data integer[], p_slot smallint default null)
 returns table (
   wait_event text,
@@ -566,7 +649,7 @@ as $$
 declare
   v_len int;
   v_idx int;
-  v_wait_id smallint;
+  v_wait_id int;
   v_count int;
   v_qid_idx int;
   v_map_id int4;
@@ -587,23 +670,46 @@ begin
     return;
   end if;
 
-  -- Walk the structure
+  -- ---- Pass 1: validate shape only, emit nothing ----
+  -- Reuses the same walker logic the old code had, but exits with a single
+  -- warning and RETURN (no partial rows) if anything is wrong.
   v_idx := 1;
   while v_idx <= v_len loop
-    -- Get wait event id (negative marker)
     if p_data[v_idx] >= 0 then
       raise warning 'ash.decode_sample: expected negative wait_id at position %', v_idx;
       return;
     end if;
-
-    v_wait_id := -p_data[v_idx];
     v_idx := v_idx + 1;
 
-    -- Get count
     if v_idx > v_len then
-      raise warning 'ash.decode_sample: unexpected end of array at position %', v_idx;
+      raise warning 'ash.decode_sample: unexpected end of array at position % (missing count)', v_idx;
       return;
     end if;
+    v_count := p_data[v_idx];
+    if v_count <= 0 then
+      raise warning 'ash.decode_sample: non-positive count % at position %', v_count, v_idx;
+      return;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx + v_count - 1 > v_len then
+      raise warning 'ash.decode_sample: not enough query_ids for count % at position %', v_count, v_idx;
+      return;
+    end if;
+    for v_qid_idx in 1..v_count loop
+      if p_data[v_idx] < 0 then
+        raise warning 'ash.decode_sample: expected non-negative query_id at position %', v_idx;
+        return;
+      end if;
+      v_idx := v_idx + 1;
+    end loop;
+  end loop;
+
+  -- ---- Pass 2: emit rows (shape is known good) ----
+  v_idx := 1;
+  while v_idx <= v_len loop
+    v_wait_id := -p_data[v_idx];
+    v_idx := v_idx + 1;
 
     v_count := p_data[v_idx];
     v_idx := v_idx + 1;
@@ -616,11 +722,6 @@ begin
 
     -- Process each query_id
     for v_qid_idx in 1..v_count loop
-      if v_idx > v_len then
-        raise warning 'ash.decode_sample: not enough query_ids for count %', v_count;
-        return;
-      end if;
-
       v_map_id := p_data[v_idx];
       v_idx := v_idx + 1;
 
@@ -899,6 +1000,49 @@ begin
     return;
   end if;
 
+  -- H-BUG-1: validate interval shape BEFORE branching on pg_cron availability.
+  -- Previously, the no-pg_cron branch returned early (below), skipping the
+  -- seconds/minutes/hours checks. Same input must produce the same accept/
+  -- reject outcome regardless of whether pg_cron is installed.
+  --
+  -- Build schedule string here (also used later when pg_cron is available):
+  -- seconds format for <60s, cron format for 60s+.
+  if v_seconds <= 59 then
+    v_schedule := v_seconds || ' seconds';
+  elsif v_seconds < 3600 then
+    -- Convert to cron: every N minutes
+    if v_seconds % 60 <> 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact minutes (60s, 120s, etc.), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
+  else
+    -- Convert to cron: every N hours (limit to 23 hours max for step syntax)
+    if v_seconds % 3600 <> 0 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval must be exact hours (3600s, 7200s, etc., up to 23h), got %s', p_interval);
+      return next;
+      return;
+    end if;
+    v_hours := v_seconds / 3600;
+    if v_hours > 23 then
+      job_type := 'error';
+      job_id := null;
+      status := format('interval exceeds maximum 23 hours (82800s), got %s = %s hours. Use days or shorter interval.', p_interval, v_hours);
+      return next;
+      return;
+    end if;
+    if v_hours = 1 then
+      v_schedule := '0 * * * *';  -- Every hour at minute 0
+    else
+      v_schedule := '0 */' || v_hours || ' * * *';  -- Every N hours at minute 0
+    end if;
+  end if;
+
   -- Privilege check: without pg_read_all_stats (or superuser), query_id is
   -- hidden for activity owned by other roles and collapses to the sentinel 0,
   -- silently skewing top_queries / query_waits results.
@@ -959,14 +1103,29 @@ begin
   select extversion into v_cron_version
   from pg_extension where extname = 'pg_cron';
 
-  if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
-    if v_seconds < 60 then
-      job_type := 'error';
-      job_id := null;
-      status := format('pg_cron version %s too old for sub-minute scheduling (need >= 1.5). Use external scheduler or upgrade pg_cron.', v_cron_version);
-      return next;
-      return;
-    end if;
+  -- M-BUG-8: defend against malformed extversion. If regexp_replace() strips
+  -- everything (e.g. extversion is 'dev', empty, or starts with '.'),
+  -- string_to_array(...)::int[] raises 'invalid input syntax for type integer'
+  -- and bubbles up as a crash. Require a leading MAJOR.MINOR pattern before
+  -- parsing; if it doesn't match, assume a modern pg_cron (>= 1.5) rather
+  -- than failing the call.
+  if v_cron_version ~ '^\d+\.\d+' then
+    begin
+      if string_to_array(regexp_replace(v_cron_version, '[^0-9.]', '', 'g'), '.')::int[] < '{1,5}'::int[] then
+        if v_seconds < 60 then
+          job_type := 'error';
+          job_id := null;
+          status := format('pg_cron version %s too old for sub-minute scheduling (need >= 1.5). Use external scheduler or upgrade pg_cron.', v_cron_version);
+          return next;
+          return;
+        end if;
+      end if;
+    exception when others then
+      -- Unparseable version — assume modern pg_cron (>= 1.5) and proceed.
+      raise notice 'ash.start: could not parse pg_cron version "%" — assuming modern (>= 1.5)', v_cron_version;
+    end;
+  else
+    raise notice 'ash.start: unrecognized pg_cron version "%" — assuming modern (>= 1.5)', v_cron_version;
   end if;
 
   -- Detect whether we need to UPDATE cron.job.nodename after scheduling.
@@ -981,45 +1140,8 @@ begin
     v_skip_nodename_update := false;
   end;
 
-  -- Convert interval to pg_cron schedule format
-  -- pg_cron supports: '[1-59] seconds' for sub-minute, or cron syntax for minute+
-
-  -- Build schedule: seconds format for <60s, cron format for 60s+
-  if v_seconds <= 59 then
-    v_schedule := v_seconds || ' seconds';
-  elsif v_seconds < 3600 then
-    -- Convert to cron: every N minutes
-    if v_seconds % 60 <> 0 then
-      job_type := 'error';
-      job_id := null;
-      status := format('interval must be exact minutes (60s, 120s, etc.), got %s', p_interval);
-      return next;
-      return;
-    end if;
-    v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
-  else
-    -- Convert to cron: every N hours (limit to 23 hours max for step syntax)
-    if v_seconds % 3600 <> 0 then
-      job_type := 'error';
-      job_id := null;
-      status := format('interval must be exact hours (3600s, 7200s, etc., up to 23h), got %s', p_interval);
-      return next;
-      return;
-    end if;
-    v_hours := v_seconds / 3600;
-    if v_hours > 23 then
-      job_type := 'error';
-      job_id := null;
-      status := format('interval exceeds maximum 23 hours (82800s), got %s = %s hours. Use days or shorter interval.', p_interval, v_hours);
-      return next;
-      return;
-    end if;
-    if v_hours = 1 then
-      v_schedule := '0 * * * *';  -- Every hour at minute 0
-    else
-      v_schedule := '0 */' || v_hours || ' * * *';  -- Every N hours at minute 0
-    end if;
-  end if;
+  -- (schedule string v_schedule already built above, before the pg_cron
+  -- availability branch — see H-BUG-1 fix.)
 
   -- Check for existing sampler job (idempotent)
   select jobid into v_sampler_job
@@ -1027,9 +1149,15 @@ begin
   where jobname = 'ash_sampler';
 
   if v_sampler_job is not null then
+    -- H-BUG-2: re-sync the pg_cron schedule when the job already exists.
+    -- Previously ash.start(new_interval) updated ash.config.sample_interval
+    -- (further below) but never touched cron.job.schedule, so pg_cron kept
+    -- firing at the old cadence — a silent behavioral divergence between
+    -- configured and actual sampling rate.
+    perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
     job_type := 'sampler';
     job_id := v_sampler_job;
-    status := 'already exists';
+    status := format('already exists — schedule updated to %s', v_schedule);
     return next;
   else
     -- Create sampler job
@@ -1452,6 +1580,10 @@ begin
   metric := 'include_bg_workers'; value := v_config.include_bg_workers::text; return next;
   metric := 'debug_logging'; value := v_config.debug_logging::text; return next;
   metric := 'missed_samples'; value := v_config.missed_samples::text; return next;
+  -- M-BUG-4: surface the counter of rows dropped by take_sample()'s inner
+  -- exception handler (CHECK violations and similar). Non-zero = silent
+  -- data loss occurred — check server log for the matching WARNINGs.
+  metric := 'insert_errors'; value := v_config.insert_errors::text; return next;
   metric := 'installed_at'; value := v_config.installed_at::text; return next;
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation'; value := (now() - v_config.rotated_at)::text; return next;
@@ -1466,7 +1598,11 @@ begin
   metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
   metric := 'samples_total'; value := v_samples_total::text; return next;
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
-  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32767 * 100, 2)::text || '%'; return next;
+  -- M-BUG-6 / H-SEC-3: denominator tracks the 32 000 cap enforced in
+  -- _register_wait (stays within smallint's 32 767 ceiling so we don't
+  -- have to widen the id column / function signature).
+  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32000 * 100, 2)::text || '%'; return next;
+  metric := 'register_wait_cap_hits'; value := v_config.register_wait_cap_hits::text; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
 
   -- Rollup metrics

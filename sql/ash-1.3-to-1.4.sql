@@ -7,9 +7,17 @@
 --   - Rollup reader functions (minute_waits, hourly_queries, daily_peak_backends)
 --   - sampling_enabled flag, skipped_samples counter, advisory lock protocol
 --   - ts_from_timestamptz()/ts_to_timestamptz() epoch helpers
---   - take_sample() catches statement_timeout (missed_samples counter)
+--   - take_sample() catches statement_timeout (missed_samples counter, #27, #28)
+--   - take_sample() inner exception handler bumps insert_errors counter
+--     instead of silently dropping data (M-BUG-4)
+--   - _register_wait() enforces 32 000-row cap on wait_event_map; bumps
+--     register_wait_cap_hits on drops (M-BUG-6 / H-SEC-3)
 --   - Dynamic SQL in take_sample()/rotate() (replaces hardcoded 3-partition logic)
 --   - Pre-truncation rollup in rotate()
---   - status() surfaces epoch_seconds_remaining for the 2094 overflow
---     horizon of sample_ts (int4). (#37)
+--   - status() surfaces new counters (missed_samples, insert_errors,
+--     register_wait_cap_hits) plus epoch_seconds_remaining for the 2094
+--     overflow horizon of sample_ts (int4). (#37)
+--   - start() validates interval shape before branching on pg_cron; re-syncs
+--     cron.job.schedule on re-invocation; defends against malformed pg_cron
+--     extversion. (H-BUG-1, H-BUG-2, M-BUG-8)
 \ir ash-install.sql
