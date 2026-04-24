@@ -218,6 +218,11 @@ begin
   -- PG14-15 volatile SQL comments can flood query_map. 50k hard cap per
   -- partition prevents unbounded growth. PG16+ normalizes comments.
   -- NOTE: 3-way IF for clarity on hot path. Bug fixes must be applied 3×.
+  -- Existence probe at the 50000th row: one index lookup, and — unlike
+  -- pg_class.reltuples — immediately accurate after TRUNCATE (reltuples
+  -- can remain stale or be -1 until autovacuum/ANALYZE catches up).
+  -- TODO: verify via EXPLAIN that the uncorrelated probe subquery is
+  -- hoisted to InitPlan (executed once) rather than re-evaluated per row.
   if v_current_slot = 0 then
     insert into ash.query_map_0 (query_id)
     select distinct sa.query_id
@@ -227,8 +232,7 @@ begin
       and (sa.backend_type = 'client backend'
        or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
       and sa.pid <> pg_backend_pid()
-      and (select reltuples from pg_class
-       where oid = 'ash.query_map_0'::regclass) < 50000
+      and not exists (select 1 from ash.query_map_0 offset 49999 limit 1)
     on conflict (query_id) do nothing;
   elsif v_current_slot = 1 then
     insert into ash.query_map_1 (query_id)
@@ -239,8 +243,7 @@ begin
       and (sa.backend_type = 'client backend'
        or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
       and sa.pid <> pg_backend_pid()
-      and (select reltuples from pg_class
-       where oid = 'ash.query_map_1'::regclass) < 50000
+      and not exists (select 1 from ash.query_map_1 offset 49999 limit 1)
     on conflict (query_id) do nothing;
   else
     insert into ash.query_map_2 (query_id)
@@ -251,8 +254,7 @@ begin
       and (sa.backend_type = 'client backend'
        or (v_include_bg and sa.backend_type in ('autovacuum worker', 'logical replication worker', 'parallel worker', 'background worker')))
       and sa.pid <> pg_backend_pid()
-      and (select reltuples from pg_class
-       where oid = 'ash.query_map_2'::regclass) < 50000
+      and not exists (select 1 from ash.query_map_2 offset 49999 limit 1)
     on conflict (query_id) do nothing;
   end if;
 
@@ -477,8 +479,306 @@ begin
 end;
 $$;
 
--- Re-create start() with pre-branch validation (H-BUG-1), schedule re-sync
--- (H-BUG-2), and defensive extversion parsing (M-BUG-8).
+-- Re-create rotate() with single-statement TRUNCATE ... RESTART IDENTITY
+-- (PR #42 / issue #37 perf: L-BUG-12).
+create or replace function ash.rotate()
+returns text
+language plpgsql
+as $$
+declare
+  v_old_slot smallint;
+  v_new_slot smallint;
+  v_truncate_slot smallint;
+  v_rotation_period interval;
+  v_rotated_at timestamptz;
+begin
+  -- Advisory lock prevents concurrent rotation from pg_cron overlap.
+  -- rotate() is already REVOKE'd from PUBLIC — only schema owner can call it.
+  -- A malicious user holding this advisory lock number can delay (not prevent)
+  -- rotation, but they'd need direct DB access first.
+  if not pg_try_advisory_lock(hashtext('ash_rotate')) then
+    return 'skipped: another rotation in progress';
+  end if;
+
+  begin
+    -- Get current config
+    select current_slot, rotation_period, rotated_at
+    into v_old_slot, v_rotation_period, v_rotated_at
+    from ash.config
+    where singleton;
+
+    -- Check if we rotated too recently (within 90% of rotation_period)
+    if now() - v_rotated_at < v_rotation_period * 0.9 then
+      perform pg_advisory_unlock(hashtext('ash_rotate'));
+      return 'skipped: rotated too recently at ' || v_rotated_at::text;
+    end if;
+
+    -- Set lock timeout to avoid blocking on long-running queries
+    set local lock_timeout = '2s';
+
+    -- Calculate new slot (0 -> 1 -> 2 -> 0)
+    v_new_slot := (v_old_slot + 1) % 3;
+
+    -- The partition to truncate is the one that was "previous" before rotation
+    -- which is (old_slot - 1 + 3) % 3, but after we advance, it becomes
+    -- the "next" partition: (new_slot + 1) % 3
+    v_truncate_slot := (v_new_slot + 1) % 3;
+
+    -- Advance current_slot first (before truncate)
+    update ash.config
+    set current_slot = v_new_slot,
+      rotated_at = now()
+    where singleton;
+
+    -- Lockstep TRUNCATE: sample partition + matching query_map partition.
+    -- Zero bloat everywhere — no DELETE, no dead tuples, no GC needed.
+    -- Single statement with RESTART IDENTITY: one AccessExclusiveLock
+    -- acquisition per slot, and resets the query_map_N identity sequence
+    -- atomically (sample_N has no identity column, so it is unaffected).
+    case v_truncate_slot
+      when 0 then
+        truncate ash.sample_0, ash.query_map_0 restart identity;
+      when 1 then
+        truncate ash.sample_1, ash.query_map_1 restart identity;
+      when 2 then
+        truncate ash.sample_2, ash.query_map_2 restart identity;
+    end case;
+
+    perform pg_advisory_unlock(hashtext('ash_rotate'));
+
+    return format('rotated: slot %s -> %s, truncated slot %s (sample + query_map)',
+           v_old_slot, v_new_slot, v_truncate_slot);
+
+  exception when lock_not_available then
+    perform pg_advisory_unlock(hashtext('ash_rotate'));
+    return 'failed: lock timeout on partition truncate, will retry next cycle';
+  when others then
+    perform pg_advisory_unlock(hashtext('ash_rotate'));
+    raise;
+  end;
+end;
+$$;
+
+-- Re-create query_waits() with O(N) running-group window (PR #42 / M-BUG-7).
+create or replace function ash.query_waits(
+  p_query_id bigint,
+  p_interval interval default '1 hour',
+  p_width int default 40,
+  p_color boolean default false
+)
+returns table (
+  wait_event text,
+  samples bigint,
+  pct numeric,
+  bar text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+begin
+  -- Check if this query_id exists in any partition
+  if not exists (select from ash.query_map_all where query_id = p_query_id) then
+    return;
+  end if;
+
+  return query
+  with map_ids as (
+    -- All (slot, id) pairs for this query across partitions
+    select slot, id from ash.query_map_all where query_id = p_query_id
+  ),
+  samples as (
+    select s.ctid, s.slot, s.data
+    from ash.sample s
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+  ),
+  -- Unpack each sample once and use a running-group window so each
+  -- element carries the nearest preceding negative wait marker. This
+  -- is O(N) per sample vs. the prior O(N^2) correlated subquery that
+  -- walked backwards from every qid position.
+  unpacked as (
+    select
+      s.ctid,
+      s.slot,
+      i as pos,
+      s.data[i] as v,
+      s.data[i - 1] as prev_v
+    from samples s, generate_subscripts(s.data, 1) i
+  ),
+  grp_ids as (
+    -- Running group: bump on each negative marker. Within a group the
+    -- first element is the negative wait marker, followed by the count
+    -- and the qids. O(N) per sample vs. the prior O(N^2) walk-back.
+    select
+      ctid,
+      slot,
+      pos,
+      v,
+      prev_v,
+      sum(case when v < 0 then 1 else 0 end)
+        over (partition by ctid, slot order by pos
+              rows between unbounded preceding and current row) as grp
+    from unpacked
+  ),
+  grouped as (
+    select
+      ctid,
+      slot,
+      pos,
+      v,
+      prev_v,
+      -- Group's wait marker is the (sole) negative value in the group.
+      -- Negate it to get the wait_event_map id.
+      -min(v) over (partition by ctid, slot, grp) as wait_id
+    from grp_ids
+  ),
+  hits as (
+    -- A qid position is data[i] >= 0 AND data[i-1] >= 0 (i.e. neither
+    -- the wait marker nor the count). Restrict to this query's map_ids.
+    select g.wait_id::smallint as wait_id
+    from grouped g
+    where g.pos > 1
+      and g.v >= 0
+      and g.prev_v >= 0
+      and exists (
+        select from map_ids m
+        where m.slot = g.slot and m.id = g.v
+      )
+  ),
+  named_hits as (
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
+    from hits h
+    join ash.wait_event_map wm on wm.id = h.wait_id
+  ),
+  totals as (
+    select evt, count(*) as cnt
+    from named_hits
+    group by evt
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
+  )
+  select
+    t.evt,
+    t.cnt as samples,
+    round(t.cnt::numeric / gt.total * 100, 2) as pct,
+    ash._bar(t.evt, round(t.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color) as bar
+  from totals t
+  cross join grand_total gt
+  cross join max_pct mp
+  order by t.cnt desc;
+end;
+$$;
+
+-- Re-create query_waits_at() with the same O(N) rewrite (PR #42 / M-BUG-7).
+create or replace function ash.query_waits_at(
+  p_query_id bigint,
+  p_start timestamptz,
+  p_end timestamptz,
+  p_width int default 40,
+  p_color boolean default false
+)
+returns table (
+  wait_event text,
+  samples bigint,
+  pct numeric,
+  bar text
+)
+language plpgsql
+stable
+set jit = off
+as $$
+declare
+  v_start int4 := ash._to_sample_ts(p_start);
+  v_end int4 := ash._to_sample_ts(p_end);
+begin
+  if not exists (select from ash.query_map_all where query_id = p_query_id) then
+    return;
+  end if;
+
+  return query
+  with map_ids as (
+    select slot, id from ash.query_map_all where query_id = p_query_id
+  ),
+  samples as (
+    select s.ctid, s.slot, s.data
+    from ash.sample s
+    where s.slot = any(ash._active_slots())
+      and s.sample_ts >= v_start and s.sample_ts < v_end
+  ),
+  -- See ash.query_waits for commentary: O(N) running-group rewrite
+  -- of the old O(N^2) correlated walk-back.
+  unpacked as (
+    select
+      s.ctid,
+      s.slot,
+      i as pos,
+      s.data[i] as v,
+      s.data[i - 1] as prev_v
+    from samples s, generate_subscripts(s.data, 1) i
+  ),
+  grp_ids as (
+    select
+      ctid, slot, pos, v, prev_v,
+      sum(case when v < 0 then 1 else 0 end)
+        over (partition by ctid, slot order by pos
+              rows between unbounded preceding and current row) as grp
+    from unpacked
+  ),
+  grouped as (
+    select
+      ctid, slot, pos, v, prev_v,
+      -min(v) over (partition by ctid, slot, grp) as wait_id
+    from grp_ids
+  ),
+  hits as (
+    select g.wait_id::smallint as wait_id
+    from grouped g
+    where g.pos > 1
+      and g.v >= 0
+      and g.prev_v >= 0
+      and exists (
+        select from map_ids m
+        where m.slot = g.slot and m.id = g.v
+      )
+  ),
+  named_hits as (
+    select
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
+    from hits h
+    join ash.wait_event_map wm on wm.id = h.wait_id
+  ),
+  totals as (
+    select evt, count(*) as cnt from named_hits group by evt
+  ),
+  grand_total as (
+    select sum(cnt) as total from totals
+  ),
+  max_pct as (
+    select max(round(t.cnt::numeric / gt.total * 100, 2)) as m
+    from totals t cross join grand_total gt
+  )
+  select
+    t.evt,
+    t.cnt,
+    round(t.cnt::numeric / gt.total * 100, 2),
+    ash._bar(t.evt, round(t.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color)
+  from totals t
+  cross join grand_total gt
+  cross join max_pct mp
+  order by t.cnt desc;
+end;
+$$;
+
+-- Re-create ash.start() with pre-branch validation (H-BUG-1), schedule re-sync
+-- (H-BUG-2), defensive extversion parsing (M-BUG-8), and pg_read_all_stats
+-- privilege notice (schema parity with install.sql).
 create or replace function ash.start(p_interval interval default '1 second')
 returns table (job_type text, job_id bigint, status text)
 language plpgsql
