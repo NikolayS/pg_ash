@@ -1545,6 +1545,12 @@ begin
         p_interval, v_rotation_period;
       perform set_config('ash.notice_oversized', '1', true);
     end if;
+    -- Honor the NOTICE: return no slots so reader JOINs (`slot = any(...)`)
+    -- yield empty. Without this, an absurd interval like '1000 years' clamps
+    -- v_min_ts to 0 and matches every retained sample, contradicting the
+    -- "older samples not available" promise. Callers wanting all retained
+    -- data should pass an interval <= 2 * rotation_period.
+    return array[]::smallint[];
   end if;
 
   return array[
