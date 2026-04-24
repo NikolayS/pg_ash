@@ -513,9 +513,12 @@ begin
   -- Partitioned query_map: TRUNCATE resets on rotation, but between rotations
   -- PG14-15 volatile SQL comments can flood query_map. 50k hard cap per
   -- partition prevents unbounded growth. PG16+ normalizes comments.
-  -- Dynamic SQL: single query template, bug fixes apply once (not 3×).
+  -- Dynamic SQL: single query template, bug fixes apply once (not N×).
+  -- Existence probe at the 50000th row: one index lookup, and — unlike
+  -- pg_class.reltuples — immediately accurate after TRUNCATE (reltuples
+  -- can remain stale or be -1 until autovacuum/ANALYZE catches up).
   execute format(
-    'insert into ash.query_map_%s (query_id) '
+    'insert into ash.query_map_%1$s (query_id) '
     'select distinct sa.query_id '
     'from pg_stat_activity sa '
     'where sa.query_id is not null '
@@ -526,11 +529,9 @@ begin
     '     ''logical replication worker'', ''parallel worker'', '
     '     ''background worker''))) '
     '  and sa.pid <> pg_backend_pid() '
-    '  and (select reltuples from pg_class '
-    '   where oid = %L::regclass) < 50000 '
+    '  and not exists (select 1 from ash.query_map_%1$s offset 49999 limit 1) '
     'on conflict (query_id) do nothing',
-    v_current_slot,
-    'ash.query_map_' || v_current_slot
+    v_current_slot
   ) using v_include_bg;
 
   -- ---- Read 2+3: Per-database encoding ----
@@ -790,13 +791,13 @@ begin
 
     -- Lockstep TRUNCATE: sample partition + matching query_map partition.
     -- Zero bloat everywhere — no DELETE, no dead tuples, no GC needed.
-    -- Dynamic SQL replaces the old CASE block for N-partition support.
-    execute format('truncate ash.sample_%s', v_truncate_slot);
-    execute format('truncate ash.query_map_%s', v_truncate_slot);
-    -- ALTER COLUMN id RESTART takes ACCESS EXCLUSIVE lock on query_map.
-    -- Safe here because we just truncated the table — no concurrent readers.
+    -- Single statement with RESTART IDENTITY: one AccessExclusiveLock
+    -- acquisition pair per slot, and resets the query_map_N identity sequence
+    -- atomically (sample_N has no identity column, so it is unaffected).
+    -- Dynamic SQL for N-partition support.
     execute format(
-      'alter table ash.query_map_%s alter column id restart', v_truncate_slot
+      'truncate ash.sample_%1$s, ash.query_map_%1$s restart identity',
+      v_truncate_slot
     );
 
     return format('rotated: slot %s -> %s, truncated slot %s (sample + query_map)',
@@ -2656,29 +2657,70 @@ begin
     -- All (slot, id) pairs for this query across partitions
     select slot, id from ash.query_map_all where query_id = p_query_id
   ),
-  hits as (
-    -- Find every position where the query appears in a sample,
-    -- then walk backwards to find the wait group marker
-    select
-      (select (- s.data[j])::smallint
-      from generate_series(i, 1, -1) j
-      where s.data[j] < 0
-      limit 1
-      ) as wait_id
-    from ash.sample s, generate_subscripts(s.data, 1) i
+  samples as (
+    select s.ctid, s.slot, s.data
+    from ash.sample s
     where s.slot = any(ash._active_slots())
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
-      and i > 1
-      and s.data[i] >= 0
-      and s.data[i - 1] >= 0  -- it's a query_id position, not a count
-      and exists (select from map_ids m where m.slot = s.slot and m.id = s.data[i])
+  ),
+  -- Unpack each sample once and use a running-group window so each
+  -- element carries the nearest preceding negative wait marker. This
+  -- is O(N) per sample vs. the prior O(N^2) correlated subquery that
+  -- walked backwards from every qid position.
+  unpacked as (
+    select
+      s.ctid,
+      s.slot,
+      i as pos,
+      s.data[i] as v,
+      s.data[i - 1] as prev_v
+    from samples s, generate_subscripts(s.data, 1) i
+  ),
+  grp_ids as (
+    -- Running group: bump on each negative marker. Within a group the
+    -- first element is the negative wait marker, followed by the count
+    -- and the qids. O(N) per sample vs. the prior O(N^2) walk-back.
+    select
+      ctid,
+      slot,
+      pos,
+      v,
+      prev_v,
+      sum(case when v < 0 then 1 else 0 end)
+        over (partition by ctid, slot order by pos
+              rows between unbounded preceding and current row) as grp
+    from unpacked
+  ),
+  grouped as (
+    select
+      ctid,
+      slot,
+      pos,
+      v,
+      prev_v,
+      -- Group's wait marker is the (sole) negative value in the group.
+      -- Negate it to get the wait_event_map id.
+      -min(v) over (partition by ctid, slot, grp) as wait_id
+    from grp_ids
+  ),
+  hits as (
+    -- A qid position is data[i] >= 0 AND data[i-1] >= 0 (i.e. neither
+    -- the wait marker nor the count). Restrict to this query's map_ids.
+    select g.wait_id::smallint as wait_id
+    from grouped g
+    where g.pos > 1
+      and g.v >= 0
+      and g.prev_v >= 0
+      and exists (
+        select from map_ids m
+        where m.slot = g.slot and m.id = g.v
+      )
   ),
   named_hits as (
     select
       case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
     from hits h
     join ash.wait_event_map wm on wm.id = h.wait_id
-    where h.wait_id is not null
   ),
   totals as (
     select evt, count(*) as cnt
@@ -3010,25 +3052,53 @@ begin
   with map_ids as (
     select slot, id from ash.query_map_all where query_id = p_query_id
   ),
-  hits as (
-    select
-      (select (- s.data[j])::smallint
-      from generate_series(i, 1, -1) j
-      where s.data[j] < 0 limit 1
-      ) as wait_id
-    from ash.sample s, generate_subscripts(s.data, 1) i
+  samples as (
+    select s.ctid, s.slot, s.data
+    from ash.sample s
     where s.slot = any(ash._active_slots())
       and s.sample_ts >= v_start and s.sample_ts < v_end
-      and i > 1
-      and s.data[i] >= 0 and s.data[i - 1] >= 0
-      and exists (select from map_ids m where m.slot = s.slot and m.id = s.data[i])
+  ),
+  -- See ash.query_waits for commentary: O(N) running-group rewrite
+  -- of the old O(N^2) correlated walk-back.
+  unpacked as (
+    select
+      s.ctid,
+      s.slot,
+      i as pos,
+      s.data[i] as v,
+      s.data[i - 1] as prev_v
+    from samples s, generate_subscripts(s.data, 1) i
+  ),
+  grp_ids as (
+    select
+      ctid, slot, pos, v, prev_v,
+      sum(case when v < 0 then 1 else 0 end)
+        over (partition by ctid, slot order by pos
+              rows between unbounded preceding and current row) as grp
+    from unpacked
+  ),
+  grouped as (
+    select
+      ctid, slot, pos, v, prev_v,
+      -min(v) over (partition by ctid, slot, grp) as wait_id
+    from grp_ids
+  ),
+  hits as (
+    select g.wait_id::smallint as wait_id
+    from grouped g
+    where g.pos > 1
+      and g.v >= 0
+      and g.prev_v >= 0
+      and exists (
+        select from map_ids m
+        where m.slot = g.slot and m.id = g.v
+      )
   ),
   named_hits as (
     select
       case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt
     from hits h
     join ash.wait_event_map wm on wm.id = h.wait_id
-    where h.wait_id is not null
   ),
   totals as (
     select evt, count(*) as cnt from named_hits group by evt
