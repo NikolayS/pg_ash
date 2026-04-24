@@ -1399,8 +1399,10 @@ jobs:
 
             -- === decode_sample corner cases ===
 
-            -- Empty/null data
-            select count(*) into v_count from ash.decode_sample(null);
+            -- Empty/null data (cast to integer[] to disambiguate from
+            -- the decode_sample(int4) overload, which would otherwise
+            -- both match an unknown-typed NULL literal).
+            select count(*) into v_count from ash.decode_sample(null::integer[]);
             assert v_count = 0, 'null decode should return 0 rows';
 
             select count(*) into v_count from ash.decode_sample('{}'::integer[]);
