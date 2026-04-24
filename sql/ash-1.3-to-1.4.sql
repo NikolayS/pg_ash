@@ -45,4 +45,12 @@
 --     symmetric undo. (#52)
 --   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
 --     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
+--   - ts_from_timestamptz() clamps to [0, INT4_MAX] so the _at reader family
+--     (top_waits_at / samples_at / query_waits_at / event_queries_at /
+--     timeline_chart_at / top_queries_at / wait_timeline_at / top_by_type_at /
+--     minute_waits_at / hourly_queries_at / daily_peak_backends_at) no longer
+--     raises `integer out of range` on absurd timestamps (pre-epoch or
+--     post-2094 horizon). Pre-epoch -> 0 and post-horizon -> INT4_MAX both
+--     fall outside any sample_ts window, yielding empty results — same class
+--     of fix as #51 (PR #57), centralized at the helper. (#63)
 \ir ash-install.sql

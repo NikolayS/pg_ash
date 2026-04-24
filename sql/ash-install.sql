@@ -328,7 +328,15 @@ begin
   end if;
 end $$;
 
--- Convert timestamptz to int4 epoch offset
+-- Convert timestamptz to int4 epoch offset.
+--
+-- Clamp to [0, INT4_MAX] so absurd inputs (pre-epoch dates, post-2094-horizon
+-- dates) do not raise `integer out of range`. sample_ts is a non-negative int4
+-- by construction, so:
+--   * pre-epoch  -> 0           (no matching samples; readers return empty)
+--   * post-INT4  -> 2147483647  (no matching samples; readers return empty)
+-- This centralizes the same-class clamp pattern used by the interval readers
+-- (#51 / PR #57) so every _at variant inherits the safety net (#63).
 create or replace function ash.ts_from_timestamptz(p_ts timestamptz)
 returns int4
 language sql
@@ -336,7 +344,13 @@ immutable
 parallel safe
 set search_path = pg_catalog, ash
 as $$
-  select extract(epoch from p_ts - ash.epoch())::int4
+  select greatest(
+           least(
+             extract(epoch from p_ts - ash.epoch()),
+             2147483647  -- int4 max; sample_ts can't exceed this without overflow
+           ),
+           0             -- sample_ts can't be negative; pre-epoch -> 0
+         )::int4
 $$;
 
 -- Convert int4 epoch offset to timestamptz
