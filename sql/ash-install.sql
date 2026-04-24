@@ -813,6 +813,49 @@ begin
 end;
 $$;
 
+-- Convenience overload: decode every ash.sample row whose sample_ts matches.
+-- Walks all datids/slots and returns decoded rows annotated with datid so the
+-- caller can distinguish them. Implemented as a SQL LATERAL JOIN over the
+-- 2-arg decode_sample(data, slot) SRF (passes slot for unambiguous lookup,
+-- avoiding the "search-all-partitions" branch that can return stale ids
+-- after rotation).
+create or replace function ash.decode_sample(p_sample_ts int4)
+returns table (
+  datid      oid,
+  wait_event text,
+  query_id   int8,
+  count      int
+)
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select s.datid, d.wait_event, d.query_id, d.count
+  from ash.sample s,
+       lateral ash.decode_sample(s.data, s.slot) d
+  where s.sample_ts = p_sample_ts
+$$;
+
+-- Wall-clock convenience: convert timestamptz to the matching sample_ts via
+-- ts_from_timestamptz() and delegate to decode_sample(int4). Same return
+-- shape. Named decode_sample_at() (matching the samples_at / top_waits_at
+-- naming convention) so we don't create a decode_sample(unknown) ambiguity
+-- between int4 and timestamptz overloads.
+create or replace function ash.decode_sample_at(p_ts timestamptz)
+returns table (
+  datid      oid,
+  wait_event text,
+  query_id   int8,
+  count      int
+)
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select d.datid, d.wait_event, d.query_id, d.count
+  from ash.decode_sample(ash.ts_from_timestamptz(p_ts)) d
+$$;
+
 
 --------------------------------------------------------------------------------
 -- STEP 3: Rotation function
@@ -1546,10 +1589,13 @@ as $$
 $$;
 
 -- Helper used by reader functions that accept a user-supplied interval.
--- Returns the same array as ash._active_slots(), but also emits a single
--- NOTICE per transaction when p_interval exceeds 2 * rotation_period — so
--- callers get a clear signal instead of a silent empty set. Never clamps
--- the caller's interval — the returned row set stays honest.
+-- Returns the same array as ash._active_slots() for in-range intervals.
+-- For intervals beyond 2 * rotation_period, returns an empty array so
+-- reader `slot = any(...)` JOINs naturally yield zero rows — honoring
+-- the NOTICE's "older samples not available" promise (and avoiding the
+-- int4-epoch underflow that would otherwise raise `integer out of range`).
+-- A single NOTICE is emitted per transaction in that case so callers get
+-- a clear signal instead of a silent empty set.
 -- Deduplication uses a transaction-scoped GUC (ash.notice_oversized) so
 -- multi-query readers (e.g. activity_summary) don't spam the log with one
 -- NOTICE per partition/sub-query.
@@ -1583,6 +1629,12 @@ begin
         p_interval, v_rotation_period;
       perform set_config('ash.notice_oversized', '1', true);
     end if;
+    -- Honor the NOTICE: return no slots so reader JOINs (`slot = any(...)`)
+    -- yield empty. Without this, an absurd interval like '1000 years' clamps
+    -- v_min_ts to 0 and matches every retained sample, contradicting the
+    -- "older samples not available" promise. Callers wanting all retained
+    -- data should pass an interval <= 2 * rotation_period.
+    return array[]::smallint[];
   end if;
 
   return array[
@@ -2601,7 +2653,7 @@ as $$
          ash.wait_event_map wm
     where wm.id = (-s.data[i])::smallint
       and s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
       and s.data[i] < 0
   ),
   totals as (
@@ -2665,7 +2717,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
       and s.data[i] < 0
   )
   select
@@ -2723,7 +2775,7 @@ begin
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
       where s.slot = any(ash._active_slots_for(p_interval))
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
         and i > 1                   -- guard: data[0] is NULL
         and s.data[i] >= 0          -- not a wait_id marker
         and s.data[i - 1] >= 0      -- not a count (count follows negative marker)
@@ -2755,7 +2807,7 @@ begin
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
       where s.slot = any(ash._active_slots_for(p_interval))
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
         and i > 1
         and s.data[i] >= 0
         and s.data[i - 1] >= 0
@@ -2806,7 +2858,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
       and s.data[i] < 0
   ),
   totals as (
@@ -2872,7 +2924,7 @@ begin
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
       where s.slot = any(ash._active_slots_for(p_interval))
-        and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+        and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
         and i > 1
         and s.data[i] >= 0
         and s.data[i - 1] >= 0
@@ -2942,7 +2994,7 @@ begin
     select s.ctid, s.slot, s.data
     from ash.sample s
     where s.slot = any(ash._active_slots_for(p_interval))
-      and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+      and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
   ),
   -- Unpack each sample once and use a running-group window so each
   -- element carries the nearest preceding negative wait marker. This
@@ -3052,7 +3104,7 @@ as $$
   from ash.sample s
   left join pg_database d on d.oid = s.datid
   where s.slot = any(ash._active_slots_for(p_interval))
-    and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
+    and s.sample_ts >= greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4
   group by s.datid, d.datname
   order by total_backends desc
 $$;
@@ -3442,7 +3494,7 @@ declare
   r record;
   v_rank int;
 begin
-  v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_min_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
 
   -- Basic counts
   select count(*), coalesce(sum(active_count), 0), max(active_count)
@@ -3552,7 +3604,7 @@ declare
   v_i int;
   v_legend_len int;
 begin
-  v_start_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_start_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
   -- Rank by avg active sessions weighted by bucket presence
@@ -3569,7 +3621,7 @@ begin
         sum(s.data[i + 1])::numeric
           / nullif(count(distinct s.sample_ts), 0) as avg_active,
         count(distinct s.sample_ts - (s.sample_ts % v_bucket_secs))::numeric
-          / nullif(greatest(1, (extract(epoch from p_interval)::int4 / v_bucket_secs)), 0)
+          / nullif(greatest(1, (least(extract(epoch from p_interval), 2147483647)::int4 / v_bucket_secs)), 0)
           as bucket_fraction
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
@@ -3953,7 +4005,7 @@ declare
   v_has_pgss boolean := false;
   v_min_ts int4;
 begin
-  v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_min_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
 
   begin
     perform 1 from pg_stat_statements limit 1;
@@ -4151,6 +4203,12 @@ $$Decoded wait-event samples between p_start and p_end, newest first, up to p_li
 comment on function ash.decode_sample(integer[], smallint) is
 $$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows. Pass p_slot (ash.sample.slot) to resolve query_ids unambiguously; omitting it searches all query_map partitions and may return a stale id after rotation.$$;
 
+comment on function ash.decode_sample(int4) is
+$$Convenience overload: decodes every ash.sample row whose sample_ts equals p_sample_ts (across all datids/slots) and returns (datid, wait_event, query_id, count). Internally calls decode_sample(data, slot) with the row's slot, so query_id resolution is unambiguous.$$;
+
+comment on function ash.decode_sample_at(timestamptz) is
+$$Wall-clock convenience: same as decode_sample(int4) but accepts timestamptz, converting via ts_from_timestamptz() to find the matching sample_ts. Named with the _at suffix (consistent with samples_at, top_waits_at) to avoid an unknown-typed decode_sample(123) literal matching both the int4 and timestamptz overloads.$$;
+
 -- Migration: add version column if upgrading from older version
 do $$
 begin
@@ -4205,7 +4263,7 @@ declare
   v_has_pgss boolean := false;
   v_min_ts int4;
 begin
-  v_min_ts := extract(epoch from now() - p_interval - ash.epoch())::int4;
+  v_min_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
 
   begin
     perform 1 from pg_stat_statements limit 1;
