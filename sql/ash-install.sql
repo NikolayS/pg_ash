@@ -78,13 +78,20 @@ insert into ash.config (singleton) values (true) on conflict do nothing;
 -- competing with the `create table if not exists` above.
 alter table ash.config add column if not exists insert_errors bigint not null default 0;
 
+-- M-BUG-6 / H-SEC-3: track how often _register_wait hits the dictionary cap
+-- and has to skip a new (state,type,event). Non-zero means wait-event
+-- registrations are being silently dropped for that sample (those sessions
+-- won't appear in encoded data for this tick). Surfaced by ash.status().
+alter table ash.config add column if not exists register_wait_cap_hits bigint not null default 0;
+
 -- Wait event dictionary
--- M-BUG-6 / H-SEC-3: id widened from smallint to int4 to eliminate the
--- 32767 exhaustion ceiling. Combined with the 50k cap enforced in
--- _register_wait (mirrors the query_map pattern), this makes unbounded
--- registration by an unprivileged user a non-issue rather than a DoS.
+-- M-BUG-6 / H-SEC-3: id stays smallint (matches legacy upgrade scripts; a
+-- widened type would require a separate, coordinated migration because
+-- `create or replace function` cannot change the return type of
+-- ash._register_wait on a re-apply). DoS mitigation happens via the hard
+-- row cap enforced in _register_wait (same pattern as query_map).
 create table if not exists ash.wait_event_map (
-  id    int primary key generated always as identity (start with 1),
+  id    smallint primary key generated always as identity (start with 1),
   state text not null,
   type  text not null,
   event text not null,
@@ -152,18 +159,25 @@ create index if not exists sample_1_datid_ts_idx on ash.sample_1 (datid, sample_
 create index if not exists sample_2_datid_ts_idx on ash.sample_2 (datid, sample_ts);
 
 -- Register wait event function (upsert, returns id)
--- M-BUG-6 / H-SEC-3: return type widened smallint -> int to match the
--- widened wait_event_map.id, and a 50 000-row cap now protects the
--- dictionary from unbounded growth (same pattern as query_map partitions).
--- When the cap is reached we skip the INSERT and return a sentinel id of
--- 1, which is guaranteed to exist (seeded by migration or the very first
--- register); callers still get a valid id so encoding does not crash.
+-- M-BUG-6 / H-SEC-3: signature intentionally preserved (returns smallint).
+-- Widening the return type would break `create or replace` on top of any
+-- legacy upgrade script that shipped the smallint signature (PG raises
+-- `cannot change return type of existing function`), breaking the
+-- re-apply / idempotent-install path. DoS is prevented by a hard row cap
+-- below (mirrors the query_map 50 000 pattern but sized to stay within
+-- smallint's 32 767 range). When the cap is hit we skip the INSERT and
+-- return NULL — callers (take_sample() via PERFORM) ignore the return
+-- value, and the later per-datid snapshot JOIN on wait_event_map simply
+-- excludes sessions whose (state,type,event) is not registered. The
+-- register_wait_cap_hits counter in ash.config surfaces the drop so
+-- ash.status() can alert operators instead of silently mis-attributing
+-- events to whatever row happened to be id=1.
 create or replace function ash._register_wait(p_state text, p_type text, p_event text)
-returns int
+returns smallint
 language plpgsql
 as $$
 declare
-  v_id    int;
+  v_id    smallint;
   v_count bigint;
 begin
   -- Try to get existing
@@ -175,20 +189,28 @@ begin
     return v_id;
   end if;
 
-  -- Enforce dictionary size cap before inserting (mirrors the query_map 50k
-  -- guard in take_sample()). Use reltuples for a cheap estimate — exact
-  -- count would add a scan on every fresh wait-event observation.
+  -- Enforce dictionary size cap before inserting. 32 000 stays well below
+  -- smallint's 32 767 ceiling while still leaving room for genuine event
+  -- diversity (real wait-event inventories measure in the hundreds).
+  -- reltuples is a cheap estimate; an exact count would add a scan on
+  -- every fresh wait-event observation on the sampler's hot path.
   select reltuples::bigint into v_count
   from pg_class where oid = 'ash.wait_event_map'::regclass;
 
-  if v_count >= 50000 then
-    raise notice 'ash._register_wait: wait_event_map at cap (50 000 rows); skipping insert for (state=%, type=%, event=%)',
+  if v_count >= 32000 then
+    -- Bump the cap-hit counter so ash.status() can surface the drop.
+    -- Wrap in an inner block: if the UPDATE itself fails (e.g. config row
+    -- missing mid-uninstall), we still want the outer WARNING to fire and
+    -- the function to return NULL without aborting take_sample().
+    begin
+      update ash.config set register_wait_cap_hits = register_wait_cap_hits + 1
+        where singleton;
+    exception when others then
+      null;  -- counter bump is best-effort
+    end;
+    raise warning 'ash._register_wait: wait_event_map at cap (>= 32 000 rows); skipping (state=%, type=%, event=%) — see ash.status()',
       p_state, p_type, p_event;
-    -- Return a sentinel pointing at id=1 (the first registered row). The
-    -- caller needs a non-null id; the resulting decode is imprecise but
-    -- bounded. Callers aware of the cap can inspect wait_event_map size.
-    select min(id) into v_id from ash.wait_event_map;
-    return coalesce(v_id, 1);
+    return null;  -- caller PERFORMs this; snapshot JOIN drops the session
   end if;
 
   -- Insert new entry
@@ -299,7 +321,7 @@ declare
   v_datid_rec record;
   v_data integer[];
   v_active_count smallint;
-  v_current_wait_id int;
+  v_current_wait_id smallint;
   v_current_slot smallint;
   v_rows_inserted int := 0;
   v_missed_count bigint;
@@ -490,7 +512,18 @@ begin
       -- dropping a row of observability data without any durable signal.
       -- Bump insert_errors so ash.status() can surface the count, and keep
       -- the warning so live log watchers still see it.
-      update ash.config set insert_errors = insert_errors + 1 where singleton;
+      --
+      -- Nested BEGIN/EXCEPTION around the counter UPDATE: the outer
+      -- `exception when others` is a terminal handler, but the UPDATE
+      -- itself can fail (e.g. config row absent mid-uninstall, lock
+      -- timeout) and propagate out of this block. Before widening this
+      -- handler to do bookkeeping, no propagation path existed — preserve
+      -- that property so a flaky UPDATE never aborts the whole sampler.
+      begin
+        update ash.config set insert_errors = insert_errors + 1 where singleton;
+      exception when others then
+        null;  -- counter bump is best-effort; don't let it abort take_sample()
+      end;
       raise warning 'ash.take_sample: error inserting sample for datid % [%]: %', v_datid_rec.datid, sqlstate, sqlerrm;
     end;
   end loop;
@@ -1156,9 +1189,11 @@ begin
   metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
   metric := 'samples_total'; value := v_samples_total::text; return next;
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
-  -- M-BUG-6 / H-SEC-3: denominator changed from 32767 (old smallint ceiling)
-  -- to the new 50 000 cap enforced in _register_wait.
-  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 50000 * 100, 2)::text || '%'; return next;
+  -- M-BUG-6 / H-SEC-3: denominator tracks the 32 000 cap enforced in
+  -- _register_wait (stays within smallint's 32 767 ceiling so we don't
+  -- have to widen the id column / function signature).
+  metric := 'wait_event_map_utilization'; value := round(v_wait_events::numeric / 32000 * 100, 2)::text || '%'; return next;
+  metric := 'register_wait_cap_hits'; value := v_config.register_wait_cap_hits::text; return next;
   metric := 'query_map_count'; value := v_query_ids::text; return next;
 
   -- pg_cron status if available
@@ -1296,7 +1331,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
-    where wm.id = (-s.data[i])::int
+    where wm.id = (-s.data[i])::smallint
       and s.slot = any(ash._active_slots())
       and s.sample_ts >= extract(epoch from now() - p_interval - ash.epoch())::int4
       and s.data[i] < 0
@@ -1357,7 +1392,7 @@ as $$
   with waits as (
     select
       ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
-      (-s.data[i])::int as wait_id,
+      (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
@@ -1488,7 +1523,7 @@ set jit = off
 as $$
   with waits as (
     select
-      (-s.data[i])::int as wait_id,
+      (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
@@ -1625,7 +1660,7 @@ begin
     -- Find every position where the query appears in a sample,
     -- then walk backwards to find the wait group marker
     select
-      (select (- s.data[j])::int
+      (select (- s.data[j])::smallint
       from generate_series(i, 1, -1) j
       where s.data[j] < 0
       limit 1
@@ -1734,7 +1769,7 @@ as $$
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
-    where wm.id = (-s.data[i])::int
+    where wm.id = (-s.data[i])::smallint
       and s.slot = any(ash._active_slots())
       and s.sample_ts >= ash._to_sample_ts(p_start)
       and s.sample_ts < ash._to_sample_ts(p_end)
@@ -1880,7 +1915,7 @@ as $$
   with waits as (
     select
       ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
-      (-s.data[i])::int as wait_id,
+      (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
@@ -1916,7 +1951,7 @@ stable
 set jit = off
 as $$
   with waits as (
-    select (-s.data[i])::int as wait_id, s.data[i + 1] as cnt
+    select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
     where s.slot = any(ash._active_slots())
       and s.sample_ts >= ash._to_sample_ts(p_start)
@@ -1976,7 +2011,7 @@ begin
   ),
   hits as (
     select
-      (select (- s.data[j])::int
+      (select (- s.data[j])::smallint
       from generate_series(i, 1, -1) j
       where s.data[j] < 0 limit 1
       ) as wait_id
@@ -2173,7 +2208,7 @@ begin
           as bucket_fraction
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::int
+      where wm.id = (-s.data[i])::smallint
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts
         and s.data[i] < 0
@@ -2236,7 +2271,7 @@ begin
         sum(s.data[i + 1]) as cnt
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::int
+      where wm.id = (-s.data[i])::smallint
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts
         and s.data[i] < 0
@@ -2382,7 +2417,7 @@ begin
           as bucket_fraction
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::int
+      where wm.id = (-s.data[i])::smallint
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
         and s.data[i] < 0
@@ -2443,7 +2478,7 @@ begin
         sum(s.data[i + 1]) as cnt
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
-      where wm.id = (-s.data[i])::int
+      where wm.id = (-s.data[i])::smallint
         and s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
         and s.data[i] < 0
@@ -2567,7 +2602,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::int as wait_id,
+        (-s.data[i])::smallint as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2603,7 +2638,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::int as wait_id,
+        (-s.data[i])::smallint as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2672,7 +2707,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::int as wait_id,
+        (-s.data[i])::smallint as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2708,7 +2743,7 @@ begin
         s.slot,
         s.datid,
         s.active_count,
-        (-s.data[i])::int as wait_id,
+        (-s.data[i])::smallint as wait_id,
         s.data[i + 2 + gs.n] as map_id
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
@@ -2822,7 +2857,7 @@ begin
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_min_ts
         and s.data[i] < 0
-        and (-s.data[i])::int = mw.wait_id
+        and (-s.data[i])::smallint = mw.wait_id
         and i + 2 + gs.n <= array_length(s.data, 1)
         and s.data[i + 2 + gs.n] >= 0
     ),
@@ -2926,7 +2961,7 @@ begin
       where s.slot = any(ash._active_slots())
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and s.data[i] < 0
-        and (-s.data[i])::int = mw.wait_id
+        and (-s.data[i])::smallint = mw.wait_id
         and i + 2 + gs.n <= array_length(s.data, 1)
         and s.data[i + 2 + gs.n] >= 0
     ),
