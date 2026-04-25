@@ -4846,6 +4846,7 @@ returns text[]
 language sql
 immutable
 parallel safe
+set search_path = pg_catalog
 as $$
   select array[
     'start', 'stop', 'uninstall', 'rotate', 'take_sample',
