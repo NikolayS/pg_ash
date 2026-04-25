@@ -4742,47 +4742,59 @@ comment on function ash._apply_pgss_search_path() is
 -- box. No-op (keeps default) when pgss is absent or lives in public.
 select ash._apply_pgss_search_path();
 
+-- Canonical "admin" function set: callers that must NOT be granted to
+-- monitoring roles. Single source of truth for the REVOKE-from-PUBLIC /
+-- GRANT-to-owner hardening block below and for grant_reader/revoke_reader
+-- (which exclude these names from the reader EXECUTE bundle). Adding a new
+-- admin entry point requires updating only this list.
+create or replace function ash._admin_funcs()
+returns text[]
+language sql
+immutable
+parallel safe
+as $$
+  select array[
+    'start', 'stop', 'uninstall', 'rotate', 'take_sample',
+    'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
+    'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
+    '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
+    '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
+    -- the helpers themselves: granting them to a reader role would let
+    -- that role hand out privileges. keep them admin-only.
+    'grant_reader', 'revoke_reader'
+  ]::text[]
+$$;
+
+comment on function ash._admin_funcs() is
+  'Canonical list of ash.* admin function names (must not be granted to monitoring roles). Single source of truth used by the REVOKE/GRANT hardening block and by grant_reader/revoke_reader.';
+
 do $$
 declare
   v_owner text := (select nspowner::regrole::text from pg_namespace where nspname = 'ash');
+  v_admin_funcs constant text[] := ash._admin_funcs();
   r record;
 begin
-  -- Admin functions: only the schema owner
-  execute format('revoke all on function ash.start(interval) from public');
-  execute format('revoke all on function ash.stop() from public');
-  execute format('revoke all on function ash.uninstall(text) from public');
-  execute format('revoke all on function ash.rotate() from public');
-  execute format('revoke all on function ash.take_sample() from public');
-  execute format('revoke all on function ash.set_debug_logging(bool) from public');
-  execute format('revoke all on function ash.rebuild_partitions(int, text) from public');
-  execute format('revoke all on function ash._drop_all_partitions() from public');
-  execute format('revoke all on function ash._rebuild_query_map_view() from public');
-  execute format('revoke all on function ash.rollup_minute(int) from public');
-  execute format('revoke all on function ash.rollup_hour() from public');
-  execute format('revoke all on function ash.rollup_cleanup() from public');
-  execute format('revoke all on function ash._merge_wait_counts(int4[]) from public');
-  execute format('revoke all on function ash._merge_query_counts(int8[]) from public');
-  execute format('revoke all on function ash._truncate_pairs(int8[], int) from public');
-  execute format('revoke all on function ash._int4_array_cat_agg(int4[]) from public');
-  execute format('revoke all on function ash._int8_array_cat_agg(int8[]) from public');
-
-  execute format('grant execute on function ash.start(interval) to %I', v_owner);
-  execute format('grant execute on function ash.stop() to %I', v_owner);
-  execute format('grant execute on function ash.uninstall(text) to %I', v_owner);
-  execute format('grant execute on function ash.rotate() to %I', v_owner);
-  execute format('grant execute on function ash.take_sample() to %I', v_owner);
-  execute format('grant execute on function ash.set_debug_logging(bool) to %I', v_owner);
-  execute format('grant execute on function ash.rebuild_partitions(int, text) to %I', v_owner);
-  execute format('grant execute on function ash._drop_all_partitions() to %I', v_owner);
-  execute format('grant execute on function ash._rebuild_query_map_view() to %I', v_owner);
-  execute format('grant execute on function ash.rollup_minute(int) to %I', v_owner);
-  execute format('grant execute on function ash.rollup_hour() to %I', v_owner);
-  execute format('grant execute on function ash.rollup_cleanup() to %I', v_owner);
-  execute format('grant execute on function ash._merge_wait_counts(int4[]) to %I', v_owner);
-  execute format('grant execute on function ash._merge_query_counts(int8[]) to %I', v_owner);
-  execute format('grant execute on function ash._truncate_pairs(int8[], int) to %I', v_owner);
-  execute format('grant execute on function ash._int4_array_cat_agg(int4[]) to %I', v_owner);
-  execute format('grant execute on function ash._int8_array_cat_agg(int8[]) to %I', v_owner);
+  -- Admin functions: revoke from PUBLIC and grant only to the schema owner.
+  -- Resolve signatures dynamically via pg_proc so any future overload or
+  -- default-argument change is picked up automatically. prokind in ('f','a')
+  -- covers regular functions and aggregates (_int{4,8}_array_cat_agg).
+  -- Entries in _admin_funcs() that are not yet created at this point in
+  -- install order (e.g. grant_reader/revoke_reader, defined below) are
+  -- skipped here and locked down by their own DO block once created.
+  for r in
+    select p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on p.pronamespace = n.oid
+    where n.nspname = 'ash'
+      and p.prokind in ('f', 'a')
+      and p.proname::text = any(v_admin_funcs)
+  loop
+    execute format('revoke all on function ash.%I(%s) from public',
+                   r.proname, r.args);
+    execute format('grant execute on function ash.%I(%s) to %I',
+                   r.proname, r.args, v_owner);
+  end loop;
 
   -- ts helpers: grant to PUBLIC (harmless read-only conversion, useful for Grafana panels)
   -- ts_from_timestamptz and ts_to_timestamptz are already PUBLIC by default
@@ -4872,16 +4884,10 @@ as $$
 declare
   r record;
   v_role text;
-  v_admin_funcs constant text[] := array[
-    'start', 'stop', 'uninstall', 'rotate', 'take_sample',
-    'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
-    'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
-    '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
-    '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
-    -- the helpers themselves: granting them to a reader role would let
-    -- that role hand out privileges. keep them admin-only.
-    'grant_reader', 'revoke_reader'
-  ];
+  -- Canonical admin set lives in ash._admin_funcs(): a reader role must not
+  -- receive EXECUTE on any of these (incl. grant_reader/revoke_reader, which
+  -- would let the role hand out privileges).
+  v_admin_funcs constant text[] := ash._admin_funcs();
   v_func_count int := 0;
   v_table_count int := 0;
 begin
@@ -4956,14 +4962,8 @@ as $$
 declare
   r record;
   v_role text;
-  v_admin_funcs constant text[] := array[
-    'start', 'stop', 'uninstall', 'rotate', 'take_sample',
-    'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
-    'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
-    '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
-    '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
-    'grant_reader', 'revoke_reader'
-  ];
+  -- See grant_reader: ash._admin_funcs() is the single source of truth.
+  v_admin_funcs constant text[] := ash._admin_funcs();
   v_func_count int := 0;
   v_table_count int := 0;
 begin

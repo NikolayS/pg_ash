@@ -56,6 +56,9 @@
 --     post-2094 horizon). Pre-epoch -> 0 and post-horizon -> INT4_MAX both
 --     fall outside any sample_ts window, yielding empty results — same class
 --     of fix as #51 (PR #57), centralized at the helper. (#63)
+--   - ash._admin_funcs() — canonical admin function list, single source of
+--     truth for the REVOKE-from-PUBLIC hardening block and for
+--     grant_reader/revoke_reader. Refactor; no behavior change (#67).
 --   - _active_slots_for_at(p_start, p_end) helper + every raw-sample _at
 --     reader (top_waits_at / top_queries_at / wait_timeline_at /
 --     top_by_type_at / query_waits_at / event_queries_at / timeline_chart_at /
