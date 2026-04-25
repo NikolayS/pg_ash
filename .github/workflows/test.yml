@@ -3482,6 +3482,18 @@ jobs:
           from pg_views
           where schemaname = 'ash'
           order by viewname;
+
+          -- Issue #66: include CHECK / NOT NULL / PK / UNIQUE / FK constraints.
+          -- Covers parent partitioned tables AND their partitions (relkind r,p).
+          -- pg_get_constraintdef gives a stable canonical text form, so any
+          -- divergence (e.g. sample_data_check `>= 2` vs `>= 3` from #49)
+          -- surfaces here.
+          select 'CON', c.relname, con.conname, pg_get_constraintdef(con.oid)
+          from pg_constraint con
+          join pg_class c on c.oid = con.conrelid
+          join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname = 'ash' and c.relkind in ('r','p')
+          order by c.relname, con.conname;
           SNAPSQL
 
           # 1) Fresh install → snapshot
@@ -3503,6 +3515,49 @@ jobs:
             echo "Schema equivalence test PASSED: fresh install and upgrade path produce identical schemas"
           else
             echo "::error::Schema equivalence test FAILED: fresh install and upgrade path differ (see diff above)"
+
+            # Issue #66: when constraints diverge, surface a clear, dedicated
+            # error naming each affected constraint and both definitions, so
+            # CHECK-constraint regressions (e.g. sample_data_check `>= 2` vs
+            # `>= 3`) don't get lost in a long unified diff over
+            # functions/columns/indexes/views.
+            grep '^CON|' /tmp/fresh_schema.txt    | sort > /tmp/fresh_constraints.txt
+            grep '^CON|' /tmp/upgraded_schema.txt | sort > /tmp/upgraded_constraints.txt
+            if ! diff -q /tmp/fresh_constraints.txt /tmp/upgraded_constraints.txt > /dev/null; then
+              echo "::error::Constraint divergence detected (issue #66):"
+              # Each CON line is: CON|<relname>|<conname>|<def>
+              # Pair fresh vs upgrade by (relname, conname) and report both
+              # definitions for any (relname, conname) present on only one
+              # side or whose definition differs.
+              awk -F'|' '
+                FNR == NR { fresh[$2"|"$3] = $0; next }
+                {
+                  key = $2"|"$3
+                  if (!(key in fresh)) {
+                    def = $4; for (i = 5; i <= NF; i++) def = def "|" $i
+                    printf "  upgrade ash.%s.%s: %s\n", $2, $3, def
+                    printf "  fresh   ash.%s.%s: <missing>\n", $2, $3
+                  } else if (fresh[key] != $0) {
+                    def = $4; for (i = 5; i <= NF; i++) def = def "|" $i
+                    printf "  upgrade ash.%s.%s: %s\n", $2, $3, def
+                    n = split(fresh[key], a, "|")
+                    def2 = a[4]; for (i = 5; i <= n; i++) def2 = def2 "|" a[i]
+                    printf "  fresh   ash.%s.%s: %s\n", a[2], a[3], def2
+                    delete fresh[key]
+                  } else {
+                    delete fresh[key]
+                  }
+                }
+                END {
+                  for (k in fresh) {
+                    n = split(fresh[k], a, "|")
+                    def = a[4]; for (i = 5; i <= n; i++) def = def "|" a[i]
+                    printf "  upgrade ash.%s.%s: <missing>\n", a[2], a[3]
+                    printf "  fresh   ash.%s.%s: %s\n", a[2], a[3], def
+                  }
+                }
+              ' /tmp/fresh_constraints.txt /tmp/upgraded_constraints.txt
+            fi
             exit 1
           fi
 
