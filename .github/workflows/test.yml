@@ -1077,6 +1077,12 @@ jobs:
           # Hard-fail with diagnostics if no samples ever appeared.
           if [ "${samples:-0}" -eq 0 ]; then
             echo "::error::H-CI-3 FAILED: pg_cron did not fire ash.take_sample within 90 s (no rows in ash.sample)"
+            echo "--- ash.status() ---"
+            psql -h localhost -U postgres -d postgres -c "select * from ash.status()"
+            echo "--- ash.config ---"
+            psql -h localhost -U postgres -d postgres -c "select * from ash.config"
+            echo "--- ash.take_sample() called manually ---"
+            psql -h localhost -U postgres -d postgres -c "select ash.take_sample(); select count(*) from ash.sample;"
             echo "--- cron.job ---"
             psql -h localhost -U postgres -d postgres -c "select * from cron.job"
             echo "--- cron.job_run_details (last 10) ---"
