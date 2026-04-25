@@ -491,8 +491,16 @@ begin
   end if;
 
   -- Acquire participation lock (xact-level, auto-releases on commit/rollback).
-  -- rebuild_partitions() polls pg_locks for this to drain in-flight operations.
-  if not pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4) then
+  -- All ash advisory locks share classid = hashtext('pg_ash')::int4 with a
+  -- per-kind objid. The sampler kind is dedicated so it does NOT contend
+  -- with rollup_minute / rollup_hour / rollup_cleanup — a long catch-up
+  -- rollup no longer silently bumps skipped_samples on every tick.
+  -- rebuild_partitions() polls pg_locks for ANY ash lock to drain in-flight
+  -- operations.
+  if not pg_try_advisory_xact_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_sampler')::int4
+     ) then
     update ash.config
     set skipped_samples = skipped_samples + 1
     where singleton;
@@ -737,6 +745,17 @@ begin
 
   v_len := array_length(p_data, 1);
 
+  -- Reject pathologically large arrays. Real ash.sample.data arrays are
+  -- bounded by pg_stat_activity row count (a few hundred entries even on
+  -- a busy database) plus the packed query_map_id payload — the largest
+  -- legitimate data we ever see is well under 10 000 elements. A larger
+  -- array passed by a malicious caller would force the validator and
+  -- decoder to walk it twice, sustaining backend memory pressure.
+  if v_len > 100000 then
+    raise warning 'ash.decode_sample: data array too large (% > 100000)', v_len;
+    return;
+  end if;
+
   -- Basic structure check: first element must be negative (wait_id marker)
   if v_len < 3 or p_data[1] >= 0 then
     raise warning 'ash.decode_sample: invalid data array';
@@ -903,7 +922,13 @@ begin
   -- Advisory lock prevents concurrent rotation from pg_cron overlap.
   -- Xact-level: auto-releases on commit/rollback — no leak risk with pg_cron
   -- connection reuse. rotate() is REVOKE'd from PUBLIC — only schema owner.
-  if not pg_try_advisory_xact_lock(hashtext('ash_rotate')) then
+  -- Two-arg form so rebuild_partitions's drain poll (which keys on classid)
+  -- can see this lock; was a single-arg form in 1.4 betas but that put rotate
+  -- in a different lock namespace and rebuild couldn't drain it.
+  if not pg_try_advisory_xact_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_rotate')::int4
+     ) then
     return 'skipped: another rotation in progress';
   end if;
 
@@ -1011,28 +1036,58 @@ begin
   end if;
 
   -- Step 3: Acquire rebuild exclusive lock (two-key xact-level form).
-  -- Xact-level: auto-releases on commit/rollback — no manual unlock needed.
-  if not pg_try_advisory_xact_lock(1, hashtext('ash_rebuild')::int4) then
+  -- All ash advisory locks share classid = hashtext('pg_ash')::int4. Each kind
+  -- gets its own objid. This makes the (classid, objid) pair ash-specific
+  -- and harder for an unrelated extension or a hostile session to squat
+  -- (using literal classid 0/1 was vulnerable). Xact-level: auto-releases
+  -- on commit/rollback — no manual unlock needed.
+  if not pg_try_advisory_xact_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_rebuild')::int4
+     ) then
     update ash.config set sampling_enabled = true where singleton;
     raise exception 'rebuild_partitions: could not acquire lock — '
       'another rebuild is in progress';
   end if;
 
-  -- Step 4: Drain — wait up to 5s for in-flight take_sample/rollup to finish.
-  -- They hold (0, hashtext('ash_operation')) xact locks; we poll pg_locks.
-  for i in 1 .. 10 loop
-    if not exists (
-      select from pg_locks
-      where locktype = 'advisory'
-        and classid = 0
-        and objid = hashtext('ash_operation')::int4::oid
-        and granted
-    ) then
-      exit;
-    end if;
+  -- Step 4: Drain — wait up to 5s for in-flight take_sample / rollup_* /
+  -- rotate to release their ash advisory locks. STRICT drain: if anyone is
+  -- still holding a lock at the end of the budget, raise an exception
+  -- rather than proceeding to drop partitions out from under them. The
+  -- caller can retry. Drains every ash lock kind (sampler / rollup /
+  -- rotate) — anything that touches raw sample partitions OR rollup
+  -- tables we'd be about to invalidate.
+  declare
+    v_drained boolean := false;
+  begin
+    for i in 1 .. 10 loop
+      if not exists (
+        select from pg_locks
+        where locktype = 'advisory'
+          and classid = hashtext('pg_ash')::int4::oid
+          and objid in (
+            hashtext('pg_ash_sampler')::int4::oid,
+            hashtext('pg_ash_rollup')::int4::oid,
+            hashtext('pg_ash_rotate')::int4::oid
+          )
+          and granted
+          and pid <> pg_backend_pid()
+      ) then
+        v_drained := true;
+        exit;
+      end if;
 
-    perform pg_sleep(0.5);
-  end loop;
+      perform pg_sleep(0.5);
+    end loop;
+
+    if not v_drained then
+      update ash.config set sampling_enabled = true where singleton;
+      raise exception 'rebuild_partitions: drain timeout — in-flight '
+        'sampler / rollup / rotate operations did not release within 5 s. '
+        'Retry after they complete (or call ash.stop() first to halt the '
+        'sampler).';
+    end if;
+  end;
 
   -- Step 5: Drop the query_map_all view first (depends on query_map tables)
   drop view if exists ash.query_map_all;
@@ -1633,13 +1688,27 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_current_slot smallint;
+  v_num_partitions smallint;
   v_rotation_period interval;
   v_already text;
 begin
-  select current_slot, rotation_period
-    into v_current_slot, v_rotation_period
+  select current_slot, num_partitions, rotation_period
+    into v_current_slot, v_num_partitions, v_rotation_period
   from ash.config
   where singleton;
+
+  -- Negative interval is meaningless and would underflow `now() - p_interval`
+  -- past the int4 horizon downstream. Treat as out-of-window.
+  if p_interval is not null and p_interval < interval '0' then
+    v_already := current_setting('ash.notice_oversized', true);
+    if v_already is null or v_already = '' then
+      raise notice
+        'requested interval % is negative; nothing to retrieve.',
+        p_interval;
+      perform set_config('ash.notice_oversized', '1', true);
+    end if;
+    return array[]::smallint[];
+  end if;
 
   if p_interval is not null and p_interval > 2 * v_rotation_period then
     -- Suppress duplicate NOTICEs within the same transaction. The GUC is
@@ -1659,9 +1728,12 @@ begin
     return array[]::smallint[];
   end if;
 
+  -- Slot enumeration must use the configured num_partitions (default 3,
+  -- configurable in [3, 32] via rebuild_partitions). Hardcoded `% 3` would
+  -- mis-enumerate on N != 3.
   return array[
     v_current_slot,
-    ((v_current_slot - 1 + 3) % 3)::smallint
+    ((v_current_slot - 1 + v_num_partitions) % v_num_partitions)::smallint
   ];
 end;
 $$;
@@ -1704,13 +1776,14 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_current_slot    smallint;
+  v_num_partitions  smallint;
   v_rotation_period interval;
   v_now             timestamptz := now();
   v_retention_start timestamptz;
   v_already         text;
 begin
-  select current_slot, rotation_period
-    into v_current_slot, v_rotation_period
+  select current_slot, num_partitions, rotation_period
+    into v_current_slot, v_num_partitions, v_rotation_period
   from ash.config
   where singleton;
 
@@ -1733,7 +1806,7 @@ begin
 
   return array[
     v_current_slot,
-    ((v_current_slot - 1 + 3) % 3)::smallint
+    ((v_current_slot - 1 + v_num_partitions) % v_num_partitions)::smallint
   ];
 end;
 $$;
@@ -2102,8 +2175,13 @@ declare
   v_min_backend_seconds smallint;
   v_has_later_data bool;
 begin
-  -- Acquire participation lock (xact-level)
-  if not pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4) then
+  -- Acquire rollup lock (xact-level). Distinct from the sampler lock so a
+  -- long catch-up doesn't bump skipped_samples on every concurrent tick.
+  -- rebuild_partitions's drain poll waits on this objid.
+  if not pg_try_advisory_xact_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_rollup')::int4
+     ) then
     return 0;
   end if;
 
@@ -2294,8 +2372,13 @@ declare
   v_total int := 0;
   v_count int;
 begin
-  -- Acquire participation lock (xact-level)
-  if not pg_try_advisory_xact_lock(0, hashtext('ash_operation')::int4) then
+  -- Acquire rollup lock (xact-level). Same kind as rollup_minute /
+  -- rollup_cleanup so they serialize among themselves; distinct from
+  -- the sampler lock.
+  if not pg_try_advisory_xact_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_rollup')::int4
+     ) then
     return 0;
   end if;
 
@@ -2372,6 +2455,16 @@ declare
   v_cutoff_1m int4;
   v_cutoff_1h int4;
 begin
+  -- Acquire rollup lock (xact-level). Shares the kind with rollup_minute
+  -- and rollup_hour so cleanup can't delete rows that an in-flight rollup
+  -- is upserting into. Also visible to rebuild_partitions's drain poll.
+  if not pg_try_advisory_xact_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_rollup')::int4
+     ) then
+    return 'cleanup: skipped — another rollup operation in progress';
+  end if;
+
   select rollup_1m_retention_days, rollup_1h_retention_days
   into v_1m_retention, v_1h_retention
   from ash.config where singleton;
@@ -2713,6 +2806,10 @@ $$;
 -- Build a bar string with fixed visible width (for pspg/column alignment).
 -- Visible: [blocks padded to p_width] + ' ' + pct + '%'
 -- Invisible ANSI codes don't affect visual width.
+--
+-- p_width is clamped to [1, 500] to prevent reader-callable OOM via
+-- unbounded `repeat()` on the █ character (a granted reader role could
+-- otherwise pass p_width => 1_000_000_000 and allocate ~3 GB per row).
 create or replace function ash._bar(
   p_event text,
   p_pct numeric,
@@ -2729,8 +2826,8 @@ as $$
   -- reset is always 4 chars. Total invisible = 23 when color on, 0 when off.
   select ash._wait_color(p_event, p_color)
     || rpad(
-         repeat('█', greatest(1, (p_pct / nullif(p_max_pct, 0) * p_width)::int)),
-         p_width
+         repeat('█', greatest(1, (p_pct / nullif(p_max_pct, 0) * least(greatest(p_width, 1), 500))::int)),
+         least(greatest(p_width, 1), 500)
        )
     || ash._reset(p_color)
     || lpad(p_pct || '%', 8);
@@ -3763,6 +3860,10 @@ declare
   v_i int;
   v_legend_len int;
 begin
+  -- Clamp p_width to a sane visible range to prevent reader-callable OOM
+  -- via unbounded `repeat()` on the bar characters. 500 is an order of
+  -- magnitude beyond any realistic terminal width.
+  p_width := least(greatest(p_width, 1), 500);
   v_start_ts := greatest(extract(epoch from now() - p_interval - ash.epoch()), 0)::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
@@ -3973,6 +4074,9 @@ declare
   v_i int;
   v_legend_len int;
 begin
+  -- Clamp p_width to a sane visible range to prevent reader-callable OOM
+  -- via unbounded `repeat()` on the bar characters. See ash._bar comment.
+  p_width := least(greatest(p_width, 1), 500);
   v_start_ts := ash.ts_from_timestamptz(p_start);
   v_end_ts := ash.ts_from_timestamptz(p_end);
   -- Pulled into a local so the NOTICE side effect fires even when the
@@ -4697,13 +4801,15 @@ declare
   r record;
 begin
   -- Always keep public in the path as a fallback (matches the managed-service
-  -- default and preserves behavior when pgss is not yet installed). If the
-  -- extension lives elsewhere, append that schema after public so ash.* still
-  -- wins over any user-created objects in public/<pgss_schema>.
+  -- default and preserves behavior when pgss is not yet installed). When the
+  -- extension lives in a non-default schema, list THAT schema BEFORE public
+  -- so an attacker who creates a `public.pg_stat_statements` view cannot
+  -- shadow the real one and feed attacker-controlled query_text into
+  -- monitoring dashboards. (Security review #76 finding.)
   if v_pgss_schema is null or v_pgss_schema in ('pg_catalog', 'ash', 'public') then
     v_path := 'pg_catalog, ash, public';
   else
-    v_path := format('pg_catalog, ash, public, %I', v_pgss_schema);
+    v_path := format('pg_catalog, ash, %I, public', v_pgss_schema);
   end if;
 
   for r in

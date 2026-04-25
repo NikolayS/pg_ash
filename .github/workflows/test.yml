@@ -2223,6 +2223,88 @@ jobs:
           $$;
           EOF
 
+      - name: "Release-gate fixes: negative interval, p_width clamp, decode_sample size cap"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_count int;
+            v_text text;
+          begin
+            -- Negative-interval guard: should NOTICE + 0 rows, no error.
+            select count(*) into v_count from ash.top_waits('-1000 years');
+            assert v_count = 0, format('top_waits negative: expected 0, got %s', v_count);
+
+            select count(*) into v_count from ash.top_queries('-1 day');
+            assert v_count = 0, format('top_queries negative: expected 0, got %s', v_count);
+
+            select count(*) into v_count from ash.samples('-1 hour');
+            assert v_count = 0, format('samples negative: expected 0, got %s', v_count);
+
+            -- p_width clamp on _bar: huge value must NOT OOM. The internal
+            -- repeat() is now bounded at 500 chars per bar.
+            select ash._bar('CPU*', 50.0, 100.0, 1000000000, false) into v_text;
+            assert length(v_text) < 600, format('_bar p_width overflow not clamped: len=%s', length(v_text));
+
+            -- timeline_chart and _at variants clamp p_width too.
+            for v_count in 1..1 loop
+              perform * from ash.timeline_chart('1 minute', '10 seconds', 3, 1000000000, false);
+              perform * from ash.timeline_chart_at(now()-'1 min'::interval, now(), '10 seconds', 3, 1000000000, false);
+            end loop;
+            -- (No assertion on row counts — just verifying the calls don't OOM/error.)
+
+            -- decode_sample(int4[]) huge-array guard: arrays > 100k elements rejected.
+            select count(*) into v_count
+              from ash.decode_sample(array_fill(-1, array[200000])::int4[], null::smallint);
+            assert v_count = 0, format('decode_sample huge array: expected 0 rows, got %s', v_count);
+
+            raise notice 'Release-gate fix tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Release-gate: _active_slots_for{,_at} respect num_partitions"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_slots smallint[];
+            v_n smallint;
+            v_min smallint;
+            v_max smallint;
+          begin
+            -- Default num_partitions = 3.
+            select num_partitions into v_n from ash.config where singleton;
+            assert v_n = 3, format('precondition: num_partitions=3, got %s', v_n);
+
+            -- Rebuild to N=5.
+            perform ash.rebuild_partitions(5, 'yes');
+            select num_partitions into v_n from ash.config where singleton;
+            assert v_n = 5, format('after rebuild: expected num_partitions=5, got %s', v_n);
+
+            -- Slot enumeration must stay within [0, 4]; never reference slot 5+.
+            v_slots := ash._active_slots_for('1 minute'::interval);
+            select min(s), max(s) into v_min, v_max from unnest(v_slots) s;
+            assert v_min >= 0 and v_max <= 4,
+              format('_active_slots_for slots out of [0,4] after rebuild(5): %s', v_slots);
+
+            v_slots := ash._active_slots_for_at(now() - '1 min'::interval, now());
+            select min(s), max(s) into v_min, v_max from unnest(v_slots) s;
+            assert v_min >= 0 and v_max <= 4,
+              format('_active_slots_for_at slots out of [0,4] after rebuild(5): %s', v_slots);
+
+            -- Restore N=3.
+            perform ash.rebuild_partitions(3, 'yes');
+
+            raise notice '_active_slots_for{,_at} num_partitions tests PASSED';
+          end;
+          $$;
+          EOF
+
       - name: "Test v1.4: configurable partitions"
         env:
           PGPASSWORD: postgres
