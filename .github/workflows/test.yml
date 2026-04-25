@@ -1058,25 +1058,25 @@ jobs:
           EOF
 
           # Poll for actual job runs. With cron.use_background_workers=on
-          # plus a properly-provisioned root role+db, jobs fire within a
-          # few seconds. Allow 90 s with 5 s progress notices so a future
-          # regression's signature is visible in the log.
+          # the jobs fire as bgworkers — but cron.job_run_details is only
+          # populated for the libpq-mode path, so we assert via the side
+          # effect we actually care about: ash.sample row count growth.
+          # Allow 90 s with 5 s progress notices so a future regression's
+          # signature is visible in the log.
           deadline=$((SECONDS + 90))
           while [ $SECONDS -lt $deadline ]; do
-            after=$(psql -h localhost -U postgres -d postgres -tAc \
-              "select coalesce(count(*), 0) from cron.job_run_details where status = 'succeeded'")
             samples=$(psql -h localhost -U postgres -d postgres -tAc "select count(*) from ash.sample")
-            echo "  waited=$((SECONDS)) succeeded_runs=$after samples=$samples"
-            if [ "${after:-0}" -gt 0 ] && [ "${samples:-0}" -gt 0 ]; then
-              echo "H-CI-3 PASSED: pg_cron fired and ash.sample has rows"
+            echo "  waited=$((SECONDS)) samples=$samples"
+            if [ "${samples:-0}" -gt 0 ]; then
+              echo "H-CI-3 PASSED: pg_cron fired ash.take_sample and ash.sample has $samples row(s)"
               break
             fi
             sleep 5
           done
 
-          # Hard-fail with diagnostics if we never saw a successful run.
-          if [ "${after:-0}" -eq 0 ] || [ "${samples:-0}" -eq 0 ]; then
-            echo "::error::H-CI-3 FAILED: pg_cron did not fire ash.take_sample within 90 s"
+          # Hard-fail with diagnostics if no samples ever appeared.
+          if [ "${samples:-0}" -eq 0 ]; then
+            echo "::error::H-CI-3 FAILED: pg_cron did not fire ash.take_sample within 90 s (no rows in ash.sample)"
             echo "--- cron.job ---"
             psql -h localhost -U postgres -d postgres -c "select * from cron.job"
             echo "--- cron.job_run_details (last 10) ---"
