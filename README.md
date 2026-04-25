@@ -116,6 +116,9 @@ visible in server / CI logs.
 -- from 1.3 to 1.4
 \i sql/ash-1.3-to-1.4.sql
 
+-- from 1.4 to 1.5
+\i sql/ash-1.4-to-1.5.sql
+
 -- check version
 select * from ash.status();
 ```

@@ -1,4 +1,6 @@
-# pg_ash — Unreleased (since 1.4)
+# pg_ash 1.5 release notes
+
+Upgrade from 1.4: `\i sql/ash-1.4-to-1.5.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`. The upgrade script is idempotent and safe to re-run.
 
 ## Breaking changes
 
@@ -17,6 +19,44 @@ select ash.rebuild_partitions(9, 'yes');
 Calling `ash.rebuild_partitions(N)` without the `'yes'` token raises an error and changes nothing — `sampling_enabled`, pg_cron jobs, and partition tables are all left untouched. The argument-validation runs before any destructive action. (#53)
 
 The `(int)` overload is dropped on upgrade. Existing callers (scripts, runbooks) must be updated to pass `'yes'`.
+
+## What's new
+
+### Privilege provisioning helpers
+
+`ash.grant_reader(role)` and `ash.revoke_reader(role)` provision a monitoring role (Grafana, Datadog, etc.) with the minimum privileges to call every public reader. Owner-only, idempotent, symmetric undo. (#52)
+
+```sql
+create role grafana login;
+select ash.grant_reader('grafana');
+-- ...later
+select ash.revoke_reader('grafana');
+```
+
+The admin function set is now centralized in `ash._admin_funcs()` — a single source of truth for the REVOKE-from-PUBLIC hardening block and the grant/revoke helpers. (#67)
+
+### `decode_sample` convenience overloads
+
+`ash.decode_sample(p_sample_ts int4)` and `ash.decode_sample_at(p_ts timestamptz)` decode every row at a given timestamp without requiring the caller to fetch the packed `data` array first. The original `decode_sample(integer[], smallint)` is unchanged. (#54)
+
+### NOTICE on out-of-window `_at` queries
+
+`ash._active_slots_for_at(p_start, p_end)` brings the same loud-warn behavior to absolute-time readers that `_active_slots_for(p_interval)` already provides for relative readers. Out-of-retention ranges return empty AND emit a NOTICE pointing at `2 * rotation_period`. (#69)
+
+## Fixes
+
+- **No more `integer out of range` on absurd reader inputs.** Both the relative-interval readers (`top_waits('1000 years')`, etc.) and the absolute-timestamp `_at` readers (`top_waits_at('1000-01-01', '1000-01-02')`, etc.) now return empty rows cleanly. (#51, #63)
+- **`sample_data_check` constraint aligned across upgrade paths.** Installs upgraded from 1.0 had a looser `array_length(data, 1) >= 2` constraint that 1.1 silently failed to tighten because of `create table if not exists`. (#49)
+- **`ash.status()` no longer errors for non-superuser monitoring roles when pg_cron is loaded.** A nested `EXCEPTION WHEN insufficient_privilege` substitutes a fallback row pointing at the missing `GRANT USAGE ON SCHEMA cron`. (#61)
+
+## CI / infra
+
+- End-to-end pg_cron firing test (deferred from 1.4) now passes on every PG 14–18 cron-enabled job. Provisions a `root` PG role + database to satisfy peer auth in the GHA service container; asserts via `ash.sample` row growth. (#46)
+- Schema-equivalence CI now includes `pg_constraint` — catches the class of divergence behind #49. (#66)
+
+## Demo
+
+README's hero visual is a [60-second animated GIF](demos/) of pg_ash investigating a row-lock spike on Postgres 18. Reproducible via `make -C demos record`. Human-paced typing, colored bar charts, vanilla psql in tmux. (PRs #64, #68)
 
 ---
 

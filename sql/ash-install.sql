@@ -1,10 +1,11 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.4 (latest)
+-- Version: 1.5 (latest)
 -- Fresh install: \i sql/ash-install.sql
--- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.4: \i sql/ash-1.4-to-1.5.sql
 
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
@@ -83,7 +84,7 @@ create table if not exists ash.config (
   include_bg_workers         bool not null default false,
   debug_logging              bool not null default false,
   encoding_version           smallint not null default 1,
-  version                    text not null default '1.4',
+  version                    text not null default '1.5',
   rotated_at                 timestamptz not null default clock_timestamp(),
   installed_at               timestamptz not null default clock_timestamp(),
   rollup_1m_retention_days   smallint not null default 30
@@ -4259,8 +4260,8 @@ begin
   end if;
 end $$;
 
-update ash.config set version = '1.4' where singleton;
-alter table ash.config alter column version set default '1.4';
+update ash.config set version = '1.5' where singleton;
+alter table ash.config alter column version set default '1.5';
 
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
