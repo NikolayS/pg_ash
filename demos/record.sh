@@ -7,7 +7,8 @@
 #   3. Kick off a workload that transitions baseline -> row-lock spike -> tail.
 #   4. After the spike is well underway, start tmux + asciinema with psql
 #      attached to the demo DB in the container.
-#   5. Drive the tmux pane via `tmux send-keys` to walk the investigation.
+#   5. Drive the tmux pane via per-character keystrokes (human-paced typing)
+#      to walk the investigation.
 #   6. Convert the .cast -> .gif via agg.
 #
 # Output: demos/ash_demo.cast, demos/ash_demo.gif
@@ -24,14 +25,37 @@ SESSION="ash-demo"
 CAST="$HERE/ash_demo.cast"
 GIF="$HERE/ash_demo.gif"
 
-# Terminal geometry tuned for GitHub README embedding (~800 px rendered width).
-# 100 cols fits ash.timeline_chart + ash.event_queries without wrapping while
-# still keeping the rendered GIF narrow enough to embed cleanly on GitHub.
-COLS="${COLS:-100}"
-ROWS="${ROWS:-28}"
+# Terminal geometry: wider (140 cols) so wide wait-event names like
+# `Lock:transactionid` and `Client:ClientRead` plus the colored bar charts
+# fit on one line. Compensated by smaller font-size in agg below so the
+# rendered GIF stays readable at GitHub's ~800px embed width.
+COLS="${COLS:-140}"
+ROWS="${ROWS:-32}"
 
-WARMUP_SEC="${WARMUP_SEC:-45}"  # baseline + full spike before we record
+# agg font-size in pixels. Lower = smaller text, more columns visible.
+# 12 keeps a 140-col terminal under ~1100px and still legible.
+AGG_FONT_SIZE="${AGG_FONT_SIZE:-12}"
+
+WARMUP_SEC="${WARMUP_SEC:-30}"  # baseline + spike accumulate before we record
 POST_WAIT="${POST_WAIT:-3}"
+
+# Workload phase durations passed to demos/workload.sh. With human-paced
+# typing the recorded session runs ~90 seconds, so we keep the spike going
+# long enough that every reader query (especially the final \gset → query_waits
+# step ~80 s into the recording) still sees fresh `Lock:tuple` samples in its
+# 1-minute window. Override these to make the spike shorter / longer.
+export SPIKE_SEC="${SPIKE_SEC:-120}"
+export BASELINE_SEC="${BASELINE_SEC:-15}"
+export TAIL_SEC="${TAIL_SEC:-30}"
+
+# Human-typing pacing (milliseconds per character, with jitter).
+# Average ~60 cps (16ms/char) is a brisk touch-typist; we use 30-120ms range
+# so the pacing feels bursty rather than metronomic.
+TYPE_MIN_MS="${TYPE_MIN_MS:-30}"
+TYPE_MAX_MS="${TYPE_MAX_MS:-120}"
+# Extra pause after punctuation (`,`, `;`, `.`, `(`, `)`) — humans pause to
+# think at clause boundaries.
+TYPE_PUNCT_MS="${TYPE_PUNCT_MS:-180}"
 
 DOCKER="${DOCKER:-docker}"
 
@@ -100,16 +124,30 @@ until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sl
 
 # --- 2. Install pg_ash + seed + start sampling + workload --------------------
 log "installing pg_ash, seeding pgbench, starting sampling, kicking off workload"
-$DOCKER exec -d "$CONTAINER" bash /repo/demos/container-entrypoint.sh
+log "  workload phases: baseline=${BASELINE_SEC}s spike=${SPIKE_SEC}s tail=${TAIL_SEC}s"
+$DOCKER exec -d \
+  -e BASELINE_SEC="$BASELINE_SEC" \
+  -e SPIKE_SEC="$SPIKE_SEC" \
+  -e TAIL_SEC="$TAIL_SEC" \
+  "$CONTAINER" bash /repo/demos/container-entrypoint.sh
 
 # --- 3. Warm up --------------------------------------------------------------
 log "warming up (${WARMUP_SEC}s — baseline + spike accumulate)"
 sleep "$WARMUP_SEC"
 
 # Pre-stage a psqlrc inside the container that tightens the look of each query.
-# Critically: disable the pager. psql's default `less`-based pager intercepts
-# keystrokes from the recorder, corrupting the demo. We always want every row
-# rendered straight to stdout.
+# Critically:
+#   - Disable the default pager. psql's default `less`-based pager intercepts
+#     keystrokes from the recorder, corrupting the demo. We always want every
+#     row rendered straight to stdout.
+#   - Enable `ash.color = on` for the session so all reader functions emit
+#     ANSI escape codes in their `bar` / `chart` columns.
+#   - Define a `:color` psql variable that re-runs the previous query through
+#     `sed` to convert literal `\x1B` chars (which psql's aligned formatter
+#     emits in place of real escapes) back into real ESC bytes, so the
+#     terminal renders the colored bars. Mirrors the README pattern but
+#     skips `less -R` so the output is non-interactive (the recorder cannot
+#     drive an interactive pager).
 $DOCKER exec "$CONTAINER" bash -c "cat >/root/.psqlrc <<'PSQLRC'
 \\set QUIET on
 \\pset pager off
@@ -121,6 +159,8 @@ $DOCKER exec "$CONTAINER" bash -c "cat >/root/.psqlrc <<'PSQLRC'
 \\pset null ''
 \\pset format aligned
 \\pset tuples_only off
+set ash.color = on;
+\\set color '\\\\g | sed ''s/\\\\\\\\x1B/\\\\x1b/g'''
 \\unset QUIET
 PSQLRC
 "
@@ -133,20 +173,20 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 # geometry; positional arg is the output cast file.
 # Ship a tiny splash script into the container. It prints a coloured banner
 # (that becomes the GIF's first frame / GitHub thumbnail) and then execs psql.
-# Width is 98 chars (2 cols of padding on each side of a 100-col terminal).
+# Banner is sized for the wider 140-col terminal (138-char inner box).
 $DOCKER exec "$CONTAINER" bash -c 'cat >/tmp/ash_splash.sh <<"SPLASH"
 #!/bin/bash
 printf "\033[38;2;080;250;123m"
 cat <<BANNER
-╔══════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                                  ║
-║   pg_ash v1.4   —   Active Session History for Postgres                                          ║
-║                                                                                                  ║
-║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                  ║
-║                                                                                                  ║
-║   Investigation: something just spiked in the last minute. Let'"'"'s find out what.                  ║
-║                                                                                                  ║
-╚══════════════════════════════════════════════════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                                                                        ║
+║   pg_ash v1.4   —   Active Session History for Postgres                                                                                ║
+║                                                                                                                                        ║
+║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                                                        ║
+║                                                                                                                                        ║
+║   Investigation: something just spiked in the last minute. Let'"'"'s find out what.                                                        ║
+║                                                                                                                                        ║
+╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
 BANNER
 printf "\033[0m\n"
 exec psql -U postgres -d demo
@@ -162,11 +202,66 @@ tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
      '$CAST'"
 sleep 3.0
 
-# Send a line of text followed by Enter. Two-step form avoids tmux's
-# command-language parsing. The trailing space is load-bearing: tmux drops a
-# trailing `;` from -l args (even in literal mode), so we suffix a space to
-# preserve it. The space is harmless in psql.
-send() {
+# --- Human-paced typing ------------------------------------------------------
+# Send a string one character at a time with randomized inter-key delays so the
+# capture looks like a real person at the keyboard. Punctuation triggers a
+# slightly longer pause (clause-boundary breath). Followed by Enter.
+#
+# Tmux quirks handled:
+#   - `-l` is literal mode: passes the byte through without command parsing.
+#     Required for `;`, `(`, `$`, etc.
+#   - tmux drops a TRAILING `;` from `-l` even in literal mode (it doubles as
+#     the tmux command-language separator). Because we're sending one byte
+#     per call, every solo `;` IS trailing — we work around it below by
+#     smuggling a trailing space along with the final `;` of the line.
+#
+# Jitter is seeded per-char from $RANDOM for low-correlation timings.
+human_type_and_send() {
+  local text="$1"
+  local i ch ms send_str
+  local span=$(( TYPE_MAX_MS - TYPE_MIN_MS ))
+  local n=${#text}
+  for (( i=0; i<n; i++ )); do
+    ch="${text:$i:1}"
+    # Random delay in [TYPE_MIN_MS, TYPE_MAX_MS] inclusive.
+    if [ "$span" -gt 0 ]; then
+      ms=$(( TYPE_MIN_MS + ( RANDOM % (span + 1) ) ))
+    else
+      ms=$TYPE_MIN_MS
+    fi
+    case "$ch" in
+      ',' | ';' | '.' | '(' | ')')
+        # Clause boundary — humans pause to think.
+        ms=$(( ms + TYPE_PUNCT_MS ))
+        ;;
+      ' ')
+        # Words flow fast; a space is mostly a beat.
+        ms=$(( TYPE_MIN_MS + ( RANDOM % 40 ) ))
+        ;;
+    esac
+    # tmux send-keys -l drops a TRAILING `;` (its command-language separator)
+    # even in literal mode. Since we send one byte per call, EVERY solo `;`
+    # is trailing in its own send-keys arg — so we always smuggle a trailing
+    # space along with the semicolon to keep it from being eaten. That extra
+    # space is a no-op everywhere in psql syntax.
+    send_str="$ch"
+    if [ "$ch" = ";" ]; then
+      send_str="; "
+    fi
+    tmux send-keys -t "$SESSION" -l -- "$send_str"
+    # Convert ms -> seconds for sleep. printf handles the decimal.
+    sleep "$(printf '0.%03d' "$ms")"
+  done
+  # Submit the line.
+  tmux send-keys -t "$SESSION" Enter
+}
+
+# Reseed RANDOM from /dev/urandom for non-deterministic jitter across runs.
+RANDOM=$(( $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') ))
+
+# Convenience wrapper kept for any block that wants instant submission
+# (currently unused in the script body, but handy for debugging).
+send_instant() {
   tmux send-keys -t "$SESSION" -l "$1 "
   tmux send-keys -t "$SESSION" Enter
 }
@@ -176,54 +271,55 @@ send() {
 # investigation query.
 #
 # NOTE: psql treats any unterminated statement as continuation; every select
-# MUST end with `;`. (The `send()` helper uses tmux `-l` literal mode, so
-# semicolons are fine — they don't trigger tmux command parsing.)
+# MUST end with `;`. Reader functions are invoked with `p_color => true` so
+# the bar charts emit ANSI codes; the `:color` psql variable runs the query
+# through `sed` so the codes survive psql's aligned formatter.
 sleep 1.5
 
 # Act 2 — status: already sampling, version 1.4, pg_cron wired.
-send "select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
+human_type_and_send "select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
 sleep 3.8
 
-# Act 3 — top wait events: culprit is obvious.
-send '\echo -- Q1: which wait event is dominating in the last minute?'
-sleep 1.2
-send "select * from ash.top_waits('1 minute', 6);"
-sleep 4.2
-
-# Act 4 — timeline: when did the spike land?
-send '\echo -- Q2: when did the spike land?'
-sleep 1.1
-send "select bucket_start::time as t, active, chart from ash.timeline_chart('1 minute','10 seconds',4,32);"
+# Act 3 — top wait events: culprit is obvious. Use :color to render bars.
+human_type_and_send '\echo -- Q1: which wait event is dominating in the last minute?'
+sleep 1.0
+human_type_and_send "select * from ash.top_waits('1 minute', 10, 30, true) :color"
 sleep 4.6
 
+# Act 4 — timeline: when did the spike land?
+human_type_and_send '\echo -- Q2: when did the spike land?'
+sleep 1.0
+human_type_and_send "select bucket_start::time as t, active, chart from ash.timeline_chart('1 minute','10 seconds',4,40,true) :color"
+sleep 4.8
+
 # Act 5 — drill into the culprit wait event -> guilty queries.
-send '\echo -- Q3: which query is stuck on Lock:tuple?'
-sleep 1.2
-send "select query_id, samples, pct, bar, substr(query_text,1,42) as q from ash.event_queries('Lock:tuple','1 minute',3);"
-sleep 4.4
+human_type_and_send '\echo -- Q3: which query is stuck on Lock:tuple?'
+sleep 1.0
+human_type_and_send "select query_id, samples, pct, bar, substr(query_text,1,42) as q from ash.event_queries('Lock:tuple','1 minute',3,20,true) :color"
+sleep 4.6
 
 # Act 6 — full wait profile of the #1 guilty query (closes the loop:
 # top_waits -> event_queries -> query_waits, mirroring the LLM-assisted
 # investigation flow in the main README). \gset captures the top query_id
 # silently into :top_qid; we then call query_waits with it.
-send '\echo -- Q4: full wait profile of the top guilty query?'
-sleep 1.2
-send "select query_id as top_qid from ash.event_queries('Lock:tuple','1 minute',1) \\gset"
-sleep 0.4
-send "select wait_event, samples, pct, bar from ash.query_waits(:top_qid, '1 minute');"
-sleep 4.4
+human_type_and_send '\echo -- Q4: full wait profile of the top guilty query?'
+sleep 1.0
+human_type_and_send "select query_id as top_qid from ash.event_queries('Lock:tuple','1 minute',1) \\gset"
+sleep 0.5
+human_type_and_send "select wait_event, samples, pct, bar from ash.query_waits(:top_qid, '1 minute', 30, true) :color"
+sleep 4.8
 
 # Act 7 — closing lines. Held on screen for the "still" moment viewers see
 # when the gif loops back around.
-send '\echo '
+human_type_and_send '\echo '
 sleep 0.2
-send '\echo -- Root cause: concurrent UPDATEs on the same row.'
+human_type_and_send '\echo -- Root cause: concurrent UPDATEs on the same row.'
 sleep 1.4
-send '\echo -- pg_ash: pure SQL. No extension. No restart. Works everywhere.'
+human_type_and_send '\echo -- pg_ash: pure SQL. No extension. No restart. Works everywhere.'
 sleep 3.5
 
 # Quit psql cleanly.
-send '\q'
+human_type_and_send '\q'
 sleep 0.6
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -255,9 +351,9 @@ with open(path, 'w') as f:
 PY
 
 # --- 6. Render GIF -----------------------------------------------------------
-log "rendering gif via agg (cols=$COLS rows=$ROWS)"
+log "rendering gif via agg (cols=$COLS rows=$ROWS font-size=$AGG_FONT_SIZE)"
 agg \
-  --font-size 16 \
+  --font-size "$AGG_FONT_SIZE" \
   --theme monokai \
   --speed 1.0 \
   --fps-cap 15 \

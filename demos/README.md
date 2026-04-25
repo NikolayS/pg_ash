@@ -78,17 +78,21 @@ Override via environment variables:
 
 | Var | Default | What it controls |
 |-----|---------|-----------------|
-| `COLS` / `ROWS` | 100 / 28 | Terminal geometry (shrink for tighter embeds) |
-| `WARMUP_SEC` | 45 | Seconds of workload before recording starts |
+| `COLS` / `ROWS` | 140 / 32 | Terminal geometry — wider so `Lock:transactionid` / `Client:ClientRead` rows don't wrap |
+| `AGG_FONT_SIZE` | 12 | Pixel font-size passed to `agg`; lower keeps the wider terminal under ~1100 px |
+| `TYPE_MIN_MS` / `TYPE_MAX_MS` | 30 / 120 | Per-character keystroke jitter range (ms) — see "Typing pacing" below |
+| `TYPE_PUNCT_MS` | 180 | Extra pause after `, ; . ( )` characters |
+| `WARMUP_SEC` | 30 | Seconds of workload before recording starts |
 | `BASELINE_SEC` | 15 | Phase-1 pgbench duration inside the container |
-| `SPIKE_SEC` | 30 | Phase-2 lock-contention duration |
+| `SPIKE_SEC` | 120 | Phase-2 lock-contention duration — kept long enough that the spike outlives the ~90 s recording so the final `\gset` step still sees fresh `Lock:tuple` samples |
+| `TAIL_SEC` | 30 | Phase-3 quiet pgbench coda |
 | `LOCK_WORKERS` | 5 | Contender count — more = more lock waits |
 | `KEEP_CONTAINER` | 0 | Set `1` to leave the container running after recording (for re-takes) |
 
 Example — slower pacing and a larger spike:
 
 ```bash
-WARMUP_SEC=50 LOCK_WORKERS=8 make record
+WARMUP_SEC=40 SPIKE_SEC=150 LOCK_WORKERS=8 make record
 ```
 
 ### Re-running without recapturing the container
@@ -97,21 +101,60 @@ The `.cast` file is the source of truth — once you have one you like, re-rende
 the GIF without touching Docker:
 
 ```bash
-agg --font-size 16 --theme monokai --speed 1.0 --fps-cap 15 \
+agg --font-size 12 --theme monokai --speed 1.0 --fps-cap 15 \
   demos/ash_demo.cast demos/ash_demo.gif
+```
+
+### Typing pacing
+
+The recorder simulates a human at the keyboard rather than pasting commands
+instantly. The `human_type_and_send` helper in `record.sh` walks each command
+string one character at a time, calling `tmux send-keys -l` per character and
+sleeping a randomised interval between keystrokes.
+
+| Region | Delay |
+|--------|-------|
+| Letters / digits | `TYPE_MIN_MS`–`TYPE_MAX_MS` ms (default 30–120 ms) |
+| Spaces | 30–70 ms (slightly faster — words flow) |
+| Punctuation `, ; . ( )` | base + `TYPE_PUNCT_MS` (default +180 ms) — clause-boundary pause |
+
+Bash's `RANDOM` is reseeded from `/dev/urandom` at the start of each run so
+the pacing is non-deterministic. The aggregate effect is roughly 60 cps —
+brisk touch-typing, with visible "thinking" beats at punctuation.
+
+Want it even slower (more cinematic) or faster (shorter GIF)?
+
+```bash
+TYPE_MIN_MS=60 TYPE_MAX_MS=200 TYPE_PUNCT_MS=300 make record   # slower, more deliberate
+TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezier
 ```
 
 ## Design notes
 
-- **Geometry (100 × 28):** narrower than typical terminals so the embedded GIF
-  stays legible at GitHub's rendered ~800 px width.
+- **Geometry (140 × 32):** wider than typical README embeds so long wait
+  event names like `Lock:transactionid` / `Client:ClientRead` and the colored
+  bar charts fit on a single line. Compensated by `agg --font-size 12` so the
+  rendered GIF stays under ~1100 px and remains readable at GitHub's ~800 px
+  embed width.
 - **Theme:** `monokai` — dark background lets the pg_ash `_wait_color()` ANSI
   palette (cyan / red / yellow / pink / purple) pop.
-- **Pacing:** ~1.2 s between `echo` banners and commands, ~3–4 s between
-  commands so the viewer can read table output without pausing.
-- **First frame:** `ash.status()` output is already visible by ~3 s, so the
-  GitHub still preview shows a populated pg_ash pane rather than an empty
-  prompt.
+- **Colors on by default:** `set ash.color = on` is set in the demo's
+  `~/.psqlrc`, *and* every reader call passes `p_color => true` (or the
+  positional `true` argument) so the bars come back with ANSI codes. The
+  `:color` psql variable (mirroring the README pattern) re-runs the previous
+  query through `sed` to convert psql's literalised `\x1B` back into real ESC
+  bytes — without this step psql's aligned formatter would mangle the codes.
+  We omit `less -R` from the README pattern here because the recorder cannot
+  drive an interactive pager.
+- **Human-paced typing:** commands are typed one character at a time via
+  `tmux send-keys -l` with a 30–120 ms jitter and an extra ~180 ms beat at
+  punctuation, so the recording feels like a real session. See
+  [Typing pacing](#typing-pacing).
+- **Pacing:** ~1.0–1.2 s between `\echo` banners and commands, ~4–5 s after
+  each result so the viewer can read the colored table output without
+  pausing.
+- **First frame:** the splash banner is set to `t = 0`, so the GitHub still
+  preview shows the colored banner rather than an empty prompt.
 - **Loop:** closes on a held summary frame instead of a terminal exit line, so
   the auto-loop flows cleanly into the next opening banner.
 - **No faking:** every table comes from `ash.*` reader functions against real
