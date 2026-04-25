@@ -1740,6 +1740,29 @@ jobs:
             assert v_count >= 0,
               'top_waits_at(normal range) should not error, got: ' || v_count;
 
+            -- Pin "all _at readers inherit the helper-level fix" claim:
+            -- spot-check the remaining _at signatures (rollup readers,
+            -- decode_sample_at, event_queries_at) on absurd timestamps.
+            select count(*) into v_count from ash.minute_waits_at(
+              '1000-01-01'::timestamptz, '1000-01-01 01:00'::timestamptz);
+            assert v_count = 0,
+              'minute_waits_at(pre-epoch) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.hourly_queries_at(
+              '3000-01-01'::timestamptz, '3000-01-01 01:00'::timestamptz);
+            assert v_count = 0,
+              'hourly_queries_at(post-horizon) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.decode_sample_at(
+              '1000-01-01'::timestamptz);
+            assert v_count = 0,
+              'decode_sample_at(pre-epoch) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.event_queries_at(
+              'Lock:tuple', '1000-01-01'::timestamptz, '1000-01-01 01:00'::timestamptz);
+            assert v_count = 0,
+              'event_queries_at(pre-epoch) should return 0 rows, got: ' || v_count;
+
             -- === Non-existent queries ===
 
             select count(*) into v_count from ash.query_waits(999999999, '1 hour');
