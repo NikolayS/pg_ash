@@ -31,6 +31,21 @@ All changes go through PRs. Before merging, run a REV review (https://gitlab.com
 
 Never merge without explicit approval from the project owner.
 
+## Release gate
+
+**Tagging a release is blocked** until a comprehensive test pass against the release-candidate `main` returns a fully clean result. The pass MUST:
+
+- Spawn parallel agents (one per test surface) — minimum coverage:
+  - Fresh install + regression on every supported PG version
+  - Full upgrade chain (1.0 → … → release candidate) + idempotent re-apply + schema equivalence
+  - All new features introduced since the previous release, exercised behaviorally
+  - All existing features (privilege hardening, rollups, edge cases — not just the new stuff)
+  - Demo / docs reproducibility (e.g. `make -C demos record`)
+- Test against real Postgres in Docker — CI green is necessary but not sufficient.
+- If any agent reports a finding, file an issue, fix it, and re-run the **entire** pass. A partial re-run does not satisfy the gate; the whole suite must come back clean.
+
+Only after the comprehensive pass returns clean: bump version, generate the upgrade script for the new release, write release notes, tag, and publish. Skipping the gate means shipping bugs that get filed against a tagged version (v1.4 hit this — issues #46, #49, #51, #52, #53, #54, #61, #63 were all surfaced post-tag and would have blocked it).
+
 ## Stack
 
 - Pure SQL + PL/pgSQL (no extensions, no `.control` file)
