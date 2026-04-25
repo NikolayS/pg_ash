@@ -1,15 +1,15 @@
-# pg_ash 1.5 release notes
+# pg_ash 1.4 release notes
 
-Upgrade from 1.4: `\i sql/ash-1.4-to-1.5.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`. The upgrade script is idempotent and safe to re-run.
+Upgrade from 1.3: `\i sql/ash-1.3-to-1.4.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`. The upgrade script is idempotent and safe to re-run.
 
 ## Breaking changes
 
 ### `rebuild_partitions()` now requires a `'yes'` confirmation token
 
-`ash.rebuild_partitions(N)` drops every raw sample partition and is irreversible. To prevent accidental data loss, the function now takes a second argument and refuses to proceed unless it equals `'yes'`. Wording mirrors `ash.uninstall('yes')`.
+`ash.rebuild_partitions(N)` drops every raw sample partition and is irreversible. To prevent accidental data loss, the function takes a second argument and refuses to proceed unless it equals `'yes'`. Wording mirrors `ash.uninstall('yes')`.
 
 ```sql
--- before (1.4): silently destructive
+-- before: silently destructive
 select ash.rebuild_partitions(9);
 
 -- now: explicit confirmation required
@@ -18,11 +18,29 @@ select ash.rebuild_partitions(9, 'yes');
 
 Calling `ash.rebuild_partitions(N)` without the `'yes'` token raises an error and changes nothing — `sampling_enabled`, pg_cron jobs, and partition tables are all left untouched. The argument-validation runs before any destructive action. (#53)
 
-The `(int)` overload is dropped on upgrade. Existing callers (scripts, runbooks) must be updated to pass `'yes'`.
-
 ## What's new
 
-### Privilege provisioning helpers
+### Long-term storage: rollup tables
+
+Two new tables — `ash.rollup_1m` (per-minute) and `ash.rollup_1h` (per-hour) — aggregate raw samples into compact summaries that survive raw-partition rotation. Watermark-based functions populate them:
+
+- `ash.rollup_minute()` — incrementally rolls up new raw samples into `rollup_1m`
+- `ash.rollup_hour()` — rolls minutes into hours, using a custom `_int4_array_cat_agg` / `_int8_array_cat_agg` to handle minutes with different-length wait/query arrays
+- `ash.rollup_cleanup()` — enforces `rollup_1m_retention_days` (default 30) and `rollup_1h_retention_days` (default 1825 = ~5 years)
+
+New rollup readers expose the data: `ash.minute_waits`, `ash.minute_waits_at`, `ash.hourly_queries`, `ash.hourly_queries_at`, `ash.daily_peak_backends`, `ash.daily_peak_backends_at`.
+
+`ash.start()` schedules `rollup_minute` (every minute), `rollup_hour` (every hour), and `rollup_cleanup` (daily at 3am) alongside the sampler when pg_cron is available.
+
+### Configurable N partitions
+
+`ash.config.num_partitions` is now configurable in `[3, 32]`. Default is 3 (unchanged). `ash.rebuild_partitions(N, 'yes')` rebuilds the raw `sample_*` and `query_map_*` partition tables; `take_sample()` and `rotate()` use dynamic SQL that walks `num_partitions` instead of the hardcoded 3.
+
+### Privilege hardening (REVOKE from PUBLIC)
+
+Every reader function gets a `SET search_path = pg_catalog, ash, public[, <pgss_schema>]` guard that resists shadow attacks via session search_path. Every `ash.*` function has `EXECUTE` revoked from `PUBLIC`; every reader table has `SELECT` revoked. Helpers `ash._pgss_schema()` and `ash._apply_pgss_search_path()` detect the schema where `pg_stat_statements` lives and fold it into the search_path of pgss-aware readers. Hardcoded utilities (`ash.epoch()`, `ash.ts_from_timestamptz()`, `ash.ts_to_timestamptz()`) are re-granted to `PUBLIC` since they don't access sample data. (#45)
+
+#### Privilege provisioning helpers
 
 `ash.grant_reader(role)` and `ash.revoke_reader(role)` provision a monitoring role (Grafana, Datadog, etc.) with the minimum privileges to call every public reader. Owner-only, idempotent, symmetric undo. (#52)
 
@@ -33,59 +51,69 @@ select ash.grant_reader('grafana');
 select ash.revoke_reader('grafana');
 ```
 
-The admin function set is now centralized in `ash._admin_funcs()` — a single source of truth for the REVOKE-from-PUBLIC hardening block and the grant/revoke helpers. (#67)
+The admin function set is centralized in `ash._admin_funcs()` — a single source of truth for the REVOKE-from-PUBLIC hardening block and the grant/revoke helpers. (#67)
 
-### `decode_sample` convenience overloads
+> **Note:** After `ash.rebuild_partitions(N, 'yes')`, previously-granted reader roles lose access to the new partition tables. Re-run `ash.grant_reader(...)` for each monitoring role.
+
+### Decoded-sample convenience overloads
 
 `ash.decode_sample(p_sample_ts int4)` and `ash.decode_sample_at(p_ts timestamptz)` decode every row at a given timestamp without requiring the caller to fetch the packed `data` array first. The original `decode_sample(integer[], smallint)` is unchanged. (#54)
 
-### NOTICE on out-of-window `_at` queries
+### NOTICE on out-of-window queries (relative AND absolute)
 
-`ash._active_slots_for_at(p_start, p_end)` brings the same loud-warn behavior to absolute-time readers that `_active_slots_for(p_interval)` already provides for relative readers. Out-of-retention ranges return empty AND emit a NOTICE pointing at `2 * rotation_period`. (#69)
+When the requested time range falls outside the retained window (older than `2 * rotation_period`, or in the future), readers emit a `NOTICE` and return empty:
+
+- Relative-interval readers (`top_waits`, `top_queries`, etc.) — via `ash._active_slots_for(p_interval)`
+- Absolute-time `_at` readers (`top_waits_at`, `samples_at`, etc.) — via the new `ash._active_slots_for_at(p_start, p_end)` helper, mirroring the relative-interval behavior. (#69)
+
+### New observability counters
+
+Three new bigint columns on `ash.config`, all surfaced by `ash.status()`:
+
+- `missed_samples` — bumped when `take_sample()` catches `query_canceled` (statement_timeout or pg_cancel_backend). The sampler emits a `WARNING` and returns `-1` so callers can observe the miss. (#27, #28)
+- `insert_errors` — bumped when `take_sample()`'s inner `EXCEPTION WHEN OTHERS` swallows a non-cancel insert error instead of silently dropping data. (M-BUG-4)
+- `register_wait_cap_hits` — bumped when `_register_wait` skips a new `(state, type, event)` because `wait_event_map` has hit its 32 000-row cap. Counter reveals silently-dropped wait registrations. (M-BUG-6 / H-SEC-3)
+
+`status()` also reports `epoch_seconds_remaining` and the year-2094 horizon when `sample_ts` (int4 epoch offset) overflows — sampling hard-fails with `integer out of range` past that point, NOT silently wraps. (#37)
+
+### Misc
+
+- `sampling_enabled` flag and `skipped_samples` counter on `ash.config`
+- `ts_from_timestamptz()` / `ts_to_timestamptz()` epoch ↔ int4 helpers
+- `start()` validates the interval shape before branching on pg_cron availability, re-syncs `cron.job.schedule` on re-invocation, and defends against malformed `pg_cron` extversion strings (H-BUG-1, H-BUG-2, M-BUG-8)
+- Pre-truncation rollup in `rotate()` so the slot we're about to discard contributes to `rollup_1m` first
+- Advisory lock protocol around `take_sample()` ↔ `rotate()` to prevent overlapping samples landing in a slot mid-rotation
 
 ## Fixes
 
-- **No more `integer out of range` on absurd reader inputs.** Both the relative-interval readers (`top_waits('1000 years')`, etc.) and the absolute-timestamp `_at` readers (`top_waits_at('1000-01-01', '1000-01-02')`, etc.) now return empty rows cleanly. (#51, #63)
-- **`sample_data_check` constraint aligned across upgrade paths.** Installs upgraded from 1.0 had a looser `array_length(data, 1) >= 2` constraint that 1.1 silently failed to tighten because of `create table if not exists`. (#49)
+- **No more `integer out of range` on absurd reader inputs.** Both the relative-interval readers (`top_waits('1000 years')`, etc.) and the absolute-timestamp `_at` readers (`top_waits_at('1000-01-01', …)`, etc.) now return empty rows cleanly via clamps in the readers and in `ts_from_timestamptz`. (#51, #63)
+- **`sample_data_check` constraint aligned across upgrade paths.** Installs upgraded from 1.0 had a looser `array_length(data, 1) >= 2` check that 1.1 silently failed to tighten because of `create table if not exists`. An idempotent DO block in install.sql now drops + re-adds the `>= 3` form. (#49)
 - **`ash.status()` no longer errors for non-superuser monitoring roles when pg_cron is loaded.** A nested `EXCEPTION WHEN insufficient_privilege` substitutes a fallback row pointing at the missing `GRANT USAGE ON SCHEMA cron`. (#61)
 
 ## CI / infra
 
-- End-to-end pg_cron firing test (deferred from 1.4) now passes on every PG 14–18 cron-enabled job. Provisions a `root` PG role + database to satisfy peer auth in the GHA service container; asserts via `ash.sample` row growth. (#46)
-- Schema-equivalence CI now includes `pg_constraint` — catches the class of divergence behind #49. (#66)
+- End-to-end pg_cron firing test passes on every PG 14–18 cron-enabled job. Provisions a `root` PG role + database to satisfy peer auth in the GHA service container; asserts via `ash.sample` row growth with a real `pg_sleep` workload. (#46)
+- Schema-equivalence CI now diffs `pg_constraint` between fresh-install and chain-upgrade snapshots — catches the class of divergence behind #49. (#66)
 
 ## Demo
 
-README's hero visual is a [60-second animated GIF](demos/) of pg_ash investigating a row-lock spike on Postgres 18. Reproducible via `make -C demos record`. Human-paced typing, colored bar charts, vanilla psql in tmux. (PRs #64, #68)
-
----
-
-# pg_ash 1.4 release notes
-
-Upgrade from 1.3: `\i sql/ash-1.3-to-1.4.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`. The upgrade script is idempotent and safe to re-run.
-
-## What changed
-
-### Fixed: take_sample() no longer silently drops samples on statement_timeout
-
-`take_sample()` now catches `query_canceled` (raised by `statement_timeout`, and also by `pg_cancel_backend()`) instead of letting the exception propagate and leave the sample unrecorded. When the sampler is interrupted, it emits a `WARNING` and returns `-1` so the caller (pg_cron or external scheduler) can observe the miss. Use `pg_terminate_backend()` if you need to hard-cancel a running sampler. (#28)
-
-### New: missed_samples counter
-
-`ash.config` gains a `missed_samples bigint not null default 0` column. Every caught `query_canceled` in `take_sample()` increments it atomically. The new value is surfaced in `ash.status()` as the `missed_samples` metric, making sampler starvation easy to spot without digging through server logs. (#27, #28)
-
-### Improved: ash.status() output
-
-`status()` now emits a `missed_samples` row alongside the existing configuration and sampling metrics. All other columns and ordering are unchanged.
+README's hero visual is a [short animated GIF](demos/) of pg_ash investigating a row-lock spike on Postgres 18. Reproducible via `make -C demos record`. Human-paced typing, colored bar charts, vanilla psql in tmux. (PRs #64, #68)
 
 ## Functions
 
-| Function | Description |
-|---|---|
-| `take_sample()` | **Enhanced** — catches `query_canceled`, increments `missed_samples`, returns `-1` on miss |
-| `status()` | **Enhanced** — reports the new `missed_samples` metric |
+This release adds a substantial number of functions; the README's Function reference table is the canonical list. Highlights:
 
-All other functions unchanged from 1.3. See README for the full reference.
+| New function | Purpose |
+|---|---|
+| `ash.rebuild_partitions(N, p_confirm)` | Reconfigure to N raw partitions (destructive — requires `'yes'`) |
+| `ash.rollup_minute()` / `rollup_hour()` / `rollup_cleanup()` | Long-term rollup pipeline |
+| `ash.minute_waits` / `hourly_queries` / `daily_peak_backends` (+ `_at`) | Read rollup data |
+| `ash.grant_reader(role)` / `ash.revoke_reader(role)` | Provision monitoring roles |
+| `ash.decode_sample(int4)` / `decode_sample_at(timestamptz)` | Convenience overloads |
+| `ash._admin_funcs()` | Canonical admin function list |
+| `ash._active_slots_for_at(start, end)` | Helper for `_at` reader retention warnings |
+| `ash.ts_from_timestamptz` / `ts_to_timestamptz` / `epoch` | Epoch helpers (granted to PUBLIC) |
+| `ash._pgss_schema()` / `_apply_pgss_search_path()` | pgss-schema-aware search_path management |
 
 ---
 
