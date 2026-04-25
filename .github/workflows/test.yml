@@ -228,8 +228,8 @@ jobs:
             -- Config table initialized with version
             assert (select count(*) from ash.config) = 1,
               'config not initialized';
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 for fresh install';
+            assert (select version from ash.config where singleton) = '1.5',
+              'version should be 1.5 for fresh install';
 
             -- missed_samples column exists and defaults to 0
             assert exists (
@@ -3245,8 +3245,8 @@ jobs:
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 after upgrade';
+            assert (select version from ash.config where singleton) = '1.5',
+              'version should be 1.5 after upgrade';
             assert exists (
               select from information_schema.columns
               where table_schema = 'ash' and table_name = 'config' and column_name = 'missed_samples'
@@ -3404,8 +3404,8 @@ jobs:
             v_qid_id int4;
           begin
             -- Version landed on 1.4
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 after wrapper chain';
+            assert (select version from ash.config where singleton) = '1.5',
+              'version should be 1.5 after wrapper chain';
 
             -- (H-CI-2) Pre-existing v1.0 config values must survive
             select * into v_cfg from ash.config where singleton;
@@ -3497,8 +3497,8 @@ jobs:
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 after upgrade';
+            assert (select version from ash.config where singleton) = '1.5',
+              'version should be 1.5 after upgrade';
             assert (select missed_samples from ash.config where singleton) = 0,
               'missed_samples should be 0';
             raise notice '1.3 -> 1.4 direct upgrade PASSED';
@@ -3537,8 +3537,8 @@ jobs:
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should still be 1.4';
+            assert (select version from ash.config where singleton) = '1.5',
+              'version should still be 1.5';
             raise notice 'Idempotent re-apply PASSED';
           end;
           $$;
@@ -3554,8 +3554,8 @@ jobs:
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should still be 1.4 after second apply';
+            assert (select version from ash.config where singleton) = '1.5',
+              'version should still be 1.5 after second apply';
             assert (select missed_samples from ash.config where singleton) = 42,
               'missed_samples should be preserved (42) after idempotent re-apply';
             -- timeline_chart must still be callable after re-apply. No data
