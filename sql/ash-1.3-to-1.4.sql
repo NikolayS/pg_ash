@@ -1,7 +1,7 @@
 -- pg_ash: upgrade from 1.3 to 1.4
 -- NOTE: this script is a thin shim that runs `\ir ash-install.sql`, which
 -- always reflects the LATEST released version. Running it on a 1.3 install
--- upgrades all the way to the current latest (currently 1.5). This is by
+-- upgrades all the way to the current latest (currently 1.4). This is by
 -- design — install.sql's idempotent migrations cover every intermediate
 -- step. If you specifically want to land on 1.4, check out the v1.4 tag
 -- and use that ash-install.sql.

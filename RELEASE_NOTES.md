@@ -94,6 +94,8 @@ Three new bigint columns on `ash.config`, all surfaced by `ash.status()`:
 
 - End-to-end pg_cron firing test passes on every PG 14–18 cron-enabled job. Provisions a `root` PG role + database to satisfy peer auth in the GHA service container; asserts via `ash.sample` row growth with a real `pg_sleep` workload. (#46)
 - Schema-equivalence CI now diffs `pg_constraint` between fresh-install and chain-upgrade snapshots — catches the class of divergence behind #49. (#66)
+- **Hot-path perf** improvements in `query_waits` / `query_waits_at` (window-based dedup via `named_hits` CTE), `rotate()` (single-statement `truncate ash.sample_N, ash.query_map_N restart identity`), and the `_register_wait` cap probe (`offset 49999 limit 1` replacing stale `pg_class.reltuples`). (#42)
+- **Supply-chain hardening** for the GitHub Actions used to drive review and CI: every third-party action pinned to a 40-char commit SHA, per-event `author_association` gates on `claude.yml`, least-privilege `permissions:` blocks, and explicit `pull_request` (not `pull_request_target`) triggers. (#40)
 
 ## Demo
 
