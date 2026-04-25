@@ -1325,6 +1325,144 @@ jobs:
           $$;
           EOF
 
+      - name: Test _at NOTICE symmetry (#69)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Each scenario runs in its own transaction so the
+          # transaction-scoped ash.notice_oversized GUC starts unset.
+          # We assert it becomes '1' (== NOTICE fired) for out-of-retention
+          # ranges and stays unset for normal ranges, mirroring how the
+          # interval-based readers behave for oversized intervals.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Out-of-retention past
+          begin;
+            do $$
+            declare
+              v_count int;
+              v_flag text;
+            begin
+              select count(*) into v_count
+              from ash.top_waits_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+              assert v_count = 0,
+                'top_waits_at(1000-01-01..) should return 0 rows, got: ' || v_count;
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1',
+                'top_waits_at(1000-01-01..) should emit NOTICE (ash.notice_oversized=' ||
+                coalesce(v_flag, '<unset>') || ')';
+            end;
+            $$;
+          rollback;
+
+          -- Out-of-retention future
+          begin;
+            do $$
+            declare
+              v_count int;
+              v_flag text;
+            begin
+              select count(*) into v_count
+              from ash.top_waits_at('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+              assert v_count = 0,
+                'top_waits_at(3000-01-01..) should return 0 rows, got: ' || v_count;
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1',
+                'top_waits_at(3000-01-01..) should emit NOTICE (ash.notice_oversized=' ||
+                coalesce(v_flag, '<unset>') || ')';
+            end;
+            $$;
+          rollback;
+
+          -- Normal range — must NOT emit NOTICE
+          begin;
+            do $$
+            declare
+              v_count int;
+              v_flag text;
+            begin
+              select count(*) into v_count
+              from ash.top_waits_at(now() - interval '10 minutes', now());
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag is null or v_flag = '',
+                'top_waits_at(now()-10m, now()) should NOT emit NOTICE (ash.notice_oversized=' ||
+                coalesce(v_flag, '<null>') || ')';
+            end;
+            $$;
+          rollback;
+
+          -- Cross-reader sanity: each _at reader still routes through
+          -- _active_slots_for_at on out-of-retention, asserted via the GUC.
+          begin;
+            do $$
+            declare
+              v_flag text;
+            begin
+              perform * from ash.samples_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz, 1);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1', 'samples_at: NOTICE not emitted';
+              perform set_config('ash.notice_oversized', '', true);
+
+              perform * from ash.top_queries_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1', 'top_queries_at: NOTICE not emitted';
+              perform set_config('ash.notice_oversized', '', true);
+
+              perform * from ash.top_by_type_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1', 'top_by_type_at: NOTICE not emitted';
+              perform set_config('ash.notice_oversized', '', true);
+
+              perform * from ash.wait_timeline_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1', 'wait_timeline_at: NOTICE not emitted';
+              perform set_config('ash.notice_oversized', '', true);
+
+              perform * from ash.timeline_chart_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1', 'timeline_chart_at: NOTICE not emitted';
+              perform set_config('ash.notice_oversized', '', true);
+
+              perform * from ash.decode_sample_at('1000-01-01'::timestamptz);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1', 'decode_sample_at: NOTICE not emitted';
+              perform set_config('ash.notice_oversized', '', true);
+
+              -- query_waits_at: needs an existing query_id to avoid the
+              -- short-circuit; the seeded fixture uses 111111 (see earlier
+              -- "Seed test data" step in this job).
+              perform * from ash.query_waits_at(
+                111111,
+                '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag = '1', 'query_waits_at: NOTICE not emitted';
+
+              raise notice 'All _at readers fire NOTICE on out-of-retention range';
+            end;
+            $$;
+          rollback;
+
+          -- query_waits_at on a non-existent query must NOT emit NOTICE
+          -- (matches the relative ash.query_waits short-circuit pattern: the
+          -- function returns silently before reaching the helper).
+          begin;
+            do $$
+            declare
+              v_flag text;
+            begin
+              perform * from ash.query_waits_at(
+                999999999,
+                '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+              v_flag := current_setting('ash.notice_oversized', true);
+              assert v_flag is null or v_flag = '',
+                'query_waits_at(non-existent qid) should not NOTICE (ash.notice_oversized=' ||
+                coalesce(v_flag, '<null>') || ')';
+            end;
+            $$;
+          rollback;
+
+          \echo '_at NOTICE symmetry tests (#69) PASSED'
+          EOF
+
       - name: Test query-specific functions
         env:
           PGPASSWORD: postgres

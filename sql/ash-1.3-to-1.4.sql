@@ -56,4 +56,16 @@
 --     post-2094 horizon). Pre-epoch -> 0 and post-horizon -> INT4_MAX both
 --     fall outside any sample_ts window, yielding empty results — same class
 --     of fix as #51 (PR #57), centralized at the helper. (#63)
+--   - _active_slots_for_at(p_start, p_end) helper + every raw-sample _at
+--     reader (top_waits_at / top_queries_at / wait_timeline_at /
+--     top_by_type_at / query_waits_at / event_queries_at / timeline_chart_at /
+--     samples_at / decode_sample_at) routes its slot filter through it,
+--     restoring NOTICE symmetry with _active_slots_for(p_interval): callers
+--     get a loud-warn when the requested range falls outside the retained
+--     window (now() - 2 * rotation_period .. now()) instead of a silent
+--     empty result. The four SQL-language readers (top_waits_at,
+--     wait_timeline_at, top_by_type_at, decode_sample_at) flip to plpgsql so
+--     the helper can be invoked into a local — otherwise the planner would
+--     constant-fold the time predicate and skip the helper call (and its
+--     NOTICE). (#69)
 \ir ash-install.sql
