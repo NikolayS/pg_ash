@@ -38,8 +38,8 @@ Never merge without explicit approval from the project owner.
 - Spawn parallel agents (one per test surface) — minimum coverage:
   - Fresh install + regression on every supported PG version
   - Full upgrade chain (1.0 → … → release candidate) + idempotent re-apply + schema equivalence
-  - All new features introduced since the previous release, exercised behaviorally
-  - All existing features (privilege hardening, rollups, edge cases — not just the new stuff)
+  - All new features introduced since the previous release, **exercised behaviorally** (i.e. call the function, assert the side effect — not just check the function exists in the catalog)
+  - All existing features (privilege hardening, rollups, edge cases, **degraded mode without pg_cron and/or pg_stat_statements** — not just the new stuff)
   - Demo / docs reproducibility (e.g. `make -C demos record`)
 - Test against real Postgres in Docker — CI green is necessary but not sufficient.
 - If any agent reports a finding, file an issue, fix it, and re-run the **entire** pass. A partial re-run does not satisfy the gate; the whole suite must come back clean.
