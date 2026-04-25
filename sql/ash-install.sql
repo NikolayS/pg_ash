@@ -4856,7 +4856,13 @@ as $$
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
     -- the helpers themselves: granting them to a reader role would let
     -- that role hand out privileges. keep them admin-only.
-    'grant_reader', 'revoke_reader'
+    'grant_reader', 'revoke_reader',
+    -- _apply_pgss_search_path runs ALTER FUNCTION on every reader, which
+    -- requires owner privilege so a non-owner call would fail anyway, but
+    -- list it explicitly so grant_reader doesn't hand it to monitoring
+    -- roles in the first place. _pgss_schema() is read-only and can stay
+    -- generally callable.
+    '_apply_pgss_search_path'
   ]::text[]
 $$;
 
