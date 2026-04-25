@@ -1697,6 +1697,72 @@ jobs:
             assert v_count = 0,
               'event_queries(1000 years) should return 0 rows, got: ' || v_count;
 
+            -- === Absurd timestamps for _at variants (regression: #63) ===
+            -- Pre-epoch and post-2094-horizon timestamps would over/underflow
+            -- the int4 epoch offset in ash.ts_from_timestamptz. The helper
+            -- now clamps to [0, INT4_MAX] so every _at reader yields an empty
+            -- (or single-row placeholder for activity_summary-style readers)
+            -- result instead of raising integer-out-of-range.
+
+            -- Helper-level: pre-epoch -> 0, post-horizon -> INT4_MAX
+            assert ash.ts_from_timestamptz('1000-01-01'::timestamptz) = 0,
+              'ts_from_timestamptz(1000-01-01) should clamp to 0, got: ' ||
+              ash.ts_from_timestamptz('1000-01-01'::timestamptz);
+            assert ash.ts_from_timestamptz('3000-01-01'::timestamptz) = 2147483647,
+              'ts_from_timestamptz(3000-01-01) should clamp to INT4_MAX, got: ' ||
+              ash.ts_from_timestamptz('3000-01-01'::timestamptz);
+
+            -- Pre-epoch range -> empty
+            select count(*) into v_count from ash.top_waits_at(
+              '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+            assert v_count = 0,
+              'top_waits_at(pre-epoch) should return 0 rows, got: ' || v_count;
+
+            -- Post-horizon range -> empty
+            select count(*) into v_count from ash.top_waits_at(
+              '3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            assert v_count = 0,
+              'top_waits_at(post-horizon) should return 0 rows, got: ' || v_count;
+
+            -- Spot-check samples_at: same start/end after clamping yields empty
+            select count(*) into v_count from ash.samples_at(
+              '1000-01-01'::timestamptz, '1000-01-02'::timestamptz, 10);
+            assert v_count = 0,
+              'samples_at(pre-epoch) should return 0 rows, got: ' || v_count;
+            select count(*) into v_count from ash.samples_at(
+              '3000-01-01'::timestamptz, '3000-01-02'::timestamptz, 10);
+            assert v_count = 0,
+              'samples_at(post-horizon) should return 0 rows, got: ' || v_count;
+
+            -- Normal range still works (no regression in positive path)
+            select count(*) into v_count from ash.top_waits_at(
+              now() - interval '10 minutes', now());
+            assert v_count >= 0,
+              'top_waits_at(normal range) should not error, got: ' || v_count;
+
+            -- Pin "all _at readers inherit the helper-level fix" claim:
+            -- spot-check the remaining _at signatures (rollup readers,
+            -- decode_sample_at, event_queries_at) on absurd timestamps.
+            select count(*) into v_count from ash.minute_waits_at(
+              '1000-01-01'::timestamptz, '1000-01-01 01:00'::timestamptz);
+            assert v_count = 0,
+              'minute_waits_at(pre-epoch) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.hourly_queries_at(
+              '3000-01-01'::timestamptz, '3000-01-01 01:00'::timestamptz);
+            assert v_count = 0,
+              'hourly_queries_at(post-horizon) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.decode_sample_at(
+              '1000-01-01'::timestamptz);
+            assert v_count = 0,
+              'decode_sample_at(pre-epoch) should return 0 rows, got: ' || v_count;
+
+            select count(*) into v_count from ash.event_queries_at(
+              'Lock:tuple', '1000-01-01'::timestamptz, '1000-01-01 01:00'::timestamptz);
+            assert v_count = 0,
+              'event_queries_at(pre-epoch) should return 0 rows, got: ' || v_count;
+
             -- === Non-existent queries ===
 
             select count(*) into v_count from ash.query_waits(999999999, '1 hour');
