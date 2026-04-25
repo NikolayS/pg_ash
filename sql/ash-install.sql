@@ -855,6 +855,14 @@ $$;
 -- shape. Named decode_sample_at() (matching the samples_at / top_waits_at
 -- naming convention) so we don't create a decode_sample(unknown) ambiguity
 -- between int4 and timestamptz overloads.
+--
+-- Intentionally NOT routed through _active_slots_for_at() (#69): unlike the
+-- range-scan _at readers, decode_sample_at is a point-lookup keyed by an
+-- exact sample_ts. Restricting to the helper's "now() - 2*rotation_period
+-- .. now()" active-slots window would hide rows the caller can prove exist
+-- (matching sample_ts in any partition). The silent ts_from_timestamptz()
+-- int4 clamp from #63 is sufficient: absurd timestamps still don't error,
+-- they just miss every partition.
 create or replace function ash.decode_sample_at(p_ts timestamptz)
 returns table (
   datid      oid,
@@ -1648,6 +1656,78 @@ begin
     -- v_min_ts to 0 and matches every retained sample, contradicting the
     -- "older samples not available" promise. Callers wanting all retained
     -- data should pass an interval <= 2 * rotation_period.
+    return array[]::smallint[];
+  end if;
+
+  return array[
+    v_current_slot,
+    ((v_current_slot - 1 + 3) % 3)::smallint
+  ];
+end;
+$$;
+
+-- Absolute-range counterpart to ash._active_slots_for(interval), used by every
+-- _at reader (top_waits_at, samples_at, query_waits_at, etc.). Returns the
+-- active slot set when the requested [p_start, p_end) range overlaps what raw
+-- samples retain (~2 * rotation_period back from now()), and an empty array
+-- with a NOTICE when it doesn't — restoring loud-warn symmetry with the
+-- relative readers (#69). Without this, _at readers silently returned 0 rows
+-- on absurd inputs (year 1000, year 3000) thanks to ts_from_timestamptz()'s
+-- int4 clamp (#63), which was a UX regression vs the interval path.
+--
+-- Out-of-retention conditions (each emits the NOTICE and returns {}):
+--   * p_end   <= now() - 2 * rotation_period   (range entirely too old)
+--   * p_start >  now()                          (range entirely in the future)
+--
+-- Importantly, an empty range (p_start >= p_end) inside the retained window
+-- is NOT flagged — callers may legitimately ask for a zero-length window and
+-- a NOTICE would be noise. Likewise nulls are passed through silently; the
+-- reader's own WHERE clause filters them out as unknown comparisons.
+--
+-- Shares the ash.notice_oversized transaction-scoped GUC with
+-- _active_slots_for(interval) so multi-call readers (and the relative wrapper
+-- chain delegating into _at) don't spam one NOTICE per sub-query.
+--
+-- Readers must invoke this helper into a local variable in plpgsql (not as a
+-- predicate inside language=sql bodies) — otherwise the planner can fold the
+-- accompanying time predicate to false and skip the call entirely, losing the
+-- NOTICE side-effect. See top_waits_at and friends for the established
+-- pattern.
+create or replace function ash._active_slots_for_at(
+  p_start timestamptz,
+  p_end   timestamptz
+)
+returns smallint[]
+language plpgsql
+stable
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_current_slot    smallint;
+  v_rotation_period interval;
+  v_now             timestamptz := now();
+  v_retention_start timestamptz;
+  v_already         text;
+begin
+  select current_slot, rotation_period
+    into v_current_slot, v_rotation_period
+  from ash.config
+  where singleton;
+
+  v_retention_start := v_now - 2 * v_rotation_period;
+
+  -- Out-of-retention check. Skip when either bound is null (the reader's
+  -- own WHERE will yield empty without us needing to NOTICE) or when the
+  -- range is empty inside retention (legitimate degenerate query).
+  if p_start is not null and p_end is not null
+     and (p_end <= v_retention_start or p_start > v_now) then
+    v_already := current_setting('ash.notice_oversized', true);
+    if v_already is null or v_already = '' then
+      raise notice
+        'requested range [%, %) lies outside the retained window (now - 2 * rotation_period .. now, i.e. [%, %)); only the last two partitions are retained, so older or future samples are not available. Adjust the range or increase rotation_period via ash.config.',
+        p_start, p_end, v_retention_start, v_now;
+      perform set_config('ash.notice_oversized', '1', true);
+    end if;
     return array[]::smallint[];
   end if;
 
@@ -3154,7 +3234,14 @@ as $$
   select ash.ts_from_timestamptz(p_ts)
 $$;
 
--- Top waits in an absolute time range
+-- Top waits in an absolute time range.
+-- plpgsql (not sql) so the _active_slots_for_at(p_start, p_end) NOTICE side
+-- effect is observable even when the time predicates fold to false (e.g.
+-- p_start = p_end = 0 after ts_from_timestamptz clamps absurd dates). A
+-- language=sql body would inline the helper into the WHERE clause, which
+-- the planner can short-circuit out of when the rest of the predicate is
+-- provably empty (#69). Pulling the call into a local first guarantees
+-- evaluation regardless of plan shape.
 create or replace function ash.top_waits_at(
   p_start timestamptz,
   p_end timestamptz,
@@ -3168,11 +3255,21 @@ returns table (
   pct numeric,
   bar text
 )
-language sql
+language plpgsql
 stable
 set jit = off
 set search_path = pg_catalog, ash
 as $$
+-- The OUT-parameter table columns (wait_event, samples, pct, bar) collide
+-- with bare column references inside the embedded SQL — tell plpgsql to
+-- prefer the column over the function variable in those CTEs.
+#variable_conflict use_column
+declare
+  v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
+  v_start int4       := ash.ts_from_timestamptz(p_start);
+  v_end   int4       := ash.ts_from_timestamptz(p_end);
+begin
+  return query
   with waits as (
     select
       case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as wait_event,
@@ -3180,9 +3277,9 @@ as $$
     from ash.sample s, generate_subscripts(s.data, 1) i,
          ash.wait_event_map wm
     where wm.id = (-s.data[i])::smallint
-      and s.slot = any(ash._active_slots())
-      and s.sample_ts >= ash.ts_from_timestamptz(p_start)
-      and s.sample_ts < ash.ts_from_timestamptz(p_end)
+      and s.slot = any(v_slots)
+      and s.sample_ts >= v_start
+      and s.sample_ts < v_end
       and s.data[i] < 0
   ),
   totals as (
@@ -3215,13 +3312,14 @@ as $$
   )
   select
     r.wait_event,
-    r.cnt as samples,
+    r.cnt::bigint as samples,
     round(r.cnt::numeric / gt.total * 100, 2) as pct,
     ash._bar(r.wait_event, round(r.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color) as bar
   from (select * from top_rows union all select * from other) r
   cross join grand_total gt
   cross join max_pct mp
-  order by r.rn
+  order by r.rn;
+end;
 $$;
 
 -- Top queries in an absolute time range
@@ -3244,6 +3342,9 @@ set search_path = pg_catalog, ash, public
 as $$
 declare
   v_has_pgss boolean := false;
+  -- Pull v_slots first so the helper's NOTICE fires even when the time
+  -- predicate folds to false on absurd ranges (#69).
+  v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
   v_start int4 := ash.ts_from_timestamptz(p_start);
   v_end int4 := ash.ts_from_timestamptz(p_end);
 begin
@@ -3260,7 +3361,7 @@ begin
     with qids as (
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
-      where s.slot = any(ash._active_slots())
+      where s.slot = any(v_slots)
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and i > 1 and s.data[i] >= 0 and s.data[i - 1] >= 0
     ),
@@ -3286,7 +3387,7 @@ begin
     with qids as (
       select s.slot, s.data[i] as map_id
       from ash.sample s, generate_subscripts(s.data, 1) i
-      where s.slot = any(ash._active_slots())
+      where s.slot = any(v_slots)
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and i > 1 and s.data[i] >= 0 and s.data[i - 1] >= 0
     ),
@@ -3310,6 +3411,8 @@ end;
 $$;
 
 -- Wait timeline in an absolute time range
+-- plpgsql (not sql) so the _active_slots_for_at NOTICE side effect fires even
+-- when the time predicate folds to false; see top_waits_at for context (#69).
 create or replace function ash.wait_timeline_at(
   p_start timestamptz,
   p_end timestamptz,
@@ -3320,20 +3423,28 @@ returns table (
   wait_event text,
   samples bigint
 )
-language sql
+language plpgsql
 stable
 set jit = off
 set search_path = pg_catalog, ash
 as $$
+-- OUT-param columns shadow embedded SQL aliases; prefer column refs.
+#variable_conflict use_column
+declare
+  v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
+  v_start int4       := ash.ts_from_timestamptz(p_start);
+  v_end   int4       := ash.ts_from_timestamptz(p_end);
+begin
+  return query
   with waits as (
     select
       ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
       (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots())
-      and s.sample_ts >= ash.ts_from_timestamptz(p_start)
-      and s.sample_ts < ash.ts_from_timestamptz(p_end)
+    where s.slot = any(v_slots)
+      and s.sample_ts >= v_start
+      and s.sample_ts < v_end
       and s.data[i] < 0
   )
   select
@@ -3343,10 +3454,13 @@ as $$
   from waits w
   join ash.wait_event_map wm on wm.id = w.wait_id
   group by w.bucket, wm.type, wm.event
-  order by w.bucket, sum(w.cnt) desc
+  order by w.bucket, sum(w.cnt) desc;
+end;
 $$;
 
 -- Wait event type distribution in an absolute time range
+-- plpgsql (not sql) so the _active_slots_for_at NOTICE side effect fires even
+-- when the time predicate folds to false; see top_waits_at for context (#69).
 create or replace function ash.top_by_type_at(
   p_start timestamptz,
   p_end timestamptz,
@@ -3359,17 +3473,25 @@ returns table (
   pct numeric,
   bar text
 )
-language sql
+language plpgsql
 stable
 set jit = off
 set search_path = pg_catalog, ash
 as $$
+-- OUT-param columns shadow embedded SQL aliases; prefer column refs.
+#variable_conflict use_column
+declare
+  v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
+  v_start int4       := ash.ts_from_timestamptz(p_start);
+  v_end   int4       := ash.ts_from_timestamptz(p_end);
+begin
+  return query
   with waits as (
     select (-s.data[i])::smallint as wait_id, s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots())
-      and s.sample_ts >= ash.ts_from_timestamptz(p_start)
-      and s.sample_ts < ash.ts_from_timestamptz(p_end)
+    where s.slot = any(v_slots)
+      and s.sample_ts >= v_start
+      and s.sample_ts < v_end
       and s.data[i] < 0
   ),
   totals as (
@@ -3390,7 +3512,8 @@ as $$
     round(t.cnt::numeric / gt.total * 100, 2),
     ash._bar(t.wait_type || ':*', round(t.cnt::numeric / gt.total * 100, 2), mp.m, p_width, p_color)
   from totals t, grand_total gt, max_pct mp
-  order by t.cnt desc
+  order by t.cnt desc;
+end;
 $$;
 
 -- Query waits in an absolute time range
@@ -3415,10 +3538,18 @@ as $$
 declare
   v_start int4 := ash.ts_from_timestamptz(p_start);
   v_end int4 := ash.ts_from_timestamptz(p_end);
+  v_slots smallint[];
 begin
   if not exists (select from ash.query_map_all where query_id = p_query_id) then
     return;
   end if;
+
+  -- Computed after the query_id existence short-circuit (matching the
+  -- relative ash.query_waits pattern: a non-existent query_id returns
+  -- silently without emitting any NOTICE about retention). Pulled into
+  -- a local so the NOTICE side effect fires regardless of whether the
+  -- time predicate folds out (#69).
+  v_slots := ash._active_slots_for_at(p_start, p_end);
 
   return query
   with map_ids as (
@@ -3427,7 +3558,7 @@ begin
   samples as (
     select s.ctid, s.slot, s.data
     from ash.sample s
-    where s.slot = any(ash._active_slots())
+    where s.slot = any(v_slots)
       and s.sample_ts >= v_start and s.sample_ts < v_end
   ),
   -- See ash.query_waits for commentary: O(N) running-group rewrite
@@ -3826,6 +3957,7 @@ declare
   v_max_active numeric;
   v_start_ts int4;
   v_end_ts int4;
+  v_slots smallint[];
   v_bucket_secs int4;
   v_rec record;
   v_bar text;
@@ -3843,6 +3975,9 @@ declare
 begin
   v_start_ts := ash.ts_from_timestamptz(p_start);
   v_end_ts := ash.ts_from_timestamptz(p_end);
+  -- Pulled into a local so the NOTICE side effect fires even when the
+  -- inner queries' time predicates fold to false (#69).
+  v_slots := ash._active_slots_for_at(p_start, p_end);
   v_bucket_secs := extract(epoch from p_bucket)::int4;
 
   -- Rank by avg active sessions weighted by bucket presence
@@ -3864,7 +3999,7 @@ begin
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
-        and s.slot = any(ash._active_slots())
+        and s.slot = any(v_slots)
         and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
         and s.data[i] < 0
       group by 1
@@ -3890,7 +4025,7 @@ begin
       sum(s.data[i + 1])::numeric
         / nullif(count(distinct s.sample_ts), 0) as avg_total
     from ash.sample s, generate_subscripts(s.data, 1) i
-    where s.slot = any(ash._active_slots())
+    where s.slot = any(v_slots)
       and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
       and s.data[i] < 0
     group by 1
@@ -3925,7 +4060,7 @@ begin
       from ash.sample s, generate_subscripts(s.data, 1) i,
            ash.wait_event_map wm
       where wm.id = (-s.data[i])::smallint
-        and s.slot = any(ash._active_slots())
+        and s.slot = any(v_slots)
         and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
         and s.data[i] < 0
       group by 1, 2
@@ -3935,7 +4070,7 @@ begin
         s.sample_ts - (s.sample_ts % v_bucket_secs) as bucket_ts,
         count(distinct s.sample_ts) as n_samples
       from ash.sample s
-      where s.slot = any(ash._active_slots())
+      where s.slot = any(v_slots)
         and s.sample_ts >= v_start_ts and s.sample_ts < v_end_ts
       group by 1
     ),
@@ -4138,9 +4273,13 @@ declare
   v_has_pgss boolean := false;
   v_start int4;
   v_end int4;
+  v_slots smallint[];
 begin
   v_start := ash.ts_from_timestamptz(p_start);
   v_end := ash.ts_from_timestamptz(p_end);
+  -- Pulled into a local so the helper's NOTICE side effect fires even when
+  -- the time predicate folds to false on absurd ranges (#69).
+  v_slots := ash._active_slots_for_at(p_start, p_end);
 
   begin
     perform 1 from pg_stat_statements limit 1;
@@ -4162,7 +4301,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots())
+      where s.slot = any(v_slots)
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
@@ -4198,7 +4337,7 @@ begin
       from ash.sample s,
         generate_subscripts(s.data, 1) i,
         generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots())
+      where s.slot = any(v_slots)
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
@@ -4398,6 +4537,9 @@ declare
   v_has_pgss boolean := false;
   v_start int4 := ash.ts_from_timestamptz(p_start);
   v_end int4 := ash.ts_from_timestamptz(p_end);
+  -- Pulled into a local so the helper's NOTICE side effect fires even when
+  -- the time predicate folds to false on absurd ranges (#69).
+  v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
 begin
   begin
     perform 1 from pg_stat_statements limit 1;
@@ -4428,7 +4570,7 @@ begin
         generate_subscripts(s.data, 1) i,
         matching_waits mw,
         lateral generate_series(0, greatest(s.data[i + 1] - 1, -1)) gs(n)
-      where s.slot = any(ash._active_slots())
+      where s.slot = any(v_slots)
         and s.sample_ts >= v_start and s.sample_ts < v_end
         and s.data[i] < 0
         and (-s.data[i])::smallint = mw.wait_id
