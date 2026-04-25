@@ -48,4 +48,7 @@
 --     symmetric undo. (#52)
 --   - rebuild_partitions(p_num_partitions, p_confirm) — destructive, requires
 --     p_confirm = 'yes' to proceed; old (int) overload is dropped (#53).
+--   - ash._admin_funcs() — canonical admin function list, single source of
+--     truth for the REVOKE-from-PUBLIC hardening block and for
+--     grant_reader/revoke_reader. Refactor; no behavior change (#67).
 \ir ash-install.sql

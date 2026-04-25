@@ -562,6 +562,22 @@ jobs:
           -- Idempotency: second revoke_reader is a no-op.
           select ash.revoke_reader('ash_grafana');
 
+          -- Sanity: ash._admin_funcs() returns the canonical admin set
+          -- (single source of truth for grant_reader/revoke_reader and the
+          -- REVOKE-from-PUBLIC hardening block).
+          do $$
+          begin
+            assert array_length(ash._admin_funcs(), 1) > 10,
+              'ash._admin_funcs() must return a non-trivial admin list';
+            -- Spot-check a few canonical entries to catch accidental drift.
+            assert 'start' = any(ash._admin_funcs()),
+              'ash._admin_funcs() must include start';
+            assert 'take_sample' = any(ash._admin_funcs()),
+              'ash._admin_funcs() must include take_sample';
+            assert 'grant_reader' = any(ash._admin_funcs()),
+              'ash._admin_funcs() must include grant_reader';
+          end $$;
+
           drop role ash_grafana;
           EOF
 
