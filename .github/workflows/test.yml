@@ -3333,20 +3333,25 @@ jobs:
           declare
             v_found bool;
           begin
-            -- Acquire the ash_operation lock (same as take_sample uses)
-            perform pg_advisory_xact_lock(0, hashtext('ash_operation')::int4);
+            -- Acquire the sampler lock (same kind take_sample acquires).
+            -- Pattern updated for the v1.4 release-gate fix: ash locks now
+            -- share classid = hashtext('pg_ash')::int4 with per-kind objids.
+            perform pg_advisory_xact_lock(
+              hashtext('pg_ash')::int4,
+              hashtext('pg_ash_sampler')::int4
+            );
 
-            -- Verify it appears in pg_locks with correct classid/objid
+            -- Verify it appears in pg_locks with the new ash-scoped classid.
             select exists (
               select from pg_locks
               where locktype = 'advisory'
-                and classid = 0
-                and objid = hashtext('ash_operation')::int4::oid
+                and classid = hashtext('pg_ash')::int4::oid
+                and objid = hashtext('pg_ash_sampler')::int4::oid
                 and granted
             ) into v_found;
 
             assert v_found,
-              'ash_operation advisory lock should be visible in pg_locks';
+              'pg_ash_sampler advisory lock should be visible in pg_locks';
 
             raise notice 'Advisory lock visibility test PASSED';
           end;
