@@ -119,6 +119,21 @@ jobs:
             # PGDG catches up (e.g. PG18). Don't fail the job; downstream
             # cron-gated tests check `pg_extension` and skip themselves.
             psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available (PGDG package missing for this PG major)"
+
+            # Issue #46: pg_cron's scheduler/maintenance threads open a libpq
+            # connection back to localhost as the container's OS user (root).
+            # Peer auth needs both a matching PG role AND a default database
+            # of the same name — otherwise the postgres log fills with
+            # `FATAL: role "root" does not exist` or `FATAL: database "root"
+            # does not exist`, even though `cron.use_background_workers = on`
+            # makes the actual job execution bgworker-based. Provision both
+            # so the wiring is clean and H-CI-3 below can assert real firing.
+            if psql -h localhost -U postgres -d postgres -tAc "select 1 from pg_extension where extname = 'pg_cron'" | grep -q 1; then
+              psql -h localhost -U postgres -d postgres -tAc "select 1 from pg_roles where rolname = 'root'" | grep -q 1 \
+                || psql -h localhost -U postgres -d postgres -c "create role root superuser login;"
+              psql -h localhost -U postgres -d postgres -tAc "select 1 from pg_database where datname = 'root'" | grep -q 1 \
+                || psql -h localhost -U postgres -d postgres -c "create database root owner postgres;"
+            fi
           fi
           # pg_stat_statements normally ships with every supported PG version,
           # but PGDG occasionally lags contrib on release day for a brand-new
@@ -992,17 +1007,105 @@ jobs:
           $$;
           EOF
 
-      # End-to-end "pg_cron actually fires ash.take_sample on schedule"
-      # (issue #37 H-CI-3) is deferred to issue #46. The in-DB logic
-      # (ash.start / ash.take_sample / cron wiring) is still exercised by
-      # direct take_sample() calls elsewhere in this workflow and by the
-      # "Verify pg_cron wiring" step above. What's deferred is the
-      # end-to-end "cron actually fires on schedule in CI" assertion,
-      # which kept failing because pg_cron's scheduler metadata
-      # connection hits `FATAL: database "root" does not exist` in the
-      # GHA service container (peer auth defaults dbname to OS user
-      # `root`). See https://github.com/NikolayS/pg_ash/issues/46 for
-      # the iterations attempted and proposed next steps.
+      - name: "H-CI-3: end-to-end pg_cron fires ash.take_sample (#46)"
+        # Closes #46. Pre-reqs (provisioned in "Create pg_cron extension"
+        # above): pg_cron extension created, `root` role exists,
+        # `root` database exists, `cron.use_background_workers = on`.
+        # Together those let pg_cron's libpq self-connect succeed (peer
+        # auth as OS user `root` → role `root` → default db `root`)
+        # AND let scheduled jobs run as bgworkers in the target db.
+        if: ${{ matrix.cron == 'on' }}
+        env:
+          PGPASSWORD: postgres
+          CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          # Skip cleanly if pg_cron isn't actually installed (PGDG lag).
+          if ! psql -h localhost -U postgres -d postgres -tAc \
+            "select 1 from pg_extension where extname = 'pg_cron'" | grep -q 1; then
+            echo "pg_cron not installed — skipping H-CI-3"
+            exit 0
+          fi
+
+          # Background workload so take_sample() has active sessions to capture.
+          # In a quiescent container, ash.take_sample() returns 0 (no active
+          # backends to sample). Start a couple of long-running pg_sleep
+          # connections in the background so each cron tick sees activity.
+          (psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
+           psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
+           psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &) || true
+          # Give the sleepers a moment to register in pg_stat_activity.
+          sleep 2
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Clean slate: stop any prior sampler, truncate raw partitions
+          -- so the post-baseline count is unambiguous.
+          select ash.stop();
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+
+          -- Capture pre-start baseline (should be 0 across all slots).
+          do $$
+          declare
+            v_baseline bigint;
+          begin
+            select count(*) into v_baseline from ash.sample;
+            assert v_baseline = 0,
+              format('expected 0 samples after truncate, got %s', v_baseline);
+          end $$;
+
+          -- Schedule sampling at 1 Hz via pg_cron.
+          select ash.start('1 second');
+
+          -- Sanity: cron.job has the ash row.
+          do $$
+          declare
+            v_jobs int;
+          begin
+            select count(*) into v_jobs
+            from cron.job where jobname like 'ash_%';
+            assert v_jobs >= 1,
+              format('expected ash_* job(s) in cron.job, got %s', v_jobs);
+          end $$;
+          EOF
+
+          # Poll for actual job runs. With cron.use_background_workers=on
+          # the jobs fire as bgworkers — but cron.job_run_details is only
+          # populated for the libpq-mode path, so we assert via the side
+          # effect we actually care about: ash.sample row count growth.
+          # Allow 90 s with 5 s progress notices so a future regression's
+          # signature is visible in the log.
+          deadline=$((SECONDS + 90))
+          while [ $SECONDS -lt $deadline ]; do
+            samples=$(psql -h localhost -U postgres -d postgres -tAc "select count(*) from ash.sample")
+            echo "  waited=$((SECONDS)) samples=$samples"
+            if [ "${samples:-0}" -gt 0 ]; then
+              echo "H-CI-3 PASSED: pg_cron fired ash.take_sample and ash.sample has $samples row(s)"
+              break
+            fi
+            sleep 5
+          done
+
+          # Hard-fail with diagnostics if no samples ever appeared.
+          if [ "${samples:-0}" -eq 0 ]; then
+            echo "::error::H-CI-3 FAILED: pg_cron did not fire ash.take_sample within 90 s (no rows in ash.sample)"
+            echo "--- ash.status() ---"
+            psql -h localhost -U postgres -d postgres -c "select * from ash.status()"
+            echo "--- ash.config ---"
+            psql -h localhost -U postgres -d postgres -c "select * from ash.config"
+            echo "--- ash.take_sample() called manually ---"
+            psql -h localhost -U postgres -d postgres -c "select ash.take_sample(); select count(*) from ash.sample;"
+            echo "--- cron.job ---"
+            psql -h localhost -U postgres -d postgres -c "select * from cron.job"
+            echo "--- cron.job_run_details (last 10) ---"
+            psql -h localhost -U postgres -d postgres -c "select * from cron.job_run_details order by start_time desc limit 10"
+            echo "--- pg_stat_activity (pg_cron-related) ---"
+            psql -h localhost -U postgres -d postgres -c "select pid, backend_type, application_name, state, wait_event_type, wait_event, query from pg_stat_activity where backend_type ilike '%cron%' or application_name ilike '%cron%' or query ilike '%cron%'"
+            echo "--- postgres logs (last 200 lines) ---"
+            docker logs --tail 200 "$CONTAINER_ID" 2>&1 || true
+            exit 1
+          fi
+
+          # Tear down: stop the sampler, leave state consistent for later steps.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "select ash.stop();"
 
       - name: Test set_debug_logging
         env:
