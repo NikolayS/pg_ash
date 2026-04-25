@@ -1026,6 +1026,16 @@ jobs:
             exit 0
           fi
 
+          # Background workload so take_sample() has active sessions to capture.
+          # In a quiescent container, ash.take_sample() returns 0 (no active
+          # backends to sample). Start a couple of long-running pg_sleep
+          # connections in the background so each cron tick sees activity.
+          (psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
+           psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
+           psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &) || true
+          # Give the sleepers a moment to register in pg_stat_activity.
+          sleep 2
+
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           -- Clean slate: stop any prior sampler, truncate raw partitions
           -- so the post-baseline count is unambiguous.
