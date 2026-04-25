@@ -59,16 +59,20 @@
 --   - ash._admin_funcs() — canonical admin function list, single source of
 --     truth for the REVOKE-from-PUBLIC hardening block and for
 --     grant_reader/revoke_reader. Refactor; no behavior change (#67).
---   - _active_slots_for_at(p_start, p_end) helper + every raw-sample _at
---     reader (top_waits_at / top_queries_at / wait_timeline_at /
---     top_by_type_at / query_waits_at / event_queries_at / timeline_chart_at /
---     samples_at / decode_sample_at) routes its slot filter through it,
+--   - _active_slots_for_at(p_start, p_end) helper + every range-scan
+--     raw-sample _at reader (top_waits_at / top_queries_at /
+--     wait_timeline_at / top_by_type_at / query_waits_at / event_queries_at /
+--     timeline_chart_at / samples_at) routes its slot filter through it,
 --     restoring NOTICE symmetry with _active_slots_for(p_interval): callers
 --     get a loud-warn when the requested range falls outside the retained
 --     window (now() - 2 * rotation_period .. now()) instead of a silent
---     empty result. The four SQL-language readers (top_waits_at,
---     wait_timeline_at, top_by_type_at, decode_sample_at) flip to plpgsql so
---     the helper can be invoked into a local — otherwise the planner would
---     constant-fold the time predicate and skip the helper call (and its
---     NOTICE). (#69)
+--     empty result. The three SQL-language range readers (top_waits_at,
+--     wait_timeline_at, top_by_type_at) flip to plpgsql so the helper can be
+--     invoked into a local — otherwise the planner would constant-fold the
+--     time predicate and skip the helper call (and its NOTICE).
+--     decode_sample_at is intentionally NOT in this list: it is a
+--     point-lookup keyed on an exact sample_ts, so restricting to the
+--     active-slots window would hide rows the caller can prove exist in
+--     other partitions. It keeps the silent ts_from_timestamptz int4 clamp
+--     from #63 instead. (#69)
 \ir ash-install.sql

@@ -851,21 +851,18 @@ as $$
 $$;
 
 -- Wall-clock convenience: convert timestamptz to the matching sample_ts via
--- ts_from_timestamptz() and decode the matching ash.sample row(s). Same
--- return shape as decode_sample(int4). Named decode_sample_at() (matching
--- the samples_at / top_waits_at naming convention) so we don't create a
--- decode_sample(unknown) ambiguity between int4 and timestamptz overloads.
+-- ts_from_timestamptz() and delegate to decode_sample(int4). Same return
+-- shape. Named decode_sample_at() (matching the samples_at / top_waits_at
+-- naming convention) so we don't create a decode_sample(unknown) ambiguity
+-- between int4 and timestamptz overloads.
 --
--- Routes through _active_slots_for_at(p_ts, p_ts) (#69) so out-of-retention
--- timestamps emit a NOTICE — symmetric with the other _at readers — instead
--- of silently returning empty (which they already did, courtesy of
--- ts_from_timestamptz()'s int4 clamp). Restricting to the active slots is a
--- semantic no-op: only those slots hold data after rotation.
---
--- plpgsql (not sql) for two reasons: (1) the body's reference to
--- _active_slots_for_at, defined later in the file, isn't resolved at parse
--- time; (2) pulling the helper into a local first guarantees its NOTICE
--- side effect fires even when the sample_ts predicate is unsatisfiable.
+-- Intentionally NOT routed through _active_slots_for_at() (#69): unlike the
+-- range-scan _at readers, decode_sample_at is a point-lookup keyed by an
+-- exact sample_ts. Restricting to the helper's "now() - 2*rotation_period
+-- .. now()" active-slots window would hide rows the caller can prove exist
+-- (matching sample_ts in any partition). The silent ts_from_timestamptz()
+-- int4 clamp from #63 is sufficient: absurd timestamps still don't error,
+-- they just miss every partition.
 create or replace function ash.decode_sample_at(p_ts timestamptz)
 returns table (
   datid      oid,
@@ -873,21 +870,12 @@ returns table (
   query_id   int8,
   count      int
 )
-language plpgsql
+language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-declare
-  v_slots smallint[] := ash._active_slots_for_at(p_ts, p_ts);
-  v_ts    int4       := ash.ts_from_timestamptz(p_ts);
-begin
-  return query
-    select s.datid, d.wait_event, d.query_id, d.count
-    from ash.sample s,
-         lateral ash.decode_sample(s.data, s.slot) d
-    where s.sample_ts = v_ts
-      and s.slot = any(v_slots);
-end;
+  select d.datid, d.wait_event, d.query_id, d.count
+  from ash.decode_sample(ash.ts_from_timestamptz(p_ts)) d
 $$;
 
 

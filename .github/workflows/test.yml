@@ -1438,10 +1438,11 @@ jobs:
               assert v_flag = '1', 'timeline_chart_at: NOTICE not emitted';
               perform set_config('ash.notice_oversized', '', true);
 
-              perform * from ash.decode_sample_at('1000-01-01'::timestamptz);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1', 'decode_sample_at: NOTICE not emitted';
-              perform set_config('ash.notice_oversized', '', true);
+              -- decode_sample_at intentionally NOT covered here: it is a
+              -- point-lookup keyed by exact sample_ts, not a range scan, so
+              -- it does not route through _active_slots_for_at. Absurd
+              -- timestamps fall outside any partition via the silent
+              -- ts_from_timestamptz int4 clamp (#63).
 
               -- query_waits_at: needs an existing query_id to avoid the
               -- short-circuit; the seeded fixture uses 111111 (see earlier
