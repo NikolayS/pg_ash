@@ -126,17 +126,18 @@ select * from ash.status();
 
 | Function | Description |
 |----------|-------------|
-| `ash.start(interval)` | Start sampling (default: `'1 second'`). Uses pg_cron if available, otherwise prints external scheduling instructions. Also schedules rollup jobs |
-| `ash.stop()` | Stop sampling and rollups (removes pg_cron jobs, sets `sampling_enabled = false`) |
-| `ash.status()` | Sampling status, version, partition info, rollup metrics, debug_logging state |
-| `ash.take_sample()` | Take one sample manually (called automatically by the scheduler) |
-| `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers). Runs pre-truncation rollup to prevent data loss |
-| `ash.rebuild_partitions(N, 'yes')` | Change partition count (3–32). **Destructive** — all raw sample data is lost; requires `'yes'` confirmation token. Rollup tables survive. Call `ash.start()` after to resume |
-| `ash.rollup_minute([batch])` | Aggregate raw samples into per-minute rollups. Watermark-based with catch-up. Default batch: 60 minutes |
-| `ash.rollup_hour()` | Aggregate minute rollups into hourly rollups. Watermark-based |
-| `ash.rollup_cleanup()` | Delete expired rollup rows per retention config |
-| `ash.set_debug_logging([bool])` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call with no argument to check current state |
-| `ash.uninstall('yes')` | Drop the ash schema and remove pg_cron jobs |
+| `ash.start(interval)` | Start sampling (default: `'1 second'`). Uses pg_cron if available, otherwise prints external scheduling instructions. Also schedules rollup jobs. **Admin-only** |
+| `ash.stop()` | Stop sampling and rollups (removes pg_cron jobs, sets `sampling_enabled = false`). **Admin-only** |
+| `ash.status()` | Sampling status, version, partition info, rollup metrics, debug_logging state. Reader-safe |
+| `ash.take_sample()` | Take one sample manually (called automatically by the scheduler). Writes to raw sample/query-map partitions and updates counters. **Admin-only** |
+| `ash.rotate()` | Rotate sample partitions (called automatically, or manually for external schedulers). Runs pre-truncation rollup, then truncates the retired raw sample/query-map slot. **Admin-only** |
+| `ash.rebuild_partitions(N, 'yes')` | Change partition count (3–32). **Admin-only and destructive** — all raw sample and query-map partition data is lost; requires the exact `'yes'` confirmation token. Rollup tables survive. Call `ash.start()` after to resume |
+| `ash.rollup_minute([batch])` | Aggregate raw samples into per-minute rollups. Watermark-based with catch-up. Default batch: 60 minutes. **Admin-only** |
+| `ash.rollup_hour()` | Aggregate minute rollups into hourly rollups. Watermark-based. **Admin-only** |
+| `ash.rollup_cleanup()` | Delete expired rollup rows per retention config. **Admin-only** |
+| `ash.set_debug_logging([bool])` | Enable/disable per-session RAISE LOG in `take_sample()` for diagnostics. Call with no argument to check current state. **Admin-only** |
+| `ash.grant_reader(role)` / `ash.revoke_reader(role)` | Grant/revoke the minimum monitoring-reader privilege bundle. **Admin-only** |
+| `ash.uninstall('yes')` | Drop the `ash` schema and remove pg_cron jobs. **Admin-only and destructive**; requires the exact `'yes'` confirmation token |
 
 ### Relative time (last N hours)
 
@@ -902,7 +903,7 @@ Don't forget to also schedule rotation and rollups:
 
 ## Privileges
 
-pg_ash installs with a locked-down privilege model: admin functions (`ash.start()`, `ash.stop()`, `ash.rotate()`, `ash.take_sample()`, `ash.set_debug_logging()`, `ash.uninstall()`) are restricted to the schema owner, and EXECUTE on all reader functions plus SELECT on reader tables (`ash.sample`, `ash.query_map_all`, `ash.config`, `ash.wait_event_map`, and per-slot partitions) is revoked from `PUBLIC`. The installing role retains full access.
+pg_ash installs with a locked-down privilege model: admin functions (`ash.start()`, `ash.stop()`, `ash.rotate()`, `ash.take_sample()`, `ash.set_debug_logging()`, `ash.rebuild_partitions()`, `ash.rollup_minute()`, `ash.rollup_hour()`, `ash.rollup_cleanup()`, `ash.grant_reader()`, `ash.revoke_reader()`, `ash.uninstall()`, and internal maintenance helpers) are restricted to the schema owner, and `EXECUTE` on reader functions plus `SELECT` on reader tables (`ash.sample`, `ash.query_map_all`, `ash.config`, `ash.wait_event_map`, rollup tables, and per-slot partitions) is revoked from `PUBLIC`. The installing role retains full access.
 
 Grant access to a monitoring or read-only role with the convenience helpers:
 
@@ -925,23 +926,30 @@ quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
 
 **Note on pg_cron visibility:** `ash.grant_reader()` does **not** grant `USAGE ON SCHEMA cron`, since pg_cron is not an `ash` object. When pg_cron is loaded but the monitoring role lacks USAGE on schema `cron`, `ash.status()` emits a single fallback row of the form `cron_jobs = '<no cron.job access; grant USAGE ON SCHEMA cron TO <role>>'` instead of per-job `cron_job_*` rows. To surface real cron job details, either run `grant usage on schema cron to <role>` (and `grant select on cron.job to <role>`) once, or simply ignore the row.
 
-If you prefer manual control, the equivalent explicit grants are:
+Prefer `ash.grant_reader()` for full monitoring access. If you need manual control, grant only the specific readers and tables the role actually needs — do **not** use blanket `EXECUTE` grants on the whole `ash` schema, because that can include owner-only maintenance helpers now or after future upgrades.
+
+Minimal example for a dashboard that only calls `ash.status()` and `ash.top_waits()`:
 
 ```sql
--- allow a monitoring role to call the readers
 grant usage on schema ash to my_monitor_role;
-grant execute on function ash.top_waits(interval, int, int)           to my_monitor_role;
-grant execute on function ash.top_queries(interval, int)              to my_monitor_role;
-grant execute on function ash.top_queries_with_text(interval, int)    to my_monitor_role;
-grant execute on function ash.samples(interval, int)                  to my_monitor_role;
-grant execute on function ash.status()                                to my_monitor_role;
+grant execute on function ash.status() to my_monitor_role;
+grant execute on function ash.top_waits(interval, int, int, boolean) to my_monitor_role;
 
--- or grant all reader functions at once
-grant execute on all functions in schema ash to my_monitor_role;
-
--- grant direct read on raw tables for ad-hoc SQL (optional)
-grant select on all tables in schema ash to my_monitor_role;
+grant select on table
+  ash.config,
+  ash.sample,
+  ash.sample_0,
+  ash.sample_1,
+  ash.sample_2,
+  ash.wait_event_map,
+  ash.query_map_all,
+  ash.query_map_0,
+  ash.query_map_1,
+  ash.query_map_2
+  to my_monitor_role;
 ```
+
+For all public readers, use `select ash.grant_reader('my_monitor_role');`; it computes the current safe reader set and deliberately excludes admin/destructive functions.
 
 ### pg_stat_statements in a non-default schema
 
@@ -960,10 +968,11 @@ select ash._apply_pgss_search_path();
 - **24-hour raw sample queries are slow** (~6s for full-day scan) — use rollup reader functions (`ash.minute_waits`, `ash.hourly_queries`, `ash.daily_peak_backends`) for queries over long time ranges.
 - **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
-- **query_map hard cap at 50k entries** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. This can flood the query_map partitions. A hard cap of 50,000 entries per partition prevents unbounded growth — queries beyond the cap are tracked as "unknown." PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
+- **query_map hard cap at 50k entries per slot** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. Each query-map partition is truncated in lockstep with its matching sample partition during `ash.rotate()`; there is no background garbage collector. The 50,000-entry per-slot cap prevents unbounded growth between rotations — queries beyond the cap are tracked as `unknown`. PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
 - **Parallel query workers counted individually** — parallel workers share the same `query_id` as the leader but are counted as separate backends. This inflates the apparent "weight" of parallel queries in `top_queries()`. `leader_pid` grouping is not yet implemented.
 - **WAL overhead** — 1-second sampling generates ~29 KiB WAL per sample (~2.4 GiB/day), dominated by `full_page_writes`. This is significant for WAL-sensitive replication setups. Consider 5-second or 10-second sampling intervals (`ash.start('5 seconds')`) if WAL volume is a concern. The overhead scales linearly with sampling frequency.
 - **Epoch overflow horizon (~2094)** — `sample_ts` is stored as `int4` seconds since 2026-01-01 UTC and `int4` is exhausted around 2094-01-19. Past that point, the `::int4` cast in `ash.take_sample()` raises `ERROR: integer out of range` and sampling hard-fails (it does NOT silently wrap). `ash.status()` exposes `epoch_seconds_remaining` so operators can plan a `bigint` migration of the column well before the horizon. See issue [#37](https://github.com/NikolayS/pg_ash/issues/37).
+- **Advisory-lock squat DoS** — pg_ash coordination locks use deterministic advisory-lock keys. A role that can call Postgres advisory-lock builtins can intentionally hold the same keys and stall sampling, rotation, rollups, or partition rebuilds for the duration of its transaction. See [SECURITY.md](SECURITY.md#advisory-lock-squat-dos) for mitigation guidance.
 
 ## License
 

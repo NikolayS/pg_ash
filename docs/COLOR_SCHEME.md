@@ -89,7 +89,7 @@ Functions that support color:
 
 - `top_waits()` / `top_waits_at()` — bar column
 - `query_waits()` / `query_waits_at()` — bar column
-- `waits_by_type()` / `waits_by_type_at()` — bar column
+- `top_by_type()` / `top_by_type_at()` — bar column
 - `timeline_chart()` / `timeline_chart_at()` — chart column
 
 ## Comparison with other tools
