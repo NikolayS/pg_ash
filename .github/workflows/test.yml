@@ -12,6 +12,29 @@ permissions:
   contents: read
 
 jobs:
+
+  docs-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Guard docs against stale privilege and reader names
+        run: |
+          set -euo pipefail
+
+          if grep -RIn "grant execute on all functions in schema ash" README.md RELEASE_NOTES.md docs; then
+            echo "Do not recommend blanket EXECUTE on ash.*; use ash.grant_reader() or explicit minimal grants." >&2
+            exit 1
+          fi
+
+          if grep -RIn "waits_by_type" README.md docs | grep -v "Renamed"; then
+            echo "Stale waits_by_type reference found; use top_by_type/top_by_type_at." >&2
+            exit 1
+          fi
+
+          grep -q "ash.grant_reader" README.md
+          grep -q "SECURITY.md#advisory-lock-squat-dos" README.md
+          grep -q "SECURITY.md#advisory-lock-squat-dos" RELEASE_NOTES.md
   test:
     runs-on: ubuntu-latest
     strategy:
