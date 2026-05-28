@@ -41,7 +41,8 @@
 --     samples / activity_summary / timeline_chart / event_queries (and
 --     pgss variants) no longer raise `integer out of range` on absurd
 --     intervals (e.g. '1000 years'). _active_slots_for() returns `{}`
---     once the interval exceeds 2 * rotation_period, so reader
+--     once the interval exceeds raw retention
+--     ((num_partitions - 2) * rotation_period), so reader
 --     `slot = any(...)` JOINs naturally yield empty — honoring the
 --     oversized-interval NOTICE's "older samples not available" promise
 --     instead of silently returning all retained data (#51).
@@ -71,8 +72,8 @@
 --     timeline_chart_at / samples_at) routes its slot filter through it,
 --     restoring NOTICE symmetry with _active_slots_for(p_interval): callers
 --     get a loud-warn when the requested range falls outside the retained
---     window (now() - 2 * rotation_period .. now()) instead of a silent
---     empty result. The three SQL-language range readers (top_waits_at,
+--     window (now() - raw_retention .. now()) instead of a silent empty
+--     result. The three SQL-language range readers (top_waits_at,
 --     wait_timeline_at, top_by_type_at) flip to plpgsql so the helper can be
 --     invoked into a local — otherwise the planner would constant-fold the
 --     time predicate and skip the helper call (and its NOTICE).

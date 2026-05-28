@@ -2296,9 +2296,12 @@ jobs:
           do $$
           declare
             v_slots smallint[];
+            v_expected smallint[] := array[0,4,3,2]::smallint[];
             v_n smallint;
             v_min smallint;
             v_max smallint;
+            v_wait_id smallint;
+            v_rows int;
           begin
             -- Default num_partitions = 3.
             select num_partitions into v_n from ash.config where singleton;
@@ -2309,16 +2312,46 @@ jobs:
             select num_partitions into v_n from ash.config where singleton;
             assert v_n = 5, format('after rebuild: expected num_partitions=5, got %s', v_n);
 
-            -- Slot enumeration must stay within [0, 4]; never reference slot 5+.
-            v_slots := ash._active_slots_for('1 minute'::interval);
+            -- Slot enumeration must include every retained raw slot, not just
+            -- current+previous. With N=5 and current_slot=0, retained slots
+            -- are current plus 3 completed partitions: [0,4,3,2].
+            v_slots := ash._active_slots_for('3 days'::interval);
+            assert v_slots = v_expected,
+              format('_active_slots_for(3 days): expected %s, got %s', v_expected, v_slots);
             select min(s), max(s) into v_min, v_max from unnest(v_slots) s;
             assert v_min >= 0 and v_max <= 4,
               format('_active_slots_for slots out of [0,4] after rebuild(5): %s', v_slots);
 
-            v_slots := ash._active_slots_for_at(now() - '1 min'::interval, now());
+            v_slots := ash._active_slots_for_at(now() - '3 days'::interval, now());
+            assert v_slots = v_expected,
+              format('_active_slots_for_at(3 days): expected %s, got %s', v_expected, v_slots);
             select min(s), max(s) into v_min, v_max from unnest(v_slots) s;
             assert v_min >= 0 and v_max <= 4,
               format('_active_slots_for_at slots out of [0,4] after rebuild(5): %s', v_slots);
+
+            v_slots := ash._active_slots_for('4 days'::interval);
+            assert v_slots = array[]::smallint[],
+              format('_active_slots_for(4 days) should exceed raw retention and return {}, got %s', v_slots);
+
+            -- End-to-end reader proof: a row in the third completed retained
+            -- slot must be visible to _at readers.
+            select ash._register_wait('active', 'RetentionProof', 'OlderSlot')
+              into v_wait_id;
+
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values (
+              ash.ts_from_timestamptz(now() - interval '2 days 10 minutes'),
+              0::oid,
+              1::smallint,
+              array[(-v_wait_id)::int, 1, 0]::int4[],
+              3::smallint
+            );
+
+            select count(*) into v_rows
+            from ash.samples_at(now() - interval '3 days', now(), 100)
+            where wait_event = 'RetentionProof:OlderSlot';
+            assert v_rows = 1,
+              format('samples_at should see retained slot 3 sample, got %s rows', v_rows);
 
             -- Restore N=3.
             perform ash.rebuild_partitions(3, 'yes');
@@ -4119,4 +4152,3 @@ jobs:
           CRON: ${{ matrix.cron }}
         run: |
           echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
-

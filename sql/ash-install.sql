@@ -1666,11 +1666,11 @@ as $$
 $$;
 
 -- Helper used by reader functions that accept a user-supplied interval.
--- Returns the same array as ash._active_slots() for in-range intervals.
--- For intervals beyond 2 * rotation_period, returns an empty array so
--- reader `slot = any(...)` JOINs naturally yield zero rows — honoring
--- the NOTICE's "older samples not available" promise (and avoiding the
--- int4-epoch underflow that would otherwise raise `integer out of range`).
+-- Returns every raw slot still retained by the configured N-partition ring.
+-- For intervals beyond (num_partitions - 2) * rotation_period, returns an
+-- empty array so reader `slot = any(...)` JOINs naturally yield zero rows —
+-- honoring the NOTICE's "older samples not available" promise (and avoiding
+-- the int4-epoch underflow that would otherwise raise `integer out of range`).
 -- A single NOTICE is emitted per transaction in that case so callers get
 -- a clear signal instead of a silent empty set.
 -- Deduplication uses a transaction-scoped GUC (ash.notice_oversized) so
@@ -1690,12 +1690,15 @@ declare
   v_current_slot smallint;
   v_num_partitions smallint;
   v_rotation_period interval;
+  v_raw_retention interval;
   v_already text;
 begin
   select current_slot, num_partitions, rotation_period
     into v_current_slot, v_num_partitions, v_rotation_period
   from ash.config
   where singleton;
+
+  v_raw_retention := (v_num_partitions - 2) * v_rotation_period;
 
   -- Negative interval is meaningless and would underflow `now() - p_interval`
   -- past the int4 horizon downstream. Treat as out-of-window.
@@ -1710,46 +1713,48 @@ begin
     return array[]::smallint[];
   end if;
 
-  if p_interval is not null and p_interval > 2 * v_rotation_period then
+  if p_interval is not null and p_interval > v_raw_retention then
     -- Suppress duplicate NOTICEs within the same transaction. The GUC is
     -- set local to the current transaction and auto-resets on commit/rollback.
     v_already := current_setting('ash.notice_oversized', true);
     if v_already is null or v_already = '' then
       raise notice
-        'requested interval % exceeds 2 * rotation_period (%); only the last two partitions are retained, so older samples are not available. Shorten the interval or increase rotation_period via ash.config.',
-        p_interval, v_rotation_period;
+        'requested interval % exceeds raw retention (%); only % completed partition(s) plus the current partial partition are retained. Shorten the interval, increase rotation_period, or rebuild with more partitions.',
+        p_interval, v_raw_retention, v_num_partitions - 2;
       perform set_config('ash.notice_oversized', '1', true);
     end if;
     -- Honor the NOTICE: return no slots so reader JOINs (`slot = any(...)`)
     -- yield empty. Without this, an absurd interval like '1000 years' clamps
     -- v_min_ts to 0 and matches every retained sample, contradicting the
     -- "older samples not available" promise. Callers wanting all retained
-    -- data should pass an interval <= 2 * rotation_period.
+    -- data should pass an interval <= raw_retention.
     return array[]::smallint[];
   end if;
 
-  -- Slot enumeration must use the configured num_partitions (default 3,
-  -- configurable in [3, 32] via rebuild_partitions). Hardcoded `% 3` would
-  -- mis-enumerate on N != 3.
-  return array[
-    v_current_slot,
-    ((v_current_slot - 1 + v_num_partitions) % v_num_partitions)::smallint
-  ];
+  -- Slot enumeration must use the configured num_partitions and include every
+  -- retained raw slot, not just current+previous. Readers still filter by
+  -- sample_ts; the slot list only keeps the partition-pruning contract honest.
+  return array(
+    select ((v_current_slot - gs.i + v_num_partitions) % v_num_partitions)::smallint
+    from generate_series(0, v_num_partitions - 2) as gs(i)
+    order by gs.i
+  );
 end;
 $$;
 
 -- Absolute-range counterpart to ash._active_slots_for(interval), used by every
 -- _at reader (top_waits_at, samples_at, query_waits_at, etc.). Returns the
 -- active slot set when the requested [p_start, p_end) range overlaps what raw
--- samples retain (~2 * rotation_period back from now()), and an empty array
--- with a NOTICE when it doesn't — restoring loud-warn symmetry with the
--- relative readers (#69). Without this, _at readers silently returned 0 rows
--- on absurd inputs (year 1000, year 3000) thanks to ts_from_timestamptz()'s
--- int4 clamp (#63), which was a UX regression vs the interval path.
+-- samples retain ((num_partitions - 2) * rotation_period back from now()), and
+-- an empty array with a NOTICE when it doesn't — restoring loud-warn symmetry
+-- with the relative readers (#69). Without this, _at readers silently returned
+-- 0 rows on absurd inputs (year 1000, year 3000) thanks to
+-- ts_from_timestamptz()'s int4 clamp (#63), which was a UX regression vs the
+-- interval path.
 --
 -- Out-of-retention conditions (each emits the NOTICE and returns {}):
---   * p_end   <= now() - 2 * rotation_period   (range entirely too old)
---   * p_start >  now()                          (range entirely in the future)
+--   * p_end   <= now() - raw_retention (range entirely too old)
+--   * p_start >  now()                  (range entirely in the future)
 --
 -- Importantly, an empty range (p_start >= p_end) inside the retained window
 -- is NOT flagged — callers may legitimately ask for a zero-length window and
@@ -1779,6 +1784,7 @@ declare
   v_num_partitions  smallint;
   v_rotation_period interval;
   v_now             timestamptz := now();
+  v_raw_retention   interval;
   v_retention_start timestamptz;
   v_already         text;
 begin
@@ -1787,7 +1793,8 @@ begin
   from ash.config
   where singleton;
 
-  v_retention_start := v_now - 2 * v_rotation_period;
+  v_raw_retention := (v_num_partitions - 2) * v_rotation_period;
+  v_retention_start := v_now - v_raw_retention;
 
   -- Out-of-retention check. Skip when either bound is null (the reader's
   -- own WHERE will yield empty without us needing to NOTICE) or when the
@@ -1797,17 +1804,18 @@ begin
     v_already := current_setting('ash.notice_oversized', true);
     if v_already is null or v_already = '' then
       raise notice
-        'requested range [%, %) lies outside the retained window (now - 2 * rotation_period .. now, i.e. [%, %)); only the last two partitions are retained, so older or future samples are not available. Adjust the range or increase rotation_period via ash.config.',
-        p_start, p_end, v_retention_start, v_now;
+        'requested range [%, %) lies outside the retained window (now - raw_retention .. now, i.e. [%, %)); only % completed partition(s) plus the current partial partition are retained. Adjust the range, increase rotation_period, or rebuild with more partitions.',
+        p_start, p_end, v_retention_start, v_now, v_num_partitions - 2;
       perform set_config('ash.notice_oversized', '1', true);
     end if;
     return array[]::smallint[];
   end if;
 
-  return array[
-    v_current_slot,
-    ((v_current_slot - 1 + v_num_partitions) % v_num_partitions)::smallint
-  ];
+  return array(
+    select ((v_current_slot - gs.i + v_num_partitions) % v_num_partitions)::smallint
+    from generate_series(0, v_num_partitions - 2) as gs(i)
+    order by gs.i
+  );
 end;
 $$;
 
