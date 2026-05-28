@@ -918,6 +918,9 @@ declare
   v_rotation_period interval;
   v_rotated_at timestamptz;
   v_rotation_minutes int;
+  v_rollup_result int;
+  v_endangered_rows bigint;
+  v_unrolled_groups bigint;
 begin
   -- Advisory lock prevents concurrent rotation from pg_cron overlap.
   -- Xact-level: auto-releases on commit/rollback — no leak risk with pg_cron
@@ -944,28 +947,76 @@ begin
       return 'skipped: rotated too recently at ' || v_rotated_at::text;
     end if;
 
-    -- Set lock timeout to avoid blocking on long-running queries
-    set local lock_timeout = '2s';
-
-    -- Pre-truncation rollup: process endangered minutes before they are lost.
-    -- Called before config update to avoid locking contention with take_sample().
-    -- Rollup is idempotent (upsert), so double-processing is safe.
-    v_rotation_minutes := extract(epoch from v_rotation_period)::int / 60;
-
-    begin
-      perform ash.rollup_minute(v_rotation_minutes);
-    exception when undefined_function then
-      -- rollup_minute() not yet installed (upgrade in progress), skip
-      null;
-    when others then
-      raise warning 'ash.rotate: rollup_minute failed [%]: %', sqlstate, sqlerrm;
-    end;
-
     -- Calculate new slot dynamically (0 -> 1 -> ... -> N-1 -> 0)
     v_new_slot := (v_old_slot + 1) % v_num_partitions;
 
     -- The partition to truncate is the one after the new slot
     v_truncate_slot := (v_new_slot + 1) % v_num_partitions;
+
+    -- Set lock timeout to avoid blocking on long-running queries
+    set local lock_timeout = '2s';
+
+    -- Pre-truncation rollup: process endangered minutes before they are lost.
+    -- This is no longer best-effort: if the endangered raw slot has rows and
+    -- we cannot prove they are represented in rollup_1m, skip rotation rather
+    -- than deleting the only copy of the samples (#81).
+    execute format('select count(*) from ash.sample_%s', v_truncate_slot)
+    into v_endangered_rows;
+
+    if v_endangered_rows > 0 then
+      if not pg_try_advisory_xact_lock(
+           hashtext('pg_ash')::int4,
+           hashtext('pg_ash_rollup')::int4
+         ) then
+        return format(
+          'failed: pre-truncation rollup busy; slot %s not truncated',
+          v_truncate_slot
+        );
+      end if;
+
+      v_rotation_minutes := greatest(extract(epoch from v_rotation_period)::int / 60, 1);
+
+      begin
+        select ash.rollup_minute(v_rotation_minutes) into v_rollup_result;
+      exception when undefined_function then
+        return format(
+          'failed: rollup_minute() unavailable; slot %s not truncated',
+          v_truncate_slot
+        );
+      when others then
+        raise warning 'ash.rotate: rollup_minute failed [%]: %', sqlstate, sqlerrm;
+        return format(
+          'failed: pre-truncation rollup failed [%s]; slot %s not truncated',
+          sqlstate,
+          v_truncate_slot
+        );
+      end;
+
+      execute format(
+        'with raw as ('
+        '  select (sample_ts / 60) * 60 as ts, datid,'
+        '         count(distinct sample_ts)::smallint as samples,'
+        '         max(active_count)::smallint as peak_backends'
+        '  from ash.sample_%1$s'
+        '  group by 1, 2'
+        ') '
+        'select count(*) '
+        'from raw '
+        'left join ash.rollup_1m r on r.ts = raw.ts and r.datid = raw.datid '
+        'where r.ts is null '
+        '   or r.samples < raw.samples '
+        '   or r.peak_backends < raw.peak_backends',
+        v_truncate_slot
+      ) into v_unrolled_groups;
+
+      if v_unrolled_groups > 0 then
+        return format(
+          'failed: pre-truncation rollup incomplete for %s group(s) in slot %s; slot not truncated',
+          v_unrolled_groups,
+          v_truncate_slot
+        );
+      end if;
+    end if;
 
     -- Advance current_slot first (before truncate)
     update ash.config
@@ -2174,10 +2225,10 @@ declare
   v_count int;
   v_min_backend_seconds smallint;
   v_has_later_data bool;
+  v_sampler_lock_acquired bool := false;
 begin
-  -- Acquire rollup lock (xact-level). Distinct from the sampler lock so a
-  -- long catch-up doesn't bump skipped_samples on every concurrent tick.
-  -- rebuild_partitions's drain poll waits on this objid.
+  -- Acquire rollup lock (xact-level). Rollup operations serialize with each
+  -- other, and rebuild_partitions's drain poll waits on this objid.
   if not pg_try_advisory_xact_lock(
        hashtext('pg_ash')::int4,
        hashtext('pg_ash_rollup')::int4
@@ -2191,8 +2242,39 @@ begin
   into v_last_ts, v_min_backend_seconds
   from ash.config where singleton;
 
-  -- Current minute boundary (only process *complete* minutes)
-  v_now_minute_ts := ash.ts_from_timestamptz(date_trunc('minute', now()));
+  -- Drain in-flight samplers before choosing the "complete minute" boundary.
+  -- take_sample() gets sample_ts from transaction-start now(), then may block
+  -- before INSERT. Without this drain, rollup_minute() can advance the
+  -- watermark while a sampler later commits an old-minute row, permanently
+  -- excluding it from rollups (#81).
+  if not pg_try_advisory_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_sampler')::int4
+     ) then
+    return 0;
+  end if;
+  v_sampler_lock_acquired := true;
+
+  begin
+    -- Current minute boundary (only process *complete* minutes). This is
+    -- computed after the sampler drain, so future samplers cannot commit rows
+    -- with sample_ts older than this boundary.
+    v_now_minute_ts := ash.ts_from_timestamptz(date_trunc('minute', now()));
+
+    perform pg_advisory_unlock(
+      hashtext('pg_ash')::int4,
+      hashtext('pg_ash_sampler')::int4
+    );
+    v_sampler_lock_acquired := false;
+  exception when others then
+    if v_sampler_lock_acquired then
+      perform pg_advisory_unlock(
+        hashtext('pg_ash')::int4,
+        hashtext('pg_ash_sampler')::int4
+      );
+    end if;
+    raise;
+  end;
 
   -- Initialize watermark if NULL (first run after install or upgrade).
   if v_last_ts is null then
