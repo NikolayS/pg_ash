@@ -2407,6 +2407,43 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test v1.5: malformed sample.data is rejected (#89)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          begin;
+
+          do $$
+          declare
+            v_inserted boolean := false;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m;
+            truncate ash.wait_event_map restart identity cascade;
+            perform ash._register_wait('active', 'Corrupt', 'Bogus');
+
+            begin
+              insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (
+                ash.ts_from_timestamptz(now() - interval '2 minutes'),
+                0::oid,
+                1::smallint,
+                array[-1,1000,0]::int4[],
+                ash.current_slot()
+              );
+              v_inserted := true;
+            exception when check_violation then
+              null;
+            end;
+
+            assert not v_inserted,
+              'ash.sample.data must reject malformed packed arrays whose count exceeds available query ids';
+          end $$;
+
+          rollback;
+          EOF
+
       - name: "Release-gate fixes: negative interval, p_width clamp, decode_sample size cap"
         env:
           PGPASSWORD: postgres
@@ -3926,13 +3963,12 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          # Regression for issue #49: the oldest released installer shipped
-          # `array_length(data, 1) >= 2`; later releases require `>= 3`.
-          # No legacy upgrade script rewrote the check, so installs that
-          # started at the oldest release carried the looser form forever.
-          # The current development upgrade chain now detects and rewrites it;
-          # assert that the discovered full chain ends with the tightened
-          # constraint on both the partitioned parent and every partition.
+          # Regression for issue #49 and #89: the oldest released installer
+          # shipped `array_length(data, 1) >= 2`; later releases require full
+          # packed-array shape validation. The current development upgrade
+          # chain detects and rewrites old checks; assert that the discovered
+          # full chain ends with the validator helper on both the partitioned
+          # parent and every partition.
           python3 devel/scripts/ash_sql_chain.py oldest-install-path | sed 's#^#\\i #' > /tmp/ash_oldest_install.sql
           python3 devel/scripts/ash_sql_chain.py upgrade-chain-from-oldest > /tmp/ash_upgrade_from_oldest.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
@@ -3953,8 +3989,9 @@ jobs:
 
           \i /tmp/ash_upgrade_from_oldest.sql
 
-          -- After full dev chain: parent + every partition must carry `>= 3`,
-          -- and none may carry the legacy `>= 2`.
+          -- After full dev chain: parent + every partition must carry the
+          -- packed-array validator, and none may carry legacy array_length
+          -- checks.
           do $$
           declare
             v_bad int;
@@ -3964,8 +4001,8 @@ jobs:
             from pg_constraint c
             where c.conrelid = 'ash.sample'::regclass
               and c.conname  = 'sample_data_check';
-            assert v_parent_def ~ 'array_length\(data, 1\) >= 3',
-              format('parent constraint not tightened; got: %s', v_parent_def);
+            assert v_parent_def ~ '_sample_data_is_valid',
+              format('parent constraint not upgraded to validator; got: %s', v_parent_def);
 
             select count(*) into v_bad
             from pg_constraint c
@@ -3974,9 +4011,9 @@ jobs:
             where n.nspname = 'ash'
               and t.relname ~ '^sample(_[0-9]+)?$'
               and c.contype = 'c'
-              and pg_get_constraintdef(c.oid) ~ 'array_length\(data, 1\) >= 2';
+              and pg_get_constraintdef(c.oid) ~ 'array_length\(data, 1\)';
             assert v_bad = 0,
-              format('%s ash.sample* check(s) still carry the legacy `>= 2` form', v_bad);
+              format('%s ash.sample* check(s) still carry a legacy array_length form', v_bad);
 
             select count(*) into v_bad
             from pg_inherits i
@@ -3985,14 +4022,14 @@ jobs:
             left join pg_constraint c
               on c.conrelid = p.oid
              and c.contype  = 'c'
-             and pg_get_constraintdef(c.oid) ~ 'array_length\(data, 1\) >= 3'
+             and pg_get_constraintdef(c.oid) ~ '_sample_data_is_valid'
             where i.inhparent = 'ash.sample'::regclass
               and n.nspname = 'ash'
               and c.oid is null;
             assert v_bad = 0,
-              format('%s partition(s) of ash.sample missing `>= 3` check', v_bad);
+              format('%s partition(s) of ash.sample missing validator check', v_bad);
 
-            raise notice 'issue #49 regression PASSED: sample_data_check is `>= 3` everywhere';
+            raise notice 'issue #49/#89 regression PASSED: sample_data_check uses validator everywhere';
           end $$;
 
           select ash.uninstall('yes');
