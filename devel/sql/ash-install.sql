@@ -3056,13 +3056,17 @@ as $$
 declare
   v_has_pgss boolean := false;
 begin
-  -- Probe the view directly — extension installed <> shared library loaded
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  -- Trust pg_stat_statements only when the real extension is installed.
+  -- Otherwise a user-created public.pg_stat_statements relation could spoof
+  -- query text and execution metrics (#87).
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -3084,6 +3088,13 @@ begin
     ),
     grand_total as (
       select sum(cnt) as total from resolved
+    ),
+    pgss as (
+      select
+        p.queryid,
+        min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -3092,7 +3103,7 @@ begin
       left(pss.query, 100) as query_text
     from resolved r
     cross join grand_total gt
-    left join pg_stat_statements pss on pss.queryid = r.query_id
+    left join pgss pss on pss.queryid = r.query_id
     order by r.cnt desc
     limit p_limit;
   else
@@ -3205,13 +3216,17 @@ as $$
 declare
   v_has_pgss boolean := false;
 begin
-  -- Probe the view directly — extension installed <> shared library loaded
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  -- Trust pg_stat_statements only when the real extension is installed.
+  -- Otherwise a user-created public.pg_stat_statements relation could spoof
+  -- query text and execution metrics (#87).
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -3233,6 +3248,19 @@ begin
     ),
     grand_total as (
       select sum(cnt) as total from resolved
+    ),
+    pgss as (
+      select
+        p.queryid,
+        sum(p.calls)::bigint as calls,
+        sum(p.total_exec_time) as total_exec_time,
+        case
+          when sum(p.calls) > 0 then sum(p.total_exec_time) / sum(p.calls)
+          else max(p.mean_exec_time)
+        end as mean_exec_time,
+        min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -3244,7 +3272,7 @@ begin
       left(pss.query, 200) as query_text
     from resolved r
     cross join grand_total gt
-    left join pg_stat_statements pss on pss.queryid = r.query_id
+    left join pgss pss on pss.queryid = r.query_id
     order by r.cnt desc
     limit p_limit;
   else
@@ -3535,13 +3563,17 @@ declare
   v_start int4 := ash.ts_from_timestamptz(p_start);
   v_end int4 := ash.ts_from_timestamptz(p_end);
 begin
-  -- Probe the view directly — extension installed <> shared library loaded
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  -- Trust pg_stat_statements only when the real extension is installed.
+  -- Otherwise a user-created public.pg_stat_statements relation could spoof
+  -- query text and execution metrics (#87).
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -3561,12 +3593,19 @@ begin
     ),
     grand_total as (
       select sum(cnt) as total from resolved
+    ),
+    pgss as (
+      select
+        p.queryid,
+        min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
        left(pss.query, 100)
     from resolved r
     cross join grand_total gt
-    left join pg_stat_statements pss on pss.queryid = r.query_id
+    left join pgss pss on pss.queryid = r.query_id
     order by r.cnt desc limit p_limit;
   else
     raise warning 'pg_stat_statements is not installed — query_text will be NULL. Run: CREATE EXTENSION pg_stat_statements;';
@@ -4364,12 +4403,14 @@ declare
 begin
   v_min_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
 
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -4475,12 +4516,14 @@ begin
   -- the time predicate folds to false on absurd ranges (#69).
   v_slots := ash._active_slots_for_at(p_start, p_end);
 
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -4626,12 +4669,14 @@ declare
 begin
   v_min_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
 
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -4735,12 +4780,14 @@ declare
   -- the time predicate folds to false on absurd ranges (#69).
   v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
 begin
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
