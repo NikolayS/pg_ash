@@ -2154,6 +2154,10 @@ jobs:
               v_s2 smallint;
               v_s3 smallint;
             begin
+              -- This block tests slot arithmetic only. With #81, rotate()
+              -- must refuse to advance if the endangered inactive slot still
+              -- contains unrolled raw samples from earlier edge cases.
+              truncate ash.sample;
               select ash.current_slot() into v_s0;
 
               update ash.config set rotated_at = now() - interval '2 days';
@@ -3009,6 +3013,198 @@ jobs:
           end;
           $$;
           EOF
+
+      - name: "Critical bug #81: rollup and rotation must not lose raw samples"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+
+          psql_base=(psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1)
+
+          reset_issue_81_state() {
+            "${psql_base[@]}" << 'SQL'
+            select ash.stop();
+            truncate ash.sample;
+            truncate ash.rollup_1m;
+            truncate ash.rollup_1h;
+            truncate ash.wait_event_map restart identity cascade;
+            truncate ash.query_map_0 restart identity;
+            truncate ash.query_map_1 restart identity;
+            truncate ash.query_map_2 restart identity;
+            update ash.config
+            set current_slot = 0,
+              rotated_at = now() - interval '2 days',
+              rotation_period = interval '1 day',
+              last_rollup_1m_ts = null,
+              last_rollup_1h_ts = null,
+              sampling_enabled = true
+            where singleton;
+            select ash._register_wait('active', 'Issue81', 'RotateLoss');
+          SQL
+          }
+
+          seed_endangered_sample() {
+            "${psql_base[@]}" << 'SQL'
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            )
+            values (
+              ash.ts_from_timestamptz(date_trunc('minute', now()) - interval '2 minutes'),
+              0::oid,
+              1::smallint,
+              array[-1,1,0]::integer[],
+              2::smallint
+            );
+            select count(*) as seeded_rows from ash.sample_2;
+          SQL
+          }
+
+          assert_raw_sample_survived() {
+            local context="$1"
+            local raw_rows
+            local rollup_rows
+            local current_slot
+
+            raw_rows="$("${psql_base[@]}" -tAc "select count(*) from ash.sample_2")"
+            rollup_rows="$("${psql_base[@]}" -tAc "select count(*) from ash.rollup_1m")"
+            current_slot="$("${psql_base[@]}" -tAc "select current_slot from ash.config where singleton")"
+
+            if [ "$raw_rows" != "1" ]; then
+              echo "::error::$context: endangered raw sample was truncated (sample_2 rows=$raw_rows, rollup_1m rows=$rollup_rows, current_slot=$current_slot)" >&2
+              exit 1
+            fi
+            if [ "$current_slot" != "0" ]; then
+              echo "::error::$context: rotate advanced current_slot despite failed pre-rollup (current_slot=$current_slot)" >&2
+              exit 1
+            fi
+          }
+
+          wait_until_sql_true() {
+            local description="$1"
+            local sql="$2"
+            local value
+
+            for _ in {1..100}; do
+              value="$("${psql_base[@]}" -tAc "$sql")"
+              if [ "$value" = "t" ]; then
+                return 0
+              fi
+              sleep 0.1
+            done
+
+            echo "::error::timed out waiting for $description" >&2
+            exit 1
+          }
+
+          echo "=== #81A: rollup_minute must not advance while sampler lock is held ==="
+          reset_issue_81_state
+          "${psql_base[@]}" << 'SQL'
+          insert into ash.sample (
+            sample_ts, datid, active_count, data, slot
+          )
+          values (
+            ash.ts_from_timestamptz(date_trunc('minute', now()) - interval '2 minutes'),
+            0::oid,
+            1::smallint,
+            array[-1,1,0]::integer[],
+            0::smallint
+          );
+          SQL
+          "${psql_base[@]}" -c "
+            begin;
+            select pg_advisory_xact_lock(
+              hashtext('pg_ash')::int4,
+              hashtext('pg_ash_sampler')::int4
+            );
+            select pg_sleep(5);
+            commit;
+          " &
+          sampler_lock_pid=$!
+          wait_until_sql_true "sampler advisory lock" "
+            select exists (
+              select 1
+              from pg_locks
+              where locktype = 'advisory'
+                and classid = hashtext('pg_ash')::int4::oid
+                and objid = hashtext('pg_ash_sampler')::int4::oid
+                and granted
+                and pid <> pg_backend_pid()
+            )
+          "
+          rollup_result="$("${psql_base[@]}" -tAc "select ash.rollup_minute(5)")"
+          watermark="$("${psql_base[@]}" -tAc "select coalesce(last_rollup_1m_ts::text, '') from ash.config where singleton")"
+          rollup_rows="$("${psql_base[@]}" -tAc "select count(*) from ash.rollup_1m")"
+          wait "$sampler_lock_pid"
+
+          if [ "$rollup_result" != "0" ] || [ -n "$watermark" ] || [ "$rollup_rows" != "0" ]; then
+            echo "::error::rollup_minute advanced while sampler lock was held (result=$rollup_result, watermark=$watermark, rows=$rollup_rows)" >&2
+            exit 1
+          fi
+
+          rollup_result="$("${psql_base[@]}" -tAc "select ash.rollup_minute(5)")"
+          rollup_rows="$("${psql_base[@]}" -tAc "select count(*) from ash.rollup_1m")"
+          if [ "$rollup_result" = "0" ] || [ "$rollup_rows" = "0" ]; then
+            echo "::error::rollup_minute did not process data after sampler lock released (result=$rollup_result, rows=$rollup_rows)" >&2
+            exit 1
+          fi
+
+          echo "=== #81B: rotate must not truncate when rollup advisory lock is busy ==="
+          reset_issue_81_state
+          seed_endangered_sample
+          "${psql_base[@]}" -c "
+            begin;
+            select pg_advisory_xact_lock(
+              hashtext('pg_ash')::int4,
+              hashtext('pg_ash_rollup')::int4
+            );
+            select pg_sleep(5);
+            commit;
+          " &
+          rollup_lock_pid=$!
+          wait_until_sql_true "rollup advisory lock" "
+            select exists (
+              select 1
+              from pg_locks
+              where locktype = 'advisory'
+                and classid = hashtext('pg_ash')::int4::oid
+                and objid = hashtext('pg_ash_rollup')::int4::oid
+                and granted
+                and pid <> pg_backend_pid()
+            )
+          "
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          wait "$rollup_lock_pid"
+          echo "rotate result with busy rollup lock: $rotate_result"
+          assert_raw_sample_survived "busy rollup advisory lock"
+
+          echo "=== #81C: rotate must not truncate when pre-rollup hits lock_timeout ==="
+          reset_issue_81_state
+          seed_endangered_sample
+          "${psql_base[@]}" -c "
+            begin;
+            lock table ash.rollup_1m in access exclusive mode;
+            select pg_sleep(5);
+            commit;
+          " &
+          rollup_table_lock_pid=$!
+          wait_until_sql_true "rollup_1m AccessExclusiveLock" "
+            select exists (
+              select 1
+              from pg_locks
+              where locktype = 'relation'
+                and relation = 'ash.rollup_1m'::regclass
+                and mode = 'AccessExclusiveLock'
+                and granted
+                and pid <> pg_backend_pid()
+            )
+          "
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          wait "$rollup_table_lock_pid"
+          echo "rotate result with rollup_1m lock_timeout: $rotate_result"
+          assert_raw_sample_survived "rollup_1m lock_timeout"
+
+          echo "Critical bug #81 regression tests PASSED"
 
       - name: "Test v1.4: rollup reader functions"
         env:
