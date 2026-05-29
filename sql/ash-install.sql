@@ -1,10 +1,11 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.4 (latest)
+-- Version: 1.5 (latest)
 -- Fresh install: \i sql/ash-install.sql
--- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql
+-- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.4: \i sql/ash-1.4-to-1.5.sql
 
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
@@ -83,7 +84,7 @@ create table if not exists ash.config (
   include_bg_workers         bool not null default false,
   debug_logging              bool not null default false,
   encoding_version           smallint not null default 1,
-  version                    text not null default '1.4',
+  version                    text not null default '1.5',
   rotated_at                 timestamptz not null default clock_timestamp(),
   installed_at               timestamptz not null default clock_timestamp(),
   rollup_1m_retention_days   smallint not null default 30
@@ -265,13 +266,73 @@ as $$
   select current_slot from ash.config where singleton
 $$;
 
+-- Validate the packed ash.sample.data representation.
+--
+-- Layout: one or more groups of:
+--   - negative wait-id marker
+--   - positive backend count N
+--   - exactly N non-negative query_map ids, where 0 means NULL query_id
+--
+-- Kept as a standalone immutable helper so both fresh installs and upgrades
+-- can use one table CHECK expression. The function intentionally performs
+-- shape validation only; wait/query dictionary lookups stay in readers.
+create or replace function ash._sample_data_is_valid(p_data integer[])
+returns boolean
+language plpgsql
+immutable
+strict
+parallel safe
+set search_path = pg_catalog
+as $$
+declare
+  v_len int;
+  v_idx int := 1;
+  v_count int;
+  v_qid_idx int;
+begin
+  v_len := array_length(p_data, 1);
+  if v_len is null or v_len < 3 or v_len > 100000 then
+    return false;
+  end if;
+
+  while v_idx <= v_len loop
+    if p_data[v_idx] is null or p_data[v_idx] >= 0 then
+      return false;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx > v_len then
+      return false;
+    end if;
+    v_count := p_data[v_idx];
+    if v_count is null or v_count <= 0 then
+      return false;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx + v_count - 1 > v_len then
+      return false;
+    end if;
+
+    for v_qid_idx in 1..v_count loop
+      if p_data[v_idx] is null or p_data[v_idx] < 0 then
+        return false;
+      end if;
+      v_idx := v_idx + 1;
+    end loop;
+  end loop;
+
+  return true;
+end;
+$$;
+
 -- Sample table (partitioned by slot)
 create table if not exists ash.sample (
   sample_ts    int4 not null,
   datid        oid not null,
   active_count smallint not null,
   data         integer[] not null
-         check (data[1] < 0 and array_length(data, 1) >= 3),
+         check (ash._sample_data_is_valid(data)),
   slot         smallint not null default ash.current_slot()
 ) partition by list (slot);
 
@@ -302,29 +363,33 @@ begin
   end loop;
 end $$;
 
--- Migration (issue #49): align sample.data check across upgrade paths.
--- v1.0 shipped `array_length(data, 1) >= 2`; v1.1 tightened it to `>= 3`,
--- but no legacy upgrade script rewrote the constraint, so installs that
--- started at 1.0 still carry the looser form. Detect and fix in place.
--- Idempotent: only rewrites when the current definition is missing or
--- the old `>= 2` form. Drops on the partitioned parent cascade to all
--- partitions; ADD CONSTRAINT on the parent propagates back to children.
+-- Migration (issues #49, #89): align sample.data check across upgrade paths.
+-- v1.0 shipped `array_length(data, 1) >= 2`; v1.1 tightened it to `>= 3`;
+-- v1.5 validates the full packed shape so impossible wait counts are rejected
+-- at INSERT time. Detect and fix in place. Idempotent: only rewrites when the
+-- current definition is missing or not using the validator helper. Drops on the
+-- partitioned parent cascade to all partitions; ADD CONSTRAINT on the parent
+-- propagates back to children.
 do $$
 declare
   v_def text;
+  v_valid boolean;
 begin
-  select pg_get_constraintdef(c.oid) into v_def
+  select pg_get_constraintdef(c.oid), c.convalidated
+    into v_def, v_valid
   from pg_constraint c
   where c.conrelid = 'ash.sample'::regclass
     and c.conname  = 'sample_data_check';
 
-  if v_def is null or v_def !~ 'array_length\(data, 1\) >= 3' then
+  if v_def is null or v_def !~ '_sample_data_is_valid' then
     if v_def is not null then
       alter table ash.sample drop constraint sample_data_check;
     end if;
     alter table ash.sample
       add constraint sample_data_check
-      check (data[1] < 0 and array_length(data, 1) >= 3);
+      check (ash._sample_data_is_valid(data));
+  elsif not v_valid then
+    alter table ash.sample validate constraint sample_data_check;
   end if;
 end $$;
 
@@ -390,8 +455,8 @@ language plpgsql
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_id    smallint;
-  v_count bigint;
+  v_id     smallint;
+  v_at_cap boolean;
 begin
   -- Try to get existing
   select id into v_id
@@ -405,12 +470,14 @@ begin
   -- Enforce dictionary size cap before inserting. 32 000 stays well below
   -- smallint's 32 767 ceiling while still leaving room for genuine event
   -- diversity (real wait-event inventories measure in the hundreds).
-  -- reltuples is a cheap estimate; an exact count would add a scan on
-  -- every fresh wait-event observation on the sampler's hot path.
-  select reltuples::bigint into v_count
-  from pg_class where oid = 'ash.wait_event_map'::regclass;
+  -- Use an exact existence probe for the 32 000th row instead of
+  -- pg_class.reltuples: reltuples can be -1 or stale immediately after
+  -- TRUNCATE/restore, which bypasses a hard cap until ANALYZE catches up.
+  select exists (
+    select 1 from ash.wait_event_map offset 31999 limit 1
+  ) into v_at_cap;
 
-  if v_count >= 32000 then
+  if v_at_cap then
     -- Bump the cap-hit counter so ash.status() can surface the drop.
     -- Note: counts *registration drops* here — not the number of sampled
     -- backends observed for this (state,type,event). Many concurrent
@@ -918,6 +985,9 @@ declare
   v_rotation_period interval;
   v_rotated_at timestamptz;
   v_rotation_minutes int;
+  v_rollup_result int;
+  v_endangered_rows bigint;
+  v_unrolled_groups bigint;
 begin
   -- Advisory lock prevents concurrent rotation from pg_cron overlap.
   -- Xact-level: auto-releases on commit/rollback — no leak risk with pg_cron
@@ -944,28 +1014,76 @@ begin
       return 'skipped: rotated too recently at ' || v_rotated_at::text;
     end if;
 
-    -- Set lock timeout to avoid blocking on long-running queries
-    set local lock_timeout = '2s';
-
-    -- Pre-truncation rollup: process endangered minutes before they are lost.
-    -- Called before config update to avoid locking contention with take_sample().
-    -- Rollup is idempotent (upsert), so double-processing is safe.
-    v_rotation_minutes := extract(epoch from v_rotation_period)::int / 60;
-
-    begin
-      perform ash.rollup_minute(v_rotation_minutes);
-    exception when undefined_function then
-      -- rollup_minute() not yet installed (upgrade in progress), skip
-      null;
-    when others then
-      raise warning 'ash.rotate: rollup_minute failed [%]: %', sqlstate, sqlerrm;
-    end;
-
     -- Calculate new slot dynamically (0 -> 1 -> ... -> N-1 -> 0)
     v_new_slot := (v_old_slot + 1) % v_num_partitions;
 
     -- The partition to truncate is the one after the new slot
     v_truncate_slot := (v_new_slot + 1) % v_num_partitions;
+
+    -- Set lock timeout to avoid blocking on long-running queries
+    set local lock_timeout = '2s';
+
+    -- Pre-truncation rollup: process endangered minutes before they are lost.
+    -- This is no longer best-effort: if the endangered raw slot has rows and
+    -- we cannot prove they are represented in rollup_1m, skip rotation rather
+    -- than deleting the only copy of the samples (#81).
+    execute format('select count(*) from ash.sample_%s', v_truncate_slot)
+    into v_endangered_rows;
+
+    if v_endangered_rows > 0 then
+      if not pg_try_advisory_xact_lock(
+           hashtext('pg_ash')::int4,
+           hashtext('pg_ash_rollup')::int4
+         ) then
+        return format(
+          'failed: pre-truncation rollup busy; slot %s not truncated',
+          v_truncate_slot
+        );
+      end if;
+
+      v_rotation_minutes := greatest(extract(epoch from v_rotation_period)::int / 60, 1);
+
+      begin
+        select ash.rollup_minute(v_rotation_minutes) into v_rollup_result;
+      exception when undefined_function then
+        return format(
+          'failed: rollup_minute() unavailable; slot %s not truncated',
+          v_truncate_slot
+        );
+      when others then
+        raise warning 'ash.rotate: rollup_minute failed [%]: %', sqlstate, sqlerrm;
+        return format(
+          'failed: pre-truncation rollup failed [%s]; slot %s not truncated',
+          sqlstate,
+          v_truncate_slot
+        );
+      end;
+
+      execute format(
+        'with raw as ('
+        '  select (sample_ts / 60) * 60 as ts, datid,'
+        '         count(distinct sample_ts)::smallint as samples,'
+        '         max(active_count)::smallint as peak_backends'
+        '  from ash.sample_%1$s'
+        '  group by 1, 2'
+        ') '
+        'select count(*) '
+        'from raw '
+        'left join ash.rollup_1m r on r.ts = raw.ts and r.datid = raw.datid '
+        'where r.ts is null '
+        '   or r.samples < raw.samples '
+        '   or r.peak_backends < raw.peak_backends',
+        v_truncate_slot
+      ) into v_unrolled_groups;
+
+      if v_unrolled_groups > 0 then
+        return format(
+          'failed: pre-truncation rollup incomplete for %s group(s) in slot %s; slot not truncated',
+          v_unrolled_groups,
+          v_truncate_slot
+        );
+      end if;
+    end if;
 
     -- Advance current_slot first (before truncate)
     update ash.config
@@ -1185,6 +1303,14 @@ begin
   end;
 
   -- Validate interval
+  if p_interval is null then
+    job_type := 'error';
+    job_id := null;
+    status := 'interval must not be null';
+    return next;
+    return;
+  end if;
+
   v_seconds := extract(epoch from p_interval)::int;
   if v_seconds < 1 then
     job_type := 'error';
@@ -1666,11 +1792,11 @@ as $$
 $$;
 
 -- Helper used by reader functions that accept a user-supplied interval.
--- Returns the same array as ash._active_slots() for in-range intervals.
--- For intervals beyond 2 * rotation_period, returns an empty array so
--- reader `slot = any(...)` JOINs naturally yield zero rows — honoring
--- the NOTICE's "older samples not available" promise (and avoiding the
--- int4-epoch underflow that would otherwise raise `integer out of range`).
+-- Returns every raw slot still retained by the configured N-partition ring.
+-- For intervals beyond (num_partitions - 2) * rotation_period, returns an
+-- empty array so reader `slot = any(...)` JOINs naturally yield zero rows —
+-- honoring the NOTICE's "older samples not available" promise (and avoiding
+-- the int4-epoch underflow that would otherwise raise `integer out of range`).
 -- A single NOTICE is emitted per transaction in that case so callers get
 -- a clear signal instead of a silent empty set.
 -- Deduplication uses a transaction-scoped GUC (ash.notice_oversized) so
@@ -1690,12 +1816,15 @@ declare
   v_current_slot smallint;
   v_num_partitions smallint;
   v_rotation_period interval;
+  v_raw_retention interval;
   v_already text;
 begin
   select current_slot, num_partitions, rotation_period
     into v_current_slot, v_num_partitions, v_rotation_period
   from ash.config
   where singleton;
+
+  v_raw_retention := (v_num_partitions - 2) * v_rotation_period;
 
   -- Negative interval is meaningless and would underflow `now() - p_interval`
   -- past the int4 horizon downstream. Treat as out-of-window.
@@ -1710,46 +1839,48 @@ begin
     return array[]::smallint[];
   end if;
 
-  if p_interval is not null and p_interval > 2 * v_rotation_period then
+  if p_interval is not null and p_interval > v_raw_retention then
     -- Suppress duplicate NOTICEs within the same transaction. The GUC is
     -- set local to the current transaction and auto-resets on commit/rollback.
     v_already := current_setting('ash.notice_oversized', true);
     if v_already is null or v_already = '' then
       raise notice
-        'requested interval % exceeds 2 * rotation_period (%); only the last two partitions are retained, so older samples are not available. Shorten the interval or increase rotation_period via ash.config.',
-        p_interval, v_rotation_period;
+        'requested interval % exceeds raw retention (%); only % completed partition(s) plus the current partial partition are retained. Shorten the interval, increase rotation_period, or rebuild with more partitions.',
+        p_interval, v_raw_retention, v_num_partitions - 2;
       perform set_config('ash.notice_oversized', '1', true);
     end if;
     -- Honor the NOTICE: return no slots so reader JOINs (`slot = any(...)`)
     -- yield empty. Without this, an absurd interval like '1000 years' clamps
     -- v_min_ts to 0 and matches every retained sample, contradicting the
     -- "older samples not available" promise. Callers wanting all retained
-    -- data should pass an interval <= 2 * rotation_period.
+    -- data should pass an interval <= raw_retention.
     return array[]::smallint[];
   end if;
 
-  -- Slot enumeration must use the configured num_partitions (default 3,
-  -- configurable in [3, 32] via rebuild_partitions). Hardcoded `% 3` would
-  -- mis-enumerate on N != 3.
-  return array[
-    v_current_slot,
-    ((v_current_slot - 1 + v_num_partitions) % v_num_partitions)::smallint
-  ];
+  -- Slot enumeration must use the configured num_partitions and include every
+  -- retained raw slot, not just current+previous. Readers still filter by
+  -- sample_ts; the slot list only keeps the partition-pruning contract honest.
+  return array(
+    select ((v_current_slot - gs.i + v_num_partitions) % v_num_partitions)::smallint
+    from generate_series(0, v_num_partitions - 2) as gs(i)
+    order by gs.i
+  );
 end;
 $$;
 
 -- Absolute-range counterpart to ash._active_slots_for(interval), used by every
 -- _at reader (top_waits_at, samples_at, query_waits_at, etc.). Returns the
 -- active slot set when the requested [p_start, p_end) range overlaps what raw
--- samples retain (~2 * rotation_period back from now()), and an empty array
--- with a NOTICE when it doesn't — restoring loud-warn symmetry with the
--- relative readers (#69). Without this, _at readers silently returned 0 rows
--- on absurd inputs (year 1000, year 3000) thanks to ts_from_timestamptz()'s
--- int4 clamp (#63), which was a UX regression vs the interval path.
+-- samples retain ((num_partitions - 2) * rotation_period back from now()), and
+-- an empty array with a NOTICE when it doesn't — restoring loud-warn symmetry
+-- with the relative readers (#69). Without this, _at readers silently returned
+-- 0 rows on absurd inputs (year 1000, year 3000) thanks to
+-- ts_from_timestamptz()'s int4 clamp (#63), which was a UX regression vs the
+-- interval path.
 --
 -- Out-of-retention conditions (each emits the NOTICE and returns {}):
---   * p_end   <= now() - 2 * rotation_period   (range entirely too old)
---   * p_start >  now()                          (range entirely in the future)
+--   * p_end   <= now() - raw_retention (range entirely too old)
+--   * p_start >  now()                  (range entirely in the future)
 --
 -- Importantly, an empty range (p_start >= p_end) inside the retained window
 -- is NOT flagged — callers may legitimately ask for a zero-length window and
@@ -1779,6 +1910,7 @@ declare
   v_num_partitions  smallint;
   v_rotation_period interval;
   v_now             timestamptz := now();
+  v_raw_retention   interval;
   v_retention_start timestamptz;
   v_already         text;
 begin
@@ -1787,7 +1919,8 @@ begin
   from ash.config
   where singleton;
 
-  v_retention_start := v_now - 2 * v_rotation_period;
+  v_raw_retention := (v_num_partitions - 2) * v_rotation_period;
+  v_retention_start := v_now - v_raw_retention;
 
   -- Out-of-retention check. Skip when either bound is null (the reader's
   -- own WHERE will yield empty without us needing to NOTICE) or when the
@@ -1797,17 +1930,18 @@ begin
     v_already := current_setting('ash.notice_oversized', true);
     if v_already is null or v_already = '' then
       raise notice
-        'requested range [%, %) lies outside the retained window (now - 2 * rotation_period .. now, i.e. [%, %)); only the last two partitions are retained, so older or future samples are not available. Adjust the range or increase rotation_period via ash.config.',
-        p_start, p_end, v_retention_start, v_now;
+        'requested range [%, %) lies outside the retained window (now - raw_retention .. now, i.e. [%, %)); only % completed partition(s) plus the current partial partition are retained. Adjust the range, increase rotation_period, or rebuild with more partitions.',
+        p_start, p_end, v_retention_start, v_now, v_num_partitions - 2;
       perform set_config('ash.notice_oversized', '1', true);
     end if;
     return array[]::smallint[];
   end if;
 
-  return array[
-    v_current_slot,
-    ((v_current_slot - 1 + v_num_partitions) % v_num_partitions)::smallint
-  ];
+  return array(
+    select ((v_current_slot - gs.i + v_num_partitions) % v_num_partitions)::smallint
+    from generate_series(0, v_num_partitions - 2) as gs(i)
+    order by gs.i
+  );
 end;
 $$;
 
@@ -2174,10 +2308,10 @@ declare
   v_count int;
   v_min_backend_seconds smallint;
   v_has_later_data bool;
+  v_sampler_lock_acquired bool := false;
 begin
-  -- Acquire rollup lock (xact-level). Distinct from the sampler lock so a
-  -- long catch-up doesn't bump skipped_samples on every concurrent tick.
-  -- rebuild_partitions's drain poll waits on this objid.
+  -- Acquire rollup lock (xact-level). Rollup operations serialize with each
+  -- other, and rebuild_partitions's drain poll waits on this objid.
   if not pg_try_advisory_xact_lock(
        hashtext('pg_ash')::int4,
        hashtext('pg_ash_rollup')::int4
@@ -2191,8 +2325,39 @@ begin
   into v_last_ts, v_min_backend_seconds
   from ash.config where singleton;
 
-  -- Current minute boundary (only process *complete* minutes)
-  v_now_minute_ts := ash.ts_from_timestamptz(date_trunc('minute', now()));
+  -- Drain in-flight samplers before choosing the "complete minute" boundary.
+  -- take_sample() gets sample_ts from transaction-start now(), then may block
+  -- before INSERT. Without this drain, rollup_minute() can advance the
+  -- watermark while a sampler later commits an old-minute row, permanently
+  -- excluding it from rollups (#81).
+  if not pg_try_advisory_lock(
+       hashtext('pg_ash')::int4,
+       hashtext('pg_ash_sampler')::int4
+     ) then
+    return 0;
+  end if;
+  v_sampler_lock_acquired := true;
+
+  begin
+    -- Current minute boundary (only process *complete* minutes). This is
+    -- computed after the sampler drain, so future samplers cannot commit rows
+    -- with sample_ts older than this boundary.
+    v_now_minute_ts := ash.ts_from_timestamptz(date_trunc('minute', now()));
+
+    perform pg_advisory_unlock(
+      hashtext('pg_ash')::int4,
+      hashtext('pg_ash_sampler')::int4
+    );
+    v_sampler_lock_acquired := false;
+  exception when others then
+    if v_sampler_lock_acquired then
+      perform pg_advisory_unlock(
+        hashtext('pg_ash')::int4,
+        hashtext('pg_ash_sampler')::int4
+      );
+    end if;
+    raise;
+  end;
 
   -- Initialize watermark if NULL (first run after install or upgrade).
   if v_last_ts is null then
@@ -2698,14 +2863,26 @@ begin
   v_end_ts := ash.ts_from_timestamptz(p_end);
 
   return query
+  with hourly as (
+    select
+      (ash.ts_to_timestamptz(r.ts))::date as d,
+      r.peak_backends,
+      r.samples,
+      coalesce((
+        select sum(u.val)::bigint
+        from unnest(r.wait_counts) with ordinality as u(val, ord)
+        where u.ord % 2 = 0
+      ), 0) as backend_seconds
+    from ash.rollup_1h r
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  )
   select
-    (ash.ts_to_timestamptz(r.ts))::date as d,
-    max(r.peak_backends)::int,
-    round(avg(r.peak_backends), 1)
-  from ash.rollup_1h r
-  where r.ts >= v_start_ts and r.ts < v_end_ts
-  group by d
-  order by d;
+    h.d,
+    max(h.peak_backends)::int,
+    round(sum(h.backend_seconds)::numeric / nullif(sum(h.samples), 0), 1)
+  from hourly h
+  group by h.d
+  order by h.d;
 end;
 $$;
 
@@ -2873,15 +3050,25 @@ as $$
     select
       t.wait_event,
       t.cnt,
-      row_number() over (order by t.cnt desc) as rn
+      row_number() over (order by t.cnt desc) as rn,
+      count(*) over () as total_rows
     from totals t
   ),
   top_rows as (
-    select wait_event, cnt, rn from ranked where rn <= p_limit
+    select wait_event, cnt, rn
+    from ranked
+    where p_limit > 0
+      and (
+        (total_rows <= p_limit and rn <= p_limit)
+        or (total_rows > p_limit and rn < p_limit)
+      )
   ),
   other as (
     select 'Other'::text as wait_event, sum(cnt) as cnt, (p_limit + 1)::bigint as rn
-    from ranked where rn > p_limit
+    from ranked
+    where p_limit > 0
+      and total_rows > p_limit
+      and rn >= p_limit
     having sum(cnt) > 0
   ),
   max_pct as (
@@ -2910,14 +3097,23 @@ returns table (
   wait_event text,
   samples bigint
 )
-language sql
+language plpgsql
 stable
 set jit = off
 set search_path = pg_catalog, ash
 as $$
+declare
+  v_bucket_secs int4;
+begin
+  v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 1 then
+    raise exception 'bucket must be at least 1 second, got %', p_bucket;
+  end if;
+
+  return query
   with waits as (
     select
-      ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
+      ash.epoch() + (s.sample_ts - (s.sample_ts % v_bucket_secs)) * interval '1 second' as bucket,
       (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
@@ -2932,7 +3128,8 @@ as $$
   from waits w
   join ash.wait_event_map wm on wm.id = w.wait_id
   group by w.bucket, wm.type, wm.event
-  order by w.bucket, sum(w.cnt) desc
+  order by w.bucket, sum(w.cnt) desc;
+end;
 $$;
 
 -- Top queries by wait samples (inline SQL decode)
@@ -2966,13 +3163,17 @@ as $$
 declare
   v_has_pgss boolean := false;
 begin
-  -- Probe the view directly — extension installed <> shared library loaded
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  -- Trust pg_stat_statements only when the real extension is installed.
+  -- Otherwise a user-created public.pg_stat_statements relation could spoof
+  -- query text and execution metrics (#87).
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -2994,6 +3195,13 @@ begin
     ),
     grand_total as (
       select sum(cnt) as total from resolved
+    ),
+    pgss as (
+      select
+        p.queryid,
+        min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -3002,7 +3210,7 @@ begin
       left(pss.query, 100) as query_text
     from resolved r
     cross join grand_total gt
-    left join pg_stat_statements pss on pss.queryid = r.query_id
+    left join pgss pss on pss.queryid = r.query_id
     order by r.cnt desc
     limit p_limit;
   else
@@ -3115,13 +3323,17 @@ as $$
 declare
   v_has_pgss boolean := false;
 begin
-  -- Probe the view directly — extension installed <> shared library loaded
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  -- Trust pg_stat_statements only when the real extension is installed.
+  -- Otherwise a user-created public.pg_stat_statements relation could spoof
+  -- query text and execution metrics (#87).
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -3143,6 +3355,19 @@ begin
     ),
     grand_total as (
       select sum(cnt) as total from resolved
+    ),
+    pgss as (
+      select
+        p.queryid,
+        sum(p.calls)::bigint as calls,
+        sum(p.total_exec_time) as total_exec_time,
+        case
+          when sum(p.calls) > 0 then sum(p.total_exec_time) / sum(p.calls)
+          else max(p.mean_exec_time)
+        end as mean_exec_time,
+        min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -3154,7 +3379,7 @@ begin
       left(pss.query, 200) as query_text
     from resolved r
     cross join grand_total gt
-    left join pg_stat_statements pss on pss.queryid = r.query_id
+    left join pgss pss on pss.queryid = r.query_id
     order by r.cnt desc
     limit p_limit;
   else
@@ -3445,13 +3670,17 @@ declare
   v_start int4 := ash.ts_from_timestamptz(p_start);
   v_end int4 := ash.ts_from_timestamptz(p_end);
 begin
-  -- Probe the view directly — extension installed <> shared library loaded
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  -- Trust pg_stat_statements only when the real extension is installed.
+  -- Otherwise a user-created public.pg_stat_statements relation could spoof
+  -- query text and execution metrics (#87).
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -3471,12 +3700,19 @@ begin
     ),
     grand_total as (
       select sum(cnt) as total from resolved
+    ),
+    pgss as (
+      select
+        p.queryid,
+        min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select r.query_id, r.cnt, round(r.cnt::numeric / gt.total * 100, 2),
        left(pss.query, 100)
     from resolved r
     cross join grand_total gt
-    left join pg_stat_statements pss on pss.queryid = r.query_id
+    left join pgss pss on pss.queryid = r.query_id
     order by r.cnt desc limit p_limit;
   else
     raise warning 'pg_stat_statements is not installed — query_text will be NULL. Run: CREATE EXTENSION pg_stat_statements;';
@@ -3864,8 +4100,12 @@ begin
   -- via unbounded `repeat()` on the bar characters. 500 is an order of
   -- magnitude beyond any realistic terminal width.
   p_width := least(greatest(p_width, 1), 500);
-  v_start_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 1 then
+    raise exception 'bucket must be at least 1 second, got %', p_bucket;
+  end if;
+
+  v_start_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
 
   -- Rank by avg active sessions weighted by bucket presence
   select array_agg(t.wait_event order by t.score desc)
@@ -4274,12 +4514,14 @@ declare
 begin
   v_min_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
 
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -4385,12 +4627,14 @@ begin
   -- the time predicate folds to false on absurd ranges (#69).
   v_slots := ash._active_slots_for_at(p_start, p_end);
 
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -4502,8 +4746,8 @@ begin
   end if;
 end $$;
 
-update ash.config set version = '1.4' where singleton;
-alter table ash.config alter column version set default '1.4';
+update ash.config set version = '1.5' where singleton;
+alter table ash.config alter column version set default '1.5';
 
 -------------------------------------------------------------------------------
 -- Event queries — top query_ids for a specific wait event
@@ -4536,12 +4780,14 @@ declare
 begin
   v_min_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
 
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -4645,12 +4891,14 @@ declare
   -- the time predicate folds to false on absurd ranges (#69).
   v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
 begin
-  begin
-    perform 1 from pg_stat_statements limit 1;
-    v_has_pgss := true;
-  exception when others then
-    v_has_pgss := false;
-  end;
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
 
   if v_has_pgss then
     return query
@@ -4854,6 +5102,7 @@ as $$
     'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
     '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
+    '_register_wait',
     -- the helpers themselves: granting them to a reader role would let
     -- that role hand out privileges. keep them admin-only.
     'grant_reader', 'revoke_reader',
@@ -4967,9 +5216,10 @@ end $$;
 --     uninstall, rotate, take_sample, set_debug_logging, rebuild_partitions,
 --     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
 --     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
---     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg). Defining
---     "reader" by exclusion (rather than enumeration) keeps the helpers
---     correct as new readers and reader-internal helpers are added.
+--     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg,
+--     _register_wait). Defining "reader" by exclusion (rather than
+--     enumeration) keeps the helpers correct as new readers and
+--     reader-internal helpers are added.
 --   - SELECT on ash.sample (+ every sample_N partition), ash.query_map_all
 --     (+ every query_map_N partition), ash.config, ash.wait_event_map,
 --     ash.rollup_1m, ash.rollup_1h.

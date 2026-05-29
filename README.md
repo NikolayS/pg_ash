@@ -10,7 +10,7 @@ Active Session History for Postgres — lightweight wait event sampling with zer
 
 **The anti-extension.** Pure SQL + PL/pgSQL that works on any Postgres 14+ — including RDS, Cloud SQL, AlloyDB, Supabase, Neon, and every other managed provider. No C extension, no `shared_preload_libraries`, no provider approval, no restart. Just `\i` and go.
 
-![pg_ash v1.4 investigation flow](demos/ash_demo.gif)
+![pg_ash v1.5 investigation flow](demos/ash_demo.gif)
 
 *Short walkthrough of the [LLM-assisted investigation](#llm-assisted-investigation) flow against a live row-lock spike in Postgres 18. Source: [`demos/`](demos/).*
 
@@ -116,6 +116,9 @@ visible in server / CI logs.
 -- from 1.3 to 1.4
 \i sql/ash-1.3-to-1.4.sql
 
+-- from 1.4 to 1.5
+\i sql/ash-1.4-to-1.5.sql
+
 -- check version
 select * from ash.status();
 ```
@@ -218,7 +221,7 @@ select * from ash.status();
 ```
            metric           |             value
 ----------------------------+-------------------------------
- version                    | 1.4
+ version                    | 1.5
  color                      | off
  num_partitions             | 3
  sampling_enabled           | true
