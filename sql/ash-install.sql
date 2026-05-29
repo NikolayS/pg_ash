@@ -390,8 +390,8 @@ language plpgsql
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_id    smallint;
-  v_count bigint;
+  v_id     smallint;
+  v_at_cap boolean;
 begin
   -- Try to get existing
   select id into v_id
@@ -405,12 +405,14 @@ begin
   -- Enforce dictionary size cap before inserting. 32 000 stays well below
   -- smallint's 32 767 ceiling while still leaving room for genuine event
   -- diversity (real wait-event inventories measure in the hundreds).
-  -- reltuples is a cheap estimate; an exact count would add a scan on
-  -- every fresh wait-event observation on the sampler's hot path.
-  select reltuples::bigint into v_count
-  from pg_class where oid = 'ash.wait_event_map'::regclass;
+  -- Use an exact existence probe for the 32 000th row instead of
+  -- pg_class.reltuples: reltuples can be -1 or stale immediately after
+  -- TRUNCATE/restore, which bypasses a hard cap until ANALYZE catches up.
+  select exists (
+    select 1 from ash.wait_event_map offset 31999 limit 1
+  ) into v_at_cap;
 
-  if v_count >= 32000 then
+  if v_at_cap then
     -- Bump the cap-hit counter so ash.status() can surface the drop.
     -- Note: counts *registration drops* here — not the number of sampled
     -- backends observed for this (state,type,event). Many concurrent

@@ -92,12 +92,13 @@ Three new bigint columns on `ash.config`, all surfaced by `ash.status()`:
 - **No more `integer out of range` on absurd reader inputs.** Both the relative-interval readers (`top_waits('1000 years')`, etc.) and the absolute-timestamp `_at` readers (`top_waits_at('1000-01-01', …)`, etc.) now return empty rows cleanly via clamps in the readers and in `ts_from_timestamptz`. (issues #51 and #63; [PR #57](https://github.com/NikolayS/pg_ash/pull/57), [PR #65](https://github.com/NikolayS/pg_ash/pull/65))
 - **`sample_data_check` constraint aligned across upgrade paths.** Installs upgraded from 1.0 had a looser `array_length(data, 1) >= 2` check that 1.1 silently failed to tighten because of `create table if not exists`. An idempotent DO block in install.sql now drops + re-adds the `>= 3` form. (issue #49; [PR #56](https://github.com/NikolayS/pg_ash/pull/56))
 - **`ash.status()` no longer errors for non-superuser monitoring roles when pg_cron is loaded.** A nested `EXCEPTION WHEN insufficient_privilege` substitutes a fallback row pointing at the missing `GRANT USAGE ON SCHEMA cron`. (issue #61; [PR #62](https://github.com/NikolayS/pg_ash/pull/62))
+- **`wait_event_map` cap enforcement fixed.** `_register_wait()` now checks the exact 32 000th dictionary row instead of trusting stale `pg_class.reltuples`, so the hard cap fires immediately after `TRUNCATE` / restore and increments `register_wait_cap_hits` as documented. (#90; [PR #92](https://github.com/NikolayS/pg_ash/pull/92))
 
 ## CI / infra
 
 - End-to-end pg_cron firing test passes on every PG 14–18 cron-enabled job. Provisions a `root` PG role + database to satisfy peer auth in the GHA service container; asserts via `ash.sample` row growth with a real `pg_sleep` workload. (issue #46; [PR #73](https://github.com/NikolayS/pg_ash/pull/73))
 - Schema-equivalence CI now diffs `pg_constraint` between fresh-install and chain-upgrade snapshots — catches the class of divergence behind issue #49. (issue #66; [PR #70](https://github.com/NikolayS/pg_ash/pull/70))
-- **Hot-path perf** improvements in `query_waits` / `query_waits_at` (window-based dedup via `named_hits` CTE), `rotate()` (single-statement `truncate ash.sample_N, ash.query_map_N restart identity`), and the `_register_wait` cap probe (`offset 49999 limit 1` replacing stale `pg_class.reltuples`). ([PR #42](https://github.com/NikolayS/pg_ash/pull/42))
+- **Hot-path perf** improvements in `query_waits` / `query_waits_at` (window-based dedup via `named_hits` CTE), `rotate()` (single-statement `truncate ash.sample_N, ash.query_map_N restart identity`), and the `query_map` cap probe (`offset 49999 limit 1` replacing stale `pg_class.reltuples`). ([PR #42](https://github.com/NikolayS/pg_ash/pull/42))
 - **Supply-chain hardening** for CI: third-party actions pinned to 40-char commit SHAs and least-privilege `permissions:` blocks. ([PR #40](https://github.com/NikolayS/pg_ash/pull/40))
 
 ## Demo
@@ -498,4 +499,3 @@ Benchmark results are published in [issue #1](https://github.com/NikolayS/pg_ash
 - **Rollup tables** — per-minute and per-hour aggregation for long-term trends (designed in `blueprints/ROLLUP_DESIGN.md`, implementation planned for 1.1)
 - **Cross-database query text** — sampling covers all databases (via `pg_stat_activity.datid`), but `top_queries_with_text()` can only resolve query text from pg_stat_statements in the database where pg_ash is installed
 - **Parallel query attribution** — parallel workers are sampled but not linked to their leader
-

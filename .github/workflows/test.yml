@@ -1865,6 +1865,51 @@ jobs:
           $$;
           EOF
 
+      - name: "Regression: wait_event_map cap is exact after truncate"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          begin;
+
+          truncate ash.wait_event_map restart identity cascade;
+          update ash.config set register_wait_cap_hits = 0 where singleton;
+
+          insert into ash.wait_event_map (state, type, event)
+          select
+            'active',
+            'synthetic_type_' || i,
+            'synthetic_event_' || i
+          from generate_series(1, 32000) as gs(i);
+
+          do $$
+          declare
+            v_id smallint;
+            v_rows bigint;
+            v_hits bigint;
+          begin
+            select ash._register_wait(
+              'active',
+              'synthetic_type_over_cap',
+              'synthetic_event_over_cap'
+            ) into v_id;
+
+            assert v_id is null,
+              '_register_wait should return NULL once wait_event_map has 32000 rows';
+
+            select count(*) into v_rows from ash.wait_event_map;
+            assert v_rows = 32000,
+              'wait_event_map cap should prevent row 32001, got ' || v_rows;
+
+            select register_wait_cap_hits into v_hits from ash.config where singleton;
+            assert v_hits = 1,
+              'register_wait_cap_hits should increment at cap, got ' || v_hits;
+          end;
+          $$;
+
+          rollback;
+          EOF
+
       - name: Test edge cases and corner cases
         env:
           PGPASSWORD: postgres
@@ -4119,4 +4164,3 @@ jobs:
           CRON: ${{ matrix.cron }}
         run: |
           echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
-
