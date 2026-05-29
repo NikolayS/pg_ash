@@ -2407,6 +2407,43 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test v1.5: malformed sample.data is rejected (#89)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          begin;
+
+          do $$
+          declare
+            v_inserted boolean := false;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m;
+            truncate ash.wait_event_map restart identity cascade;
+            perform ash._register_wait('active', 'Corrupt', 'Bogus');
+
+            begin
+              insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (
+                ash.ts_from_timestamptz(now() - interval '2 minutes'),
+                0::oid,
+                1::smallint,
+                array[-1,1000,0]::int4[],
+                ash.current_slot()
+              );
+              v_inserted := true;
+            exception when check_violation then
+              null;
+            end;
+
+            assert not v_inserted,
+              'ash.sample.data must reject malformed packed arrays whose count exceeds available query ids';
+          end $$;
+
+          rollback;
+          EOF
+
       - name: "Release-gate fixes: negative interval, p_width clamp, decode_sample size cap"
         env:
           PGPASSWORD: postgres
