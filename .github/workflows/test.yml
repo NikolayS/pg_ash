@@ -4181,6 +4181,7 @@ jobs:
           do $$
           declare
             v_count int;
+            v_text_count int;
             v_cpu_id smallint;
             v_q1 int4;
             v_now_ts int4;
@@ -4217,6 +4218,30 @@ jobs:
             perform ash.status();
             perform ash.set_debug_logging();
 
+            -- A user-created public.pg_stat_statements relation must not be
+            -- trusted when the real extension is absent (#87). It must not
+            -- duplicate ASH rows or supply spoofed query_text.
+            create table public.pg_stat_statements (
+              queryid bigint,
+              query text,
+              calls bigint,
+              total_exec_time double precision,
+              mean_exec_time double precision,
+              dbid oid
+            );
+
+            insert into public.pg_stat_statements values
+              (999999, 'select same from user_a', 10, 100.0, 10.0, 1::oid),
+              (999999, 'select same from user_b', 20, 400.0, 20.0, 2::oid);
+
+            select count(*), count(query_text)
+            into v_count, v_text_count
+            from ash.top_queries('1 hour', 10)
+            where query_id = 999999;
+            assert v_count = 1 and v_text_count = 0,
+              format('top_queries must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s',
+                     v_count, v_text_count);
+
             -- Functions that should ERROR without pgss:
             begin
               perform ash.top_queries_with_text('1 hour');
@@ -4241,6 +4266,8 @@ jobs:
               assert SQLERRM like '%pg_stat_statements%',
                 'event_queries_at error should mention pg_stat_statements, got: ' || SQLERRM;
             end;
+
+            drop table public.pg_stat_statements;
 
             raise notice 'All degraded-mode (no pgss) tests PASSED';
           end;
