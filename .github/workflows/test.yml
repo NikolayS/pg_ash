@@ -2154,6 +2154,10 @@ jobs:
               v_s2 smallint;
               v_s3 smallint;
             begin
+              -- This block tests slot arithmetic only. With #81, rotate()
+              -- must refuse to advance if the endangered inactive slot still
+              -- contains unrolled raw samples from earlier edge cases.
+              truncate ash.sample;
               select ash.current_slot() into v_s0;
 
               update ash.config set rotated_at = now() - interval '2 days';

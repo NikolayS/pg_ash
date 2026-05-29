@@ -5,6 +5,7 @@ Work in progress after v1.4.
 ## Fixes
 
 - **`wait_event_map` cap enforcement fixed.** `_register_wait()` now checks the exact 32 000th dictionary row instead of trusting stale `pg_class.reltuples`, so the hard cap fires immediately after `TRUNCATE` / restore and increments `register_wait_cap_hits` as documented. (issue #90; [PR #92](https://github.com/NikolayS/pg_ash/pull/92))
+- **Raw samples are protected during rollup/rotation races.** `rollup_minute()` no longer advances its watermark while a sampler is in flight, and `rotate()` refuses to truncate an endangered raw partition unless pre-truncation rollup succeeds and covers the raw groups in that slot. (issue #81; [PR #86](https://github.com/NikolayS/pg_ash/pull/86))
 
 ---
 
