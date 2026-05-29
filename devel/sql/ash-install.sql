@@ -263,13 +263,73 @@ as $$
   select current_slot from ash.config where singleton
 $$;
 
+-- Validate the packed ash.sample.data representation.
+--
+-- Layout: one or more groups of:
+--   - negative wait-id marker
+--   - positive backend count N
+--   - exactly N non-negative query_map ids, where 0 means NULL query_id
+--
+-- Kept as a standalone immutable helper so both fresh installs and upgrades
+-- can use one table CHECK expression. The function intentionally performs
+-- shape validation only; wait/query dictionary lookups stay in readers.
+create or replace function ash._sample_data_is_valid(p_data integer[])
+returns boolean
+language plpgsql
+immutable
+strict
+parallel safe
+set search_path = pg_catalog
+as $$
+declare
+  v_len int;
+  v_idx int := 1;
+  v_count int;
+  v_qid_idx int;
+begin
+  v_len := array_length(p_data, 1);
+  if v_len is null or v_len < 3 or v_len > 100000 then
+    return false;
+  end if;
+
+  while v_idx <= v_len loop
+    if p_data[v_idx] is null or p_data[v_idx] >= 0 then
+      return false;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx > v_len then
+      return false;
+    end if;
+    v_count := p_data[v_idx];
+    if v_count is null or v_count <= 0 then
+      return false;
+    end if;
+    v_idx := v_idx + 1;
+
+    if v_idx + v_count - 1 > v_len then
+      return false;
+    end if;
+
+    for v_qid_idx in 1..v_count loop
+      if p_data[v_idx] is null or p_data[v_idx] < 0 then
+        return false;
+      end if;
+      v_idx := v_idx + 1;
+    end loop;
+  end loop;
+
+  return true;
+end;
+$$;
+
 -- Sample table (partitioned by slot)
 create table if not exists ash.sample (
   sample_ts    int4 not null,
   datid        oid not null,
   active_count smallint not null,
   data         integer[] not null
-         check (data[1] < 0 and array_length(data, 1) >= 3),
+         check (ash._sample_data_is_valid(data)),
   slot         smallint not null default ash.current_slot()
 ) partition by list (slot);
 
@@ -300,29 +360,33 @@ begin
   end loop;
 end $$;
 
--- Migration (issue #49): align sample.data check across upgrade paths.
--- v1.0 shipped `array_length(data, 1) >= 2`; v1.1 tightened it to `>= 3`,
--- but no legacy upgrade script rewrote the constraint, so installs that
--- started at 1.0 still carry the looser form. Detect and fix in place.
--- Idempotent: only rewrites when the current definition is missing or
--- the old `>= 2` form. Drops on the partitioned parent cascade to all
--- partitions; ADD CONSTRAINT on the parent propagates back to children.
+-- Migration (issues #49, #89): align sample.data check across upgrade paths.
+-- v1.0 shipped `array_length(data, 1) >= 2`; v1.1 tightened it to `>= 3`;
+-- v1.5 validates the full packed shape so impossible wait counts are rejected
+-- at INSERT time. Detect and fix in place. Idempotent: only rewrites when the
+-- current definition is missing or not using the validator helper. Drops on the
+-- partitioned parent cascade to all partitions; ADD CONSTRAINT on the parent
+-- propagates back to children.
 do $$
 declare
   v_def text;
+  v_valid boolean;
 begin
-  select pg_get_constraintdef(c.oid) into v_def
+  select pg_get_constraintdef(c.oid), c.convalidated
+    into v_def, v_valid
   from pg_constraint c
   where c.conrelid = 'ash.sample'::regclass
     and c.conname  = 'sample_data_check';
 
-  if v_def is null or v_def !~ 'array_length\(data, 1\) >= 3' then
+  if v_def is null or v_def !~ '_sample_data_is_valid' then
     if v_def is not null then
       alter table ash.sample drop constraint sample_data_check;
     end if;
     alter table ash.sample
       add constraint sample_data_check
-      check (data[1] < 0 and array_length(data, 1) >= 3);
+      check (ash._sample_data_is_valid(data));
+  elsif not v_valid then
+    alter table ash.sample validate constraint sample_data_check;
   end if;
 end $$;
 
