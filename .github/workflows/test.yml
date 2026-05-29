@@ -2464,6 +2464,10 @@ jobs:
             v_num smallint;
             v_result text;
             v_slot smallint;
+            v_retention_slots smallint[];
+            v_expected_retention_slots smallint[] := array[0,4,3,2]::smallint[];
+            v_retention_wait_id smallint;
+            v_retention_rows int;
           begin
             -- === Confirmation token required (issue #53) ===
             -- Without 'yes': raises and leaves state untouched.
@@ -2533,6 +2537,44 @@ jobs:
             -- Verify sampling_enabled is false after rebuild (must call start())
             assert (select sampling_enabled from ash.config where singleton) = false,
               'sampling_enabled should be false after rebuild';
+
+            -- Raw readers must honor all retained partitions after rebuild.
+            -- With N=5 and current_slot=0, retained raw slots are current plus
+            -- three completed partitions: [0,4,3,2].
+            v_retention_slots := ash._active_slots_for('3 days'::interval);
+            assert v_retention_slots = v_expected_retention_slots,
+              format('_active_slots_for(3 days): expected %s, got %s',
+                     v_expected_retention_slots, v_retention_slots);
+
+            v_retention_slots := ash._active_slots_for_at(now() - interval '3 days', now());
+            assert v_retention_slots = v_expected_retention_slots,
+              format('_active_slots_for_at(3 days): expected %s, got %s',
+                     v_expected_retention_slots, v_retention_slots);
+
+            v_retention_slots := ash._active_slots_for('4 days'::interval);
+            assert v_retention_slots = array[]::smallint[],
+              format('_active_slots_for(4 days) should exceed raw retention and return {}, got %s',
+                     v_retention_slots);
+
+            select ash._register_wait('active', 'RetentionProof', 'OlderSlot')
+            into v_retention_wait_id;
+
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values (
+              ash.ts_from_timestamptz(now() - interval '2 days 10 minutes'),
+              0::oid,
+              1::smallint,
+              array[(-v_retention_wait_id)::int, 1, 0]::int4[],
+              3::smallint
+            );
+
+            select count(*) into v_retention_rows
+            from ash.samples_at(now() - interval '3 days', now(), 100)
+            where wait_event = 'RetentionProof:OlderSlot';
+            assert v_retention_rows = 1,
+              format('samples_at should see retained slot 3 sample, got %s rows', v_retention_rows);
+
+            truncate ash.sample;
 
             -- === Rotate with 5 partitions ===
             update ash.config
