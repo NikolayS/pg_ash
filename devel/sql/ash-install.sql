@@ -2788,14 +2788,26 @@ begin
   v_end_ts := ash.ts_from_timestamptz(p_end);
 
   return query
+  with hourly as (
+    select
+      (ash.ts_to_timestamptz(r.ts))::date as d,
+      r.peak_backends,
+      r.samples,
+      coalesce((
+        select sum(u.val)::bigint
+        from unnest(r.wait_counts) with ordinality as u(val, ord)
+        where u.ord % 2 = 0
+      ), 0) as backend_seconds
+    from ash.rollup_1h r
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  )
   select
-    (ash.ts_to_timestamptz(r.ts))::date as d,
-    max(r.peak_backends)::int,
-    round(avg(r.peak_backends), 1)
-  from ash.rollup_1h r
-  where r.ts >= v_start_ts and r.ts < v_end_ts
-  group by d
-  order by d;
+    h.d,
+    max(h.peak_backends)::int,
+    round(sum(h.backend_seconds)::numeric / nullif(sum(h.samples), 0), 1)
+  from hourly h
+  group by h.d
+  order by h.d;
 end;
 $$;
 

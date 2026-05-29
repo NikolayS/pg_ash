@@ -3256,6 +3256,10 @@ jobs:
           do $$
           declare
             v_count int;
+            v_peak int;
+            v_avg numeric;
+            v_wait_id smallint;
+            v_day_start timestamptz;
           begin
             -- === Reader functions exist ===
             assert exists (select from pg_proc
@@ -3298,6 +3302,41 @@ jobs:
             select count(*) into v_count
             from ash.daily_peak_backends_at(now() - interval '7 days', now());
             assert v_count >= 0, 'daily_peak_backends_at should not error';
+
+            -- avg_backends should be average active backends from backend-seconds
+            -- over samples, not the average of hourly peak_backends (#88).
+            truncate ash.rollup_1h;
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait_id;
+            v_day_start := date_trunc('day', now());
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            )
+            values
+              (
+                ash.ts_from_timestamptz(v_day_start),
+                0::oid,
+                60::smallint,
+                100::smallint,
+                array[v_wait_id, 60]::int4[],
+                '{}'::int8[]
+              ),
+              (
+                ash.ts_from_timestamptz(v_day_start + interval '1 hour'),
+                0::oid,
+                60::smallint,
+                100::smallint,
+                array[v_wait_id, 60]::int4[],
+                '{}'::int8[]
+              );
+
+            select peak_backends, avg_backends
+            into v_peak, v_avg
+            from ash.daily_peak_backends_at(v_day_start, v_day_start + interval '2 hours');
+            assert v_peak = 100,
+              format('daily peak should remain max peak_backends=100, got %s', v_peak);
+            assert v_avg = 1.0,
+              format('daily avg_backends should be backend-seconds/samples=1.0, got %s', v_avg);
 
             -- === Future range: no data ===
             select count(*) into v_count
