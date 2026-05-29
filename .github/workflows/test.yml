@@ -231,11 +231,11 @@ jobs:
             where jobname like 'ash_%';
           "
 
-      - name: Install pg_ash (fresh install)
+      - name: Install pg_ash (fresh development install)
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql
 
       - name: Test schema and infrastructure
         env:
@@ -3535,6 +3535,7 @@ jobs:
 
           -- Upgrade to 1.4
           \i sql/ash-1.3-to-1.4.sql
+          \i devel/sql/ash-1.4-to-1.5.sql
 
           do $$
           begin
@@ -3546,9 +3547,48 @@ jobs:
             ), 'missed_samples column missing after 1.4 upgrade';
             assert (select missed_samples from ash.config where singleton) = 0,
               'missed_samples should be 0 after upgrade';
-            raise notice '1.3 -> 1.4 upgrade PASSED';
+            raise notice '1.3 -> 1.4 -> 1.5-dev upgrade PASSED';
           end;
           $$;
+
+          begin;
+
+          truncate ash.wait_event_map restart identity cascade;
+          update ash.config set register_wait_cap_hits = 0 where singleton;
+
+          insert into ash.wait_event_map (state, type, event)
+          select
+            'active',
+            'upgrade_synthetic_type_' || i,
+            'upgrade_synthetic_event_' || i
+          from generate_series(1, 32000) as gs(i);
+
+          do $$
+          declare
+            v_id smallint;
+            v_rows bigint;
+            v_hits bigint;
+          begin
+            select ash._register_wait(
+              'active',
+              'upgrade_synthetic_type_over_cap',
+              'upgrade_synthetic_event_over_cap'
+            ) into v_id;
+
+            assert v_id is null,
+              '1.4-to-1.5 _register_wait should return NULL once wait_event_map has 32000 rows';
+
+            select count(*) into v_rows from ash.wait_event_map;
+            assert v_rows = 32000,
+              '1.4-to-1.5 wait_event_map cap should prevent row 32001, got ' || v_rows;
+
+            select register_wait_cap_hits into v_hits from ash.config where singleton;
+            assert v_hits = 1,
+              '1.4-to-1.5 register_wait_cap_hits should increment at cap, got ' || v_hits;
+          end;
+          $$;
+
+          rollback;
 
           -- Uninstall after upgrade test
           select ash.uninstall('yes');
@@ -3561,9 +3601,9 @@ jobs:
           # Regression for issue #49: v1.0 shipped `array_length(data, 1) >= 2`,
           # v1.1+ requires `>= 3`. No legacy upgrade script rewrote the check,
           # so installs that started at 1.0 carried the looser form forever.
-          # ash-install.sql now detects and rewrites it; assert that the full
-          # 1.0 -> 1.4 chain ends with the tightened constraint on both the
-          # partitioned parent and every partition.
+          # The current development upgrade chain now detects and rewrites it;
+          # assert that the full 1.0 -> 1.5-dev chain ends with the tightened
+          # constraint on both the partitioned parent and every partition.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           \i sql/ash-1.0.sql
 
@@ -3584,8 +3624,9 @@ jobs:
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
           \i sql/ash-1.3-to-1.4.sql
+          \i devel/sql/ash-1.4-to-1.5.sql
 
-          -- After full chain: parent + every partition must carry `>= 3`,
+          -- After full dev chain: parent + every partition must carry `>= 3`,
           -- and none may carry the legacy `>= 2`.
           do $$
           declare
@@ -3686,8 +3727,9 @@ jobs:
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
           \i sql/ash-1.3-to-1.4.sql
+          \i devel/sql/ash-1.4-to-1.5.sql
 
-          -- Assertions after reaching v1.4
+          -- Assertions after reaching v1.4 plus the current 1.5-dev delta.
           do $$
           declare
             v_cfg record;
@@ -3784,6 +3826,7 @@ jobs:
           $$;
 
           \i sql/ash-1.3-to-1.4.sql
+          \i devel/sql/ash-1.4-to-1.5.sql
 
           do $$
           begin
@@ -3791,7 +3834,7 @@ jobs:
               'version should be 1.4 after upgrade';
             assert (select missed_samples from ash.config where singleton) = 0,
               'missed_samples should be 0';
-            raise notice '1.3 -> 1.4 direct upgrade PASSED';
+            raise notice '1.3 -> 1.4 -> 1.5-dev direct upgrade PASSED';
           end;
           $$;
 
@@ -3815,14 +3858,15 @@ jobs:
           # REPLACE cannot change OUT params). The 1.0 bootstrap and the
           # 1.0-to-1.1 wrapper hit the same path. Those finalized legacy
           # scripts remain immutable and are still exercised end-to-end by
-          # the one-shot upgrade-chain tests above (fresh DB, 1.0 → 1.4).
+          # the one-shot upgrade-chain tests above (fresh DB, 1.0 → 1.5-dev).
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          \i sql/ash-install.sql
+          \i devel/sql/ash-install.sql
 
           -- Apply all upgrade scripts on top of fresh install (should be idempotent)
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
           \i sql/ash-1.3-to-1.4.sql
+          \i devel/sql/ash-1.4-to-1.5.sql
 
           do $$
           begin
@@ -3839,6 +3883,7 @@ jobs:
           \i sql/ash-1.1-to-1.2.sql
           \i sql/ash-1.2-to-1.3.sql
           \i sql/ash-1.3-to-1.4.sql
+          \i devel/sql/ash-1.4-to-1.5.sql
 
           do $$
           begin
@@ -3857,7 +3902,7 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
-      - name: "Schema equivalence: fresh install vs full upgrade path"
+      - name: "Schema equivalence: fresh dev install vs full upgrade path"
         env:
           PGPASSWORD: postgres
         run: |
@@ -3910,7 +3955,7 @@ jobs:
           SNAPSQL
 
           # 1) Fresh install → snapshot
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/fresh_schema.txt
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
@@ -3920,14 +3965,15 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1-to-1.2.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.2-to-1.3.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.3-to-1.4.sql > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-1.4-to-1.5.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
           # 3) Compare
           if diff -u /tmp/fresh_schema.txt /tmp/upgraded_schema.txt; then
-            echo "Schema equivalence test PASSED: fresh install and upgrade path produce identical schemas"
+            echo "Schema equivalence test PASSED: fresh dev install and upgrade path produce identical schemas"
           else
-            echo "::error::Schema equivalence test FAILED: fresh install and upgrade path differ (see diff above)"
+            echo "::error::Schema equivalence test FAILED: fresh dev install and upgrade path differ (see diff above)"
 
             # Issue #66: when constraints diverge, surface a clear, dedicated
             # error naming each affected constraint and both definitions, so
@@ -3985,7 +4031,7 @@ jobs:
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" 2>/dev/null || echo "ash.uninstall skipped (schema absent)"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "drop extension if exists pg_stat_statements"
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql > /dev/null
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
 
@@ -4113,7 +4159,7 @@ jobs:
           # Use ON_ERROR_STOP so unrelated failures don't get silenced.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "drop extension if exists pg_cron cascade"
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-install.sql > /dev/null
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql > /dev/null
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           do $$
