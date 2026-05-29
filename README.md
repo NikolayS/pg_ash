@@ -117,7 +117,7 @@ visible in server / CI logs.
 \i sql/ash-1.3-to-1.4.sql
 
 -- from 1.4 to 1.5
-\i sql/ash-1.4-to-1.5.sql
+\i sql/ash-1.4-to-1.5.sql  -- atomic wrapper; run with ON_ERROR_STOP enabled
 
 -- check version
 select * from ash.status();

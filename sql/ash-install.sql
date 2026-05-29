@@ -374,6 +374,7 @@ do $$
 declare
   v_def text;
   v_valid boolean;
+  v_invalid bigint;
 begin
   select pg_get_constraintdef(c.oid), c.convalidated
     into v_def, v_valid
@@ -382,6 +383,31 @@ begin
     and c.conname  = 'sample_data_check';
 
   if v_def is null or v_def !~ '_sample_data_is_valid' then
+    select count(*) into v_invalid
+    from ash.sample
+    where not ash._sample_data_is_valid(data);
+
+    if v_invalid > 0 then
+      create table if not exists ash.sample_malformed_1_5 (
+        sample_ts int4 not null,
+        datid oid not null,
+        active_count smallint not null,
+        data integer[] not null,
+        slot smallint not null,
+        quarantined_at timestamptz not null default clock_timestamp()
+      );
+
+      insert into ash.sample_malformed_1_5(sample_ts, datid, active_count, data, slot)
+      select sample_ts, datid, active_count, data, slot
+      from ash.sample
+      where not ash._sample_data_is_valid(data);
+
+      raise warning 'pg_ash upgrade: quarantined and deleted % malformed ash.sample row(s) rejected by the v1.5 data-shape validator',
+        v_invalid;
+      delete from ash.sample
+      where not ash._sample_data_is_valid(data);
+    end if;
+
     if v_def is not null then
       alter table ash.sample drop constraint sample_data_check;
     end if;
@@ -3767,11 +3793,17 @@ declare
   v_slots smallint[] := ash._active_slots_for_at(p_start, p_end);
   v_start int4       := ash.ts_from_timestamptz(p_start);
   v_end   int4       := ash.ts_from_timestamptz(p_end);
+  v_bucket_secs int4;
 begin
+  v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 1 then
+    raise exception 'bucket must be at least 1 second, got %', p_bucket;
+  end if;
+
   return query
   with waits as (
     select
-      ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
+      ash.epoch() + (s.sample_ts - (s.sample_ts % v_bucket_secs)) * interval '1 second' as bucket,
       (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
@@ -4323,6 +4355,9 @@ begin
   -- inner queries' time predicates fold to false (#69).
   v_slots := ash._active_slots_for_at(p_start, p_end);
   v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 1 then
+    raise exception 'bucket must be at least 1 second, got %', p_bucket;
+  end if;
 
   -- Rank by avg active sessions weighted by bucket presence
   select array_agg(t.wait_event order by t.score desc)
