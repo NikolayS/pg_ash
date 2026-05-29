@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - name: Guard docs against stale privilege and reader names
         run: |
@@ -67,6 +69,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - name: Install pg_cron in container
         # The GitHub Actions `services:` block does not let us mount a custom
@@ -2362,6 +2366,16 @@ jobs:
               format('wait_timeline zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
 
             begin
+              perform * from ash.wait_timeline_at(now() - interval '1 hour', now(), '0 seconds');
+              raise exception 'wait_timeline_at accepted zero bucket';
+            exception when others then
+              v_state := sqlstate;
+              v_msg := sqlerrm;
+            end;
+            assert v_state <> '22012' and v_msg ilike '%bucket%',
+              format('wait_timeline_at zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
+
+            begin
               perform * from ash.timeline_chart('1 hour', '0 seconds', 4, 20);
               raise exception 'timeline_chart accepted zero bucket';
             exception when others then
@@ -2370,6 +2384,16 @@ jobs:
             end;
             assert v_state <> '22012' and v_msg ilike '%bucket%',
               format('timeline_chart zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
+
+            begin
+              perform * from ash.timeline_chart_at(now() - interval '1 hour', now(), '0 seconds', 4, 20);
+              raise exception 'timeline_chart_at accepted zero bucket';
+            exception when others then
+              v_state := sqlstate;
+              v_msg := sqlerrm;
+            end;
+            assert v_state <> '22012' and v_msg ilike '%bucket%',
+              format('timeline_chart_at zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
 
             -- NULL interval should be handled at function level before
             -- touching ash.config.sample_interval.
@@ -3892,6 +3916,83 @@ jobs:
             raise notice 'Uninstall test PASSED (including v1.4 rollup objects)';
           end;
           $$;
+          EOF
+
+      - name: "Release upgrade path: actual v1.4 tag to v1.5"
+        if: matrix.postgres == 17 && matrix.cron == 'on'
+        env:
+          PGPASSWORD: postgres
+        run: |
+          git show v1.4:sql/ash-install.sql > /tmp/ash-v1.4-install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i /tmp/ash-v1.4-install.sql
+
+          do $$
+          declare
+            v_wait_id smallint;
+            v_slot smallint;
+            v_ts int4 := ash.ts_from_timestamptz(now());
+          begin
+            select ash._register_wait('active', 'DirectUpgrade', 'ValidRaw') into v_wait_id;
+            select ash.current_slot() into v_slot;
+
+            -- v1.4 permits this malformed payload. v1.5 must not fail the
+            -- whole release upgrade when a legacy database already contains it.
+            insert into ash.sample(sample_ts, datid, active_count, data, slot)
+            values (v_ts - 10, 0::oid, 1000, array[-v_wait_id, 1000, 0]::int4[], v_slot);
+
+            -- Valid raw data seeded before the upgrade must still decode after
+            -- the direct v1.4 -> v1.5 wrapper.
+            insert into ash.sample(sample_ts, datid, active_count, data, slot)
+            values (v_ts - 5, 0::oid, 1, array[-v_wait_id, 1, 0]::int4[], v_slot);
+          end $$;
+
+          \i sql/ash-1.4-to-1.5.sql
+
+          do $$
+          declare
+            v_count int;
+            v_wait_id smallint;
+            v_slot smallint;
+            v_retained_slot smallint;
+            v_ts int4 := ash.ts_from_timestamptz(now());
+          begin
+            assert (select version from ash.config where singleton) = '1.5',
+              'direct v1.4 -> v1.5 upgrade did not stamp version 1.5';
+
+            select count(*) into v_count
+            from ash.sample
+            where not ash._sample_data_is_valid(data);
+            assert v_count = 0,
+              format('direct v1.4 -> v1.5 upgrade left % malformed sample rows', v_count);
+
+            assert exists (
+              select 1 from ash.top_waits('1 hour', 100)
+              where wait_event = 'DirectUpgrade:ValidRaw'
+            ), 'direct v1.4 -> v1.5 upgrade lost valid pre-upgrade raw sample';
+
+            perform ash.rebuild_partitions(5, 'yes');
+            select ash.current_slot() into v_slot;
+            v_retained_slot := ((v_slot - 3 + 5) % 5)::smallint;
+            select ash._register_wait('active', 'DirectUpgrade', 'RetainedSlot') into v_wait_id;
+
+            execute format(
+              'insert into ash.sample_%s(sample_ts, datid, active_count, data, slot) values (%s, 0::oid, 1, %L::int4[], %s)',
+              v_retained_slot,
+              v_ts - 60,
+              array[-v_wait_id, 1, 0]::int4[],
+              v_retained_slot
+            );
+
+            assert exists (
+              select 1 from ash.top_waits('2 days', 100)
+              where wait_event = 'DirectUpgrade:RetainedSlot'
+            ), 'direct v1.4 -> v1.5 upgrade did not honor rebuilt retained raw slots';
+
+            raise notice 'direct v1.4 -> v1.5 release upgrade regression PASSED';
+          end $$;
+
+          select ash.uninstall('yes');
           EOF
 
       - name: "Upgrade path: discovered full chain"

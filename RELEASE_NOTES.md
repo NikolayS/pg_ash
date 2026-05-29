@@ -5,8 +5,9 @@ safety, and release-process hardening. Upgrade from 1.4:
 `\i sql/ash-1.4-to-1.5.sql`. Fresh install or upgrade from any version:
 `\i sql/ash-install.sql`.
 
-Thanks to @r314tive for reporting issue #90 and for bringing the original PRs
-behind the rollup/rotation and raw-retention fixes ([PR #86](https://github.com/NikolayS/pg_ash/pull/86),
+Thanks to @r314tive for the sustained bug-reporting work behind this release:
+issues #81, #83, and #87-#91, plus the original PRs behind the rollup/rotation
+and raw-retention fixes ([PR #86](https://github.com/NikolayS/pg_ash/pull/86),
 [PR #85](https://github.com/NikolayS/pg_ash/pull/85)).
 
 ## Fixes
@@ -23,10 +24,10 @@ behind the rollup/rotation and raw-retention fixes ([PR #86](https://github.com/
 
 - **Development SQL is staged outside released SQL.** Between releases, new SQL
   lives under `devel/sql/`; release stamping promotes it into `sql/` only when
-  cutting the next tag. (PR #94)
+  cutting the next tag. ([PR #94](https://github.com/NikolayS/pg_ash/pull/94))
 - **CI discovers SQL chains from files.** The test workflow uses
   `devel/scripts/ash_sql_chain.py` instead of hardcoded version paths, so future
-  version bumps require adding/moving files, not rewriting CI. (PR #94)
+  version bumps require adding/moving files, not rewriting CI. ([PR #94](https://github.com/NikolayS/pg_ash/pull/94))
 
 ---
 

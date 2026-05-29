@@ -40,7 +40,10 @@ development SQL into released core SQL:
    references if the helper no longer emits them after promotion.
 6. Run the full release gate before tagging.
 
-After the tag, create a new `devel/sql/` area for the next development cycle.
+After the tag, keep an empty `devel/sql/` area as the next development-cycle
+landing zone. The first SQL-changing PR after a release adds the next
+`devel/sql/ash-install.sql` and `devel/sql/ash-X.Y-to-X.Z.sql` files there
+before touching released `sql/` files.
 
 ## Legacy upgrade scripts
 
