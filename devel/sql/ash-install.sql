@@ -1236,6 +1236,14 @@ begin
   end;
 
   -- Validate interval
+  if p_interval is null then
+    job_type := 'error';
+    job_id := null;
+    status := 'interval must not be null';
+    return next;
+    return;
+  end if;
+
   v_seconds := extract(epoch from p_interval)::int;
   if v_seconds < 1 then
     job_type := 'error';
@@ -2975,15 +2983,25 @@ as $$
     select
       t.wait_event,
       t.cnt,
-      row_number() over (order by t.cnt desc) as rn
+      row_number() over (order by t.cnt desc) as rn,
+      count(*) over () as total_rows
     from totals t
   ),
   top_rows as (
-    select wait_event, cnt, rn from ranked where rn <= p_limit
+    select wait_event, cnt, rn
+    from ranked
+    where p_limit > 0
+      and (
+        (total_rows <= p_limit and rn <= p_limit)
+        or (total_rows > p_limit and rn < p_limit)
+      )
   ),
   other as (
     select 'Other'::text as wait_event, sum(cnt) as cnt, (p_limit + 1)::bigint as rn
-    from ranked where rn > p_limit
+    from ranked
+    where p_limit > 0
+      and total_rows > p_limit
+      and rn >= p_limit
     having sum(cnt) > 0
   ),
   max_pct as (
@@ -3012,14 +3030,23 @@ returns table (
   wait_event text,
   samples bigint
 )
-language sql
+language plpgsql
 stable
 set jit = off
 set search_path = pg_catalog, ash
 as $$
+declare
+  v_bucket_secs int4;
+begin
+  v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 1 then
+    raise exception 'bucket must be at least 1 second, got %', p_bucket;
+  end if;
+
+  return query
   with waits as (
     select
-      ash.epoch() + (s.sample_ts - (s.sample_ts % extract(epoch from p_bucket)::int4)) * interval '1 second' as bucket,
+      ash.epoch() + (s.sample_ts - (s.sample_ts % v_bucket_secs)) * interval '1 second' as bucket,
       (-s.data[i])::smallint as wait_id,
       s.data[i + 1] as cnt
     from ash.sample s, generate_subscripts(s.data, 1) i
@@ -3034,7 +3061,8 @@ as $$
   from waits w
   join ash.wait_event_map wm on wm.id = w.wait_id
   group by w.bucket, wm.type, wm.event
-  order by w.bucket, sum(w.cnt) desc
+  order by w.bucket, sum(w.cnt) desc;
+end;
 $$;
 
 -- Top queries by wait samples (inline SQL decode)
@@ -4005,8 +4033,12 @@ begin
   -- via unbounded `repeat()` on the bar characters. 500 is an order of
   -- magnitude beyond any realistic terminal width.
   p_width := least(greatest(p_width, 1), 500);
-  v_start_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 1 then
+    raise exception 'bucket must be at least 1 second, got %', p_bucket;
+  end if;
+
+  v_start_ts := greatest(least(extract(epoch from now() - p_interval - ash.epoch()), 2147483647), 0)::int4;
 
   -- Rank by avg active sessions weighted by bucket presence
   select array_agg(t.wait_event order by t.score desc)
@@ -5003,6 +5035,7 @@ as $$
     'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
     '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
+    '_register_wait',
     -- the helpers themselves: granting them to a reader role would let
     -- that role hand out privileges. keep them admin-only.
     'grant_reader', 'revoke_reader',
@@ -5116,9 +5149,10 @@ end $$;
 --     uninstall, rotate, take_sample, set_debug_logging, rebuild_partitions,
 --     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
 --     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
---     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg). Defining
---     "reader" by exclusion (rather than enumeration) keeps the helpers
---     correct as new readers and reader-internal helpers are added.
+--     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg,
+--     _register_wait). Defining "reader" by exclusion (rather than
+--     enumeration) keeps the helpers correct as new readers and
+--     reader-internal helpers are added.
 --   - SELECT on ash.sample (+ every sample_N partition), ash.query_map_all
 --     (+ every query_map_N partition), ash.config, ash.wait_event_map,
 --     ash.rollup_1m, ash.rollup_1h.
