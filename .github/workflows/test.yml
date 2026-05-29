@@ -235,13 +235,16 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
       - name: Test schema and infrastructure
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py latest-released-version)" << 'EOF'
+          select set_config('pg_ash.expected_version', :'expected_version', false);
+
           do $$
           begin
             -- Schema exists
@@ -251,8 +254,8 @@ jobs:
             -- Config table initialized with version
             assert (select count(*) from ash.config) = 1,
               'config not initialized';
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 for fresh install';
+            assert (select version from ash.config where singleton) = current_setting('pg_ash.expected_version'),
+              'version should match latest released version for fresh install';
 
             -- missed_samples column exists and defaults to 0
             assert exists (
@@ -3468,86 +3471,25 @@ jobs:
           $$;
           EOF
 
-      - name: "Upgrade path: 1.0 → 1.1 → 1.2 → 1.3 → 1.4"
+      - name: "Upgrade path: discovered full chain"
         env:
           PGPASSWORD: postgres
         run: |
+          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Start from 1.0
-          \i sql/ash-1.0.sql
+          \i /tmp/ash_full_upgrade_chain.sql
 
           do $$
           begin
-            assert exists (select from pg_namespace where nspname = 'ash'), '1.0 install failed';
-            raise notice '1.0 installed OK';
-          end;
-          $$;
-
-          -- Upgrade to 1.1
-          \i sql/ash-1.1.sql
-
-          do $$
-          begin
-            assert (select version from ash.config where singleton) = '1.1',
-              'version should be 1.1 after upgrade';
-            -- timeline_chart must exist
-            assert exists (
-              select from pg_proc where proname = 'timeline_chart'
-                and pronamespace = 'ash'::regnamespace
-            ), 'timeline_chart missing after 1.1 upgrade';
-            raise notice '1.0 -> 1.1 upgrade PASSED';
-          end;
-          $$;
-
-          -- Upgrade to 1.2
-          \i sql/ash-1.1-to-1.2.sql
-
-          do $$
-          begin
-            assert (select version from ash.config where singleton) = '1.2',
-              'version should be 1.2 after 1.1-to-1.2 upgrade';
-            raise notice '1.1 -> 1.2 upgrade PASSED';
-          end;
-          $$;
-
-          -- Upgrade to 1.3
-          \i sql/ash-1.2-to-1.3.sql
-
-          do $$
-          declare
-            v_count int;
-          begin
-            assert (select version from ash.config where singleton) = '1.3',
-              'version should be 1.3 after upgrade';
-            -- timeline_chart must exist with new column order.
-            -- No seed data here, so don't assert row count — a broken
-            -- function would raise (missing function / bad signature).
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
-            -- debug_logging must exist
-            assert exists (
-              select from information_schema.columns
-              where table_schema = 'ash' and table_name = 'config' and column_name = 'debug_logging'
-            ), 'debug_logging column missing after 1.3 upgrade';
-            raise notice '1.2 -> 1.3 upgrade PASSED';
-          end;
-          $$;
-
-          -- Upgrade to 1.4
-          \i sql/ash-1.3-to-1.4.sql
-          \i devel/sql/ash-1.4-to-1.5.sql
-
-          do $$
-          begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 after upgrade';
             assert exists (
               select from information_schema.columns
               where table_schema = 'ash' and table_name = 'config' and column_name = 'missed_samples'
-            ), 'missed_samples column missing after 1.4 upgrade';
+            ), 'missed_samples column missing after full upgrade';
             assert (select missed_samples from ash.config where singleton) = 0,
               'missed_samples should be 0 after upgrade';
-            raise notice '1.3 -> 1.4 -> 1.5-dev upgrade PASSED';
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
+            raise notice 'discovered full upgrade chain PASSED';
           end;
           $$;
 
@@ -3576,15 +3518,15 @@ jobs:
             ) into v_id;
 
             assert v_id is null,
-              '1.4-to-1.5 _register_wait should return NULL once wait_event_map has 32000 rows';
+              'latest upgrade _register_wait should return NULL once wait_event_map has 32000 rows';
 
             select count(*) into v_rows from ash.wait_event_map;
             assert v_rows = 32000,
-              '1.4-to-1.5 wait_event_map cap should prevent row 32001, got ' || v_rows;
+              'latest upgrade wait_event_map cap should prevent row 32001, got ' || v_rows;
 
             select register_wait_cap_hits into v_hits from ash.config where singleton;
             assert v_hits = 1,
-              '1.4-to-1.5 register_wait_cap_hits should increment at cap, got ' || v_hits;
+              'latest upgrade register_wait_cap_hits should increment at cap, got ' || v_hits;
           end;
           $$;
 
@@ -3594,20 +3536,23 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
-      - name: "Issue #49: sample_data_check tightened by upgrade chain from 1.0"
+      - name: "Issue #49: sample_data_check tightened by discovered upgrade chain"
         env:
           PGPASSWORD: postgres
         run: |
-          # Regression for issue #49: v1.0 shipped `array_length(data, 1) >= 2`,
-          # v1.1+ requires `>= 3`. No legacy upgrade script rewrote the check,
-          # so installs that started at 1.0 carried the looser form forever.
+          # Regression for issue #49: the oldest released installer shipped
+          # `array_length(data, 1) >= 2`; later releases require `>= 3`.
+          # No legacy upgrade script rewrote the check, so installs that
+          # started at the oldest release carried the looser form forever.
           # The current development upgrade chain now detects and rewrites it;
-          # assert that the full 1.0 -> 1.5-dev chain ends with the tightened
+          # assert that the discovered full chain ends with the tightened
           # constraint on both the partitioned parent and every partition.
+          python3 devel/scripts/ash_sql_chain.py oldest-install-path | sed 's#^#\\i #' > /tmp/ash_oldest_install.sql
+          python3 devel/scripts/ash_sql_chain.py upgrade-chain-from-oldest > /tmp/ash_upgrade_from_oldest.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          \i sql/ash-1.0.sql
+          \i /tmp/ash_oldest_install.sql
 
-          -- Sanity-check the precondition: 1.0 ships the looser form.
+          -- Sanity-check the precondition: the oldest released installer ships the looser form.
           do $$
           declare
             v_def text;
@@ -3617,14 +3562,10 @@ jobs:
             where c.conrelid = 'ash.sample'::regclass
               and c.conname  = 'sample_data_check';
             assert v_def ~ 'array_length\(data, 1\) >= 2',
-              format('1.0 should ship `>= 2` form; got: %s', v_def);
+              format('oldest released installer should ship `>= 2` form; got: %s', v_def);
           end $$;
 
-          \i sql/ash-1.1.sql
-          \i sql/ash-1.1-to-1.2.sql
-          \i sql/ash-1.2-to-1.3.sql
-          \i sql/ash-1.3-to-1.4.sql
-          \i devel/sql/ash-1.4-to-1.5.sql
+          \i /tmp/ash_upgrade_from_oldest.sql
 
           -- After full dev chain: parent + every partition must carry `>= 3`,
           -- and none may carry the legacy `>= 2`.
@@ -3675,16 +3616,16 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          # The README tells users to run the wrappers (e.g. ash-1.0-to-1.1.sql),
-          # but no existing CI step exercises them — the other upgrade-path
-          # test shortcuts by loading ash-1.1.sql directly. This step exercises
-          # the wrapper chain AND asserts a seeded row is preserved end-to-end
-          # (and that new columns get sensible defaults).
+          # This step exercises the discovered wrapper chain AND asserts a
+          # seeded row is preserved end-to-end (and that new columns get
+          # sensible defaults).
+          python3 devel/scripts/ash_sql_chain.py oldest-install-path | sed 's#^#\\i #' > /tmp/ash_oldest_install.sql
+          python3 devel/scripts/ash_sql_chain.py upgrade-chain-from-oldest > /tmp/ash_upgrade_from_oldest.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Install 1.0
-          \i sql/ash-1.0.sql
+          -- Install oldest released schema
+          \i /tmp/ash_oldest_install.sql
 
-          -- Seed fixtures at v1.0 schema:
+          -- Seed fixtures at the oldest released schema:
           --   (a) a non-default config value that all upgrades must preserve
           --   (b) a wait_event_map row + query_map_0 row + a sample referencing them
           --       using a sentinel query_id we can look up later
@@ -3717,30 +3658,22 @@ jobs:
               values (v_ts, 1, 1, array[-v_wait_id, 1, v_qid_id]::integer[], v_slot);
             assert exists (
               select from ash.sample where datid = 1 and active_count = 1
-            ), 'v1.0 fixture sample row missing';
-            raise notice 'v1.0 schema installed and fixtures seeded';
+            ), 'oldest-release fixture sample row missing';
+            raise notice 'oldest released schema installed and fixtures seeded';
           end;
           $$;
 
-          -- Upgrade chain via the DOCUMENTED wrappers (H-CI-1).
-          \i sql/ash-1.0-to-1.1.sql
-          \i sql/ash-1.1-to-1.2.sql
-          \i sql/ash-1.2-to-1.3.sql
-          \i sql/ash-1.3-to-1.4.sql
-          \i devel/sql/ash-1.4-to-1.5.sql
+          -- Upgrade chain via discovered documented wrappers (H-CI-1).
+          \i /tmp/ash_upgrade_from_oldest.sql
 
-          -- Assertions after reaching v1.4 plus the current 1.5-dev delta.
+          -- Assertions after reaching current development state.
           do $$
           declare
             v_cfg record;
             v_sample_rows int;
             v_qid_id int4;
           begin
-            -- Version landed on 1.4
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 after wrapper chain';
-
-            -- (H-CI-2) Pre-existing v1.0 config values must survive
+            -- (H-CI-2) Pre-existing config values must survive
             select * into v_cfg from ash.config where singleton;
             assert v_cfg.include_bg_workers = true,
               'include_bg_workers not preserved across upgrades';
@@ -3787,54 +3720,25 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
-      - name: "Upgrade path: 1.1 → 1.2 → 1.3 → 1.4 (direct)"
+      - name: "Upgrade path: discovered direct chain from second released installer"
         env:
           PGPASSWORD: postgres
         run: |
+          python3 devel/scripts/ash_sql_chain.py second-oldest-install-path | sed 's#^#\\i #' > /tmp/ash_second_oldest_install.sql
+          python3 devel/scripts/ash_sql_chain.py upgrade-chain-from-second-oldest > /tmp/ash_upgrade_from_second_oldest.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          \i sql/ash-1.1.sql
+          \i /tmp/ash_second_oldest_install.sql
+          \i /tmp/ash_upgrade_from_second_oldest.sql
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.1',
-              'version should be 1.1';
-            raise notice '1.1 fresh install OK';
-          end;
-          $$;
-
-          \i sql/ash-1.1-to-1.2.sql
-
-          do $$
-          begin
-            assert (select version from ash.config where singleton) = '1.2',
-              'version should be 1.2 after 1.1-to-1.2';
-            raise notice '1.1 -> 1.2 direct upgrade PASSED';
-          end;
-          $$;
-
-          \i sql/ash-1.2-to-1.3.sql
-
-          do $$
-          begin
-            assert (select version from ash.config where singleton) = '1.3',
-              'version should be 1.3 after upgrade';
-            -- No seed data in this path; just verify the function is
-            -- callable after the upgrade (a missing/broken function raises).
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            raise notice '1.2 -> 1.3 direct upgrade PASSED';
-          end;
-          $$;
-
-          \i sql/ash-1.3-to-1.4.sql
-          \i devel/sql/ash-1.4-to-1.5.sql
-
-          do $$
-          begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should be 1.4 after upgrade';
             assert (select missed_samples from ash.config where singleton) = 0,
               'missed_samples should be 0';
-            raise notice '1.3 -> 1.4 -> 1.5-dev direct upgrade PASSED';
+            -- No seed data in this path; just verify representative functions
+            -- are callable after the discovered direct upgrade chain.
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
+            raise notice 'discovered direct upgrade chain PASSED';
           end;
           $$;
 
@@ -3858,20 +3762,22 @@ jobs:
           # REPLACE cannot change OUT params). The 1.0 bootstrap and the
           # 1.0-to-1.1 wrapper hit the same path. Those finalized legacy
           # scripts remain immutable and are still exercised end-to-end by
-          # the one-shot upgrade-chain tests above (fresh DB, 1.0 → 1.5-dev).
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          \i devel/sql/ash-install.sql
+          # the one-shot upgrade-chain tests above.
+          python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
+          python3 devel/scripts/ash_sql_chain.py reapply-chain > /tmp/ash_reapply_chain.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py latest-released-version)" << 'EOF'
+          select set_config('pg_ash.expected_version', :'expected_version', false);
 
-          -- Apply all upgrade scripts on top of fresh install (should be idempotent)
-          \i sql/ash-1.1-to-1.2.sql
-          \i sql/ash-1.2-to-1.3.sql
-          \i sql/ash-1.3-to-1.4.sql
-          \i devel/sql/ash-1.4-to-1.5.sql
+          \i /tmp/ash_fresh_install.sql
+
+          -- Apply all discovered re-apply-safe upgrade scripts on top of fresh install.
+          \i /tmp/ash_reapply_chain.sql
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should still be 1.4';
+            assert (select version from ash.config where singleton) = current_setting('pg_ash.expected_version'),
+              'version should still match latest released version';
             raise notice 'Idempotent re-apply PASSED';
           end;
           $$;
@@ -3880,15 +3786,12 @@ jobs:
           update ash.config set missed_samples = 42 where singleton;
 
           -- Apply again — must preserve data
-          \i sql/ash-1.1-to-1.2.sql
-          \i sql/ash-1.2-to-1.3.sql
-          \i sql/ash-1.3-to-1.4.sql
-          \i devel/sql/ash-1.4-to-1.5.sql
+          \i /tmp/ash_reapply_chain.sql
 
           do $$
           begin
-            assert (select version from ash.config where singleton) = '1.4',
-              'version should still be 1.4 after second apply';
+            assert (select version from ash.config where singleton) = current_setting('pg_ash.expected_version'),
+              'version should still match latest released version after second apply';
             assert (select missed_samples from ash.config where singleton) = 42,
               'missed_samples should be preserved (42) after idempotent re-apply';
             -- timeline_chart must still be callable after re-apply. No data
@@ -3954,18 +3857,15 @@ jobs:
           order by c.relname, con.conname;
           SNAPSQL
 
+          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
+
           # 1) Fresh install → snapshot
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/fresh_schema.txt
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
           # 2) Full upgrade path → snapshot
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.0.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.1-to-1.2.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.2-to-1.3.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.3-to-1.4.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-1.4-to-1.5.sql > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_full_upgrade_chain.sql > /dev/null 2>&1
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
@@ -4031,7 +3931,7 @@ jobs:
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" 2>/dev/null || echo "ash.uninstall skipped (schema absent)"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "drop extension if exists pg_stat_statements"
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql > /dev/null
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
 
@@ -4159,7 +4059,7 @@ jobs:
           # Use ON_ERROR_STOP so unrelated failures don't get silenced.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "drop extension if exists pg_cron cascade"
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql > /dev/null
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           do $$

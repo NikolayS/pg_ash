@@ -1,10 +1,8 @@
 -- pg_ash: Active Session History for Postgres
--- Version: 1.4 (latest)
--- Fresh install: \i sql/ash-install.sql
--- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql
--- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql
+-- Development installer for the next release after v1.4.
+-- This file is promoted to sql/ash-install.sql during the release-stamp PR.
+-- Fresh development install: \i devel/sql/ash-install.sql
+-- Upgrade from v1.4 in development: \i devel/sql/ash-1.4-to-1.5.sql
 
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
@@ -390,8 +388,8 @@ language plpgsql
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_id    smallint;
-  v_count bigint;
+  v_id     smallint;
+  v_at_cap boolean;
 begin
   -- Try to get existing
   select id into v_id
@@ -405,12 +403,14 @@ begin
   -- Enforce dictionary size cap before inserting. 32 000 stays well below
   -- smallint's 32 767 ceiling while still leaving room for genuine event
   -- diversity (real wait-event inventories measure in the hundreds).
-  -- reltuples is a cheap estimate; an exact count would add a scan on
-  -- every fresh wait-event observation on the sampler's hot path.
-  select reltuples::bigint into v_count
-  from pg_class where oid = 'ash.wait_event_map'::regclass;
+  -- Use an exact existence probe for the 32 000th row instead of
+  -- pg_class.reltuples: reltuples can be -1 or stale immediately after
+  -- TRUNCATE/restore, which bypasses a hard cap until ANALYZE catches up.
+  select exists (
+    select 1 from ash.wait_event_map offset 31999 limit 1
+  ) into v_at_cap;
 
-  if v_count >= 32000 then
+  if v_at_cap then
     -- Bump the cap-hit counter so ash.status() can surface the drop.
     -- Note: counts *registration drops* here — not the number of sampled
     -- backends observed for this (state,type,event). Many concurrent
