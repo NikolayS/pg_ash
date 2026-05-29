@@ -11,17 +11,17 @@ SQL style guide: https://gitlab.com/postgres-ai/rules/-/blob/main/rules/developm
 CI via GitHub Actions:
 
 - **test.yml**: runs on push and PRs — tests across PostgreSQL 14, 15, 16, 17, 18
-- Tests: fresh install, full upgrade chain up to the in-progress release (currently 1.0→…→1.4), schema equivalence between fresh install and upgrade chain, idempotent re-apply of each legacy upgrade script, degraded mode (no pgss/pg_cron)
+- Tests: fresh development install, discovered full upgrade chain up to the in-progress release, schema equivalence between fresh install and upgrade chain, idempotent re-apply of discovered re-apply-safe upgrade scripts, degraded mode (no pgss/pg_cron)
 - Version schema: `vMAJOR.MINOR` (e.g. `v1.3`). Tag on main after all PRs merged.
 
-`ash-install.sql` is the source of truth. Upgrade scripts for the **in-progress** release (e.g. `ash-1.3-to-1.4.sql` while 1.4 is unreleased) must stay in lockstep with install.sql through the release cycle — any install.sql change that affects schema (new/modified function bodies, new columns, dropped objects) must be mirrored into the in-progress upgrade script. Schema-equivalence CI enforces this on every PR. **Finalized** legacy upgrade scripts (`ash-1.0-to-1.1.sql` through `ash-1.2-to-1.3.sql` today) are immutable: any signature-changing PR must avoid patterns that trip their idempotent re-apply, even if that means restructuring the fix (e.g. keeping an old function signature and using a new helper name instead of changing the return type).
+After a release tag, keep `sql/` frozen at the latest released baseline until the next release-stamp PR. Current development SQL lives under `devel/sql/`: the future final installer and the future upgrade script. CI must discover version chains from files via `devel/scripts/ash_sql_chain.py`, not hardcode concrete version numbers. At release stamp time, promote the development SQL into `sql/`, bump `ash.config.version`, and remove or recreate `devel/sql/` for the next cycle. See `docs/RELEASE_PROCESS.md`.
 
 ## Testing
 
 Red/green TDD: write failing tests first, then fix the code to make them pass.
 
 - **Bug fixes**: always write a test that reproduces the bug (RED), then fix (GREEN). This proves the fix works and prevents regressions.
-- **New features**: write tests for the expected behavior before or alongside the implementation. Run tests locally with `sudo -u postgres psql -v ON_ERROR_STOP=1 -f sql/ash-install.sql` and DO blocks with assertions.
+- **New features**: write tests for the expected behavior before or alongside the implementation. Run current development tests locally with `sudo -u postgres psql -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql` and DO blocks with assertions.
 - **CI tests** live in `.github/workflows/test.yml`. Each test section uses PL/pgSQL `DO $$ ... assert ... $$` blocks. Assert exact values, not just row existence — a test that only checks "row exists" can't distinguish correct aggregation from garbage.
 - **Test locally on available PG version** before pushing. CI covers PG 14–18.
 
