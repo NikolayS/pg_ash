@@ -9,6 +9,7 @@ Work in progress after v1.4.
 - **Raw readers honor rebuilt partition retention.** `_active_slots_for()` and `_active_slots_for_at()` now enumerate every retained raw slot after `rebuild_partitions(N, 'yes')` instead of only current plus previous slot. (issue #83; [PR #85](https://github.com/NikolayS/pg_ash/pull/85))
 - **pg_stat_statements readers ignore spoofed relations and avoid duplicate top-query rows.** pgss-aware readers now require the real `pg_stat_statements` extension before reading query text/metrics, and `top_queries*` aggregates pgss rows by `queryid` so one ASH query cannot fan out into multiple rows. (issue #87)
 - **`daily_peak_backends.avg_backends` now reports average active backends.** The value is derived from hourly backend-seconds divided by sample count instead of averaging hourly peak values. (issue #88)
+- **Reader and input-validation edge cases fixed.** `top_waits()` now treats `p_limit` as a hard output row limit including `Other`, zero timeline buckets raise explicit validation errors, `ash.start(NULL)` returns a clear error row, and `ash.grant_reader()` no longer grants EXECUTE on internal mutating helper `_register_wait()`. (issue #91)
 
 ---
 

@@ -2298,6 +2298,115 @@ jobs:
           $$;
           EOF
 
+      - name: "Test v1.5: reader and input validation edge cases (#91)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          begin;
+
+          do $$
+          declare
+            v_data int4[];
+            v_count int;
+            v_state text;
+            v_msg text;
+            v_start record;
+          begin
+            -- top_waits(p_limit => 10) means a hard output row limit: 9
+            -- individual waits plus Other when lower-ranked waits exist.
+            truncate ash.sample;
+
+            with waits as (
+              select
+                i,
+                ash._register_wait('active', 'WaitType', 'WaitEvent' || i)::int as wait_id
+              from generate_series(1, 12) as gs(i)
+            )
+            select array_agg(x order by ord)::int4[]
+            into v_data
+            from waits
+            cross join lateral (
+              values
+                (i * 3 - 2, -wait_id),
+                (i * 3 - 1, 1),
+                (i * 3, 0)
+            ) as encoded(ord, x);
+
+            insert into ash.sample(sample_ts, datid, active_count, data, slot)
+            values (
+              ash.ts_from_timestamptz(now()),
+              0::oid,
+              12::smallint,
+              v_data,
+              ash.current_slot()
+            );
+
+            select count(*) into v_count from ash.top_waits('1 hour', 10, 10);
+            assert v_count = 10,
+              format('top_waits(p_limit=10) must return at most 10 rows, got %s', v_count);
+            assert exists (
+              select 1 from ash.top_waits('1 hour', 10, 10) where wait_event = 'Other'
+            ), 'top_waits(p_limit=10) must include Other when lower-ranked waits exist';
+
+            -- Zero buckets should fail with explicit validation, not raw
+            -- division-by-zero.
+            begin
+              perform * from ash.wait_timeline('1 hour', '0 seconds');
+              raise exception 'wait_timeline accepted zero bucket';
+            exception when others then
+              v_state := sqlstate;
+              v_msg := sqlerrm;
+            end;
+            assert v_state <> '22012' and v_msg ilike '%bucket%',
+              format('wait_timeline zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
+
+            begin
+              perform * from ash.timeline_chart('1 hour', '0 seconds', 4, 20);
+              raise exception 'timeline_chart accepted zero bucket';
+            exception when others then
+              v_state := sqlstate;
+              v_msg := sqlerrm;
+            end;
+            assert v_state <> '22012' and v_msg ilike '%bucket%',
+              format('timeline_chart zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
+
+            -- NULL interval should be handled at function level before
+            -- touching ash.config.sample_interval.
+            begin
+              select * into v_start from ash.start(null::interval);
+            exception when others then
+              raise exception 'ash.start(NULL) must return a clear error row, got [%] %',
+                sqlstate, sqlerrm;
+            end;
+            assert v_start.job_type = 'error',
+              format('ash.start(NULL) must return job_type=error, got %s', v_start.job_type);
+            assert v_start.status ilike '%null%',
+              format('ash.start(NULL) must mention NULL in status, got %s', v_start.status);
+          end $$;
+
+          rollback;
+
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_reader_probe') then
+              create role ash_reader_probe login password 'probe';
+            end if;
+          end;
+          $$;
+
+          select ash.grant_reader('ash_reader_probe');
+
+          do $$
+          begin
+            assert not has_function_privilege(
+              'ash_reader_probe',
+              'ash._register_wait(text,text,text)',
+              'EXECUTE'
+            ), 'grant_reader must not grant EXECUTE on internal mutating helper ash._register_wait';
+          end $$;
+          EOF
+
       - name: "Release-gate fixes: negative interval, p_width clamp, decode_sample size cap"
         env:
           PGPASSWORD: postgres
