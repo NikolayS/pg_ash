@@ -1,3 +1,13 @@
+# pg_ash 1.5 release notes
+
+Work in progress after v1.4.
+
+## Fixes
+
+- **`wait_event_map` cap enforcement fixed.** `_register_wait()` now checks the exact 32 000th dictionary row instead of trusting stale `pg_class.reltuples`, so the hard cap fires immediately after `TRUNCATE` / restore and increments `register_wait_cap_hits` as documented. (issue #90; [PR #92](https://github.com/NikolayS/pg_ash/pull/92))
+
+---
+
 # pg_ash 1.4 release notes
 
 38 commits since v1.3. Upgrade from 1.3: `\i sql/ash-1.3-to-1.4.sql`. Fresh install or upgrade from any version: `\i sql/ash-install.sql`. The upgrade script is idempotent and safe to re-run.
@@ -92,7 +102,6 @@ Three new bigint columns on `ash.config`, all surfaced by `ash.status()`:
 - **No more `integer out of range` on absurd reader inputs.** Both the relative-interval readers (`top_waits('1000 years')`, etc.) and the absolute-timestamp `_at` readers (`top_waits_at('1000-01-01', …)`, etc.) now return empty rows cleanly via clamps in the readers and in `ts_from_timestamptz`. (issues #51 and #63; [PR #57](https://github.com/NikolayS/pg_ash/pull/57), [PR #65](https://github.com/NikolayS/pg_ash/pull/65))
 - **`sample_data_check` constraint aligned across upgrade paths.** Installs upgraded from 1.0 had a looser `array_length(data, 1) >= 2` check that 1.1 silently failed to tighten because of `create table if not exists`. An idempotent DO block in install.sql now drops + re-adds the `>= 3` form. (issue #49; [PR #56](https://github.com/NikolayS/pg_ash/pull/56))
 - **`ash.status()` no longer errors for non-superuser monitoring roles when pg_cron is loaded.** A nested `EXCEPTION WHEN insufficient_privilege` substitutes a fallback row pointing at the missing `GRANT USAGE ON SCHEMA cron`. (issue #61; [PR #62](https://github.com/NikolayS/pg_ash/pull/62))
-- **`wait_event_map` cap enforcement fixed.** `_register_wait()` now checks the exact 32 000th dictionary row instead of trusting stale `pg_class.reltuples`, so the hard cap fires immediately after `TRUNCATE` / restore and increments `register_wait_cap_hits` as documented. (#90; [PR #92](https://github.com/NikolayS/pg_ash/pull/92))
 
 ## CI / infra
 
