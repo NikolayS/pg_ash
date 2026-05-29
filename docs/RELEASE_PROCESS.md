@@ -2,17 +2,17 @@
 
 ## Between releases
 
-After a release tag, `sql/` is frozen at the latest released baseline.
+After a release tag, `sql/` is frozen at the latest released baseline. Finalized
+upgrade scripts are immutable, and `sql/ash-install.sql` represents the latest
+tagged release.
 
-For the 1.5 cycle, the files currently resolve to:
+For the next development cycle, create a `devel/sql/` area:
 
-- `sql/ash-install.sql` remains the exact v1.4 installer.
-- `sql/ash-1.3-to-1.4.sql` and older upgrade scripts are finalized legacy scripts.
 - `devel/sql/ash-install.sql` is the in-progress future final installer.
-- `devel/sql/ash-1.4-to-1.5.sql` is the in-progress future upgrade script.
+- `devel/sql/ash-X.Y-to-A.B.sql` is the in-progress future upgrade script.
 
-All post-v1.4 SQL changes must be made in `devel/sql/`, not in released
-files under `sql/`.
+All post-release SQL changes must be made in `devel/sql/`, not in released files
+under `sql/`.
 
 CI must not hardcode concrete version chains. It uses
 `devel/scripts/ash_sql_chain.py` to discover released installers, released
@@ -28,12 +28,13 @@ Schema-equivalence CI must compare those two paths.
 
 ## Release stamp
 
-Right before tagging 1.5, use a release-stamp PR to promote the development
-SQL into released core SQL:
+Right before tagging a release, use a release-stamp PR to promote the
+development SQL into released core SQL:
 
 1. Replace `sql/ash-install.sql` with `devel/sql/ash-install.sql`.
-2. Move `devel/sql/ash-1.4-to-1.5.sql` to `sql/ash-1.4-to-1.5.sql`.
-3. Bump `ash.config.version` and top-of-file version comments to `1.5`.
+2. Move `devel/sql/ash-X.Y-to-A.B.sql` to `sql/ash-X.Y-to-A.B.sql`.
+3. Bump `ash.config.version` and top-of-file version comments to the release
+   version.
 4. Update release notes and README install/upgrade instructions.
 5. Leave CI on discovery-based helpers; remove only obsolete `devel/sql/`
    references if the helper no longer emits them after promotion.

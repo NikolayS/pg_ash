@@ -1,16 +1,32 @@
 # pg_ash 1.5 release notes
 
-Work in progress after v1.4.
+This is a bug-fix release: no new user-facing feature set, just correctness,
+safety, and release-process hardening. Upgrade from 1.4:
+`\i sql/ash-1.4-to-1.5.sql`. Fresh install or upgrade from any version:
+`\i sql/ash-install.sql`.
+
+Thanks to @r314tive for reporting issue #90 and for bringing the original PRs
+behind the rollup/rotation and raw-retention fixes ([PR #86](https://github.com/NikolayS/pg_ash/pull/86),
+[PR #85](https://github.com/NikolayS/pg_ash/pull/85)).
 
 ## Fixes
 
 - **`wait_event_map` cap enforcement fixed.** `_register_wait()` now checks the exact 32 000th dictionary row instead of trusting stale `pg_class.reltuples`, so the hard cap fires immediately after `TRUNCATE` / restore and increments `register_wait_cap_hits` as documented. (issue #90; [PR #92](https://github.com/NikolayS/pg_ash/pull/92))
 - **Raw samples are protected during rollup/rotation races.** `rollup_minute()` no longer advances its watermark while a sampler is in flight, and `rotate()` refuses to truncate an endangered raw partition unless pre-truncation rollup succeeds and covers the raw groups in that slot. (issue #81; [PR #86](https://github.com/NikolayS/pg_ash/pull/86))
 - **Raw readers honor rebuilt partition retention.** `_active_slots_for()` and `_active_slots_for_at()` now enumerate every retained raw slot after `rebuild_partitions(N, 'yes')` instead of only current plus previous slot. (issue #83; [PR #85](https://github.com/NikolayS/pg_ash/pull/85))
-- **pg_stat_statements readers ignore spoofed relations and avoid duplicate top-query rows.** pgss-aware readers now require the real `pg_stat_statements` extension before reading query text/metrics, and `top_queries*` aggregates pgss rows by `queryid` so one ASH query cannot fan out into multiple rows. (issue #87)
-- **`daily_peak_backends.avg_backends` now reports average active backends.** The value is derived from hourly backend-seconds divided by sample count instead of averaging hourly peak values. (issue #88)
-- **Reader and input-validation edge cases fixed.** `top_waits()` now treats `p_limit` as a hard output row limit including `Other`, zero timeline buckets raise explicit validation errors, `ash.start(NULL)` returns a clear error row, and `ash.grant_reader()` no longer grants EXECUTE on internal mutating helper `_register_wait()`. (issue #91)
-- **Malformed raw sample payloads are rejected.** `ash.sample.data` now uses a packed-array validator CHECK constraint, preventing rows whose declared wait count exceeds the available query-id payload from making raw readers report impossible totals. (issue #89)
+- **pg_stat_statements readers ignore spoofed relations and avoid duplicate top-query rows.** pgss-aware readers now require the real `pg_stat_statements` extension before reading query text/metrics, and `top_queries*` aggregates pgss rows by `queryid` so one ASH query cannot fan out into multiple rows. (issue #87; [PR #97](https://github.com/NikolayS/pg_ash/pull/97))
+- **`daily_peak_backends.avg_backends` now reports average active backends.** The value is derived from hourly backend-seconds divided by sample count instead of averaging hourly peak values. (issue #88; [PR #98](https://github.com/NikolayS/pg_ash/pull/98))
+- **Reader and input-validation edge cases fixed.** `top_waits()` now treats `p_limit` as a hard output row limit including `Other`, zero timeline buckets raise explicit validation errors, `ash.start(NULL)` returns a clear error row, and `ash.grant_reader()` no longer grants EXECUTE on internal mutating helper `_register_wait()`. (issue #91; [PR #99](https://github.com/NikolayS/pg_ash/pull/99))
+- **Malformed raw sample payloads are rejected.** `ash.sample.data` now uses a packed-array validator CHECK constraint, preventing rows whose declared wait count exceeds the available query-id payload from making raw readers report impossible totals. (issue #89; [PR #100](https://github.com/NikolayS/pg_ash/pull/100))
+
+## Release process
+
+- **Development SQL is staged outside released SQL.** Between releases, new SQL
+  lives under `devel/sql/`; release stamping promotes it into `sql/` only when
+  cutting the next tag. (PR #94)
+- **CI discovers SQL chains from files.** The test workflow uses
+  `devel/scripts/ash_sql_chain.py` instead of hardcoded version paths, so future
+  version bumps require adding/moving files, not rewriting CI. (PR #94)
 
 ---
 
