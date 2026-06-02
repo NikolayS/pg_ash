@@ -169,8 +169,9 @@ rm -f "$CAST"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
 # --- 4. Record ---------------------------------------------------------------
-# asciinema v3 CLI: --command for the command to record, --window-size for
-# geometry; positional arg is the output cast file.
+# asciinema CLI: --command for the command to record, --cols/--rows for
+# geometry; positional arg is the output cast file. These flags work with the
+# asciinema v2 CLI commonly packaged on Linux hosts.
 # Ship a tiny splash script into the container. It prints a coloured banner
 # (that becomes the GIF's first frame / GitHub thumbnail) and then execs psql.
 # Banner is sized for the wider 140-col terminal (138-char inner box).
@@ -180,7 +181,7 @@ printf "\033[38;2;080;250;123m"
 cat <<BANNER
 ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                                                        ║
-║   pg_ash v1.4   —   Active Session History for Postgres                                                                                ║
+║   pg_ash v1.5   —   Active Session History for Postgres                                                                                ║
 ║                                                                                                                                        ║
 ║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                                                        ║
 ║                                                                                                                                        ║
@@ -196,8 +197,8 @@ chmod +x /tmp/ash_splash.sh
 
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
   "asciinema rec --overwrite --idle-time-limit 3 \
-     --window-size ${COLS}x${ROWS} \
-     --capture-env TERM,SHELL \
+     --cols ${COLS} --rows ${ROWS} \
+     --env TERM,SHELL \
      --command 'docker exec -it -e TERM=xterm-256color -e LC_ALL=C.UTF-8 -e LANG=C.UTF-8 $CONTAINER /tmp/ash_splash.sh' \
      '$CAST'"
 sleep 3.0
