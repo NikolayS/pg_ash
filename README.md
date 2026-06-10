@@ -932,7 +932,7 @@ quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
 **Query text visibility:** `ash.grant_reader()` does not grant `pg_read_all_stats`. Monitoring roles need it to resolve other users' SQL text from `pg_stat_statements`; otherwise pg_ash may show `query_id` with NULL `query_text`.
 
 ```sql
-select pg_has_role(current_user, 'pg_read_all_stats', 'member');
+select pg_has_role(current_user, 'pg_read_all_stats', 'usage');
 grant pg_read_all_stats to my_monitor_role;
 ```
 
@@ -973,7 +973,7 @@ select ash._apply_pgss_search_path();
 If `query_id` is present but `query_text` is NULL:
 
 ```sql
-select pg_has_role(current_user, 'pg_read_all_stats', 'member');
+select pg_has_role(current_user, 'pg_read_all_stats', 'usage');
 
 select queryid, query
 from pg_stat_statements
