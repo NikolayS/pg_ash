@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SQL_DIRS = (ROOT / "sql", ROOT / "devel" / "sql")
 INSTALL_RE = re.compile(r"ash-(\d+)\.(\d+)\.sql$")
 UPGRADE_RE = re.compile(r"ash-(\d+\.\d+)-to-(\d+\.\d+)\.sql$")
+VERSION_DEFAULT_RE = re.compile(r"version\s+text\s+not\s+null\s+default\s+'([^']+)'")
 
 
 def version_key(version: str) -> tuple[int, int]:
@@ -83,6 +84,15 @@ def fresh_install_path() -> str:
     return rel(ROOT / "sql" / "ash-install.sql")
 
 
+def fresh_install_version() -> str:
+    path = ROOT / fresh_install_path()
+    text = path.read_text()
+    match = VERSION_DEFAULT_RE.search(text)
+    if not match:
+        raise SystemExit(f"could not find ash.config version default in {rel(path)}")
+    return match.group(1)
+
+
 def emit_psql_include(path: Path) -> None:
     print(rf"\i {rel(path)}")
 
@@ -125,6 +135,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("fresh-install-path")
+    sub.add_parser("fresh-install-version")
     sub.add_parser("oldest-install-path")
     sub.add_parser("second-oldest-install-path")
     sub.add_parser("latest-released-version")
@@ -136,6 +147,8 @@ def main() -> None:
 
     if args.command == "fresh-install-path":
         print(fresh_install_path())
+    elif args.command == "fresh-install-version":
+        print(fresh_install_version())
     elif args.command == "oldest-install-path":
         print(rel(installers()[oldest_version()]))
     elif args.command == "second-oldest-install-path":

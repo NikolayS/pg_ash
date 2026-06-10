@@ -22,9 +22,20 @@ present in the checkout.
 CI must test both supported development paths discovered by that helper:
 
 - fresh development install: the helper's `fresh-install-path`
+- fresh development install version: the helper's `fresh-install-version`
 - upgrade path: the helper's `full-upgrade-chain`
 
 Schema-equivalence CI must compare those two paths.
+
+## CI guard
+
+CI rejects ordinary PRs that modify `sql/*.sql`. To make an intentional
+release-stamp PR, use a branch starting with `release/` or `release-`, or a PR
+title starting with `release:`.
+
+That guard is deliberately conservative: if unreleased SQL lands directly under
+`sql/`, a user can copy `sql/ash-install.sql` from `main` and reasonably assume
+it is the published release payload.
 
 ## Release stamp
 
