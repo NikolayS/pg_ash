@@ -8,6 +8,36 @@
 -- Upgrade from 1.4: \i sql/ash-1.4-to-1.5.sql
 
 
+-- Preserve function EXECUTE grants across the drop/recreate below (#107).
+-- DROP FUNCTION destroys ACLs that CREATE OR REPLACE would keep, so a
+-- monitoring role configured via ash.grant_reader() (or a manual GRANT)
+-- would silently lose access on every upgrade or installer re-apply.
+-- Snapshot every explicit non-owner EXECUTE grant on ash.* functions into
+-- a temp table now; the matching block at the very end of this script
+-- re-applies them to the recreated functions and drops the snapshot.
+-- PUBLIC (grantee oid 0, which has no pg_roles row) is intentionally
+-- excluded: the hardening block below re-applies the REVOKE-from-PUBLIC
+-- posture on every install.
+do $$
+begin
+  drop table if exists pg_temp._ash_install_func_acl;
+  create temp table _ash_install_func_acl (
+    proname   name not null,
+    grantee   name not null,
+    grantable bool not null
+  );
+  insert into pg_temp._ash_install_func_acl (proname, grantee, grantable)
+  select distinct p.proname, g.rolname, acl.is_grantable
+  from pg_proc p
+  join pg_namespace n on p.pronamespace = n.oid
+  cross join lateral aclexplode(p.proacl) as acl
+  join pg_roles g on g.oid = acl.grantee
+  where n.nspname = 'ash'
+    and p.prokind in ('f', 'a')
+    and acl.privilege_type = 'EXECUTE'
+    and acl.grantee <> p.proowner;
+end $$;
+
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
 -- Drop ALL overloads of functions whose signatures changed across versions.
 -- Using DO block because DROP FUNCTION requires exact arg types and we can't
@@ -5419,4 +5449,33 @@ begin
   execute format('revoke all on function ash.revoke_reader(name) from public');
   execute format('grant execute on function ash.grant_reader(name) to %I', v_owner);
   execute format('grant execute on function ash.revoke_reader(name) to %I', v_owner);
+end $$;
+
+-- Re-apply the EXECUTE grants snapshotted before the drop/recreate at the
+-- top of this script (#107). Grants are restored by function name to every
+-- current overload, because the dropped signatures may no longer exist in
+-- this version. This mirrors what CREATE OR REPLACE would have preserved:
+-- function names that no longer exist (removed/renamed) are skipped, roles
+-- dropped mid-script are skipped, and a role's reach is never widened —
+-- functions introduced by this version still require a fresh
+-- ash.grant_reader() call, exactly as before.
+do $$
+declare
+  r record;
+begin
+  for r in
+    select distinct a.grantee, a.grantable, p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_temp._ash_install_func_acl a
+    join pg_catalog.pg_roles g on g.rolname = a.grantee
+    join pg_catalog.pg_proc p on p.proname = a.proname
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'ash'
+      and p.prokind in ('f', 'a')
+  loop
+    execute format('grant execute on function ash.%I(%s) to %I%s',
+                   r.proname, r.args, r.grantee,
+                   case when r.grantable then ' with grant option' else '' end);
+  end loop;
+  drop table pg_temp._ash_install_func_acl;
 end $$;
