@@ -20,6 +20,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Guard SQL release workflow
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          changed="$(git diff --name-only "$BASE_SHA"...HEAD)"
+
+          if printf '%s\n' "$changed" | grep -E '^sql/.*\.sql$' >/dev/null; then
+            case "$HEAD_REF:$PR_TITLE" in
+              release/*:*|release-*:*|*:release:*)
+                ;;
+              *)
+                echo "Released SQL under sql/ is frozen between releases." >&2
+                echo "Feature/fix PRs must stage SQL in devel/sql/ and let a release-stamp PR promote it." >&2
+                printf 'Changed released SQL files:\n%s\n' \
+                  "$(printf '%s\n' "$changed" | grep -E '^sql/.*\.sql$')" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
       - name: Guard docs against stale privilege and reader names
         run: |
           set -euo pipefail
@@ -246,7 +271,7 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py latest-released-version)" << 'EOF'
+            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
           select set_config('pg_ash.expected_version', :'expected_version', false);
 
           do $$
@@ -4290,7 +4315,7 @@ jobs:
           python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
           python3 devel/scripts/ash_sql_chain.py reapply-chain > /tmp/ash_reapply_chain.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py latest-released-version)" << 'EOF'
+            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
           select set_config('pg_ash.expected_version', :'expected_version', false);
 
           \i /tmp/ash_fresh_install.sql
