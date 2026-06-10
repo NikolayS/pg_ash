@@ -185,6 +185,11 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 | `ash.hourly_queries_at(start, end, limit)` | Same, absolute time range |
 | `ash.daily_peak_backends(interval)` | Peak and average backends per day (default: last 7 days) |
 | `ash.daily_peak_backends_at(start, end)` | Same, absolute time range |
+| `ash.aas_summary(interval)` / `ash.aas_summary_at(start, end)` | Elapsed-time average, peak, and p99-of-minute AAS for an arbitrary period |
+| `ash.aas_periods([end])` | Standard AAS windows: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 30 days |
+| `ash.aas_wait_types(interval, limit)` / `ash.aas_wait_types_at(start, end, limit)` | AAS drill-down by wait event type |
+| `ash.aas_wait_events(interval, limit)` / `ash.aas_wait_events_at(start, end, limit)` | AAS drill-down by wait event |
+| `ash.aas_queries(interval, limit)` / `ash.aas_queries_at(start, end, limit)` | AAS drill-down by query_id, with query text when pg_stat_statements is available |
 
 Rollup readers query `rollup_1m` / `rollup_1h` tables — they work even after raw samples have rotated away.
 
@@ -776,7 +781,74 @@ select * from ash.daily_peak_backends('30 days');
 
 -- investigate a specific time range (even if raw samples are gone)
 select * from ash.minute_waits_at('2026-03-01 02:00', '2026-03-01 03:00');
+
+-- standard windows: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 30 days
+select * from ash.aas_periods();
+
+-- the same standard windows as individual trailing-period calls
+select * from ash.aas_summary('1 minute');
+select * from ash.aas_summary('5 minutes');
+select * from ash.aas_summary('1 hour');
+select * from ash.aas_summary('1 day');
+select * from ash.aas_summary('1 week');
+select * from ash.aas_summary('30 days');
+
+-- arbitrary absolute period
+select * from ash.aas_summary_at('2026-03-01 02:00', '2026-03-01 03:00');
+
+-- arbitrary trailing period
+select * from ash.aas_summary('6 hours');
+
+-- one point per standard period, anchored to an explicit end timestamp
+select * from ash.aas_periods('2026-03-01 03:00');
+
+-- top-level to wait-type drill-down
+select wait_event_type, avg_aas, pct
+from ash.aas_wait_types('15 minutes', 10);
+
+-- wait-event drill-down for the same period
+select wait_event_type, wait_event, avg_aas, pct
+from ash.aas_wait_events('15 minutes', 20);
+
+-- query-level drill-down; query_text is filled when pg_stat_statements is available
+select query_id, avg_aas, pct, query_text
+from ash.aas_queries('15 minutes', 20);
+
+-- incident window: compare the total and drill-downs over the exact same range
+with w as (
+  select '2026-03-01 02:00'::timestamptz as start_ts,
+         '2026-03-01 02:05'::timestamptz as end_ts
+)
+select * from w, lateral ash.aas_summary_at(w.start_ts, w.end_ts);
+
+with w as (
+  select '2026-03-01 02:00'::timestamptz as start_ts,
+         '2026-03-01 02:05'::timestamptz as end_ts
+)
+select wt.*
+from w, lateral ash.aas_wait_types_at(w.start_ts, w.end_ts, 10) wt;
+
+with w as (
+  select '2026-03-01 02:00'::timestamptz as start_ts,
+         '2026-03-01 02:05'::timestamptz as end_ts
+)
+select we.*
+from w, lateral ash.aas_wait_events_at(w.start_ts, w.end_ts, 20) we;
+
+with w as (
+  select '2026-03-01 02:00'::timestamptz as start_ts,
+         '2026-03-01 02:05'::timestamptz as end_ts
+)
+select q.*
+from w, lateral ash.aas_queries_at(w.start_ts, w.end_ts, 20) q;
 ```
+
+`avg_aas` is `backend_seconds / elapsed wall-clock seconds`; missed or empty
+minutes count as zero activity. `p99_1m_aas` is computed from zero-filled
+per-minute AAS values, while `peak_aas` comes from the largest minute peak.
+Trailing-period helpers (`aas_summary(interval)`, `aas_wait_types(interval)`,
+`aas_wait_events(interval)`, `aas_queries(interval)`, and `aas_periods()`) end
+at the current minute boundary so they read complete minute rollups.
 
 Rollups use backend-seconds as the count unit (Oracle ASH-compatible). Each sample appearance = 1 backend-second at 1s sampling interval.
 
