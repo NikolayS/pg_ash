@@ -3464,6 +3464,10 @@ jobs:
             v_start timestamptz;
             v_end timestamptz;
             v_period_end timestamptz;
+            v_query_id bigint;
+            v_pgss_qid bigint;
+            v_pgss_text text;
+            v_query_text text;
           begin
             -- === Reader functions exist ===
             assert exists (select from pg_proc
@@ -3614,6 +3618,13 @@ jobs:
             assert v_metric = 1.00,
               format('AAS relative wrapper average should be 1.00, got %s', v_metric);
 
+            -- The relative wrappers must snap period_end to the current minute
+            -- boundary (raw now() would shift the window and the denominator).
+            select period_end into v_period_end from ash.aas_summary('10 minutes');
+            assert v_period_end = date_trunc('minute', now()),
+              format('aas_summary period_end should snap to minute boundary %s, got %s',
+                     date_trunc('minute', now()), v_period_end);
+
             select avg_aas, pct into v_metric, v_pct
             from ash.aas_wait_types_at(v_start, v_end, 10)
             where wait_event_type = 'Lock';
@@ -3634,6 +3645,15 @@ jobs:
             assert v_pct = 50.00,
               format('Lock:transactionid pct should be 50.00, got %s', v_pct);
 
+            -- CPU* maps to itself (event = type), so the label must carry no
+            -- "Type:" prefix — pin the no-colon branch of the event naming.
+            select avg_aas, pct into v_metric, v_pct
+            from ash.aas_wait_events_at(v_start, v_end, 10)
+            where wait_event = 'CPU*';
+            assert v_metric = 0.50 and v_pct = 50.00,
+              format('CPU* (event = type) AAS/pct should be 0.50/50.00, got %s/%s',
+                     v_metric, v_pct);
+
             select avg_aas, pct into v_metric, v_pct
             from ash.aas_queries_at(v_start, v_end, 10)
             where query_id = 111;
@@ -3650,6 +3670,17 @@ jobs:
 
             select count(*) into v_count from ash.aas_queries_at(v_start, v_end, 0);
             assert v_count = 0, format('aas_queries_at limit=0 should return 0 rows, got %s', v_count);
+
+            -- NULL limit behaves like limit 0 (greatest ignores NULL args):
+            -- pin it so a refactor cannot silently turn NULL into "no limit".
+            select count(*) into v_count from ash.aas_queries_at(v_start, v_end, null);
+            assert v_count = 0, format('aas_queries_at NULL limit should return 0 rows, got %s', v_count);
+
+            -- Drill-downs order by backend-seconds desc: query 333 (360s)
+            -- must outrank query 111 (240s) when limit cuts the list.
+            select query_id into v_query_id from ash.aas_queries_at(v_start, v_end, 1);
+            assert v_query_id = 333,
+              format('aas_queries_at limit=1 should return top query 333, got %s', v_query_id);
 
             select array_agg(period order by case period
                      when '1 minute' then 1
@@ -3716,6 +3747,114 @@ jobs:
               assert SQLERRM like '%must not be null%',
                 'aas_wait_types_at NULL start error mismatch: ' || SQLERRM;
             end;
+
+            -- The relative wrappers inherit range validation: a negative
+            -- interval produces an inverted range and must raise.
+            begin
+              perform * from ash.aas_summary(interval '-1 hour');
+              raise exception 'aas_summary should reject negative intervals';
+            exception when others then
+              assert SQLERRM like '%end timestamp must be greater%',
+                'aas_summary negative interval error mismatch: ' || SQLERRM;
+            end;
+
+            -- Non-minute-aligned start: only rollup minutes fully inside
+            -- [start, end) count (the v_end-4m row falls out), while the
+            -- denominator stays exact wall-clock seconds. Zero-filled p99
+            -- covers minutes [9, 0, 1] -> 8.84.
+            select * into v_summary
+            from ash.aas_summary_at(v_end - interval '3 minutes 30 seconds', v_end);
+            assert v_summary.samples = 120,
+              format('non-aligned AAS samples should be 120, got %s', v_summary.samples);
+            assert v_summary.avg_aas = 2.86,
+              format('non-aligned AAS avg should be 600/210=2.86, got %s', v_summary.avg_aas);
+            assert v_summary.peak_aas = 9,
+              format('non-aligned AAS peak should be 9, got %s', v_summary.peak_aas);
+            assert v_summary.p99_1m_aas = 8.84,
+              format('non-aligned AAS p99 should be 8.84, got %s', v_summary.p99_1m_aas);
+
+            -- Sub-minute window that never crosses a minute boundary must
+            -- still zero-fill peak/p99 instead of returning NULL.
+            select * into v_summary
+            from ash.aas_summary_at(v_end + interval '15 seconds', v_end + interval '45 seconds');
+            assert v_summary.samples = 0,
+              format('sub-minute AAS samples should be 0, got %s', v_summary.samples);
+            assert v_summary.avg_aas = 0.00,
+              format('sub-minute AAS avg should be 0.00, got %s', v_summary.avg_aas);
+            assert v_summary.peak_aas = 0,
+              format('sub-minute AAS peak should be 0, not NULL, got %s', v_summary.peak_aas);
+            assert v_summary.p99_1m_aas = 0.00,
+              format('sub-minute AAS p99 should be 0.00, not NULL, got %s', v_summary.p99_1m_aas);
+
+            -- Two rollup rows in the same minute (different datid): samples
+            -- and backend-seconds add up, peak takes the max across databases
+            -- (not the sum), matching daily_peak_backends semantics.
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            )
+            values (
+              ash.ts_from_timestamptz(v_end - interval '1 minute'),
+              1::oid,
+              60::smallint,
+              4::smallint,
+              array[v_io_id, 120]::int4[],
+              array[555::bigint, 120::bigint]::int8[]
+            );
+
+            select * into v_summary
+            from ash.aas_summary_at(v_end - interval '1 minute', v_end);
+            assert v_summary.samples = 120,
+              format('multi-datid AAS samples should be 120, got %s', v_summary.samples);
+            assert v_summary.avg_aas = 3.00,
+              format('multi-datid AAS avg should be 180/60=3.00, got %s', v_summary.avg_aas);
+            assert v_summary.peak_aas = 4,
+              format('multi-datid AAS peak should be max(1,4)=4, not sum, got %s', v_summary.peak_aas);
+            assert v_summary.p99_1m_aas = 3.00,
+              format('multi-datid AAS p99 should be 3.00, got %s', v_summary.p99_1m_aas);
+
+            select avg_aas, pct into v_metric, v_pct
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, 10)
+            where wait_event = 'IO:DataFileRead';
+            assert v_metric = 2.00 and v_pct = 66.67,
+              format('IO:DataFileRead AAS/pct across datids should be 2.00/66.67, got %s/%s',
+                     v_metric, v_pct);
+
+            select query_id into v_query_id
+            from ash.aas_queries_at(v_end - interval '1 minute', v_end, 1);
+            assert v_query_id = 555,
+              format('multi-datid top query should be 555 (120s > 60s), got %s', v_query_id);
+
+            -- Positive pg_stat_statements path: aas_queries_at must surface
+            -- real query text for a queryid known to pgss (the degraded job
+            -- covers the NULL-text path). Guarded: contrib may be missing.
+            if ash._pgss_schema() is not null then
+              select queryid, left(query, 100) into v_pgss_qid, v_pgss_text
+              from pg_stat_statements
+              where queryid is not null
+              order by calls desc
+              limit 1;
+            end if;
+            if v_pgss_qid is not null then
+              insert into ash.rollup_1m (
+                ts, datid, samples, peak_backends, wait_counts, query_counts
+              )
+              values (
+                ash.ts_from_timestamptz(v_end - interval '2 minutes'),
+                0::oid,
+                60::smallint,
+                1::smallint,
+                array[v_wait_id, 60]::int4[],
+                array[v_pgss_qid, 60::bigint]::int8[]
+              );
+              select query_text into v_query_text
+              from ash.aas_queries_at(v_end - interval '2 minutes', v_end - interval '1 minute', 10)
+              where query_id = v_pgss_qid;
+              assert v_query_text = v_pgss_text,
+                format('aas_queries_at query text for queryid %s should match pgss (%s), got %s',
+                       v_pgss_qid, v_pgss_text, v_query_text);
+            else
+              raise notice 'pg_stat_statements has no entries; skipping positive text check';
+            end if;
 
             -- === Future range: no data ===
             select count(*) into v_count

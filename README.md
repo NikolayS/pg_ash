@@ -185,11 +185,15 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 | `ash.hourly_queries_at(start, end, limit)` | Same, absolute time range |
 | `ash.daily_peak_backends(interval)` | Peak and average backends per day (default: last 7 days) |
 | `ash.daily_peak_backends_at(start, end)` | Same, absolute time range |
-| `ash.aas_summary(interval)` / `ash.aas_summary_at(start, end)` | Elapsed-time average, peak, and p99-of-minute AAS for an arbitrary period |
-| `ash.aas_periods([end])` | Standard AAS windows: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 30 days |
-| `ash.aas_wait_types(interval, limit)` / `ash.aas_wait_types_at(start, end, limit)` | AAS drill-down by wait event type |
-| `ash.aas_wait_events(interval, limit)` / `ash.aas_wait_events_at(start, end, limit)` | AAS drill-down by wait event |
-| `ash.aas_queries(interval, limit)` / `ash.aas_queries_at(start, end, limit)` | AAS drill-down by query_id, with query text when pg_stat_statements is available |
+| `ash.aas_summary(interval)` | Elapsed-time average, peak, and p99-of-minute AAS (default: last 1 hour) |
+| `ash.aas_summary_at(start, end)` | Same, absolute time range |
+| `ash.aas_periods([end])` | Standard AAS windows: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 1 month (30 days); default end: now |
+| `ash.aas_wait_types(interval, limit)` | AAS drill-down by wait event type (default: last 1 hour, limit 10) |
+| `ash.aas_wait_types_at(start, end, limit)` | Same, absolute time range |
+| `ash.aas_wait_events(interval, limit)` | AAS drill-down by wait event (default: last 1 hour, limit 10) |
+| `ash.aas_wait_events_at(start, end, limit)` | Same, absolute time range |
+| `ash.aas_queries(interval, limit)` | AAS drill-down by query_id, with query text when pg_stat_statements is available (default: last 1 hour, limit 10) |
+| `ash.aas_queries_at(start, end, limit)` | Same, absolute time range |
 
 Rollup readers query `rollup_1m` / `rollup_1h` tables — they work even after raw samples have rotated away.
 
@@ -782,7 +786,7 @@ select * from ash.daily_peak_backends('30 days');
 -- investigate a specific time range (even if raw samples are gone)
 select * from ash.minute_waits_at('2026-03-01 02:00', '2026-03-01 03:00');
 
--- standard windows: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 30 days
+-- standard windows: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 1 month (30 days)
 select * from ash.aas_periods();
 
 -- the same standard windows as individual trailing-period calls

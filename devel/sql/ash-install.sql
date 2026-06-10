@@ -1,11 +1,9 @@
 -- pg_ash: Active Session History for Postgres
 -- Version: 1.6 (development)
--- Fresh install: \i sql/ash-install.sql
--- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
--- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
--- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
--- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
--- Upgrade from 1.4: \i sql/ash-1.4-to-1.5.sql
+-- Development installer for the next release after v1.5.
+-- This file is promoted to sql/ash-install.sql during the release-stamp PR.
+-- Fresh development install: \i devel/sql/ash-install.sql
+-- Upgrade from v1.5 in development: \i devel/sql/ash-1.5-to-1.6.sql
 
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
@@ -3008,12 +3006,15 @@ begin
     p_end,
     coalesce(sum(f.sample_count), 0)::bigint,
     round(coalesce(sum(f.backend_seconds), 0)::numeric / v_period_secs, 2),
-    max(f.peak_backends),
-    round(
-      percentile_cont(0.99) within group (
-        order by f.backend_seconds::numeric / 60
-      )::numeric,
-      2
+    coalesce(max(f.peak_backends), 0),
+    coalesce(
+      round(
+        percentile_cont(0.99) within group (
+          order by f.backend_seconds::numeric / 60
+        )::numeric,
+        2
+      ),
+      0
     )
   from filled f;
 end;
@@ -3288,6 +3289,7 @@ returns table (
 language plpgsql
 stable
 set jit = off
+-- search_path includes public for pg_stat_statements access; see top_queries.
 set search_path = pg_catalog, ash, public
 as $$
 declare
@@ -3308,6 +3310,9 @@ begin
   v_end_ts := ash.ts_from_timestamptz(p_end);
   v_period_secs := extract(epoch from p_end - p_start)::numeric;
 
+  -- Trust pg_stat_statements only when the real extension is installed.
+  -- Otherwise a user-created public.pg_stat_statements relation could spoof
+  -- query text and execution metrics (#87).
   if ash._pgss_schema() is not null then
     begin
       perform 1 from pg_stat_statements limit 1;
@@ -3386,6 +3391,7 @@ returns table (
 language sql
 stable
 set jit = off
+-- search_path includes public for pg_stat_statements access; see top_queries.
 set search_path = pg_catalog, ash, public
 as $$
   select * from ash.aas_queries_at(
