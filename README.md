@@ -929,6 +929,13 @@ quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
 
 **Note on pg_cron visibility:** `ash.grant_reader()` does **not** grant `USAGE ON SCHEMA cron`, since pg_cron is not an `ash` object. When pg_cron is loaded but the monitoring role lacks USAGE on schema `cron`, `ash.status()` emits a single fallback row of the form `cron_jobs = '<no cron.job access; grant USAGE ON SCHEMA cron TO <role>>'` instead of per-job `cron_job_*` rows. To surface real cron job details, either run `grant usage on schema cron to <role>` (and `grant select on cron.job to <role>`) once, or simply ignore the row.
 
+**Query text visibility:** `ash.grant_reader()` does not grant `pg_read_all_stats`. Monitoring roles need it to resolve other users' SQL text from `pg_stat_statements`; otherwise pg_ash may show `query_id` with NULL `query_text`.
+
+```sql
+select pg_has_role(current_user, 'pg_read_all_stats', 'usage');
+grant pg_read_all_stats to my_monitor_role;
+```
+
 Prefer `ash.grant_reader()` for full monitoring access. If you need manual control, grant only the specific readers and tables the role actually needs — do **not** use blanket `EXECUTE` grants on the whole `ash` schema, because that can include owner-only maintenance helpers now or after future upgrades.
 
 Minimal example for a dashboard that only calls `ash.status()` and `ash.top_waits()`:
@@ -962,6 +969,18 @@ pgss reader functions (`top_queries`, `top_queries_at`, `top_queries_with_text`,
 -- detect the pgss schema and re-apply search_path on pgss readers
 select ash._apply_pgss_search_path();
 ```
+
+If `query_id` is present but `query_text` is NULL:
+
+```sql
+select pg_has_role(current_user, 'pg_read_all_stats', 'usage');
+
+select queryid, query
+from pg_stat_statements
+where queryid = 2915844351997667515; -- replace with the pg_ash query_id
+```
+
+If privileges are correct and pg_stat_statements has no row/text for the `queryid`, the text was reset, evicted, or otherwise lost from pg_stat_statements; pg_ash stores `query_id`, not historical SQL text.
 
 ## Known limitations
 
