@@ -4610,6 +4610,84 @@ jobs:
           drop role ash_b1_reader;
           EOF
 
+      - name: "Issue #107 follow-up: grant restore stays least-privilege"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # The #107 grant snapshot/restore must not become a privilege-widening
+          # vector. On every installer re-apply it must:
+          #   (a) NOT re-establish a stray non-owner EXECUTE grant on an admin
+          #       function after the hardening block revoked it (before #107,
+          #       DROP FUNCTION scrubbed such grants);
+          #   (b) NOT widen a role that held a single overload of a function to
+          #       its sibling overloads (restore by exact signature);
+          #   while still preserving legitimate ash.grant_reader() grants.
+          python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i /tmp/ash_fresh_install.sql
+
+          do $$ begin
+            if not exists (select from pg_roles where rolname = 'lp_reader')   then create role lp_reader   login password 'x'; end if;
+            if not exists (select from pg_roles where rolname = 'lp_stray')    then create role lp_stray    login password 'x'; end if;
+            if not exists (select from pg_roles where rolname = 'lp_overload') then create role lp_overload login password 'x'; end if;
+          end $$;
+
+          -- legitimate reader: must SURVIVE re-apply (guards the #107 fix)
+          select ash.grant_reader('lp_reader');
+          -- stray manual grant on an admin function in the drop list: must be SCRUBBED
+          grant execute on function ash.rebuild_partitions(int, text) to lp_stray;
+          -- single-overload grant: must NOT widen to the sibling overload
+          grant execute on function ash.decode_sample(integer[], smallint) to lp_overload;
+
+          do $$ begin
+            assert has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
+              'precondition: stray admin grant present before re-apply';
+            assert has_function_privilege('lp_overload', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
+              'precondition: array overload granted';
+            assert not has_function_privilege('lp_overload', 'ash.decode_sample(integer)', 'EXECUTE'),
+              'precondition: integer overload not granted yet';
+          end $$;
+
+          -- re-apply the installer: drop/recreate + snapshot/restore + hardening
+          \i /tmp/ash_fresh_install.sql
+
+          do $$ begin
+            -- (1) #107 still fixed: legitimate reader keeps every reader grant
+            assert has_function_privilege('lp_reader', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              '#107 regression: reader lost top_waits across re-apply';
+            assert has_function_privilege('lp_reader', 'ash.event_queries(text,interval,int,int,boolean)', 'EXECUTE'),
+              '#107 regression: reader lost event_queries across re-apply';
+            assert has_function_privilege('lp_reader', 'ash.top_queries_with_text(interval,int)', 'EXECUTE'),
+              '#107 regression: reader lost top_queries_with_text across re-apply';
+
+            -- (2) admin-function grant must be scrubbed and NOT restored after hardening
+            assert not has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
+              'admin EXECUTE grant re-established after hardening (defense-in-depth regression)';
+            assert not has_function_privilege('lp_reader', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
+              'reader must not gain admin function EXECUTE';
+            assert not has_function_privilege('lp_reader', 'ash.take_sample()', 'EXECUTE'),
+              'reader must not gain take_sample';
+
+            -- (3) no overload widening
+            assert has_function_privilege('lp_overload', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
+              'held overload should survive re-apply';
+            assert not has_function_privilege('lp_overload', 'ash.decode_sample(integer)', 'EXECUTE'),
+              'single-overload grant must NOT widen to the sibling overload';
+
+            -- (4) PUBLIC stays revoked
+            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'PUBLIC must stay revoked';
+
+            raise notice 'issue #107 follow-up: grant restore stayed least-privilege';
+          end $$;
+
+          drop owned by lp_reader, lp_stray, lp_overload;
+          select ash.uninstall('yes');
+          drop role lp_reader;
+          drop role lp_stray;
+          drop role lp_overload;
+          EOF
+
       - name: "Schema equivalence: fresh dev install vs full upgrade path"
         env:
           PGPASSWORD: postgres
