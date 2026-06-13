@@ -4606,6 +4606,14 @@ begin
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
         and i + 2 + gs.n <= array_length(s.data, 1)
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). Pre-aggregate before joining so one ASH sample row cannot
+      -- be multiplied by several pgss rows for the same query.
+      select p.queryid, p.dbid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid, p.dbid
     )
     select
       ash.epoch() + make_interval(secs => d.sample_ts),
@@ -4619,7 +4627,7 @@ begin
     join ash.wait_event_map wm on wm.id = d.wait_id
     left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
     left join pg_database db on db.oid = d.datid
-    left join pg_stat_statements pgss on pgss.queryid = qm.query_id
+    left join pgss on pgss.queryid = qm.query_id
       and pgss.dbid = d.datid
     order by d.sample_ts desc, wm.type, wm.event
     limit p_limit;
@@ -4719,6 +4727,14 @@ begin
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
         and i + 2 + gs.n <= array_length(s.data, 1)
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). Pre-aggregate before joining so one ASH sample row cannot
+      -- be multiplied by several pgss rows for the same query.
+      select p.queryid, p.dbid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid, p.dbid
     )
     select
       ash.epoch() + make_interval(secs => d.sample_ts),
@@ -4732,7 +4748,7 @@ begin
     join ash.wait_event_map wm on wm.id = d.wait_id
     left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
     left join pg_database db on db.oid = d.datid
-    left join pg_stat_statements pgss on pgss.queryid = qm.query_id
+    left join pgss on pgss.queryid = qm.query_id
       and pgss.dbid = d.datid
     order by d.sample_ts desc, wm.type, wm.event
     limit p_limit;
@@ -4908,6 +4924,14 @@ begin
     ),
     max_pct as (
       select max(r.pct) as m from ranked r
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). event_queries is query_id-level, so collapse to one text
+      -- row per queryid before joining.
+      select p.queryid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -4917,7 +4941,7 @@ begin
       left(pgss.query, 200) as query_text
     from ranked r
     cross join max_pct mp
-    left join pg_stat_statements pgss on pgss.queryid = r.query_id
+    left join pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
     raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
@@ -5019,6 +5043,14 @@ begin
     ),
     max_pct as (
       select max(r.pct) as m from ranked r
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). event_queries_at is query_id-level, so collapse to one
+      -- text row per queryid before joining.
+      select p.queryid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -5028,7 +5060,7 @@ begin
       left(pgss.query, 200) as query_text
     from ranked r
     cross join max_pct mp
-    left join pg_stat_statements pgss on pgss.queryid = r.query_id
+    left join pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
     raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
