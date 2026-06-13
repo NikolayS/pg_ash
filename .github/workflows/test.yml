@@ -1676,6 +1676,110 @@ jobs:
           $$;
           EOF
 
+      - name: "Regression: pg_stat_statements joins do not duplicate ASH rows"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          drop role if exists pgash_pgss_fanout_a;
+          drop role if exists pgash_pgss_fanout_b;
+          create role pgash_pgss_fanout_a;
+          create role pgash_pgss_fanout_b;
+          grant pgash_pgss_fanout_a, pgash_pgss_fanout_b to postgres;
+
+          select pg_stat_statements_reset();
+
+          set role pgash_pgss_fanout_a;
+          select 424242::int as pgash_fanout_probe;
+          reset role;
+
+          set role pgash_pgss_fanout_b;
+          select 424242::int as pgash_fanout_probe;
+          reset role;
+
+          do $$
+          declare
+            v_query_id bigint;
+            v_pgss_rows int;
+            v_wait_id smallint;
+            v_map_id int4;
+            v_sample_ts int4;
+            v_datid oid := (select oid from pg_database where datname = current_database());
+            v_count int;
+          begin
+            select queryid, count(*)
+            into v_query_id, v_pgss_rows
+            from pg_stat_statements
+            where query like '%pgash_fanout_probe%'
+            group by queryid
+            having count(*) >= 2
+            limit 1;
+
+            assert v_query_id is not null,
+              'pg_stat_statements did not record duplicate rows for the fanout probe';
+            assert v_pgss_rows >= 2,
+              'expected at least two pgss rows for same queryid, got ' || coalesce(v_pgss_rows, 0);
+
+            insert into ash.wait_event_map (state, type, event)
+            values ('active', 'CPU', 'CPU')
+            on conflict (state, type, event) do update set state = excluded.state
+            returning id into v_wait_id;
+
+            insert into ash.query_map_0 (query_id)
+            values (v_query_id)
+            on conflict (query_id) do update set query_id = excluded.query_id
+            returning id into v_map_id;
+
+            v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values (v_sample_ts, v_datid, 1, array[-v_wait_id::int, 1, v_map_id]::int[], 0);
+
+            select count(*)
+            into v_count
+            from ash.samples('1 hour', 1000)
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('samples() should return one ASH row for one sample; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            select count(*)
+            into v_count
+            from ash.samples_at(
+              ash.ts_to_timestamptz(v_sample_ts - 1),
+              ash.ts_to_timestamptz(v_sample_ts + 1),
+              1000
+            )
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('samples_at() should return one ASH row for one sample; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            select count(*)
+            into v_count
+            from ash.event_queries('CPU', '1 hour', 1000)
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('event_queries() should return one row per ASH query_id; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            select count(*)
+            into v_count
+            from ash.event_queries_at(
+              'CPU',
+              ash.ts_to_timestamptz(v_sample_ts - 1),
+              ash.ts_to_timestamptz(v_sample_ts + 1),
+              1000
+            )
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('event_queries_at() should return one row per ASH query_id; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            raise notice 'pg_stat_statements fanout regression test PASSED';
+          end;
+          $$;
+          EOF
+
       - name: Test timeline_chart functions
         env:
           PGPASSWORD: postgres
