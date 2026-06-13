@@ -14,7 +14,10 @@
 -- would silently lose access on every upgrade or installer re-apply.
 -- Snapshot every explicit non-owner EXECUTE grant on ash.* functions into
 -- a temp table now; the matching block at the very end of this script
--- re-applies them to the recreated functions and drops the snapshot.
+-- re-applies them to the recreated functions and drops the snapshot. The
+-- argument signature is captured alongside the name so the restore can put
+-- the grant back on the exact same overload and never widen a role that
+-- held only one overload of a function.
 -- PUBLIC (grantee oid 0, which has no pg_roles row) is intentionally
 -- excluded: the hardening block below re-applies the REVOKE-from-PUBLIC
 -- posture on every install.
@@ -23,11 +26,14 @@ begin
   drop table if exists pg_temp._ash_install_func_acl;
   create temp table _ash_install_func_acl (
     proname   name not null,
+    args      text not null,
     grantee   name not null,
     grantable bool not null
   );
-  insert into pg_temp._ash_install_func_acl (proname, grantee, grantable)
-  select distinct p.proname, g.rolname, acl.is_grantable
+  insert into pg_temp._ash_install_func_acl (proname, args, grantee, grantable)
+  select distinct p.proname,
+         pg_catalog.pg_get_function_identity_arguments(p.oid),
+         g.rolname, acl.is_grantable
   from pg_proc p
   join pg_namespace n on p.pronamespace = n.oid
   cross join lateral aclexplode(p.proacl) as acl
@@ -5484,16 +5490,28 @@ begin
 end $$;
 
 -- Re-apply the EXECUTE grants snapshotted before the drop/recreate at the
--- top of this script (#107). Grants are restored by function name to every
--- current overload, because the dropped signatures may no longer exist in
--- this version. This mirrors what CREATE OR REPLACE would have preserved:
--- function names that no longer exist (removed/renamed) are skipped, roles
--- dropped mid-script are skipped, and a role's reach is never widened —
+-- top of this script (#107), keeping the restore strictly least-privilege:
+--   * Admin functions (ash._admin_funcs()) are never restored. They are
+--     locked to the owner by the hardening block above and are never handed
+--     out by ash.grant_reader(); re-applying a stray manual grant on one
+--     would silently undo that hardening on every install. Excluding them
+--     here preserves the pre-#107 behaviour where DROP FUNCTION scrubbed
+--     such grants.
+--   * Each grant is restored to the exact same signature when it still
+--     exists, so a role that held only one overload of a function is not
+--     widened to its siblings. Only when the snapshotted signature is gone
+--     (a genuine cross-version signature change — the case this restore
+--     exists to cover) does it fall back to every current overload of the
+--     name.
+-- This mirrors what CREATE OR REPLACE would have preserved: function names
+-- that no longer exist (removed/renamed) are skipped, roles dropped
+-- mid-script are skipped, and a role's reach is never widened —
 -- functions introduced by this version still require a fresh
 -- ash.grant_reader() call, exactly as before.
 do $$
 declare
   r record;
+  v_admin_funcs constant text[] := ash._admin_funcs();
 begin
   for r in
     select distinct a.grantee, a.grantable, p.proname,
@@ -5504,6 +5522,21 @@ begin
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'ash'
       and p.prokind in ('f', 'a')
+      and p.proname::text <> all (v_admin_funcs)
+      and (
+        -- the snapshotted overload still exists: restore exactly it
+        pg_catalog.pg_get_function_identity_arguments(p.oid) = a.args
+        -- the snapshotted overload is gone (signature changed): fall back
+        -- to restoring every current overload of the name
+        or not exists (
+          select 1
+          from pg_catalog.pg_proc p2
+          join pg_catalog.pg_namespace n2 on n2.oid = p2.pronamespace
+          where n2.nspname = 'ash'
+            and p2.proname = a.proname
+            and pg_catalog.pg_get_function_identity_arguments(p2.oid) = a.args
+        )
+      )
   loop
     execute format('grant execute on function ash.%I(%s) to %I%s',
                    r.proname, r.args, r.grantee,
