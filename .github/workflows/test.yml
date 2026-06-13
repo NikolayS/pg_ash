@@ -4458,6 +4458,158 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
+      - name: "Issue #107: reader grants survive upgrade and installer re-apply"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Issue #107 (B1): the installer drops and recreates functions whose
+          # signatures changed across versions, and DROP FUNCTION destroys
+          # EXECUTE grants that CREATE OR REPLACE would have preserved. A
+          # monitoring role configured with ash.grant_reader() before an
+          # upgrade must keep its reader access after it — and after any
+          # re-apply of the installer.
+          #
+          # Split the discovered chain into released vs in-development parts
+          # so the reader grant happens at the latest released version —
+          # exactly the state of a production database about to upgrade.
+          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
+          grep -v '^\\i devel/' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_released.sql
+          grep '^\\i devel/' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_devel.sql || true
+          python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i /tmp/ash_chain_released.sql
+
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_b1_reader') then
+              create role ash_b1_reader login password 'x';
+            end if;
+          end $$;
+
+          select ash.grant_reader('ash_b1_reader');
+
+          -- Snapshot which ash.* functions the reader can execute at the
+          -- released version. Function names only: signatures may
+          -- legitimately change across versions (that is exactly why the
+          -- installer drops them).
+          create table public.b1_acl_before as
+          select distinct p.proname::text as proname
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'ash'
+            and p.prokind = 'f'
+            and has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
+
+          do $$
+          begin
+            assert (select count(*) from public.b1_acl_before) > 10,
+              'sanity: grant_reader should cover a non-trivial function set';
+          end $$;
+
+          \i /tmp/ash_chain_devel.sql
+
+          -- ACL equivalence sweep: every function name the reader could
+          -- execute before the upgrade and that still exists must remain
+          -- executable on every current overload. Nothing is enumerated, so
+          -- any future drop/recreate that loses reader grants fails here.
+          do $$
+          declare
+            v_lost text;
+          begin
+            select string_agg(distinct p.proname::text, ', ' order by p.proname::text)
+              into v_lost
+            from public.b1_acl_before b
+            join pg_proc p on p.proname::text = b.proname
+            join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'ash'
+              and p.prokind = 'f'
+              and not has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
+            assert v_lost is null,
+              format('reader EXECUTE grants lost across upgrade on: %s', v_lost);
+          end $$;
+
+          -- The functions reported lost in the bug hunt, pinned by signature.
+          do $$
+          begin
+            assert has_function_privilege('ash_b1_reader', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_waits lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_waits_at(timestamptz,timestamptz,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_waits_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.timeline_chart(interval,interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.timeline_chart lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.timeline_chart_at(timestamptz,timestamptz,interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.timeline_chart_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.query_waits(bigint,interval,int,boolean)', 'EXECUTE'),
+              '#107: ash.query_waits lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.query_waits_at(bigint,timestamptz,timestamptz,int,boolean)', 'EXECUTE'),
+              '#107: ash.query_waits_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_by_type(interval,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_by_type lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_by_type_at(timestamptz,timestamptz,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_by_type_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.event_queries(text,interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.event_queries lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.event_queries_at(text,timestamptz,timestamptz,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.event_queries_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_queries_with_text(interval,int)', 'EXECUTE'),
+              '#107: ash.top_queries_with_text lost reader EXECUTE across upgrade';
+
+            -- No escalation: restoring grants must not widen the role's
+            -- reach to admin functions or re-open PUBLIC.
+            assert not has_function_privilege('ash_b1_reader', 'ash.start(interval)', 'EXECUTE'),
+              '#107: ash.start must remain admin-only after upgrade';
+            assert not has_function_privilege('ash_b1_reader', 'ash.take_sample()', 'EXECUTE'),
+              '#107: ash.take_sample must remain admin-only after upgrade';
+            assert not has_function_privilege('ash_b1_reader', 'ash.grant_reader(name)', 'EXECUTE'),
+              '#107: ash.grant_reader must remain admin-only after upgrade';
+            assert not has_function_privilege('ash_b1_reader', 'ash.revoke_reader(name)', 'EXECUTE'),
+              '#107: ash.revoke_reader must remain admin-only after upgrade';
+            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              '#107: PUBLIC must not gain EXECUTE on ash.top_waits';
+
+            raise notice 'issue #107: reader grants preserved across upgrade';
+          end $$;
+
+          -- Behavioral: actually call affected readers as the role.
+          set role ash_b1_reader;
+          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
+          select count(*) from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+          reset role;
+
+          -- Re-apply scenario: re-running the development installer on an
+          -- already-installed database must also preserve the grants.
+          \i /tmp/ash_fresh_install.sql
+
+          do $$
+          declare
+            v_lost text;
+          begin
+            select string_agg(distinct p.proname::text, ', ' order by p.proname::text)
+              into v_lost
+            from public.b1_acl_before b
+            join pg_proc p on p.proname::text = b.proname
+            join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'ash'
+              and p.prokind = 'f'
+              and not has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
+            assert v_lost is null,
+              format('reader EXECUTE grants lost across installer re-apply on: %s', v_lost);
+
+            assert not has_function_privilege('ash_b1_reader', 'ash.take_sample()', 'EXECUTE'),
+              '#107: ash.take_sample must remain admin-only after re-apply';
+
+            raise notice 'issue #107: reader grants preserved across installer re-apply';
+          end $$;
+
+          set role ash_b1_reader;
+          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
+          reset role;
+
+          drop table public.b1_acl_before;
+          select ash.uninstall('yes');
+          drop role ash_b1_reader;
+          EOF
+
       - name: "Schema equivalence: fresh dev install vs full upgrade path"
         env:
           PGPASSWORD: postgres
@@ -4508,6 +4660,19 @@ jobs:
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'ash' and c.relkind in ('r','p')
           order by c.relname, con.conname;
+
+          -- Issue #107: privilege state must be equivalent too. proacl is
+          -- NULL until the first GRANT/REVOKE touches a function; the
+          -- installer's REVOKE-from-PUBLIC hardening always runs, so a fresh
+          -- install and the full upgrade chain must converge to identical
+          -- explicit function ACLs.
+          select 'FACL', p.proname,
+                 pg_get_function_identity_arguments(p.oid),
+                 coalesce(p.proacl::text, '<default>')
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'ash'
+          order by p.proname, pg_get_function_identity_arguments(p.oid);
           SNAPSQL
 
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
