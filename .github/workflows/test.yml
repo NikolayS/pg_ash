@@ -3693,6 +3693,12 @@ jobs:
             v_end := date_trunc('minute', now());
             v_start := v_end - interval '10 minutes';
 
+            -- AAS values scale by the configured sample interval. Earlier steps
+            -- in this job call ash.start() with various intervals, so pin it to
+            -- 1s for the fixed-number assertions below and restore it at the end.
+            select sample_interval into v_si_save from ash.config where singleton;
+            update ash.config set sample_interval = '1 second' where singleton;
+
             -- Invariant fix: two databases each 300 backend-sec in the SAME minute.
             -- True instance AAS for that minute is (300+300)/60 = 10; a per-database
             -- minute peak would report 5 (< avg) -- the bug this rework fixes.
@@ -3845,7 +3851,8 @@ jobs:
 
             -- Sample-interval scaling: a backend busy for the whole minute at 5s
             -- sampling appears 12 times; AAS must still be 12*5/60 = 1.00, not 0.20.
-            select sample_interval into v_si_save from ash.config where singleton;
+            -- (The block already pinned the interval to 1s; toggle to 5s here and
+            -- restore the 1s working value, not v_si_save, which holds the original.)
             update ash.config set sample_interval = '5 seconds' where singleton;
             truncate ash.rollup_1m;
             insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
@@ -3856,7 +3863,7 @@ jobs:
             select avg_aas into v_metric from ash.aas_at(v_end - interval '1 minute', v_end, '1 minute');
             assert v_metric = 1.00,
               format('AAS avg under 5s sampling should be 12*5/60 = 1.00, got %s', v_metric);
-            update ash.config set sample_interval = v_si_save where singleton;
+            update ash.config set sample_interval = '1 second' where singleton;
 
             -- Empty window zero-fills (no NULLs); inverted range and sub-minute
             -- bucket are rejected.
@@ -3918,6 +3925,9 @@ jobs:
             else
               raise notice 'pg_stat_statements unavailable; skipping positive text check';
             end if;
+
+            -- Restore the sample interval pinned at the start of this section.
+            update ash.config set sample_interval = v_si_save where singleton;
 
             -- === Future range: no data ===
             select count(*) into v_count
