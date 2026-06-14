@@ -16,7 +16,7 @@ jobs:
   docs-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
 
@@ -93,7 +93,7 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
 
@@ -1672,6 +1672,110 @@ jobs:
             assert v_count > 0, 'event_queries_at returned 0 rows for CPU*';
 
             raise notice 'Query-specific function tests PASSED';
+          end;
+          $$;
+          EOF
+
+      - name: "Regression: pg_stat_statements joins do not duplicate ASH rows"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          drop role if exists pgash_pgss_fanout_a;
+          drop role if exists pgash_pgss_fanout_b;
+          create role pgash_pgss_fanout_a;
+          create role pgash_pgss_fanout_b;
+          grant pgash_pgss_fanout_a, pgash_pgss_fanout_b to postgres;
+
+          select pg_stat_statements_reset();
+
+          set role pgash_pgss_fanout_a;
+          select 424242::int as pgash_fanout_probe;
+          reset role;
+
+          set role pgash_pgss_fanout_b;
+          select 424242::int as pgash_fanout_probe;
+          reset role;
+
+          do $$
+          declare
+            v_query_id bigint;
+            v_pgss_rows int;
+            v_wait_id smallint;
+            v_map_id int4;
+            v_sample_ts int4;
+            v_datid oid := (select oid from pg_database where datname = current_database());
+            v_count int;
+          begin
+            select queryid, count(*)
+            into v_query_id, v_pgss_rows
+            from pg_stat_statements
+            where query like '%pgash_fanout_probe%'
+            group by queryid
+            having count(*) >= 2
+            limit 1;
+
+            assert v_query_id is not null,
+              'pg_stat_statements did not record duplicate rows for the fanout probe';
+            assert v_pgss_rows >= 2,
+              'expected at least two pgss rows for same queryid, got ' || coalesce(v_pgss_rows, 0);
+
+            insert into ash.wait_event_map (state, type, event)
+            values ('active', 'CPU', 'CPU')
+            on conflict (state, type, event) do update set state = excluded.state
+            returning id into v_wait_id;
+
+            insert into ash.query_map_0 (query_id)
+            values (v_query_id)
+            on conflict (query_id) do update set query_id = excluded.query_id
+            returning id into v_map_id;
+
+            v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values (v_sample_ts, v_datid, 1, array[-v_wait_id::int, 1, v_map_id]::int[], 0);
+
+            select count(*)
+            into v_count
+            from ash.samples('1 hour', 1000)
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('samples() should return one ASH row for one sample; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            select count(*)
+            into v_count
+            from ash.samples_at(
+              ash.ts_to_timestamptz(v_sample_ts - 1),
+              ash.ts_to_timestamptz(v_sample_ts + 1),
+              1000
+            )
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('samples_at() should return one ASH row for one sample; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            select count(*)
+            into v_count
+            from ash.event_queries('CPU', '1 hour', 1000)
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('event_queries() should return one row per ASH query_id; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            select count(*)
+            into v_count
+            from ash.event_queries_at(
+              'CPU',
+              ash.ts_to_timestamptz(v_sample_ts - 1),
+              ash.ts_to_timestamptz(v_sample_ts + 1),
+              1000
+            )
+            where query_id = v_query_id;
+            assert v_count = 1,
+              format('event_queries_at() should return one row per ASH query_id; got %s with %s pgss rows',
+                     v_count, v_pgss_rows);
+
+            raise notice 'pg_stat_statements fanout regression test PASSED';
           end;
           $$;
           EOF
@@ -4636,6 +4740,236 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
+      - name: "Issue #107: reader grants survive upgrade and installer re-apply"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Issue #107 (B1): the installer drops and recreates functions whose
+          # signatures changed across versions, and DROP FUNCTION destroys
+          # EXECUTE grants that CREATE OR REPLACE would have preserved. A
+          # monitoring role configured with ash.grant_reader() before an
+          # upgrade must keep its reader access after it — and after any
+          # re-apply of the installer.
+          #
+          # Split the discovered chain into released vs in-development parts
+          # so the reader grant happens at the latest released version —
+          # exactly the state of a production database about to upgrade.
+          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
+          grep -v '^\\i devel/' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_released.sql
+          grep '^\\i devel/' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_devel.sql || true
+          python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i /tmp/ash_chain_released.sql
+
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_b1_reader') then
+              create role ash_b1_reader login password 'x';
+            end if;
+          end $$;
+
+          select ash.grant_reader('ash_b1_reader');
+
+          -- Snapshot which ash.* functions the reader can execute at the
+          -- released version. Function names only: signatures may
+          -- legitimately change across versions (that is exactly why the
+          -- installer drops them).
+          create table public.b1_acl_before as
+          select distinct p.proname::text as proname
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'ash'
+            and p.prokind = 'f'
+            and has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
+
+          do $$
+          begin
+            assert (select count(*) from public.b1_acl_before) > 10,
+              'sanity: grant_reader should cover a non-trivial function set';
+          end $$;
+
+          \i /tmp/ash_chain_devel.sql
+
+          -- ACL equivalence sweep: every function name the reader could
+          -- execute before the upgrade and that still exists must remain
+          -- executable on every current overload. Nothing is enumerated, so
+          -- any future drop/recreate that loses reader grants fails here.
+          do $$
+          declare
+            v_lost text;
+          begin
+            select string_agg(distinct p.proname::text, ', ' order by p.proname::text)
+              into v_lost
+            from public.b1_acl_before b
+            join pg_proc p on p.proname::text = b.proname
+            join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'ash'
+              and p.prokind = 'f'
+              and not has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
+            assert v_lost is null,
+              format('reader EXECUTE grants lost across upgrade on: %s', v_lost);
+          end $$;
+
+          -- The functions reported lost in the bug hunt, pinned by signature.
+          do $$
+          begin
+            assert has_function_privilege('ash_b1_reader', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_waits lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_waits_at(timestamptz,timestamptz,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_waits_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.timeline_chart(interval,interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.timeline_chart lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.timeline_chart_at(timestamptz,timestamptz,interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.timeline_chart_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.query_waits(bigint,interval,int,boolean)', 'EXECUTE'),
+              '#107: ash.query_waits lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.query_waits_at(bigint,timestamptz,timestamptz,int,boolean)', 'EXECUTE'),
+              '#107: ash.query_waits_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_by_type(interval,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_by_type lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_by_type_at(timestamptz,timestamptz,int,boolean)', 'EXECUTE'),
+              '#107: ash.top_by_type_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.event_queries(text,interval,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.event_queries lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.event_queries_at(text,timestamptz,timestamptz,int,int,boolean)', 'EXECUTE'),
+              '#107: ash.event_queries_at lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top_queries_with_text(interval,int)', 'EXECUTE'),
+              '#107: ash.top_queries_with_text lost reader EXECUTE across upgrade';
+
+            -- No escalation: restoring grants must not widen the role's
+            -- reach to admin functions or re-open PUBLIC.
+            assert not has_function_privilege('ash_b1_reader', 'ash.start(interval)', 'EXECUTE'),
+              '#107: ash.start must remain admin-only after upgrade';
+            assert not has_function_privilege('ash_b1_reader', 'ash.take_sample()', 'EXECUTE'),
+              '#107: ash.take_sample must remain admin-only after upgrade';
+            assert not has_function_privilege('ash_b1_reader', 'ash.grant_reader(name)', 'EXECUTE'),
+              '#107: ash.grant_reader must remain admin-only after upgrade';
+            assert not has_function_privilege('ash_b1_reader', 'ash.revoke_reader(name)', 'EXECUTE'),
+              '#107: ash.revoke_reader must remain admin-only after upgrade';
+            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              '#107: PUBLIC must not gain EXECUTE on ash.top_waits';
+
+            raise notice 'issue #107: reader grants preserved across upgrade';
+          end $$;
+
+          -- Behavioral: actually call affected readers as the role.
+          set role ash_b1_reader;
+          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
+          select count(*) from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+          reset role;
+
+          -- Re-apply scenario: re-running the development installer on an
+          -- already-installed database must also preserve the grants.
+          \i /tmp/ash_fresh_install.sql
+
+          do $$
+          declare
+            v_lost text;
+          begin
+            select string_agg(distinct p.proname::text, ', ' order by p.proname::text)
+              into v_lost
+            from public.b1_acl_before b
+            join pg_proc p on p.proname::text = b.proname
+            join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'ash'
+              and p.prokind = 'f'
+              and not has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
+            assert v_lost is null,
+              format('reader EXECUTE grants lost across installer re-apply on: %s', v_lost);
+
+            assert not has_function_privilege('ash_b1_reader', 'ash.take_sample()', 'EXECUTE'),
+              '#107: ash.take_sample must remain admin-only after re-apply';
+
+            raise notice 'issue #107: reader grants preserved across installer re-apply';
+          end $$;
+
+          set role ash_b1_reader;
+          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
+          reset role;
+
+          drop table public.b1_acl_before;
+          select ash.uninstall('yes');
+          drop role ash_b1_reader;
+          EOF
+
+      - name: "Issue #107 follow-up: grant restore stays least-privilege"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # The #107 grant snapshot/restore must not become a privilege-widening
+          # vector. On every installer re-apply it must:
+          #   (a) NOT re-establish a stray non-owner EXECUTE grant on an admin
+          #       function after the hardening block revoked it (before #107,
+          #       DROP FUNCTION scrubbed such grants);
+          #   (b) NOT widen a role that held a single overload of a function to
+          #       its sibling overloads (restore by exact signature);
+          #   while still preserving legitimate ash.grant_reader() grants.
+          python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i /tmp/ash_fresh_install.sql
+
+          do $$ begin
+            if not exists (select from pg_roles where rolname = 'lp_reader')   then create role lp_reader   login password 'x'; end if;
+            if not exists (select from pg_roles where rolname = 'lp_stray')    then create role lp_stray    login password 'x'; end if;
+            if not exists (select from pg_roles where rolname = 'lp_overload') then create role lp_overload login password 'x'; end if;
+          end $$;
+
+          -- legitimate reader: must SURVIVE re-apply (guards the #107 fix)
+          select ash.grant_reader('lp_reader');
+          -- stray manual grant on an admin function in the drop list: must be SCRUBBED
+          grant execute on function ash.rebuild_partitions(int, text) to lp_stray;
+          -- single-overload grant: must NOT widen to the sibling overload
+          grant execute on function ash.decode_sample(integer[], smallint) to lp_overload;
+
+          do $$ begin
+            assert has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
+              'precondition: stray admin grant present before re-apply';
+            assert has_function_privilege('lp_overload', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
+              'precondition: array overload granted';
+            assert not has_function_privilege('lp_overload', 'ash.decode_sample(integer)', 'EXECUTE'),
+              'precondition: integer overload not granted yet';
+          end $$;
+
+          -- re-apply the installer: drop/recreate + snapshot/restore + hardening
+          \i /tmp/ash_fresh_install.sql
+
+          do $$ begin
+            -- (1) #107 still fixed: legitimate reader keeps every reader grant
+            assert has_function_privilege('lp_reader', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              '#107 regression: reader lost top_waits across re-apply';
+            assert has_function_privilege('lp_reader', 'ash.event_queries(text,interval,int,int,boolean)', 'EXECUTE'),
+              '#107 regression: reader lost event_queries across re-apply';
+            assert has_function_privilege('lp_reader', 'ash.top_queries_with_text(interval,int)', 'EXECUTE'),
+              '#107 regression: reader lost top_queries_with_text across re-apply';
+
+            -- (2) admin-function grant must be scrubbed and NOT restored after hardening
+            assert not has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
+              'admin EXECUTE grant re-established after hardening (defense-in-depth regression)';
+            assert not has_function_privilege('lp_reader', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
+              'reader must not gain admin function EXECUTE';
+            assert not has_function_privilege('lp_reader', 'ash.take_sample()', 'EXECUTE'),
+              'reader must not gain take_sample';
+
+            -- (3) no overload widening
+            assert has_function_privilege('lp_overload', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
+              'held overload should survive re-apply';
+            assert not has_function_privilege('lp_overload', 'ash.decode_sample(integer)', 'EXECUTE'),
+              'single-overload grant must NOT widen to the sibling overload';
+
+            -- (4) PUBLIC stays revoked
+            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+              'PUBLIC must stay revoked';
+
+            raise notice 'issue #107 follow-up: grant restore stayed least-privilege';
+          end $$;
+
+          drop owned by lp_reader, lp_stray, lp_overload;
+          select ash.uninstall('yes');
+          drop role lp_reader;
+          drop role lp_stray;
+          drop role lp_overload;
+          EOF
+
       - name: "Schema equivalence: fresh dev install vs full upgrade path"
         env:
           PGPASSWORD: postgres
@@ -4686,6 +5020,19 @@ jobs:
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'ash' and c.relkind in ('r','p')
           order by c.relname, con.conname;
+
+          -- Issue #107: privilege state must be equivalent too. proacl is
+          -- NULL until the first GRANT/REVOKE touches a function; the
+          -- installer's REVOKE-from-PUBLIC hardening always runs, so a fresh
+          -- install and the full upgrade chain must converge to identical
+          -- explicit function ACLs.
+          select 'FACL', p.proname,
+                 pg_get_function_identity_arguments(p.oid),
+                 coalesce(p.proacl::text, '<default>')
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'ash'
+          order by p.proname, pg_get_function_identity_arguments(p.oid);
           SNAPSQL
 
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql

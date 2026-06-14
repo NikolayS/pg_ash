@@ -1,10 +1,48 @@
 -- pg_ash: Active Session History for Postgres
 -- Version: 1.6 (development)
--- Development installer for the next release after v1.5.
--- This file is promoted to sql/ash-install.sql during the release-stamp PR.
--- Fresh development install: \i devel/sql/ash-install.sql
--- Upgrade from v1.5 in development: \i devel/sql/ash-1.5-to-1.6.sql
+-- Fresh install: \i sql/ash-install.sql
+-- Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql
+-- Upgrade from 1.4: \i sql/ash-1.4-to-1.5.sql
 
+
+-- Preserve function EXECUTE grants across the drop/recreate below (#107).
+-- DROP FUNCTION destroys ACLs that CREATE OR REPLACE would keep, so a
+-- monitoring role configured via ash.grant_reader() (or a manual GRANT)
+-- would silently lose access on every upgrade or installer re-apply.
+-- Snapshot every explicit non-owner EXECUTE grant on ash.* functions into
+-- a temp table now; the matching block at the very end of this script
+-- re-applies them to the recreated functions and drops the snapshot. The
+-- argument signature is captured alongside the name so the restore can put
+-- the grant back on the exact same overload and never widen a role that
+-- held only one overload of a function.
+-- PUBLIC (grantee oid 0, which has no pg_roles row) is intentionally
+-- excluded: the hardening block below re-applies the REVOKE-from-PUBLIC
+-- posture on every install.
+do $$
+begin
+  drop table if exists pg_temp._ash_install_func_acl;
+  create temp table _ash_install_func_acl (
+    proname   name not null,
+    args      text not null,
+    grantee   name not null,
+    grantable bool not null
+  );
+  insert into pg_temp._ash_install_func_acl (proname, args, grantee, grantable)
+  select distinct p.proname,
+         pg_catalog.pg_get_function_identity_arguments(p.oid),
+         g.rolname, acl.is_grantable
+  from pg_proc p
+  join pg_namespace n on p.pronamespace = n.oid
+  cross join lateral aclexplode(p.proacl) as acl
+  join pg_roles g on g.oid = acl.grantee
+  where n.nspname = 'ash'
+    and p.prokind in ('f', 'a')
+    and acl.privilege_type = 'EXECUTE'
+    and acl.grantee <> p.proowner;
+end $$;
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
 -- Drop ALL overloads of functions whose signatures changed across versions.
@@ -2927,6 +2965,7 @@ as $$
   select * from ash.daily_peak_backends_at(now() - p_interval, now())
 $$;
 
+
 -- Average Active Sessions (AAS) — rollup-backed analysis for long observation
 -- windows (day / week / month). AAS = backend-seconds of activity per second of
 -- wall-clock time, i.e. the average number of active sessions over the period.
@@ -5166,6 +5205,14 @@ begin
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
         and i + 2 + gs.n <= array_length(s.data, 1)
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). Pre-aggregate before joining so one ASH sample row cannot
+      -- be multiplied by several pgss rows for the same query.
+      select p.queryid, p.dbid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid, p.dbid
     )
     select
       ash.epoch() + make_interval(secs => d.sample_ts),
@@ -5179,7 +5226,7 @@ begin
     join ash.wait_event_map wm on wm.id = d.wait_id
     left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
     left join pg_database db on db.oid = d.datid
-    left join pg_stat_statements pgss on pgss.queryid = qm.query_id
+    left join pgss on pgss.queryid = qm.query_id
       and pgss.dbid = d.datid
     order by d.sample_ts desc, wm.type, wm.event
     limit p_limit;
@@ -5279,6 +5326,14 @@ begin
         and s.data[i] < 0
         and i + 1 <= array_length(s.data, 1)
         and i + 2 + gs.n <= array_length(s.data, 1)
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). Pre-aggregate before joining so one ASH sample row cannot
+      -- be multiplied by several pgss rows for the same query.
+      select p.queryid, p.dbid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid, p.dbid
     )
     select
       ash.epoch() + make_interval(secs => d.sample_ts),
@@ -5292,7 +5347,7 @@ begin
     join ash.wait_event_map wm on wm.id = d.wait_id
     left join ash.query_map_all qm on qm.slot = d.slot and qm.id = d.map_id and d.map_id <> 0
     left join pg_database db on db.oid = d.datid
-    left join pg_stat_statements pgss on pgss.queryid = qm.query_id
+    left join pgss on pgss.queryid = qm.query_id
       and pgss.dbid = d.datid
     order by d.sample_ts desc, wm.type, wm.event
     limit p_limit;
@@ -5468,6 +5523,14 @@ begin
     ),
     max_pct as (
       select max(r.pct) as m from ranked r
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). event_queries is query_id-level, so collapse to one text
+      -- row per queryid before joining.
+      select p.queryid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -5477,7 +5540,7 @@ begin
       left(pgss.query, 200) as query_text
     from ranked r
     cross join max_pct mp
-    left join pg_stat_statements pgss on pgss.queryid = r.query_id
+    left join pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
     raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
@@ -5579,6 +5642,14 @@ begin
     ),
     max_pct as (
       select max(r.pct) as m from ranked r
+    ),
+    pgss as (
+      -- pg_stat_statements has one row per (userid, dbid, queryid,
+      -- toplevel). event_queries_at is query_id-level, so collapse to one
+      -- text row per queryid before joining.
+      select p.queryid, min(p.query) as query
+      from pg_stat_statements p
+      group by p.queryid
     )
     select
       r.query_id,
@@ -5588,7 +5659,7 @@ begin
       left(pgss.query, 200) as query_text
     from ranked r
     cross join max_pct mp
-    left join pg_stat_statements pgss on pgss.queryid = r.query_id
+    left join pgss on pgss.queryid = r.query_id
     order by r.samples desc;
   else
     raise exception 'pg_stat_statements extension is not installed. Run: CREATE EXTENSION pg_stat_statements;'
@@ -6010,4 +6081,60 @@ begin
   execute format('revoke all on function ash.revoke_reader(name) from public');
   execute format('grant execute on function ash.grant_reader(name) to %I', v_owner);
   execute format('grant execute on function ash.revoke_reader(name) to %I', v_owner);
+end $$;
+
+-- Re-apply the EXECUTE grants snapshotted before the drop/recreate at the
+-- top of this script (#107), keeping the restore strictly least-privilege:
+--   * Admin functions (ash._admin_funcs()) are never restored. They are
+--     locked to the owner by the hardening block above and are never handed
+--     out by ash.grant_reader(); re-applying a stray manual grant on one
+--     would silently undo that hardening on every install. Excluding them
+--     here preserves the pre-#107 behaviour where DROP FUNCTION scrubbed
+--     such grants.
+--   * Each grant is restored to the exact same signature when it still
+--     exists, so a role that held only one overload of a function is not
+--     widened to its siblings. Only when the snapshotted signature is gone
+--     (a genuine cross-version signature change — the case this restore
+--     exists to cover) does it fall back to every current overload of the
+--     name.
+-- This mirrors what CREATE OR REPLACE would have preserved: function names
+-- that no longer exist (removed/renamed) are skipped, roles dropped
+-- mid-script are skipped, and a role's reach is never widened —
+-- functions introduced by this version still require a fresh
+-- ash.grant_reader() call, exactly as before.
+do $$
+declare
+  r record;
+  v_admin_funcs constant text[] := ash._admin_funcs();
+begin
+  for r in
+    select distinct a.grantee, a.grantable, p.proname,
+           pg_catalog.pg_get_function_identity_arguments(p.oid) as args
+    from pg_temp._ash_install_func_acl a
+    join pg_catalog.pg_roles g on g.rolname = a.grantee
+    join pg_catalog.pg_proc p on p.proname = a.proname
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'ash'
+      and p.prokind in ('f', 'a')
+      and p.proname::text <> all (v_admin_funcs)
+      and (
+        -- the snapshotted overload still exists: restore exactly it
+        pg_catalog.pg_get_function_identity_arguments(p.oid) = a.args
+        -- the snapshotted overload is gone (signature changed): fall back
+        -- to restoring every current overload of the name
+        or not exists (
+          select 1
+          from pg_catalog.pg_proc p2
+          join pg_catalog.pg_namespace n2 on n2.oid = p2.pronamespace
+          where n2.nspname = 'ash'
+            and p2.proname = a.proname
+            and pg_catalog.pg_get_function_identity_arguments(p2.oid) = a.args
+        )
+      )
+  loop
+    execute format('grant execute on function ash.%I(%s) to %I%s',
+                   r.proname, r.args, r.grantee,
+                   case when r.grantable then ' with grant option' else '' end);
+  end loop;
+  drop table pg_temp._ash_install_func_acl;
 end $$;
