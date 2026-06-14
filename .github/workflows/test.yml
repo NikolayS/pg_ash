@@ -3610,17 +3610,23 @@ jobs:
               where proname = 'aas_periods' and pronamespace = 'ash'::regnamespace),
               'aas_periods() missing';
             assert exists (select from pg_proc
-              where proname = 'aas_waits' and pronamespace = 'ash'::regnamespace),
-              'aas_waits() missing';
+              where proname = 'aas_wait_types' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_types() missing';
             assert exists (select from pg_proc
-              where proname = 'aas_waits_at' and pronamespace = 'ash'::regnamespace),
-              'aas_waits_at() missing';
+              where proname = 'aas_wait_types_at' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_types_at() missing';
             assert exists (select from pg_proc
-              where proname = 'aas_queries' and pronamespace = 'ash'::regnamespace),
-              'aas_queries() missing';
+              where proname = 'aas_wait_events' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_events() missing';
             assert exists (select from pg_proc
-              where proname = 'aas_queries_at' and pronamespace = 'ash'::regnamespace),
-              'aas_queries_at() missing';
+              where proname = 'aas_wait_events_at' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_events_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_queryids' and pronamespace = 'ash'::regnamespace),
+              'aas_queryids() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_queryids_at' and pronamespace = 'ash'::regnamespace),
+              'aas_queryids_at() missing';
 
             -- === Readers run without error (may return 0 rows) ===
             select count(*) into v_count from ash.minute_waits('1 hour', 10);
@@ -3786,36 +3792,50 @@ jobs:
               array[v_wait_id, 120, v_io_id, 60, v_io_w, 20, v_lock_id, 60]::int4[], '{}'::int8[]
             );
 
-            -- top level (p_wait_type IS NULL): one row per type, wait_event NULL.
+            -- nature level 1: AAS by wait_event_type (one row per type; this
+            -- function has no wait_event column). pct is the type's share of all.
             select backend_seconds, pct into v_count, v_pct
-            from ash.aas_waits_at(v_end - interval '1 minute', v_end, null, 10)
+            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 10)
             where wait_event_type = 'IO';
             assert v_count = 80,
               format('AAS IO type backend_seconds should be 60+20 = 80, got %s', v_count);
             assert v_pct = 30.77,
               format('AAS IO type pct should be 80/260 = 30.77, got %s', v_pct);
-            assert (select bool_and(wait_event is null)
-                    from ash.aas_waits_at(v_end - interval '1 minute', v_end, null, 10)),
-              'AAS type level should have NULL wait_event';
+            select count(*) into v_count
+            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 10);
+            assert v_count = 3,
+              format('AAS wait types should be CPU*/IO/Lock = 3 rows, got %s', v_count);
 
-            -- drill into IO: pct is within the parent type (sums to 100).
+            -- nature level 2 drill into IO: pct is within the parent type (sums to 100).
             select backend_seconds, pct into v_count, v_pct
-            from ash.aas_waits_at(v_end - interval '1 minute', v_end, 'IO', 10)
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, 'IO', 10)
             where wait_event = 'IO:DataFileRead';
             assert v_count = 60,
               format('AAS IO:DataFileRead backend_seconds should be 60, got %s', v_count);
             assert v_pct = 75.00,
               format('AAS IO:DataFileRead pct within IO should be 60/80 = 75.00, got %s', v_pct);
             select count(*) into v_count
-            from ash.aas_waits_at(v_end - interval '1 minute', v_end, 'IO', 10);
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, 'IO', 10);
             assert v_count = 2,
               format('AAS IO drill-down should return 2 events, got %s', v_count);
 
+            -- level 2 with NULL filter ranks every wait_event across all types;
+            -- pct is then the share of the whole window, not of one type.
+            select count(*) into v_count
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, null, 10);
+            assert v_count = 4,
+              format('AAS wait events across all types should be 4, got %s', v_count);
+            select pct into v_pct
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, null, 10)
+            where wait_event = 'IO:DataFileRead';
+            assert v_pct = 23.08,
+              format('AAS IO:DataFileRead pct across all events should be 60/260 = 23.08, got %s', v_pct);
+
             -- limit 0 returns no rows (greatest guards negative/NULL limits).
             select count(*) into v_count
-            from ash.aas_waits_at(v_end - interval '1 minute', v_end, null, 0);
+            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 0);
             assert v_count = 0,
-              format('aas_waits_at limit 0 should return 0 rows, got %s', v_count);
+              format('aas_wait_types_at limit 0 should return 0 rows, got %s', v_count);
 
             -- Query drill-down from minute rollups.
             truncate ash.rollup_1m;
@@ -3825,21 +3845,21 @@ jobs:
               array[v_wait_id, 300]::int4[], array[111::bigint, 120, 333::bigint, 180]::int8[]
             );
             select avg_aas, pct into v_metric, v_pct
-            from ash.aas_queries_at(v_end - interval '1 minute', v_end, 10)
+            from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 10)
             where query_id = 333;
             assert v_metric = 3.00,
               format('AAS query 333 avg should be 180/60 = 3.00, got %s', v_metric);
             assert v_pct = 60.00,
               format('AAS query 333 pct should be 180/300 = 60.00, got %s', v_pct);
-            select query_id into v_query_id from ash.aas_queries_at(v_end - interval '1 minute', v_end, 1);
+            select query_id into v_query_id from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 1);
             assert v_query_id = 333,
               format('AAS top query should be 333 (180 > 120), got %s', v_query_id);
-            select count(*) into v_count from ash.aas_queries_at(v_end - interval '1 minute', v_end, 0);
+            select count(*) into v_count from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 0);
             assert v_count = 0,
-              format('aas_queries_at limit 0 should return 0 rows, got %s', v_count);
-            select count(*) into v_count from ash.aas_queries_at(v_end - interval '1 minute', v_end, null);
+              format('aas_queryids_at limit 0 should return 0 rows, got %s', v_count);
+            select count(*) into v_count from ash.aas_queryids_at(v_end - interval '1 minute', v_end, null);
             assert v_count = 0,
-              format('aas_queries_at NULL limit should return 0 rows, got %s', v_count);
+              format('aas_queryids_at NULL limit should return 0 rows, got %s', v_count);
 
             -- aas_periods returns the six standard windows.
             select array_agg(period order by case period
@@ -3889,14 +3909,14 @@ jobs:
                 'aas_at sub-minute bucket error mismatch: ' || sqlerrm;
             end;
             begin
-              perform * from ash.aas_waits_at(null, v_end, null, 10);
-              raise exception 'aas_waits_at should reject NULL start';
+              perform * from ash.aas_wait_types_at(null, v_end, 10);
+              raise exception 'aas_wait_types_at should reject NULL start';
             exception when others then
               assert sqlerrm like '%must not be null%',
-                'aas_waits_at NULL start error mismatch: ' || sqlerrm;
+                'aas_wait_types_at NULL start error mismatch: ' || sqlerrm;
             end;
 
-            -- Positive pg_stat_statements path: aas_queries_at surfaces real query
+            -- Positive pg_stat_statements path: aas_queryids_at surfaces real query
             -- text for a queryid known to pgss (the degraded job covers NULL text).
             if ash._pgss_schema() is not null then
               begin
@@ -3917,10 +3937,10 @@ jobs:
                 array[v_wait_id, 60]::int4[], array[v_pgss_qid, 60::bigint]::int8[]
               );
               select query_text into v_query_text
-              from ash.aas_queries_at(v_end - interval '1 minute', v_end, 10)
+              from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 10)
               where query_id = v_pgss_qid;
               assert v_query_text = v_pgss_text,
-                format('aas_queries_at query text for queryid %s should match pgss (%s), got %s',
+                format('aas_queryids_at query text for queryid %s should match pgss (%s), got %s',
                        v_pgss_qid, v_pgss_text, v_query_text);
             else
               raise notice 'pg_stat_statements unavailable; skipping positive text check';
@@ -5210,10 +5230,10 @@ jobs:
             -- NULL and spoofed public.pg_stat_statements must be ignored.
             select count(*), count(query_text), max(avg_aas)
             into v_count, v_text_count, v_aas
-            from ash.aas_queries('5 minutes', 10)
+            from ash.aas_queryids('5 minutes', 10)
             where query_id = 999999;
             assert v_count = 1 and v_text_count = 0 and v_aas = 0.20,
-              format('aas_queries without pgss should return one NULL-text row with AAS 0.20, got rows=%s text_rows=%s aas=%s',
+              format('aas_queryids without pgss should return one NULL-text row with AAS 0.20, got rows=%s text_rows=%s aas=%s',
                      v_count, v_text_count, v_aas);
 
             -- Functions that should ERROR without pgss:

@@ -185,15 +185,17 @@ Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
 | `ash.hourly_queries_at(start, end, limit)` | Same, absolute time range |
 | `ash.daily_peak_backends(interval)` | Peak and average backends per day (default: last 7 days) |
 | `ash.daily_peak_backends_at(start, end)` | Same, absolute time range |
+| `ash.aas_periods([end], [bucket])` | **Start here:** standard AAS windows side by side: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 1 month (30 days); default end: now |
 | `ash.aas(interval, bucket)` | Average Active Sessions over a period: avg + peak + p99 of per-bucket AAS (default: last 1 hour, 1-minute bucket) |
 | `ash.aas_at(start, end, bucket)` | Same, absolute time range |
 | `ash.aas_timeline(interval, bucket)` | AAS time series: one point per bucket for visualization / locating spikes (default: last 1 day, 1-hour bucket) |
 | `ash.aas_timeline_at(start, end, bucket)` | Same, absolute time range |
-| `ash.aas_periods([end], [bucket])` | Standard AAS windows side by side: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 1 month (30 days); default end: now |
-| `ash.aas_waits(interval, wait_type, limit)` | AAS nature drill-down: by wait_event_type, or by wait_event within one type (pass `wait_type`); default last 1 hour, limit 10 |
-| `ash.aas_waits_at(start, end, wait_type, limit)` | Same, absolute time range |
-| `ash.aas_queries(interval, limit)` | AAS drill-down by query_id, with query text when pg_stat_statements is available (default: last 1 hour, limit 10) |
-| `ash.aas_queries_at(start, end, limit)` | Same, absolute time range |
+| `ash.aas_wait_types(interval, limit)` | Nature drill-down level 1: AAS by `wait_event_type` (default: last 1 hour, limit 10) |
+| `ash.aas_wait_types_at(start, end, limit)` | Same, absolute time range |
+| `ash.aas_wait_events(interval, wait_type, limit)` | Nature drill-down level 2: AAS by `wait_event`; pass `wait_type` to drill into one type, omit to rank all events (default: last 1 hour, limit 10) |
+| `ash.aas_wait_events_at(start, end, wait_type, limit)` | Same, absolute time range |
+| `ash.aas_queryids(interval, limit)` | AAS by `query_id` (the identity); query text is optional decoration, shown when pg_stat_statements is available (default: last 1 hour, limit 10) |
+| `ash.aas_queryids_at(start, end, limit)` | Same, absolute time range |
 
 Rollup readers query `rollup_1m` / `rollup_1h` tables — they work even after raw samples have rotated away.
 
@@ -808,17 +810,18 @@ order by peak_aas desc;          -- busiest buckets first
 select * from ash.aas_timeline_at('2026-03-01 02:00', '2026-03-01 03:00', '1 minute');
 
 -- NATURE dimension: drill the hierarchy on a chosen window.
--- 1) overall AAS by wait_event_type (top of the hierarchy)
+-- 1) level 1 — AAS by wait_event_type (top of the hierarchy)
 select wait_event_type, avg_aas, pct
-from ash.aas_waits('15 minutes');
+from ash.aas_wait_types('15 minutes');
 
--- 2) drill into one type to see its wait_events (pct is within that type)
+-- 2) level 2 — drill into one type to see its wait_events (pct is within that type)
 select wait_event, avg_aas, pct
-from ash.aas_waits('15 minutes', 'IO');
+from ash.aas_wait_events('15 minutes', 'IO');
 
--- 3) queries by AAS for the period; query_text when pg_stat_statements is present
+-- 3) queries by AAS for the period, keyed by query_id; query_text (optional
+--    decoration) is filled when pg_stat_statements is present
 select query_id, avg_aas, pct, query_text
-from ash.aas_queries('15 minutes', 20);
+from ash.aas_queryids('15 minutes', 20);
 
 -- the deepest leaf, "queries within a specific wait_event", is NOT recoverable
 -- from rollups (wait_counts and query_counts are decoupled); use the raw-sample
@@ -837,14 +840,14 @@ with w as (
          '2026-03-01 02:05'::timestamptz as end_ts
 )
 select wt.*
-from w, lateral ash.aas_waits_at(w.start_ts, w.end_ts, null, 10) wt;
+from w, lateral ash.aas_wait_types_at(w.start_ts, w.end_ts, 10) wt;
 
 with w as (
   select '2026-03-01 02:00'::timestamptz as start_ts,
          '2026-03-01 02:05'::timestamptz as end_ts
 )
 select q.*
-from w, lateral ash.aas_queries_at(w.start_ts, w.end_ts, 20) q;
+from w, lateral ash.aas_queryids_at(w.start_ts, w.end_ts, 20) q;
 ```
 
 `avg_aas` is backend-seconds of activity per elapsed wall-clock second; missed or
@@ -853,8 +856,8 @@ empty minutes count as zero activity. `peak_aas` and `p99_aas` are the max and
 always ≥ `avg_aas`); the `bucket` argument selects that granularity (`'1 minute'`
 or `'5 minutes'`). All AAS values are scaled by the configured sample interval,
 so they stay correct under non-1s sampling. Trailing-period helpers
-(`aas(interval)`, `aas_timeline(interval)`, `aas_waits(interval)`,
-`aas_queries(interval)`, `aas_periods()`) end at the current minute boundary so
+(`aas(interval)`, `aas_timeline(interval)`, `aas_wait_types(interval)`,
+`aas_wait_events(interval)`, `aas_queryids(interval)`, `aas_periods()`) end at the current minute boundary so
 they read complete minute rollups. `aas_timeline` reads `rollup_1m` for short
 spans (per-minute peaks) and `rollup_1h` for spans over two days with hour-or-
 larger buckets (per-hour peaks). Buckets are anchored at the window start and a
