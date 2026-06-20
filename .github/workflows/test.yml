@@ -3558,7 +3558,22 @@ jobs:
             v_peak int;
             v_avg numeric;
             v_wait_id smallint;
+            v_lock_id smallint;
+            v_io_id smallint;
+            v_io_w smallint;
+            v_si_save interval;
             v_day_start timestamptz;
+            v_summary record;
+            v_metric numeric;
+            v_pct numeric;
+            v_periods text[];
+            v_start timestamptz;
+            v_end timestamptz;
+            v_period_end timestamptz;
+            v_query_id bigint;
+            v_pgss_qid bigint;
+            v_pgss_text text;
+            v_query_text text;
           begin
             -- === Reader functions exist ===
             assert exists (select from pg_proc
@@ -3579,6 +3594,39 @@ jobs:
             assert exists (select from pg_proc
               where proname = 'daily_peak_backends_at' and pronamespace = 'ash'::regnamespace),
               'daily_peak_backends_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas' and pronamespace = 'ash'::regnamespace),
+              'aas() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_at' and pronamespace = 'ash'::regnamespace),
+              'aas_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_timeline' and pronamespace = 'ash'::regnamespace),
+              'aas_timeline() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_timeline_at' and pronamespace = 'ash'::regnamespace),
+              'aas_timeline_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_periods' and pronamespace = 'ash'::regnamespace),
+              'aas_periods() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_wait_types' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_types() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_wait_types_at' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_types_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_wait_events' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_events() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_wait_events_at' and pronamespace = 'ash'::regnamespace),
+              'aas_wait_events_at() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_queryids' and pronamespace = 'ash'::regnamespace),
+              'aas_queryids() missing';
+            assert exists (select from pg_proc
+              where proname = 'aas_queryids_at' and pronamespace = 'ash'::regnamespace),
+              'aas_queryids_at() missing';
 
             -- === Readers run without error (may return 0 rows) ===
             select count(*) into v_count from ash.minute_waits('1 hour', 10);
@@ -3636,6 +3684,270 @@ jobs:
               format('daily peak should remain max peak_backends=100, got %s', v_peak);
             assert v_avg = 1.0,
               format('daily avg_backends should be backend-seconds/samples=1.0, got %s', v_avg);
+
+            -- ===================================================================
+            -- AAS (Average Active Sessions) over rollups. avg_aas = backend-time
+            -- per wall-clock second (missing minutes = 0); peak_aas / p99_aas are
+            -- the max / 99th percentile of per-bucket AAS *summed across databases*
+            -- (so peak_aas is always >= avg_aas), scaled by the sample interval.
+            -- ===================================================================
+            truncate ash.rollup_1m;
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait_id;
+            select ash._register_wait('active', 'Lock', 'transactionid') into v_lock_id;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io_id;
+            select ash._register_wait('active', 'IO', 'DataFileWrite') into v_io_w;
+            v_end := date_trunc('minute', now());
+            v_start := v_end - interval '10 minutes';
+
+            -- AAS values scale by the configured sample interval. Earlier steps
+            -- in this job call ash.start() with various intervals, so pin it to
+            -- 1s for the fixed-number assertions below and restore it at the end.
+            select sample_interval into v_si_save from ash.config where singleton;
+            update ash.config set sample_interval = '1 second' where singleton;
+
+            -- Invariant fix: two databases each 300 backend-sec in the SAME minute.
+            -- True instance AAS for that minute is (300+300)/60 = 10; a per-database
+            -- minute peak would report 5 (< avg) -- the bug this rework fixes.
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            values
+              (ash.ts_from_timestamptz(v_end - interval '1 minute'), 100001::oid, 60, 5,
+               array[v_wait_id, 300]::int4[], '{}'::int8[]),
+              (ash.ts_from_timestamptz(v_end - interval '1 minute'), 100002::oid, 60, 5,
+               array[v_wait_id, 300]::int4[], '{}'::int8[]);
+
+            select * into v_summary from ash.aas_at(v_end - interval '1 minute', v_end, '1 minute');
+            assert v_summary.avg_aas = 10.00,
+              format('AAS avg should be (300+300)/60 = 10.00, got %s', v_summary.avg_aas);
+            assert v_summary.peak_aas = 10.00,
+              format('AAS peak should sum across databases = 10.00, got %s', v_summary.peak_aas);
+            assert v_summary.peak_aas >= v_summary.avg_aas,
+              format('AAS invariant peak(%s) >= avg(%s) violated',
+                     v_summary.peak_aas, v_summary.avg_aas);
+            assert v_summary.minutes_with_data = 1,
+              format('AAS minutes_with_data should be 1, got %s', v_summary.minutes_with_data);
+
+            -- Spike detection across 10 minutes: nine quiet minutes (AAS 1) and one
+            -- storm minute (AAS 10). The average is "fooled" (1.90) but peak/p99 see it.
+            truncate ash.rollup_1m;
+            for i in 1..10 loop
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (
+                ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), 0::oid, 60, 1,
+                array[v_wait_id, case when i = 1 then 600 else 60 end]::int4[], '{}'::int8[]
+              );
+            end loop;
+
+            select * into v_summary from ash.aas_at(v_start, v_end, '1 minute');
+            assert v_summary.avg_aas = 1.90,
+              format('AAS spike avg should be 1140/600 = 1.90, got %s', v_summary.avg_aas);
+            assert v_summary.peak_aas = 10.00,
+              format('AAS spike peak (worst minute) should be 10.00, got %s', v_summary.peak_aas);
+            assert v_summary.p99_aas = 9.19,
+              format('AAS spike p99 of per-minute AAS should be 9.19, got %s', v_summary.p99_aas);
+            assert v_summary.minutes_with_data = 10,
+              format('AAS spike minutes_with_data should be 10, got %s', v_summary.minutes_with_data);
+
+            -- A 5-minute percentile bucket smooths the one-minute storm.
+            select peak_aas into v_metric from ash.aas_at(v_start, v_end, '5 minutes');
+            assert v_metric = 2.80,
+              format('AAS 5-minute-bucket peak should be 840/300 = 2.80, got %s', v_metric);
+
+            -- Window NOT a whole multiple of the bucket: the trailing bucket
+            -- overhangs the window end and must be divided by the seconds it
+            -- actually covers, not the nominal width. Here the storm minute sits
+            -- alone in the trailing 1-minute-of-coverage bucket, so peak must be
+            -- the true 10.00 (a nominal-width divisor would deflate it to 3.33).
+            select peak_aas, p99_aas into v_metric, v_pct
+            from ash.aas_at(v_start, v_end, '3 minutes');
+            assert v_metric = 10.00,
+              format('AAS 3-minute-bucket peak over a 10-minute window should be 10.00 '
+                     '(coverage-divided trailing bucket), got %s', v_metric);
+            assert v_pct = 9.73,
+              format('AAS 3-minute-bucket p99 should be 9.73, got %s', v_pct);
+
+            -- Trailing wrapper snaps the window end to the current minute boundary.
+            select period_end into v_period_end from ash.aas('10 minutes');
+            assert v_period_end = date_trunc('minute', now()),
+              format('aas() period_end should snap to minute boundary %s, got %s',
+                     date_trunc('minute', now()), v_period_end);
+
+            -- Time series: one row per bucket so spikes can be located in time.
+            select count(*) into v_count from ash.aas_timeline_at(v_start, v_end, '1 minute');
+            assert v_count = 10,
+              format('aas_timeline 1-minute buckets should return 10 rows, got %s', v_count);
+            select avg_aas into v_metric from ash.aas_timeline_at(v_start, v_end, '1 minute')
+            where bucket_start = ash.ts_to_timestamptz(
+              (ash.ts_from_timestamptz(v_end - interval '1 minute') / 60) * 60);
+            assert v_metric = 10.00,
+              format('aas_timeline spike bucket avg should be 10.00, got %s', v_metric);
+            select count(*) into v_count from ash.aas_timeline_at(v_start, v_end, '2 minutes');
+            assert v_count = 5,
+              format('aas_timeline 2-minute buckets should return 5 rows, got %s', v_count);
+
+            -- Navigable nature hierarchy: wait_event_type -> wait_event.
+            truncate ash.rollup_1m;
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            values (
+              ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 60, 5,
+              array[v_wait_id, 120, v_io_id, 60, v_io_w, 20, v_lock_id, 60]::int4[], '{}'::int8[]
+            );
+
+            -- nature level 1: AAS by wait_event_type (one row per type; this
+            -- function has no wait_event column). pct is the type's share of all.
+            select backend_seconds, pct into v_count, v_pct
+            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 10)
+            where wait_event_type = 'IO';
+            assert v_count = 80,
+              format('AAS IO type backend_seconds should be 60+20 = 80, got %s', v_count);
+            assert v_pct = 30.77,
+              format('AAS IO type pct should be 80/260 = 30.77, got %s', v_pct);
+            select count(*) into v_count
+            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 10);
+            assert v_count = 3,
+              format('AAS wait types should be CPU*/IO/Lock = 3 rows, got %s', v_count);
+
+            -- nature level 2 drill into IO: pct is within the parent type (sums to 100).
+            select backend_seconds, pct into v_count, v_pct
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, 'IO', 10)
+            where wait_event = 'IO:DataFileRead';
+            assert v_count = 60,
+              format('AAS IO:DataFileRead backend_seconds should be 60, got %s', v_count);
+            assert v_pct = 75.00,
+              format('AAS IO:DataFileRead pct within IO should be 60/80 = 75.00, got %s', v_pct);
+            select count(*) into v_count
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, 'IO', 10);
+            assert v_count = 2,
+              format('AAS IO drill-down should return 2 events, got %s', v_count);
+
+            -- level 2 with NULL filter ranks every wait_event across all types;
+            -- pct is then the share of the whole window, not of one type.
+            select count(*) into v_count
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, null, 10);
+            assert v_count = 4,
+              format('AAS wait events across all types should be 4, got %s', v_count);
+            select pct into v_pct
+            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, null, 10)
+            where wait_event = 'IO:DataFileRead';
+            assert v_pct = 23.08,
+              format('AAS IO:DataFileRead pct across all events should be 60/260 = 23.08, got %s', v_pct);
+
+            -- limit 0 returns no rows (greatest guards negative/NULL limits).
+            select count(*) into v_count
+            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 0);
+            assert v_count = 0,
+              format('aas_wait_types_at limit 0 should return 0 rows, got %s', v_count);
+
+            -- Query drill-down from minute rollups.
+            truncate ash.rollup_1m;
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            values (
+              ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 60, 5,
+              array[v_wait_id, 300]::int4[], array[111::bigint, 120, 333::bigint, 180]::int8[]
+            );
+            select avg_aas, pct into v_metric, v_pct
+            from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 10)
+            where query_id = 333;
+            assert v_metric = 3.00,
+              format('AAS query 333 avg should be 180/60 = 3.00, got %s', v_metric);
+            assert v_pct = 60.00,
+              format('AAS query 333 pct should be 180/300 = 60.00, got %s', v_pct);
+            select query_id into v_query_id from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 1);
+            assert v_query_id = 333,
+              format('AAS top query should be 333 (180 > 120), got %s', v_query_id);
+            select count(*) into v_count from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 0);
+            assert v_count = 0,
+              format('aas_queryids_at limit 0 should return 0 rows, got %s', v_count);
+            select count(*) into v_count from ash.aas_queryids_at(v_end - interval '1 minute', v_end, null);
+            assert v_count = 0,
+              format('aas_queryids_at NULL limit should return 0 rows, got %s', v_count);
+
+            -- aas_periods returns the six standard windows.
+            select array_agg(period order by case period
+                     when '1 minute' then 1 when '5 minutes' then 2 when '1 hour' then 3
+                     when '1 day' then 4 when '1 week' then 5 when '1 month' then 6 end)
+            into v_periods from ash.aas_periods(v_end);
+            assert v_periods = array['1 minute','5 minutes','1 hour','1 day','1 week','1 month'],
+              format('aas_periods labels mismatch: %s', v_periods);
+
+            -- Sample-interval scaling: a backend busy for the whole minute at 5s
+            -- sampling appears 12 times; AAS must still be 12*5/60 = 1.00, not 0.20.
+            -- (The block already pinned the interval to 1s; toggle to 5s here and
+            -- restore the 1s working value, not v_si_save, which holds the original.)
+            update ash.config set sample_interval = '5 seconds' where singleton;
+            truncate ash.rollup_1m;
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            values (
+              ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 12, 1,
+              array[v_wait_id, 12]::int4[], '{}'::int8[]
+            );
+            select avg_aas into v_metric from ash.aas_at(v_end - interval '1 minute', v_end, '1 minute');
+            assert v_metric = 1.00,
+              format('AAS avg under 5s sampling should be 12*5/60 = 1.00, got %s', v_metric);
+            update ash.config set sample_interval = '1 second' where singleton;
+
+            -- Empty window zero-fills (no NULLs); inverted range and sub-minute
+            -- bucket are rejected.
+            select * into v_summary
+            from ash.aas_at(v_end + interval '1 hour', v_end + interval '2 hours', '1 minute');
+            assert v_summary.avg_aas = 0.00 and v_summary.peak_aas = 0.00
+              and v_summary.p99_aas = 0.00 and v_summary.minutes_with_data = 0,
+              format('empty AAS window should be all zero, got avg=%s peak=%s p99=%s mwd=%s',
+                     v_summary.avg_aas, v_summary.peak_aas, v_summary.p99_aas,
+                     v_summary.minutes_with_data);
+            begin
+              perform * from ash.aas_at(v_end, v_end - interval '1 hour');
+              raise exception 'aas_at should reject inverted ranges';
+            exception when others then
+              assert sqlerrm like '%end timestamp must be greater%',
+                'aas_at inverted range error mismatch: ' || sqlerrm;
+            end;
+            begin
+              perform * from ash.aas_at(v_end - interval '1 hour', v_end, '30 seconds');
+              raise exception 'aas_at should reject sub-minute buckets';
+            exception when others then
+              assert sqlerrm like '%bucket must be at least 1 minute%',
+                'aas_at sub-minute bucket error mismatch: ' || sqlerrm;
+            end;
+            begin
+              perform * from ash.aas_wait_types_at(null, v_end, 10);
+              raise exception 'aas_wait_types_at should reject NULL start';
+            exception when others then
+              assert sqlerrm like '%must not be null%',
+                'aas_wait_types_at NULL start error mismatch: ' || sqlerrm;
+            end;
+
+            -- Positive pg_stat_statements path: aas_queryids_at surfaces real query
+            -- text for a queryid known to pgss (the degraded job covers NULL text).
+            if ash._pgss_schema() is not null then
+              begin
+                select queryid, left(query, 100) into v_pgss_qid, v_pgss_text
+                from pg_stat_statements
+                where queryid is not null
+                order by calls desc
+                limit 1;
+              exception when others then
+                v_pgss_qid := null;
+              end;
+            end if;
+            if v_pgss_qid is not null then
+              truncate ash.rollup_1m;
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (
+                ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 60, 1,
+                array[v_wait_id, 60]::int4[], array[v_pgss_qid, 60::bigint]::int8[]
+              );
+              select query_text into v_query_text
+              from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 10)
+              where query_id = v_pgss_qid;
+              assert v_query_text = v_pgss_text,
+                format('aas_queryids_at query text for queryid %s should match pgss (%s), got %s',
+                       v_pgss_qid, v_pgss_text, v_query_text);
+            else
+              raise notice 'pg_stat_statements unavailable; skipping positive text check';
+            end if;
+
+            -- Restore the sample interval pinned at the start of this section.
+            update ash.config set sample_interval = v_si_save where singleton;
 
             -- === Future range: no data ===
             select count(*) into v_count
@@ -4840,6 +5152,7 @@ jobs:
           declare
             v_count int;
             v_text_count int;
+            v_aas numeric;
             v_cpu_id smallint;
             v_q1 int4;
             v_now_ts int4;
@@ -4899,6 +5212,29 @@ jobs:
             assert v_count = 1 and v_text_count = 0,
               format('top_queries must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s',
                      v_count, v_text_count);
+
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            )
+            values (
+              ash.ts_from_timestamptz(date_trunc('minute', now()) - interval '1 minute'),
+              1::oid,
+              60::smallint,
+              2::smallint,
+              array[v_cpu_id, 60]::int4[],
+              array[999999::bigint, 60::bigint]::int8[]
+            );
+
+            -- AAS query drill-downs are rollup based and should still work
+            -- without the real pg_stat_statements extension; query_text stays
+            -- NULL and spoofed public.pg_stat_statements must be ignored.
+            select count(*), count(query_text), max(avg_aas)
+            into v_count, v_text_count, v_aas
+            from ash.aas_queryids('5 minutes', 10)
+            where query_id = 999999;
+            assert v_count = 1 and v_text_count = 0 and v_aas = 0.20,
+              format('aas_queryids without pgss should return one NULL-text row with AAS 0.20, got rows=%s text_rows=%s aas=%s',
+                     v_count, v_text_count, v_aas);
 
             -- Functions that should ERROR without pgss:
             begin

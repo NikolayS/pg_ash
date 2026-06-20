@@ -2966,6 +2966,751 @@ as $$
 $$;
 
 
+-- Average Active Sessions (AAS) — rollup-backed analysis for long observation
+-- windows (day / week / month). AAS = backend-seconds of activity per second of
+-- wall-clock time, i.e. the average number of active sessions over the period.
+--
+-- This family reads ash.rollup_1m / ash.rollup_1h, so it works long after the
+-- raw samples have rotated away. It is intentionally distinct from the live
+-- raw-sample readers (top_waits, wait_timeline, timeline_chart, activity_summary)
+-- which give a high-fidelity view of the recent past (raw retention is hours).
+--
+-- The family is named after the dimension each function groups AAS by, so the
+-- name tells you the breakdown without reading the body: aas (no breakdown),
+-- aas_timeline (by time bucket), aas_periods (standard windows), aas_wait_types
+-- (by wait_event_type), aas_wait_events (by wait_event), aas_queryids (by query_id).
+--
+-- Two analysis dimensions:
+--   * nature  — overall AAS -> wait_event_type (ash.aas_wait_types)
+--               -> wait_event (ash.aas_wait_events, optionally filtered to one
+--               type). wait_event -> query_id is NOT recoverable from rollups (the
+--               rollup wait_counts and query_counts arrays are decoupled), so the
+--               deepest leaf is served by the raw-sample reader event_queries_at
+--               within the raw-retention window. ash.aas_queryids gives the
+--               period-wide query breakdown from rollups (the row identity is the
+--               query_id; query_text is optional decoration from pg_stat_statements).
+--   * time    — ash.aas_timeline emits one AAS point per bucket so spiky load
+--               can be located in a broad period, then re-inspected on a narrow
+--               window with ash.aas / ash.aas_wait_types.
+--
+-- avg_aas counts missing minutes as zero load (wall-clock denominator). peak_aas
+-- and p99_aas are the max and 99th percentile of per-bucket AAS *summed across
+-- databases*, so they are always >= avg_aas and reflect true instance-wide
+-- concurrency (a per-database minute peak would undercount multi-database
+-- instances and could read below the average). All AAS values are scaled by the
+-- configured sample interval, so they stay correct under non-1s sampling.
+
+-- Drop the superseded first-cut AAS surface (development-only; never released).
+-- List ONLY names this cycle removes. The family below creates aas_wait_types /
+-- aas_wait_events / aas_queryids via create-or-replace, so they are deliberately
+-- absent here: dropping a function we immediately recreate would discard its ACLs
+-- (see the header note on DROP vs CREATE OR REPLACE), while create-or-replace
+-- preserves grants across re-apply.
+drop function if exists ash.aas_summary(interval);
+drop function if exists ash.aas_summary_at(timestamptz, timestamptz);
+drop function if exists ash.aas_periods(timestamptz);
+drop function if exists ash.aas_waits(interval, text, int);
+drop function if exists ash.aas_waits_at(timestamptz, timestamptz, text, int);
+drop function if exists ash.aas_queries(interval, int);
+drop function if exists ash.aas_queries_at(timestamptz, timestamptz, int);
+
+-- Configured sample interval in seconds (>= a tiny floor to avoid div-by-zero).
+-- Each rollup count is one sample appearance = sample_interval_secs of backend
+-- time, so AAS = sum(count) * sample_interval_secs / wall_clock_seconds.
+create or replace function ash._sample_interval_secs()
+returns numeric
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select greatest(
+           coalesce(extract(epoch from sample_interval)::numeric, 1),
+           0.001
+         )
+  from ash.config
+  where singleton
+$$;
+
+-- Scalar AAS summary for a period: average, peak, and p99 of per-bucket AAS.
+-- p_bucket selects the peak/p99 granularity (e.g. '1 minute' or '5 minutes');
+-- avg_aas is independent of the bucket. The window is snapped to minute
+-- boundaries so numerator and denominator agree.
+create or replace function ash.aas_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_bucket interval default '1 minute'
+)
+returns table (
+  period_start timestamptz,
+  period_end timestamptz,
+  minutes_with_data bigint,
+  avg_aas numeric,
+  peak_aas numeric,
+  p99_aas numeric
+)
+language plpgsql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_bucket_secs int4;
+  v_si numeric;
+  v_period_secs numeric;
+begin
+  if p_start is null or p_end is null then
+    raise exception 'start and end timestamps must not be null';
+  end if;
+  if p_end <= p_start then
+    raise exception 'end timestamp must be greater than start timestamp';
+  end if;
+  v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 60 then
+    raise exception 'bucket must be at least 1 minute, got %', p_bucket;
+  end if;
+
+  v_start_ts := (ash.ts_from_timestamptz(p_start) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(p_end) / 60) * 60;
+  if v_end_ts <= v_start_ts then
+    v_end_ts := v_start_ts + 60;
+  end if;
+  v_si := ash._sample_interval_secs();
+  v_period_secs := (v_end_ts - v_start_ts)::numeric;
+
+  return query
+  with buckets as (
+    select gs.ts::int4 as bstart
+    from generate_series(v_start_ts::bigint, (v_end_ts - 1)::bigint, v_bucket_secs) as gs(ts)
+  ),
+  per_min as (
+    select
+      r.ts,
+      coalesce(sum((
+        select sum(u.val)::bigint
+        from unnest(r.wait_counts) with ordinality as u(val, ord)
+        where u.ord % 2 = 0
+      )), 0)::bigint as bsec
+    from ash.rollup_1m r
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+    group by r.ts
+  ),
+  per_bucket as (
+    select
+      b.bstart,
+      coalesce(sum(pm.bsec), 0)::numeric as bsec
+    from buckets b
+    left join per_min pm
+      on pm.ts >= b.bstart and pm.ts < b.bstart + v_bucket_secs
+    group by b.bstart
+  ),
+  bucket_aas as (
+    -- Divide by the seconds the bucket actually covers inside the window, not
+    -- the nominal width: a trailing bucket that overhangs v_end_ts (window not a
+    -- whole multiple of the bucket) must not have its AAS deflated, or peak/p99
+    -- would under-report the very spikes this summary exists to surface. Both
+    -- bounds are minute-aligned and bstart < v_end_ts, so coverage >= 60.
+    select bstart, (bsec * v_si / (least(bstart + v_bucket_secs, v_end_ts) - bstart)) as aas
+    from per_bucket
+  )
+  select
+    ash.ts_to_timestamptz(v_start_ts),
+    ash.ts_to_timestamptz(v_end_ts),
+    (select count(*) from per_min)::bigint,
+    round((select coalesce(sum(bsec), 0) from per_min) * v_si / v_period_secs, 2),
+    round(coalesce(max(aas), 0), 2),
+    coalesce(round((percentile_cont(0.99) within group (order by aas))::numeric, 2), 0)
+  from bucket_aas;
+end;
+$$;
+
+-- Trailing-window wrapper. Ends at the current completed minute so only whole
+-- minute rollups are read.
+create or replace function ash.aas(
+  p_interval interval default '1 hour',
+  p_bucket interval default '1 minute'
+)
+returns table (
+  period_start timestamptz,
+  period_end timestamptz,
+  minutes_with_data bigint,
+  avg_aas numeric,
+  peak_aas numeric,
+  p99_aas numeric
+)
+language sql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+  select * from ash.aas_at(
+    date_trunc('minute', now()) - p_interval,
+    date_trunc('minute', now()),
+    p_bucket
+  )
+$$;
+
+-- AAS time series: one row per bucket across the whole period, so spiky load can
+-- be located in a broad window and then re-inspected on a narrow one. avg_aas is
+-- the bucket average; peak_aas is the worst underlying grain (minute, or hour for
+-- long spans) within the bucket. Short spans read rollup_1m (minute peaks);
+-- spans over two days with hour-or-larger buckets read rollup_1h (hour peaks).
+create or replace function ash.aas_timeline_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_bucket interval default '1 hour'
+)
+returns table (
+  bucket_start timestamptz,
+  data_points bigint,
+  avg_aas numeric,
+  peak_aas numeric
+)
+language plpgsql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_bucket_secs int4;
+  v_si numeric;
+  v_use_hourly boolean;
+begin
+  if p_start is null or p_end is null then
+    raise exception 'start and end timestamps must not be null';
+  end if;
+  if p_end <= p_start then
+    raise exception 'end timestamp must be greater than start timestamp';
+  end if;
+  v_bucket_secs := extract(epoch from p_bucket)::int4;
+  if v_bucket_secs is null or v_bucket_secs < 60 then
+    raise exception 'bucket must be at least 1 minute, got %', p_bucket;
+  end if;
+
+  v_start_ts := (ash.ts_from_timestamptz(p_start) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(p_end) / 60) * 60;
+  if v_end_ts <= v_start_ts then
+    v_end_ts := v_start_ts + 60;
+  end if;
+  v_si := ash._sample_interval_secs();
+  v_use_hourly := (v_end_ts - v_start_ts) > 2 * 86400 and v_bucket_secs >= 3600;
+
+  return query
+  with buckets as (
+    select gs.ts::int4 as bstart
+    from generate_series(v_start_ts::bigint, (v_end_ts - 1)::bigint, v_bucket_secs) as gs(ts)
+  ),
+  per_grain as (
+    select t.ts, t.bsec, t.grain_secs
+    from (
+      select
+        r.ts,
+        coalesce(sum((
+          select sum(u.val)::bigint
+          from unnest(r.wait_counts) with ordinality as u(val, ord)
+          where u.ord % 2 = 0
+        )), 0)::bigint as bsec,
+        60 as grain_secs
+      from ash.rollup_1m r
+      where not v_use_hourly and r.ts >= v_start_ts and r.ts < v_end_ts
+      group by r.ts
+      union all
+      select
+        r.ts,
+        coalesce(sum((
+          select sum(u.val)::bigint
+          from unnest(r.wait_counts) with ordinality as u(val, ord)
+          where u.ord % 2 = 0
+        )), 0)::bigint as bsec,
+        3600 as grain_secs
+      from ash.rollup_1h r
+      where v_use_hourly and r.ts >= v_start_ts and r.ts < v_end_ts
+      group by r.ts
+    ) t
+  )
+  select
+    ash.ts_to_timestamptz(b.bstart),
+    count(pg.ts)::bigint,
+    -- Average over the seconds actually inside the window (a trailing bucket may
+    -- overhang v_end_ts), so the series reconciles with ash.aas_at.
+    round(coalesce(sum(pg.bsec), 0) * v_si / (least(b.bstart + v_bucket_secs, v_end_ts) - b.bstart), 2),
+    round(coalesce(max(pg.bsec * v_si / pg.grain_secs), 0), 2)
+  from buckets b
+  left join per_grain pg
+    on pg.ts >= b.bstart and pg.ts < b.bstart + v_bucket_secs
+  group by b.bstart
+  order by b.bstart;
+end;
+$$;
+
+-- Trailing-window wrapper for the AAS time series (default: last day, hourly).
+create or replace function ash.aas_timeline(
+  p_interval interval default '1 day',
+  p_bucket interval default '1 hour'
+)
+returns table (
+  bucket_start timestamptz,
+  data_points bigint,
+  avg_aas numeric,
+  peak_aas numeric
+)
+language sql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+  select * from ash.aas_timeline_at(
+    date_trunc('minute', now()) - p_interval,
+    date_trunc('minute', now()),
+    p_bucket
+  )
+$$;
+
+-- Standard AAS windows for dashboards and quick incident triage: one summary
+-- row per trailing window, all sharing aas_at's definition.
+create or replace function ash.aas_periods(
+  p_end timestamptz default now(),
+  p_bucket interval default '1 minute'
+)
+returns table (
+  period text,
+  period_start timestamptz,
+  period_end timestamptz,
+  minutes_with_data bigint,
+  avg_aas numeric,
+  peak_aas numeric,
+  p99_aas numeric
+)
+language sql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+  with periods(label, span) as (
+    values
+      ('1 minute'::text, interval '1 minute'),
+      ('5 minutes', interval '5 minutes'),
+      ('1 hour', interval '1 hour'),
+      ('1 day', interval '1 day'),
+      ('1 week', interval '1 week'),
+      ('1 month', interval '30 days')
+  )
+  select
+    p.label,
+    s.period_start,
+    s.period_end,
+    s.minutes_with_data,
+    s.avg_aas,
+    s.peak_aas,
+    s.p99_aas
+  from periods p
+  cross join lateral ash.aas_at(
+    date_trunc('minute', p_end) - p.span,
+    date_trunc('minute', p_end),
+    least(p_bucket, p.span)
+  ) s
+$$;
+
+-- Nature drill-down, level 1: AAS by wait_event_type (the top of the wait
+-- hierarchy). One row per wait_event_type; pct is each type's share of all
+-- activity in the window (sums to ~100). Drill into a type with aas_wait_events.
+create or replace function ash.aas_wait_types_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_limit int default 10
+)
+returns table (
+  wait_event_type text,
+  backend_seconds bigint,
+  avg_aas numeric,
+  pct numeric
+)
+language plpgsql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_si numeric;
+  v_period_secs numeric;
+begin
+  if p_start is null or p_end is null then
+    raise exception 'start and end timestamps must not be null';
+  end if;
+  if p_end <= p_start then
+    raise exception 'end timestamp must be greater than start timestamp';
+  end if;
+
+  v_start_ts := (ash.ts_from_timestamptz(p_start) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(p_end) / 60) * 60;
+  if v_end_ts <= v_start_ts then
+    v_end_ts := v_start_ts + 60;
+  end if;
+  v_si := ash._sample_interval_secs();
+  v_period_secs := (v_end_ts - v_start_ts)::numeric;
+
+  return query
+  with rollups as (
+    select row_number() over () as rid, r.wait_counts
+    from ash.rollup_1m r
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  ),
+  raw_pairs as (
+    select rr.rid, val::int4, ord
+    from rollups rr,
+      lateral unnest(rr.wait_counts) with ordinality as u(val, ord)
+  ),
+  pairs as (
+    select p1.val as wait_id, p2.val as cnt
+    from raw_pairs p1
+    join raw_pairs p2 on p2.rid = p1.rid and p2.ord = p1.ord + 1
+    where p1.ord % 2 = 1
+  ),
+  decoded as (
+    select wm.type as wet, p.cnt
+    from pairs p
+    join ash.wait_event_map wm on wm.id = p.wait_id
+  ),
+  grand_total as (
+    select sum(cnt)::numeric as total from decoded
+  ),
+  grouped as (
+    select wet, sum(cnt)::bigint as cnt
+    from decoded
+    group by wet
+  )
+  select
+    g.wet,
+    round(g.cnt * v_si)::bigint,
+    round(g.cnt * v_si / v_period_secs, 2),
+    round(g.cnt * 100.0 / nullif(gt.total, 0), 2)
+  from grouped g
+  cross join grand_total gt
+  order by g.cnt desc
+  limit greatest(p_limit, 0);
+end;
+$$;
+
+-- Trailing-window wrapper for the wait_event_type drill-down.
+create or replace function ash.aas_wait_types(
+  p_interval interval default '1 hour',
+  p_limit int default 10
+)
+returns table (
+  wait_event_type text,
+  backend_seconds bigint,
+  avg_aas numeric,
+  pct numeric
+)
+language sql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+  select * from ash.aas_wait_types_at(
+    date_trunc('minute', now()) - p_interval,
+    date_trunc('minute', now()),
+    p_limit
+  )
+$$;
+
+-- Nature drill-down, level 2: AAS by wait_event. One row per wait_event. Pass
+-- p_wait_type to restrict to a single wait_event_type (the drill-in from
+-- aas_wait_types); leave it NULL to rank every wait_event across all types. pct
+-- is the share within the returned set. For the deepest wait_event -> query_id
+-- leaf use ash.event_queries_at on raw samples; rollups do not preserve the
+-- wait<->query association.
+create or replace function ash.aas_wait_events_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_wait_type text default null,
+  p_limit int default 10
+)
+returns table (
+  wait_event_type text,
+  wait_event text,
+  backend_seconds bigint,
+  avg_aas numeric,
+  pct numeric
+)
+language plpgsql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_si numeric;
+  v_period_secs numeric;
+begin
+  if p_start is null or p_end is null then
+    raise exception 'start and end timestamps must not be null';
+  end if;
+  if p_end <= p_start then
+    raise exception 'end timestamp must be greater than start timestamp';
+  end if;
+
+  v_start_ts := (ash.ts_from_timestamptz(p_start) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(p_end) / 60) * 60;
+  if v_end_ts <= v_start_ts then
+    v_end_ts := v_start_ts + 60;
+  end if;
+  v_si := ash._sample_interval_secs();
+  v_period_secs := (v_end_ts - v_start_ts)::numeric;
+
+  return query
+  with rollups as (
+    select row_number() over () as rid, r.wait_counts
+    from ash.rollup_1m r
+    where r.ts >= v_start_ts and r.ts < v_end_ts
+  ),
+  raw_pairs as (
+    select rr.rid, val::int4, ord
+    from rollups rr,
+      lateral unnest(rr.wait_counts) with ordinality as u(val, ord)
+  ),
+  pairs as (
+    select p1.val as wait_id, p2.val as cnt
+    from raw_pairs p1
+    join raw_pairs p2 on p2.rid = p1.rid and p2.ord = p1.ord + 1
+    where p1.ord % 2 = 1
+  ),
+  decoded as (
+    select
+      wm.type as wet,
+      case when wm.event = wm.type then wm.event else wm.type || ':' || wm.event end as evt,
+      p.cnt
+    from pairs p
+    join ash.wait_event_map wm on wm.id = p.wait_id
+    where p_wait_type is null or wm.type = p_wait_type
+  ),
+  grand_total as (
+    select sum(cnt)::numeric as total from decoded
+  ),
+  grouped as (
+    select wet, evt, sum(cnt)::bigint as cnt
+    from decoded
+    group by wet, evt
+  )
+  select
+    g.wet,
+    g.evt,
+    round(g.cnt * v_si)::bigint,
+    round(g.cnt * v_si / v_period_secs, 2),
+    round(g.cnt * 100.0 / nullif(gt.total, 0), 2)
+  from grouped g
+  cross join grand_total gt
+  order by g.cnt desc
+  limit greatest(p_limit, 0);
+end;
+$$;
+
+-- Trailing-window wrapper for the wait_event drill-down.
+create or replace function ash.aas_wait_events(
+  p_interval interval default '1 hour',
+  p_wait_type text default null,
+  p_limit int default 10
+)
+returns table (
+  wait_event_type text,
+  wait_event text,
+  backend_seconds bigint,
+  avg_aas numeric,
+  pct numeric
+)
+language sql
+stable
+set jit = off
+set search_path = pg_catalog, ash
+as $$
+  select * from ash.aas_wait_events_at(
+    date_trunc('minute', now()) - p_interval,
+    date_trunc('minute', now()),
+    p_wait_type,
+    p_limit
+  )
+$$;
+
+-- Query drill-down from minute rollups, keyed by query_id (the row identity).
+-- query_text is optional decoration, filled from pg_stat_statements when the real
+-- extension is installed (#87 anti-spoof guard) and NULL otherwise. Rollups cannot
+-- tie a query to a specific wait event — this is the period-wide query breakdown.
+create or replace function ash.aas_queryids_at(
+  p_start timestamptz,
+  p_end timestamptz,
+  p_limit int default 10
+)
+returns table (
+  query_id bigint,
+  backend_seconds bigint,
+  avg_aas numeric,
+  pct numeric,
+  query_text text
+)
+language plpgsql
+stable
+set jit = off
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
+as $$
+declare
+  v_start_ts int4;
+  v_end_ts int4;
+  v_si numeric;
+  v_period_secs numeric;
+  v_has_pgss boolean := false;
+  v_rec record;
+begin
+  if p_start is null or p_end is null then
+    raise exception 'start and end timestamps must not be null';
+  end if;
+  if p_end <= p_start then
+    raise exception 'end timestamp must be greater than start timestamp';
+  end if;
+
+  v_start_ts := (ash.ts_from_timestamptz(p_start) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(p_end) / 60) * 60;
+  if v_end_ts <= v_start_ts then
+    v_end_ts := v_start_ts + 60;
+  end if;
+  v_si := ash._sample_interval_secs();
+  v_period_secs := (v_end_ts - v_start_ts)::numeric;
+
+  -- Trust pg_stat_statements only when the real extension is installed (#87).
+  if ash._pgss_schema() is not null then
+    begin
+      perform 1 from pg_stat_statements limit 1;
+      v_has_pgss := true;
+    exception when others then
+      v_has_pgss := false;
+    end;
+  end if;
+
+  for v_rec in
+    with rollups as (
+      select row_number() over () as rid, rr.query_counts
+      from ash.rollup_1m rr
+      where rr.ts >= v_start_ts and rr.ts < v_end_ts
+    ),
+    raw_pairs as (
+      select r.rid, val, ord
+      from rollups r,
+        lateral unnest(r.query_counts) with ordinality as u(val, ord)
+    ),
+    pairs as (
+      select p1.val as qid, p2.val as cnt
+      from raw_pairs p1
+      join raw_pairs p2 on p2.rid = p1.rid and p2.ord = p1.ord + 1
+      where p1.ord % 2 = 1
+    ),
+    by_query as (
+      select qid, sum(cnt)::bigint as cnt
+      from pairs
+      group by qid
+    ),
+    grand_total as (
+      select sum(bq.cnt)::numeric as total from by_query bq
+    )
+    select
+      bq.qid,
+      round(bq.cnt * v_si)::bigint as bsec,
+      round(bq.cnt * v_si / v_period_secs, 2) as avg_aas,
+      round(bq.cnt * 100.0 / nullif(gt.total, 0), 2) as pct
+    from by_query bq
+    cross join grand_total gt
+    order by bq.cnt desc
+    limit greatest(p_limit, 0)
+  loop
+    query_id := v_rec.qid;
+    backend_seconds := v_rec.bsec;
+    avg_aas := v_rec.avg_aas;
+    pct := v_rec.pct;
+    query_text := null;
+
+    if v_has_pgss then
+      begin
+        execute 'select left(query, 100) from pg_stat_statements where queryid = $1 limit 1'
+          into query_text using v_rec.qid;
+      exception when others then
+        query_text := null;
+      end;
+    end if;
+
+    return next;
+  end loop;
+end;
+$$;
+
+create or replace function ash.aas_queryids(
+  p_interval interval default '1 hour',
+  p_limit int default 10
+)
+returns table (
+  query_id bigint,
+  backend_seconds bigint,
+  avg_aas numeric,
+  pct numeric,
+  query_text text
+)
+language sql
+stable
+set jit = off
+-- search_path includes public for pg_stat_statements access; see top_queries.
+set search_path = pg_catalog, ash, public
+as $$
+  select * from ash.aas_queryids_at(
+    date_trunc('minute', now()) - p_interval,
+    date_trunc('minute', now()),
+    p_limit
+  )
+$$;
+
+-- Catalog comments for the AAS family: visible via \df+ and obj_description(), so
+-- a human or an AI agent inspecting the live catalog learns the term, the columns,
+-- and the broad->locate->drill workflow without reading source. AAS = Average
+-- Active Sessions (the average number of backends actively running, Oracle/ASH
+-- term of art); avg_aas is backend-time per wall-clock second, peak_aas/p99_aas
+-- are the max/99th-percentile of per-bucket AAS summed across databases (always
+-- >= avg_aas). All values are scaled by the configured sample interval.
+comment on function ash.aas(interval, interval) is
+$$Scalar AAS summary for a trailing window (default last '1 hour', '1 minute' bucket). Returns one row (period_start, period_end, minutes_with_data, avg_aas, peak_aas, p99_aas): avg is the period average, peak/p99 are the worst and 99th-percentile per-bucket AAS so a short spike is not hidden by the average. START BROAD with ash.aas_periods() to see standard windows side by side; locate a spike in time with ash.aas_timeline(); drill its nature with ash.aas_wait_types()/aas_wait_events() and ash.aas_queryids(). Reads ash.rollup_1m (covers ~rollup_1m_retention_days, default 30).$$;
+
+comment on function ash.aas_at(timestamptz, timestamptz, interval) is
+$$Absolute-range form of ash.aas(): scalar AAS summary between p_start and p_end with the given bucket (default '1 minute'). Same return shape as ash.aas(). Use after ash.aas_timeline() locates a spike window. Reads ash.rollup_1m.$$;
+
+comment on function ash.aas_timeline(interval, interval) is
+$$AAS time series for the TIME dimension (default last '1 day', '1 hour' bucket): one row per bucket (bucket_start, data_points, avg_aas, peak_aas) for visualization and locating WHEN load spiked. Order by peak_aas desc to find the busiest buckets, then zoom with ash.aas_at()/ash.aas_wait_events_at() on the spike range. Auto-reads ash.rollup_1m for short spans (per-minute peaks) and ash.rollup_1h for spans over two days with hour-or-larger buckets (per-hour peaks, reaches back ~rollup_1h_retention_days).$$;
+
+comment on function ash.aas_timeline_at(timestamptz, timestamptz, interval) is
+$$Absolute-range form of ash.aas_timeline(): AAS time series between p_start and p_end with the given bucket (default '1 hour'). Same return shape and rollup auto-selection as ash.aas_timeline().$$;
+
+comment on function ash.aas_periods(timestamptz, interval) is
+$$START HERE for a broad overview: AAS for the six standard trailing windows (1 minute, 5 minutes, 1 hour, 1 day, 1 week, 1 month) side by side, ending at p_end (default now()). Returns (period, period_start, period_end, minutes_with_data, avg_aas, peak_aas, p99_aas) — one row per window — so "is load high right now vs normally, and is it a spike or sustained" is answered in one call. Drill from here with ash.aas_timeline()/aas_wait_types()/aas_queryids(). Reads ash.rollup_1m.$$;
+
+comment on function ash.aas_wait_types(interval, int) is
+$$NATURE drill-down level 1: AAS by wait_event_type over a trailing window (default last '1 hour', top 10). Returns (wait_event_type, backend_seconds, avg_aas, pct); pct is each type's share of activity. Drill a type into its events with ash.aas_wait_events('1 hour', 'IO'). For the raw-sample fixed-grain view with an ASCII bar, see ash.minute_waits().$$;
+
+comment on function ash.aas_wait_types_at(timestamptz, timestamptz, int) is
+$$Absolute-range form of ash.aas_wait_types(): AAS by wait_event_type between p_start and p_end (top 10). Same return shape. Use on a spike window found via ash.aas_timeline().$$;
+
+comment on function ash.aas_wait_events(interval, text, int) is
+$$NATURE drill-down level 2: AAS by wait_event over a trailing window (default last '1 hour', top 10). Returns (wait_event_type, wait_event, backend_seconds, avg_aas, pct). Pass p_wait_type (e.g. 'IO') to restrict to one type — the drill-in from ash.aas_wait_types() — or leave it NULL to rank every wait_event across all types. The deeper wait_event -> query_id leaf is NOT recoverable from rollups; use ash.event_queries() on raw samples within raw retention.$$;
+
+comment on function ash.aas_wait_events_at(timestamptz, timestamptz, text, int) is
+$$Absolute-range form of ash.aas_wait_events(): AAS by wait_event between p_start and p_end, optionally filtered to p_wait_type (top 10). Same return shape.$$;
+
+comment on function ash.aas_queryids(interval, int) is
+$$NATURE drill-down by query: AAS per query_id over a trailing window (default last '1 hour', top 10). The row identity is query_id; returns (query_id, backend_seconds, avg_aas, pct, query_text). query_text is optional decoration, populated from pg_stat_statements when present (#87 anti-spoof guard) and NULL otherwise. This is the period-wide query breakdown — rollups cannot tie a query to a specific wait event. Reads ash.rollup_1m.$$;
+
+comment on function ash.aas_queryids_at(timestamptz, timestamptz, int) is
+$$Absolute-range form of ash.aas_queryids(): AAS per query_id between p_start and p_end (top 10). Same return shape.$$;
+
 --------------------------------------------------------------------------------
 -- STEP 8: Existing reader functions (raw samples)
 --------------------------------------------------------------------------------
@@ -5146,7 +5891,8 @@ declare
     'top_queries', 'top_queries_at', 'top_queries_with_text',
     'samples', 'samples_at',
     'event_queries', 'event_queries_at',
-    'hourly_queries', 'hourly_queries_at'
+    'hourly_queries', 'hourly_queries_at',
+    'aas_queryids', 'aas_queryids_at'
   ];
   v_path text;
   r record;
