@@ -1062,6 +1062,15 @@ as $$
   from ash.decode_sample(ash.ts_from_timestamptz(p_ts)) d
 $$;
 
+comment on function ash.decode_sample(integer[], smallint) is
+$$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows. Pass p_slot (ash.sample.slot) to resolve query_ids unambiguously; omitting it searches all query_map partitions and may return a stale id after rotation.$$;
+
+comment on function ash.decode_sample(int4) is
+$$Convenience overload: decodes every ash.sample row whose sample_ts equals p_sample_ts (across all datids/slots) and returns (datid, wait_event, query_id, count). Internally calls decode_sample(data, slot) with the row's slot, so query_id resolution is unambiguous.$$;
+
+comment on function ash.decode_sample_at(timestamptz) is
+$$Wall-clock convenience: same as decode_sample(int4) but accepts timestamptz, converting via ts_from_timestamptz() to find the matching sample_ts. Named with the _at suffix to avoid an unknown-typed decode_sample(123) literal matching both the int4 and timestamptz overloads.$$;
+
 
 --------------------------------------------------------------------------------
 -- STEP 3: Rotation function
@@ -2957,6 +2966,29 @@ as $$
   end
 $$;
 
+-- Source selection for the AGGREGATE readers (aas / timeline / periods, and the
+-- non-tie drills of top / chart). Raw and rollup_1m share per-minute grain, so
+-- for anything wider than ~1 hour that rollup_1m fully covers we prefer rollup_1m
+-- (a raw decode of a wide window spills hundreds of MB — the last-24h read cost
+-- ~4.5s and ~500MB before this). Narrow windows still fall through to
+-- _pick_source (raw preferred) so the freshest partial minute is captured, and
+-- windows rollup can't cover (or where rollup is disabled/lagging) still fall to
+-- raw / rollup_1h. Leaf tie-drills (top/samples) bypass this and force raw. The
+-- source column stays honest — it names whatever was actually read.
+create or replace function ash._pick_source_agg(p_from timestamptz, p_to timestamptz)
+returns text
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select case
+    when extract(epoch from (p_to - p_from)) > 3600
+         and ash._rollup_1m_retention_start() is not null
+         and p_from >= ash._rollup_1m_retention_start() then 'rollup_1m'
+    else ash._pick_source(p_from)
+  end
+$$;
+
 -- Workhorse: matching backend-count per underlying grain row (minute for raw /
 -- rollup_1m, hour for rollup_1h) over [p_start_ts, p_end_ts), with uniform
 -- filters. One row per grain timestamp that EXISTS in the source (cnt may be 0
@@ -3161,8 +3193,10 @@ begin
 
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
+  -- overflow-safe empty/degenerate-window guard (#63): never let v_start_ts + 60
+  -- wrap past INT4_MAX near the 2094 epoch horizon.
   if v_end_ts <= v_start_ts then
-    v_end_ts := v_start_ts + 60;
+    v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
   end if;
   v_si := ash._sample_interval_secs();
 
@@ -3179,7 +3213,8 @@ begin
     end if;
     v_grain_secs := 60;
   else
-    v_source := ash._pick_source(ash.ts_to_timestamptz(v_start_ts));
+    v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
+                                     ash.ts_to_timestamptz(v_end_ts));
     v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
   end if;
 
@@ -3187,25 +3222,24 @@ begin
   v_bucket_secs := greatest(v_bucket_secs, v_grain_secs);
 
   return query
+  -- Assign each grain row to its bucket arithmetically and equi-group (was a
+  -- range self-join, O(buckets x grains) — a 1-month window planned as a
+  -- nested-loop range join took ~38s). Only sampler-covered buckets appear in
+  -- per_bucket, which is exactly the peak/p99 zero-fill frame; buckets_expected
+  -- is counted arithmetically.
   with grains as (
-    select g.ts, g.cnt
+    select v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+           g.cnt
     from ash._grain_counts(v_start_ts, v_end_ts, v_source,
            p_wait_event_type, p_wait_event, p_query_id, p_database) g
   ),
-  buckets as (
-    select gs.ts::int4 as bstart
-    from generate_series(v_start_ts::bigint, (v_end_ts - 1)::bigint, v_bucket_secs) gs(ts)
-  ),
   per_bucket as (
-    select b.bstart,
-           count(g.ts) as n,
-           coalesce(sum(g.cnt), 0) as cnt
-    from buckets b
-    left join grains g on g.ts >= b.bstart and g.ts < b.bstart + v_bucket_secs
-    group by b.bstart
+    select bstart, count(*) as n, sum(cnt) as cnt
+    from grains
+    group by bstart
   ),
   bucket_aas as (
-    select bstart, n,
+    select bstart,
            (cnt * v_si / (least(bstart + v_bucket_secs, v_end_ts) - bstart)) as aas
     from per_bucket
   )
@@ -3213,13 +3247,13 @@ begin
     ash.ts_to_timestamptz(v_start_ts),
     ash.ts_to_timestamptz(v_end_ts),
     v_source,
-    (select count(*) from buckets)::bigint,
-    (select count(*) from bucket_aas where n > 0)::bigint,
+    ceil((v_end_ts - v_start_ts)::numeric / v_bucket_secs)::bigint,
+    (select count(*) from per_bucket)::bigint,
     round((select coalesce(sum(cnt), 0) from per_bucket) * v_si
           / (v_end_ts - v_start_ts)::numeric, 2),
-    coalesce(round((select max(aas) from bucket_aas where n > 0), 2), 0),
+    coalesce(round((select max(aas) from bucket_aas), 2), 0),
     coalesce(round((select percentile_cont(0.99) within group (order by aas)
-                    from bucket_aas where n > 0)::numeric, 2), 0),
+                    from bucket_aas)::numeric, 2), 0),
     round((select coalesce(sum(cnt), 0) from per_bucket) * v_si, 2);
 end;
 $$;
@@ -3266,8 +3300,9 @@ declare
 begin
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
+  -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
-    v_end_ts := v_start_ts + 60;
+    v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
   end if;
   v_span := v_end_ts - v_start_ts;
 
@@ -3281,6 +3316,14 @@ begin
     if v_bucket_secs is null or v_bucket_secs < 60 then
       raise exception 'bucket must be at least 1 minute, got %', p_bucket;
     end if;
+  end if;
+
+  -- Bound the emitted-row count: one row per bucket, so an explicit fine bucket
+  -- over a very wide window can blow up (1 minute over 10 years ~ 5M rows). Cap
+  -- at 100000 and tell the caller to widen p_bucket.
+  if (v_span::bigint / v_bucket_secs) > 100000 then
+    raise exception 'ash.timeline: % buckets exceeds the 100000-row cap; use a coarser p_bucket (or p_bucket => null for auto grain)',
+      (v_span::bigint / v_bucket_secs);
   end if;
 
   v_si := ash._sample_interval_secs();
@@ -3297,10 +3340,11 @@ begin
     end if;
     v_grain_secs := 60;
   else
-    v_source := ash._pick_source(ash.ts_to_timestamptz(v_start_ts));
-    if v_source = 'none' then v_source := 'rollup_1m'; end if;
+    v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
+                                     ash.ts_to_timestamptz(v_end_ts));
     -- sub-hour buckets need minute grain; rollup_1h cannot supply it, so fall
-    -- back to rollup_1m (older buckets simply show no data).
+    -- back to rollup_1m (older buckets simply show no data). 'none' (a truly
+    -- empty window) is left as-is and reported honestly.
     if v_source = 'rollup_1h' and v_bucket_secs < 3600 then
       v_source := 'rollup_1m';
     end if;
@@ -3308,10 +3352,20 @@ begin
   end if;
 
   return query
+  -- Arithmetic bucket-keying + equi-join (was an O(buckets x grains) range
+  -- join). No-data buckets still appear via the left join from the full bucket
+  -- series, with data_points = 0 and null AAS.
   with grains as (
-    select g.ts, (g.cnt * v_si / v_grain_secs) as gaas, g.cnt
+    select v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+           (g.cnt * v_si / v_grain_secs) as gaas, g.cnt
     from ash._grain_counts(v_start_ts, v_end_ts, v_source,
            p_wait_event_type, p_wait_event, p_query_id, p_database) g
+  ),
+  agg as (
+    select bstart, count(*) as n, sum(cnt) as cnt, max(gaas) as peak,
+           percentile_cont(0.99) within group (order by gaas) as p99
+    from grains
+    group by bstart
   ),
   buckets as (
     select gs.ts::int4 as bstart
@@ -3320,24 +3374,27 @@ begin
   select
     ash.ts_to_timestamptz(b.bstart),
     v_source,
-    count(g.ts)::bigint,
-    case when count(g.ts) > 0 then
-      round(coalesce(sum(g.cnt), 0) * v_si
-            / (least(b.bstart + v_bucket_secs, v_end_ts) - b.bstart), 2)
+    coalesce(a.n, 0)::bigint,
+    case when a.n > 0 then
+      round(a.cnt * v_si / (least(b.bstart + v_bucket_secs, v_end_ts) - b.bstart), 2)
     end,
-    case when count(g.ts) > 0 then round(max(g.gaas), 2) end,
-    case when count(g.ts) > 0 and v_source <> 'rollup_1h' then
-      round(percentile_cont(0.99) within group (order by g.gaas)::numeric, 2)
+    case when a.n > 0 then round(a.peak, 2) end,
+    case when a.n > 0 and v_source <> 'rollup_1h' then
+      round(a.p99::numeric, 2)
     end
   from buckets b
-  left join grains g on g.ts >= b.bstart and g.ts < b.bstart + v_bucket_secs
-  group by b.bstart
+  left join agg a on a.bstart = b.bstart
   order by b.bstart;
 end;
 $$;
 
 -- Standard trailing windows for triage: one summary row per window ending at
--- p_end. Rollup-backed (no raw dependency); each row carries source.
+-- p_end. Each window delegates to ash.aas(), which auto-selects its source
+-- (short windows may read raw for the freshest partial minute; the wide windows
+-- read rollups). peak_aas/p99_aas are per-minute (worst / 99th-percentile
+-- minute), which is what capacity triage wants, and minutes_with_data stays a
+-- true minute count. After the arithmetic-bucketing fix this is cheap even for
+-- the 1-month window (~90ms for the whole call on a month of rollups).
 create or replace function ash.periods(
   p_end timestamptz default null
 )
@@ -3361,12 +3418,12 @@ as $$
   ),
   periods(label, span) as (
     values
-      ('1 minute'::text, interval '1 minute'),
-      ('5 minutes', interval '5 minutes'),
-      ('1 hour', interval '1 hour'),
-      ('1 day', interval '1 day'),
-      ('1 week', interval '1 week'),
-      ('1 month', interval '30 days')
+      ('1m'::text,  interval '1 minute'),
+      ('5m',        interval '5 minutes'),
+      ('1h',        interval '1 hour'),
+      ('1d',        interval '1 day'),
+      ('1w',        interval '1 week'),
+      ('1mo',       interval '30 days')
   )
   select
     p.label,
@@ -3599,7 +3656,10 @@ begin
 
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
-  if v_end_ts <= v_start_ts then v_end_ts := v_start_ts + 60; end if;
+  -- overflow-safe empty/degenerate-window guard (#63).
+  if v_end_ts <= v_start_ts then
+    v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
+  end if;
   v_si := ash._sample_interval_secs();
 
   v_tie := (p_dimension in ('wait_event_type', 'wait_event') and p_query_id is not null)
@@ -3617,8 +3677,9 @@ begin
     end if;
     v_grain_secs := 60;
   else
-    v_source := ash._pick_source(ash.ts_to_timestamptz(v_start_ts));
-    if v_source = 'none' then v_source := 'rollup_1m'; end if;
+    -- non-tie breakdown is an aggregate read: prefer rollup for wide windows.
+    v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
+                                     ash.ts_to_timestamptz(v_end_ts));
     v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
   end if;
   v_bucket_secs := greatest(v_bucket_secs, v_grain_secs);
@@ -3634,13 +3695,20 @@ begin
 
   for key, v_key_num, source, avg_aas, peak_aas, p99_aas, backend_seconds, pct in
   with keyed as (
-    select b.ts, b.key, b.key_num, b.cnt
+    select v_start_ts + ((b.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+           b.key, b.key_num, b.cnt
     from ash._grain_by(v_start_ts, v_end_ts, v_source, p_dimension,
            p_wait_event_type, p_wait_event, p_query_id, p_database) b
   ),
+  -- Zero-fill frame = the sampler-covered buckets, derived from the source's
+  -- grain set INDEPENDENT of the dimension/filter (#6). Deriving it from the
+  -- filtered rows made a key's p99 move when OTHER keys changed and disagree
+  -- with ash.aas() for the same drill. p_database is the only filter that
+  -- legitimately restricts coverage, so it is the only one passed here.
   covered as (
-    select distinct v_start_ts + ((k.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart
-    from keyed k
+    select distinct v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart
+    from ash._grain_counts(v_start_ts, v_end_ts, v_source,
+           null, null, null, p_database) g
   ),
   keys as (
     select k.key, max(k.key_num) as key_num, sum(k.cnt) as total
@@ -3649,14 +3717,21 @@ begin
     having sum(k.cnt) > 0
   ),
   grand as (select coalesce(sum(total), 0) as g from keys),
+  -- Only the returned top-N need per-bucket peak/p99, so limit before the
+  -- cross-join zero-fill (bounds it to N x covered buckets).
+  top_keys as (
+    select * from keys order by total desc limit greatest(p_limit, 0)
+  ),
+  key_bucket_data as (
+    select k2.key, k2.bstart, sum(k2.cnt) as bcnt
+    from keyed k2 group by k2.key, k2.bstart
+  ),
   key_bucket as (
-    select ks.key, ks.key_num, ks.total, cb.bstart,
-           coalesce(sum(k.cnt), 0) as bcnt
-    from keys ks
+    select tk.key, tk.key_num, tk.total, cb.bstart,
+           coalesce(kbd.bcnt, 0) as bcnt
+    from top_keys tk
     cross join covered cb
-    left join keyed k on k.key = ks.key
-      and k.ts >= cb.bstart and k.ts < cb.bstart + v_bucket_secs
-    group by ks.key, ks.key_num, ks.total, cb.bstart
+    left join key_bucket_data kbd on kbd.key = tk.key and kbd.bstart = cb.bstart
   ),
   per_key as (
     select kb.key, kb.key_num, kb.total,
@@ -3943,6 +4018,11 @@ as $$
     where s.slot = any(ash._active_slots_for_at(
                      ash.ts_to_timestamptz((select min(m) from unnest(p_minutes) m)),
                      ash.ts_to_timestamptz((select max(m) + 60 from unnest(p_minutes) m))))
+      -- Sargable range bound so the (sample_ts) index prunes to the extreme
+      -- minutes instead of seq-scanning the whole active partition (#perf: this
+      -- runs up to 15x per report()); the exact = any(...) stays as residual.
+      and s.sample_ts >= (select min(m) from unnest(p_minutes) m)
+      and s.sample_ts < (select max(m) + 60 from unnest(p_minutes) m)
       and (s.sample_ts / 60) * 60 = any(p_minutes)
       and s.data[i] < 0
       and i + 1 <= array_length(s.data, 1)
@@ -4010,10 +4090,21 @@ declare
   v_tot_worst numeric := 0;
   v_tot_p99 numeric := 0;
   v_tot_p999 numeric := 0;
+  -- total-series own extreme minutes (drive total worst1m/p99/p999 and the
+  -- top_queryids_*.total windows); thresholds kept unrounded for minute-set
+  -- membership.
+  v_tworst_min int4;
+  v_t99_mins int4[];
+  v_t999_mins int4[];
+  v_t99_thr numeric;
+  v_t999_thr numeric;
 begin
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
-  if v_end_ts <= v_start_ts then v_end_ts := v_start_ts + 60; end if;
+  -- overflow-safe empty/degenerate-window guard (#63).
+  if v_end_ts <= v_start_ts then
+    v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
+  end if;
   v_si := ash._sample_interval_secs();
 
   -- Covered minutes (any rollup_1m row); null result when no coverage at all.
@@ -4101,10 +4192,10 @@ begin
       v_worst := v_worst || jsonb_build_object(v_class.k, v_cworst);
       v_p99 := v_p99 || jsonb_build_object(v_class.k, v_cp99);
       v_p999 := v_p999 || jsonb_build_object(v_class.k, v_cp999);
+      -- avg of a sum == sum of the class avgs, so total avg is accumulated here;
+      -- worst1m/p99/p999 total come from the summed series' OWN extreme (below),
+      -- not the sum of each class's independent worst minute.
       v_tot_avg := v_tot_avg + coalesce(v_cavg, 0);
-      v_tot_worst := v_tot_worst + coalesce(v_cworst, 0);
-      v_tot_p99 := v_tot_p99 + coalesce(v_cp99, 0);
-      v_tot_p999 := v_tot_p999 + coalesce(v_cp999, 0);
 
       -- top_events (rollup) and top_queryids (raw) for the four non-cpu classes;
       -- top_queryids 'total' is handled once, outside this loop.
@@ -4127,11 +4218,53 @@ begin
     end;
   end loop;
 
-  -- total key = sum of the five classes for each metric
+  -- Total = the summed per-minute series' OWN extreme (matches the platform
+  -- ingestion recipe and top_queryids_*.total). Statement 1: values + unrounded
+  -- thresholds + worst minute.
+  with grid as (
+    select cov.ts, coalesce(t.cnt, 0) * v_si / 60.0 as aas
+    from (select distinct ts from ash.rollup_1m where ts >= v_start_ts and ts < v_end_ts) cov
+    left join (
+      select r.ts, sum(r.wait_counts[o + 1])::numeric as cnt
+      from ash.rollup_1m r cross join generate_subscripts(r.wait_counts, 1) o
+      join ash.wait_event_map wm on wm.id = r.wait_counts[o]
+      where o % 2 = 1 and r.ts >= v_start_ts and r.ts < v_end_ts
+        and wm.type in ('CPU*','IO','IPC','Lock','LWLock')
+      group by r.ts
+    ) t on t.ts = cov.ts
+  )
+  select
+    round(coalesce(max(aas), 0), 2),
+    round(coalesce(percentile_cont(0.99) within group (order by aas), 0)::numeric, 2),
+    round(coalesce(percentile_cont(0.999) within group (order by aas), 0)::numeric, 2),
+    percentile_cont(0.99) within group (order by aas),
+    percentile_cont(0.999) within group (order by aas),
+    (select ts from grid order by aas desc, ts limit 1)
+  into v_tot_worst, v_tot_p99, v_tot_p999, v_t99_thr, v_t999_thr, v_tworst_min
+  from grid;
+
+  -- Statement 2: the p99/p999 minute sets (>= the unrounded thresholds).
+  select
+    coalesce(array_agg(ts) filter (where aas >= v_t99_thr and aas > 0), array[]::int4[]),
+    coalesce(array_agg(ts) filter (where aas >= v_t999_thr and aas > 0), array[]::int4[])
+  into v_t99_mins, v_t999_mins
+  from (
+    select cov.ts, coalesce(t.cnt, 0) * v_si / 60.0 as aas
+    from (select distinct ts from ash.rollup_1m where ts >= v_start_ts and ts < v_end_ts) cov
+    left join (
+      select r.ts, sum(r.wait_counts[o + 1])::numeric as cnt
+      from ash.rollup_1m r cross join generate_subscripts(r.wait_counts, 1) o
+      join ash.wait_event_map wm on wm.id = r.wait_counts[o]
+      where o % 2 = 1 and r.ts >= v_start_ts and r.ts < v_end_ts
+        and wm.type in ('CPU*','IO','IPC','Lock','LWLock')
+      group by r.ts
+    ) t on t.ts = cov.ts
+  ) g;
+
   v_avg := jsonb_build_object('total', round(v_tot_avg, 2)) || v_avg;
-  v_worst := jsonb_build_object('total', round(v_tot_worst, 2)) || v_worst;
-  v_p99 := jsonb_build_object('total', round(v_tot_p99, 2)) || v_p99;
-  v_p999 := jsonb_build_object('total', round(v_tot_p999, 2)) || v_p999;
+  v_worst := jsonb_build_object('total', v_tot_worst) || v_worst;
+  v_p99 := jsonb_build_object('total', v_tot_p99) || v_p99;
+  v_p999 := jsonb_build_object('total', v_tot_p999) || v_p999;
 
   v_result := jsonb_build_object(
     'aas_avg', v_avg,
@@ -4145,59 +4278,14 @@ begin
 
   if v_raw_ok then
     -- 'total' top_queryids for each window = top queries at the window's overall
-    -- worst/percentile minutes (across all classes). Reuse the total-class
-    -- extreme minutes computed from the summed series.
-    declare
-      v_tworst_min int4;
-      v_t99_mins int4[];
-      v_t999_mins int4[];
-      v_t99 numeric;
-      v_t999 numeric;
-    begin
-      with cov as (
-        select distinct ts from ash.rollup_1m where ts >= v_start_ts and ts < v_end_ts
-      ),
-      tot as (
-        select r.ts, sum(r.wait_counts[o + 1])::numeric as cnt
-        from ash.rollup_1m r cross join generate_subscripts(r.wait_counts, 1) o
-        join ash.wait_event_map wm on wm.id = r.wait_counts[o]
-        where o % 2 = 1 and r.ts >= v_start_ts and r.ts < v_end_ts
-          and wm.type in ('CPU*','IO','IPC','Lock','LWLock')
-        group by r.ts
-      ),
-      grid as (
-        select cov.ts, coalesce(t.cnt, 0) * v_si / 60.0 as aas
-        from cov left join tot t on t.ts = cov.ts
-      )
-      select
-        (select ts from grid order by aas desc, ts limit 1),
-        percentile_cont(0.99) within group (order by aas),
-        percentile_cont(0.999) within group (order by aas)
-      into v_tworst_min, v_t99, v_t999 from grid;
-
-      select coalesce(array_agg(ts) filter (where aas >= v_t99 and aas > 0), array[]::int4[]),
-             coalesce(array_agg(ts) filter (where aas >= v_t999 and aas > 0), array[]::int4[])
-      into v_t99_mins, v_t999_mins
-      from (
-        select cov.ts, coalesce(t.cnt, 0) * v_si / 60.0 as aas
-        from (select distinct ts from ash.rollup_1m where ts >= v_start_ts and ts < v_end_ts) cov
-        left join (
-          select r.ts, sum(r.wait_counts[o + 1])::numeric as cnt
-          from ash.rollup_1m r cross join generate_subscripts(r.wait_counts, 1) o
-          join ash.wait_event_map wm on wm.id = r.wait_counts[o]
-          where o % 2 = 1 and r.ts >= v_start_ts and r.ts < v_end_ts
-            and wm.type in ('CPU*','IO','IPC','Lock','LWLock')
-          group by r.ts
-        ) t on t.ts = cov.ts
-      ) g;
-
-      v_tq_w := v_tq_w || jsonb_build_object('total',
-        to_jsonb(ash._hr_top_queryids(null, array[v_tworst_min], p_top, v_si)));
-      v_tq_9 := v_tq_9 || jsonb_build_object('total',
-        to_jsonb(ash._hr_top_queryids(null, v_t99_mins, p_top, v_si)));
-      v_tq_99 := v_tq_99 || jsonb_build_object('total',
-        to_jsonb(ash._hr_top_queryids(null, v_t999_mins, p_top, v_si)));
-    end;
+    -- worst/percentile minutes (the summed-series extremes computed above), so
+    -- these agree with aas_worst1m/p99/p999.total.
+    v_tq_w := v_tq_w || jsonb_build_object('total',
+      to_jsonb(ash._hr_top_queryids(null, array[v_tworst_min], p_top, v_si)));
+    v_tq_9 := v_tq_9 || jsonb_build_object('total',
+      to_jsonb(ash._hr_top_queryids(null, v_t99_mins, p_top, v_si)));
+    v_tq_99 := v_tq_99 || jsonb_build_object('total',
+      to_jsonb(ash._hr_top_queryids(null, v_t999_mins, p_top, v_si)));
 
     v_result := v_result || jsonb_build_object(
       'top_queryids_worst1m', v_tq_w,
@@ -4270,7 +4358,10 @@ begin
   p_width := least(greatest(p_width, 1), 500);
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
-  if v_end_ts <= v_start_ts then v_end_ts := v_start_ts + 60; end if;
+  -- overflow-safe empty/degenerate-window guard (#63).
+  if v_end_ts <= v_start_ts then
+    v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
+  end if;
   v_span := v_end_ts - v_start_ts;
   if p_bucket is null then
     v_bucket_secs := case when v_span <= 6 * 3600 then 60
@@ -4282,7 +4373,8 @@ begin
     end if;
   end if;
   v_si := ash._sample_interval_secs();
-  v_source := ash._pick_source(ash.ts_to_timestamptz(v_start_ts));
+  v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
+                                   ash.ts_to_timestamptz(v_end_ts));
   if v_source = 'none' then v_source := 'rollup_1m'; end if;
   if v_source = 'rollup_1h' and v_bucket_secs < 3600 then
     v_source := 'rollup_1m';
@@ -4503,9 +4595,9 @@ $$;
 comment on function ash._pgss_schema() is
   'Returns the schema name of the installed pg_stat_statements extension, or NULL if not installed. Used to keep reader functions portable across managed services and custom install schemas.';
 
--- Helper: re-apply search_path on the seven pgss reader functions using the
--- currently detected pgss schema. Run this after installing / moving
--- pg_stat_statements if it lives outside `public`. Safe to re-run.
+-- Helper: re-apply search_path on the pgss reader functions using the currently
+-- detected pgss schema. Run this after installing / moving pg_stat_statements if
+-- it lives outside `public`. Safe to re-run.
 create or replace function ash._apply_pgss_search_path()
 returns text
 language plpgsql
@@ -4513,18 +4605,15 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_pgss_schema text := ash._pgss_schema();
-  -- B2: keep this list in sync with v_pgss_readers in sql/ash-1.3-to-1.4.sql
-  -- (and any future upgrade scripts) AND with the per-function `set
-  -- search_path = pg_catalog, ash, public` clauses in this file. Any reader
-  -- that probes pg_stat_statements must appear here so its search_path
-  -- resolves the view across managed-service and custom pgss install schemas.
-  v_readers text[] := array[
-    'top_queries', 'top_queries_at', 'top_queries_with_text',
-    'samples', 'samples_at',
-    'event_queries', 'event_queries_at',
-    'hourly_queries', 'hourly_queries_at',
-    'aas_queryids', 'aas_queryids_at'
-  ];
+  -- The pgss readers are derived from the catalog, not a hand-maintained list
+  -- (the old list named v1.x functions that no longer exist, so the #76 shadow
+  -- mitigation covered nothing). Every ash.* function that must resolve
+  -- pg_stat_statements carries `public` in its own search_path (see the per-
+  -- function `set search_path = pg_catalog, ash, public` clauses); those are
+  -- exactly the functions whose path we rewrite so the real pgss schema is
+  -- listed before public. No-pgss functions have no `public` in their path and
+  -- are left alone. Idempotent: the rewritten path still ends in public, so a
+  -- re-run re-selects the same set.
   v_path text;
   r record;
 begin
@@ -4547,7 +4636,13 @@ begin
     join pg_catalog.pg_namespace n on p.pronamespace = n.oid
     where n.nspname = 'ash'
       and p.prokind = 'f'
-      and p.proname = any(v_readers)
+      -- 'public' is one of the schemas in the function's own search_path
+      -- (spaces stripped, comma-wrapped so 'publications' etc. can't match).
+      and exists (
+        select 1 from unnest(coalesce(p.proconfig, array[]::text[])) cfg
+        where cfg like 'search_path=%'
+          and (',' || replace(split_part(cfg, '=', 2), ' ', '') || ',') like '%,public,%'
+      )
   loop
     execute format('alter function ash.%I(%s) set search_path = %s',
                    r.proname, r.args, v_path);
