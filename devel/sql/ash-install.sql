@@ -70,10 +70,15 @@ begin
         'uninstall',
         'debug_logging',
         'rebuild_partitions',
-        -- 2.0 reader rework (issue #113): drop every removed v1.x reader and
-        -- draft aas_* function (all overloads / _at twins), plus the names whose
-        -- signatures change in 2.0 (aas, aas_periods, samples), so re-applying
-        -- this installer over any prior install yields the 2.0 surface exactly.
+        -- 2.0 reader rework (issue #113): drop every removed v1.x reader, every
+        -- draft aas_* function (all overloads / _at twins), and the earlier 2.0
+        -- draft names that were renamed to the final surface (aas_by -> top,
+        -- aas_series -> timeline, aas_compare -> compare, aas_periods -> periods,
+        -- health_report -> report), plus the changed-signature name `samples`, so
+        -- re-applying this installer over any prior install yields exactly the
+        -- 2.0 surface (periods, aas, timeline, top, compare, samples, report,
+        -- chart, summary). `aas` is a stable name but its signature changed, so
+        -- it is dropped too to clear any old overload.
         'top_queries', 'top_queries_at',
         'wait_timeline', 'wait_timeline_at',
         'activity_summary',
@@ -82,9 +87,10 @@ begin
         'minute_waits', 'minute_waits_at',
         'hourly_queries', 'hourly_queries_at',
         'daily_peak_backends', 'daily_peak_backends_at',
-        '_to_sample_ts',
+        '_to_sample_ts', '_pick_rollup_source',
         'aas', 'aas_at',
         'aas_periods',
+        'aas_series', 'aas_by', 'aas_compare', 'health_report',
         'aas_timeline', 'aas_timeline_at',
         'aas_wait_types', 'aas_wait_types_at',
         'aas_wait_events', 'aas_wait_events_at',
@@ -2756,7 +2762,7 @@ $$;
 
 drop function if exists ash.aas_summary(interval);
 drop function if exists ash.aas_summary_at(timestamptz, timestamptz);
-drop function if exists ash.aas_periods(timestamptz);
+drop function if exists ash.periods(timestamptz);
 drop function if exists ash.aas_waits(interval, text, int);
 drop function if exists ash.aas_waits_at(timestamptz, timestamptz, text, int);
 drop function if exists ash.aas_queries(interval, int);
@@ -2889,8 +2895,8 @@ $$;
 -- STEP 8: 2.0 reader / analysis API (AAS)
 --------------------------------------------------------------------------------
 -- The minimal AAS surface (issue #113, blueprints/AAS_API.md): seven data
--- functions (aas_periods, aas, aas_series, aas_by, aas_compare, samples,
--- health_report) and two render helpers (chart, summary). AAS = Average Active
+-- functions (periods, aas, timeline, top, compare, samples, report) and two
+-- render helpers (chart, summary). AAS = Average Active
 -- Sessions. Every reader auto-selects its data source by window (raw ->
 -- rollup_1m -> rollup_1h), reports it in a `source` column, and raises rather
 -- than returning a silent empty result when a wait<->query drill exceeds raw
@@ -3223,7 +3229,7 @@ $$;
 -- grain by span. peak_aas is the worst underlying grain within the bucket;
 -- p99_aas is the 99th percentile of the per-grain AAS, returned for rollup_1m-
 -- backed buckets and null for rollup_1h-backed buckets.
-create or replace function ash.aas_series(
+create or replace function ash.timeline(
   p_from timestamptz default null,
   p_to timestamptz default null,
   p_bucket interval default null,
@@ -3332,7 +3338,7 @@ $$;
 
 -- Standard trailing windows for triage: one summary row per window ending at
 -- p_end. Rollup-backed (no raw dependency); each row carries source.
-create or replace function ash.aas_periods(
+create or replace function ash.periods(
   p_end timestamptz default null
 )
 returns table (
@@ -3409,7 +3415,7 @@ declare
     '(case when wm.event = wm.type then wm.event else wm.type || '':'' || wm.event end)';
 begin
   if p_dimension not in ('wait_event_type', 'wait_event', 'query_id', 'database') then
-    raise exception 'ash.aas_by: unknown dimension %; use wait_event_type|wait_event|query_id|database', p_dimension;
+    raise exception 'ash.top: unknown dimension %; use wait_event_type|wait_event|query_id|database', p_dimension;
   end if;
   if p_database is not null then
     select d.oid into v_datid from pg_database d where d.datname = p_database;
@@ -3542,7 +3548,7 @@ $$;
 -- dimension with a wait filter, or a wait dimension with p_query_id) needs raw
 -- samples and raises past raw retention. query_text is filled only for the
 -- query_id dimension with pg_stat_statements present.
-create or replace function ash.aas_by(
+create or replace function ash.top(
   p_dimension text,
   p_from timestamptz default null,
   p_to timestamptz default null,
@@ -3584,7 +3590,7 @@ declare
   v_key_num bigint;
 begin
   if p_dimension not in ('wait_event_type', 'wait_event', 'query_id', 'database') then
-    raise exception 'ash.aas_by: unknown dimension %; use wait_event_type|wait_event|query_id|database', p_dimension;
+    raise exception 'ash.top: unknown dimension %; use wait_event_type|wait_event|query_id|database', p_dimension;
   end if;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
   if v_bucket_secs is null or v_bucket_secs < 60 then
@@ -3695,7 +3701,7 @@ $$;
 -- overall row; a dimension gives the top rows by abs(avg_delta) via a full outer
 -- join across the two windows (a key present in only one window still appears).
 -- avg_delta is window-2 minus window-1.
-create or replace function ash.aas_compare(
+create or replace function ash.compare(
   p_from_1 timestamptz,
   p_to_1 timestamptz,
   p_from_2 timestamptz,
@@ -3741,11 +3747,11 @@ begin
 
   return query
   with w1 as (
-    select * from ash.aas_by(p_dimension, p_from_1, p_to_1,
+    select * from ash.top(p_dimension, p_from_1, p_to_1,
       p_wait_event_type, p_wait_event, p_query_id, p_database, 2147483647, p_bucket)
   ),
   w2 as (
-    select * from ash.aas_by(p_dimension, p_from_2, p_to_2,
+    select * from ash.top(p_dimension, p_from_2, p_to_2,
       p_wait_event_type, p_wait_event, p_query_id, p_database, 2147483647, p_bucket)
   )
   select
@@ -3886,7 +3892,7 @@ begin
 end;
 $$;
 
--- health_report helper: top wait events at a set of minutes for one wait class,
+-- report helper: top wait events at a set of minutes for one wait class,
 -- from rollup_1m, as pre-formatted "event(aas)" strings (aas = avg per-minute
 -- AAS across the given minutes, 1 decimal). Empty array when nothing matched.
 create or replace function ash._hr_top_events(
@@ -3917,7 +3923,7 @@ as $$
   from pme
 $$;
 
--- health_report helper: top query ids at a set of minutes, optionally within one
+-- report helper: top query ids at a set of minutes, optionally within one
 -- wait class (p_type null = across all classes = the 'total' key), read from RAW
 -- samples (the wait<->query tie). "queryid(aas)" strings, int64-safe.
 create or replace function ash._hr_top_queryids(
@@ -3966,7 +3972,7 @@ $$;
 -- the window. Per-class per-minute AAS (zero-filled) drives avg/worst1m/p99/p999;
 -- top_events_* come from rollup_1m, top_queryids_* from raw samples (omitted when
 -- raw retention no longer covers the window). Returns null when no coverage.
-create or replace function ash.health_report(
+create or replace function ash.report(
   p_from timestamptz default null,
   p_to timestamptz default null,
   p_vcpus int default null,
@@ -4215,7 +4221,7 @@ $$;
 
 -- Human render helper: stacked per-bucket AAS chart (2.0 port of timeline_chart).
 -- Presentation-only; reads the rollup-backed AAS via _grain_by. p_bucket => null
--- auto-selects grain by span like aas_series.
+-- auto-selects grain by span like ash.timeline.
 create or replace function ash.chart(
   p_from timestamptz default null,
   p_to timestamptz default null,
@@ -4383,7 +4389,7 @@ end;
 $$;
 
 -- Human render helper: key/value AAS overview (2.0 port of activity_summary),
--- the companion to aas_periods for one window.
+-- the companion to ash.periods for one window.
 create or replace function ash.summary(
   p_from timestamptz default null,
   p_to timestamptz default null
@@ -4421,11 +4427,11 @@ begin
 
   return query
   select 'databases_active'::text,
-    count(*)::text from ash.aas_by('database', v_from, v_to, p_limit => 2147483647);
+    count(*)::text from ash.top('database', v_from, v_to, p_limit => 2147483647);
 
   v_rank := 0;
   for r in
-    select b.key, b.avg_aas, b.pct from ash.aas_by('wait_event', v_from, v_to, p_limit => 3) b
+    select b.key, b.avg_aas, b.pct from ash.top('wait_event', v_from, v_to, p_limit => 3) b
   loop
     v_rank := v_rank + 1;
     return query select 'top_wait_' || v_rank,
@@ -4435,7 +4441,7 @@ begin
   v_rank := 0;
   for r in
     select b.key, b.query_text, b.avg_aas, b.pct
-    from ash.aas_by('query_id', v_from, v_to, p_limit => 3) b
+    from ash.top('query_id', v_from, v_to, p_limit => 3) b
   loop
     v_rank := v_rank + 1;
     return query select 'top_query_' || v_rank,
@@ -4450,32 +4456,32 @@ $$;
 -- peak/p99 the max/99th-percentile of per-bucket AAS), its column contract, and
 -- the recommended next call, so a human or AI agent can navigate the catalog
 -- alone. On-CPU/uninstrumented work is spelled 'CPU*' everywhere user-facing.
-comment on function ash.aas_periods(timestamptz) is
-$$START HERE (US-1 triage): AAS for six standard trailing windows (1m, 5m, 1h, 1d, 1w, 1mo) ending at p_end (default now()), one row each. Columns (period, period_start, period_end, source, minutes_with_data, avg_aas, peak_aas, p99_aas): peak/p99 vs avg distinguishes a spike from sustained load. Rollup-backed (source = rollup_1m|rollup_1h). Next: locate the spike in time with ash.aas_series(), then drill with ash.aas_by().$$;
+comment on function ash.periods(timestamptz) is
+$$START HERE (US-1 triage): AAS for six standard trailing windows (1m, 5m, 1h, 1d, 1w, 1mo) ending at p_end (default now()), one row each. Columns (period, period_start, period_end, source, minutes_with_data, avg_aas, peak_aas, p99_aas): peak/p99 vs avg distinguishes a spike from sustained load. Rollup-backed (source = rollup_1m|rollup_1h). Next: locate the spike in time with ash.timeline(), then drill with ash.top().$$;
 
 comment on function ash.aas(timestamptz, timestamptz, text, text, bigint, name, interval) is
-$$Scalar AAS summary for one window [p_from, p_to) (defaults: last 1 hour). Optional uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-p_bucket AAS. Also the US-4 leaf event summary: ash.aas(p_wait_event => 'IO:DataFileRead'). Combining a wait filter with p_query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h. Next: ash.aas_by('query_id', p_wait_event => ...).$$;
+$$Scalar AAS summary for one window [p_from, p_to) (defaults: last 1 hour). Optional uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-p_bucket AAS. Also the US-4 leaf event summary: ash.aas(p_wait_event => 'IO:DataFileRead'). Combining a wait filter with p_query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h. Next: ash.top('query_id', p_wait_event => ...).$$;
 
-comment on function ash.aas_series(timestamptz, timestamptz, interval, text, text, bigint, name) is
-$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc to find the worst buckets, then drill that window with ash.aas_by(). p99_aas is null for rollup_1h-backed buckets.$$;
+comment on function ash.timeline(timestamptz, timestamptz, interval, text, text, bigint, name) is
+$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc to find the worst buckets, then drill that window with ash.top(). p99_aas is null for rollup_1h-backed buckets.$$;
 
-comment on function ash.aas_by(text, timestamptz, timestamptz, text, text, bigint, name, int, interval) is
-$$The single vertical drill (US-3): AAS broken down by p_dimension in wait_event_type|wait_event|query_id|database over [p_from, p_to). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). Filters compose: ash.aas_by('wait_event', p_wait_event_type => 'IO') is the level-2 drill; ash.aas_by('query_id', p_wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + p_query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
+comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval) is
+$$The single vertical drill (US-3): AAS broken down by p_dimension in wait_event_type|wait_event|query_id|database over [p_from, p_to). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). Filters compose: ash.top('wait_event', p_wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', p_wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + p_query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
 
-comment on function ash.aas_compare(timestamptz, timestamptz, timestamptz, timestamptz, text, int, text, text, bigint, name, interval) is
+comment on function ash.compare(timestamptz, timestamptz, timestamptz, timestamptz, text, int, text, text, bigint, name, interval) is
 $$Before/after comparison of two windows (US-7): window 1 = [p_from_1, p_to_1), window 2 = [p_from_2, p_to_2). p_dimension => null gives one overall row; a dimension gives the top p_limit keys by abs(avg_delta) via a full outer join (a key present in only one window still appears). Columns (key, query_text, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2); avg_delta = window 2 minus window 1. Use to tell whether a deploy regressed load and where.$$;
 
 comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigint, name) is
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [p_from, p_to) (default last 1 hour), up to p_limit. Uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements (null otherwise). Reads ash.sample directly (raw retention only).$$;
 
-comment on function ash.health_report(timestamptz, timestamptz, int, int) is
+comment on function ash.report(timestamptz, timestamptz, int, int) is
 $$Machine-readable load report as one jsonb (US-8) for [p_from, p_to) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"), the latter omitted when raw retention no longer covers the window. p_vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
 
 comment on function ash.chart(timestamptz, timestamptz, interval, int, int, boolean) is
-$$Human render helper: stacked ASCII per-bucket AAS chart over [p_from, p_to) (default last 1 hour), top p_top wait events plus Other. p_bucket => null auto-selects grain by span. Presentation-only (columns bucket_start, aas, detail, chart); for typed data use ash.aas_series(). Enable ANSI color with p_color => true or "set ash.color = on".$$;
+$$Human render helper: stacked ASCII per-bucket AAS chart over [p_from, p_to) (default last 1 hour), top p_top wait events plus Other. p_bucket => null auto-selects grain by span. Presentation-only (columns bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with p_color => true or "set ash.color = on".$$;
 
 comment on function ash.summary(timestamptz, timestamptz) is
-$$Human render helper: key/value AAS overview for one window [p_from, p_to) (default last 1 hour) — the companion to ash.aas_periods(). Returns (metric, value): period bounds, source, minutes_with_data, avg/peak/p99 AAS, backend_seconds, databases_active, and top waits/queries. Presentation-only; for typed data use ash.aas() and ash.aas_by().$$;
+$$Human render helper: key/value AAS overview for one window [p_from, p_to) (default last 1 hour) — the companion to ash.periods(). Returns (metric, value): period bounds, source, minutes_with_data, avg/peak/p99 AAS, backend_seconds, databases_active, and top waits/queries. Presentation-only; for typed data use ash.aas() and ash.top().$$;
 
 -- Helper: detect the schema that holds the pg_stat_statements view.
 -- Managed services differ: RDS/Cloud SQL/Supabase/AlloyDB/Neon default to

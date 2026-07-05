@@ -5,12 +5,10 @@
 -- installer, which:
 --   * snapshots existing reader-role EXECUTE grants, then drops every removed
 --     v1.x reader and draft aas_* function (all overloads / _at twins) and the
---     names whose signatures change in 2.0 (aas, aas_periods, samples) via the
---     top-of-installer drop block, so the resulting schema equals a fresh 2.0
---     install (CI asserts this),
---   * creates the 2.0 reader surface (aas_periods, aas, aas_series, aas_by,
---     aas_compare, samples, health_report, chart, summary) with catalog
---     comments and grants,
+--     changed-signature name `samples` via the top-of-installer drop block, so
+--     the resulting schema equals a fresh 2.0 install (CI asserts this),
+--   * creates the 2.0 reader surface (periods, aas, timeline, top, compare,
+--     samples, report, chart, summary) with catalog comments and grants,
 --   * re-applies the snapshotted reader grants to the surviving/recreated
 --     functions (so a role configured via ash.grant_reader keeps least-privilege
 --     access; functions newly introduced by 2.0 still need a fresh
