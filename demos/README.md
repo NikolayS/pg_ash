@@ -16,14 +16,21 @@ main README, driven against a live Postgres 18 container.
 ## What it shows
 
 The demo reproduces the investigation sequence from the README's **LLM-assisted
-investigation** section, against a real spike (not canned output):
+investigation** section on the 2.0 reader API, against a real spike (not canned
+output). Every reader answers in AAS (average active sessions):
 
-1. `ash.status()` — sampling active, version 1.4, pg_cron wired up
-2. `ash.top_waits('1 minute')` — colored bars; `Lock:tuple` leads
-3. `ash.timeline_chart('1 minute', '10 seconds')` — stacked-bar view of when the spike landed
-4. `ash.event_queries('Lock:tuple', '1 minute')` — the guilty UPDATE
-5. `ash.query_waits(<top_query_id>, '1 minute')` — full wait profile of the top guilty query
-6. Closing frame (held ~3s) so the GIF loops gracefully in the README
+1. `ash.status()` — sampling active, version 2.0, pg_cron wired up
+2. `ash.periods()` — triage: last-minute `peak_aas` >> `avg_aas` = a spike, not sustained
+3. `ash.chart('5 minutes', '1 minute')` — colored stacked timeline: when it landed + which wait class (`Lock` in red)
+4. `ash.top('wait_event', ...)` — drill: `Lock:tuple` dominates (AAS + peak + p99 per row)
+5. `ash.top('query_id', p_wait_event => 'Lock:tuple', ...)` — the leaf: the guilty UPDATE
+6. `ash.top('wait_event', p_query_id => <top_query_id>, ...)` — full wait profile of that query, closing the loop
+7. Closing frame (held ~3s) so the GIF loops gracefully in the README
+
+`ash.chart` is the only step that colors: in 2.0 the data readers (`periods`,
+`top`, `timeline`) return typed columns only. `ash.chart` is the sole reader
+that emits ANSI color; `ash.summary` is a render helper too but returns plain
+key/value text.
 
 ## The spike
 
@@ -65,7 +72,9 @@ install asciinema`, release tarball for
 
 ```bash
 cd demos
-make record     # ~2 minutes end-to-end (pulls postgres:18, installs pg_cron)
+make record     # ~8 minutes end-to-end (5.5 min warmup so the AAS windows have
+                # enough history — see WARMUP_SEC below — plus the postgres:18
+                # pull and pg_cron install)
 make open       # open the produced gif
 ```
 
@@ -82,9 +91,9 @@ Override via environment variables:
 | `AGG_FONT_SIZE` | 12 | Pixel font-size passed to `agg`; lower keeps the wider terminal under ~1100 px |
 | `TYPE_MIN_MS` / `TYPE_MAX_MS` | 30 / 120 | Per-character keystroke jitter range (ms) — see "Typing pacing" below |
 | `TYPE_PUNCT_MS` | 180 | Extra pause after `, ; . ( )` characters |
-| `WARMUP_SEC` | 30 | Seconds of workload before recording starts |
-| `BASELINE_SEC` | 15 | Phase-1 pgbench duration inside the container |
-| `SPIKE_SEC` | 120 | Phase-2 lock-contention duration — kept long enough that the spike outlives the ~90 s recording so the final `\gset` step still sees fresh `Lock:tuple` samples |
+| `WARMUP_SEC` | 330 | Seconds of workload before recording starts. Long (5.5 min) so the 2.0 readers' 5-minute windows sit inside raw retention — raw retention is data-limited (it starts at the oldest sample), and the leaf drills cross the wait↔query tie, which reads raw and raises if the window predates it |
+| `BASELINE_SEC` | 120 | Phase-1 pgbench duration inside the container — 2 min so the baseline→spike transition falls inside the trailing 5-minute chart window |
+| `SPIKE_SEC` | 480 | Phase-2 lock-contention duration — kept long enough that the spike outlives WARMUP + the ~110 s recording (~440 s) so the closing leaf drills still see fresh `Lock:tuple` samples in their 5-minute window |
 | `TAIL_SEC` | 30 | Phase-3 quiet pgbench coda |
 | `LOCK_WORKERS` | 5 | Contender count — more = more lock waits |
 | `KEEP_CONTAINER` | 0 | Set `1` to leave the container running after recording (for re-takes) |
@@ -92,7 +101,7 @@ Override via environment variables:
 Example — slower pacing and a larger spike:
 
 ```bash
-WARMUP_SEC=40 SPIKE_SEC=150 LOCK_WORKERS=8 make record
+WARMUP_SEC=360 SPIKE_SEC=540 LOCK_WORKERS=8 make record
 ```
 
 ### Re-running without recapturing the container
@@ -139,13 +148,16 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
 - **Theme:** `monokai` — dark background lets the pg_ash `_wait_color()` ANSI
   palette (cyan / red / yellow / pink / purple) pop.
 - **Colors on by default:** `set ash.color = on` is set in the demo's
-  `~/.psqlrc`, *and* every reader call passes `p_color => true` (or the
-  positional `true` argument) so the bars come back with ANSI codes. The
-  `:color` psql variable (mirroring the README pattern) re-runs the previous
-  query through `sed` to convert psql's literalised `\x1B` back into real ESC
-  bytes — without this step psql's aligned formatter would mangle the codes.
-  We omit `less -R` from the README pattern here because the recorder cannot
-  drive an interactive pager.
+  `~/.psqlrc`, *and* the one colored step — `ash.chart(...)` — passes
+  `p_color => true` so its `chart` column comes back with ANSI codes. (In 2.0
+  the data readers `periods` / `top` / `timeline` are presentation-free;
+  `ash.chart` is the only reader that emits color, and `ash.summary` — a render
+  helper too — returns plain key/value text.) The `:color` psql
+  variable (mirroring the README pattern) re-runs the previous query through
+  `sed` to convert psql's literalised `\x1B` back into real ESC bytes — without
+  this step psql's aligned formatter would mangle the codes. We omit `less -R`
+  from the README pattern here because the recorder cannot drive an interactive
+  pager.
 - **Human-paced typing:** commands are typed one character at a time via
   `tmux send-keys -l` with a 30–120 ms jitter and an extra ~180 ms beat at
   punctuation, so the recording feels like a real session. See

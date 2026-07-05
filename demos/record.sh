@@ -36,16 +36,27 @@ ROWS="${ROWS:-32}"
 # 12 keeps a 140-col terminal under ~1100px and still legible.
 AGG_FONT_SIZE="${AGG_FONT_SIZE:-12}"
 
-WARMUP_SEC="${WARMUP_SEC:-30}"  # baseline + spike accumulate before we record
+# baseline + spike accumulate before we record. Much longer than the v1.x demo
+# (was 30) for two 2.0-specific reasons:
+#   1. chart/timeline bucket at a 1-minute minimum (sub-minute grains are gone),
+#      so the colored ash.chart needs several minutes of history for a full bar
+#      chart rather than one or two bars.
+#   2. the leaf drills cross the wait<->query tie, which reads RAW samples and
+#      raises if the window START predates raw retention. Raw retention here is
+#      data-limited (it begins at the oldest sample = when ash.start() ran), so
+#      the 5-minute reader windows below require > 5 minutes of prior sampling.
+# 330 s (5.5 min) leaves a ~1 min margin at the first windowed query.
+WARMUP_SEC="${WARMUP_SEC:-330}"
 POST_WAIT="${POST_WAIT:-3}"
 
-# Workload phase durations passed to demos/workload.sh. With human-paced
-# typing the recorded session runs ~90 seconds, so we keep the spike going
-# long enough that every reader query (especially the final \gset → query_waits
-# step ~80 s into the recording) still sees fresh `Lock:tuple` samples in its
-# 1-minute window. Override these to make the spike shorter / longer.
-export SPIKE_SEC="${SPIKE_SEC:-120}"
-export BASELINE_SEC="${BASELINE_SEC:-15}"
+# Workload phase durations passed to demos/workload.sh. The spike must outlive
+# WARMUP + the ~110 s recording (~440 s) so every reader query — especially the
+# closing top('query_id', p_wait_event => 'Lock:tuple') -> top('wait_event',
+# p_query_id => ...) leaf near the end — still sees fresh `Lock:tuple` in its
+# 5-minute window. baseline is long enough (2 min) that the baseline->spike
+# transition falls inside the trailing 5-minute chart window. Override to tune.
+export SPIKE_SEC="${SPIKE_SEC:-480}"
+export BASELINE_SEC="${BASELINE_SEC:-120}"
 export TAIL_SEC="${TAIL_SEC:-30}"
 
 # Human-typing pacing (milliseconds per character, with jitter).
@@ -140,8 +151,11 @@ sleep "$WARMUP_SEC"
 #   - Disable the default pager. psql's default `less`-based pager intercepts
 #     keystrokes from the recorder, corrupting the demo. We always want every
 #     row rendered straight to stdout.
-#   - Enable `ash.color = on` for the session so all reader functions emit
-#     ANSI escape codes in their `bar` / `chart` columns.
+#   - Enable `ash.color = on` for the session so the one render helper that
+#     colors — `ash.chart` — emits ANSI escape codes in its `chart` column.
+#     (In 2.0 the data readers `top`/`timeline`/`periods` are presentation-free;
+#     `ash.chart` is the only reader that emits ANSI color. `ash.summary` is a
+#     render helper too but returns plain key/value text.)
 #   - Define a `:color` psql variable that re-runs the previous query through
 #     `sed` to convert literal `\x1B` chars (which psql's aligned formatter
 #     emits in place of real escapes) back into real ESC bytes, so the
@@ -181,7 +195,7 @@ printf "\033[38;2;080;250;123m"
 cat <<BANNER
 ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                                                        ║
-║   pg_ash v1.5   —   Active Session History for Postgres                                                                                ║
+║   pg_ash v2.0   —   Active Session History for Postgres                                                                                ║
 ║                                                                                                                                        ║
 ║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                                                        ║
 ║                                                                                                                                        ║
@@ -277,37 +291,62 @@ send_instant() {
 # through `sed` so the codes survive psql's aligned formatter.
 sleep 1.5
 
-# Act 2 — status: already sampling, version 1.4, pg_cron wired.
+# The 2.0 reader API: seven data functions + two human render helpers. The
+# investigation arc below walks the designed path — triage (periods) -> locate
+# + wait-class breakdown (chart, the colored render helper) -> drill (top on a
+# dimension) -> leaf (top on query_id filtered by the guilty wait event). AAS
+# (average active sessions) is the single load unit everywhere.
+#
+# Windows are `now() - interval '5 minutes'` .. `now()`: the 2.0 minimum bucket
+# is 1 minute (sub-minute grains are gone), so the timeline/chart need a
+# multi-minute window to show more than one bar. The workload spike outlives
+# the recording (SPIKE_SEC), so every window still sees fresh Lock:tuple.
+
+# Act 2 — status: already sampling, version 2.0, pg_cron wired.
 human_type_and_send "select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
 sleep 3.8
 
-# Act 3 — top wait events: culprit is obvious. Use :color to render bars.
-human_type_and_send '\echo -- Q1: which wait event is dominating in the last minute?'
+# Act 3 — triage: is it bad right now, and is it a spike or sustained? periods()
+# is the 2.0 "start here": one row per standard trailing window, in AAS, with
+# peak/p99 next to avg so a spike (peak >> avg) is legible without a 2nd call.
+human_type_and_send '\echo -- Q1: triage — is it bad right now? spike or sustained?'
 sleep 1.0
-human_type_and_send "select * from ash.top_waits('1 minute', 10, 30, true) :color"
+human_type_and_send "select period, source, minutes_with_data as mins, avg_aas, peak_aas, p99_aas from ash.periods();"
 sleep 4.6
 
-# Act 4 — timeline: when did the spike land?
-human_type_and_send '\echo -- Q2: when did the spike land?'
+# Act 4 — locate + wait-class breakdown: the colored stacked chart (the 2.0
+# render helper that replaces timeline_chart). Shows WHEN the spike landed and
+# WHICH wait class dominates (Lock in red). Color via p_color => true + :color.
+human_type_and_send '\echo -- Q2: when did it land, and which wait class? (colored)'
 sleep 1.0
-human_type_and_send "select bucket_start::time as t, active, chart from ash.timeline_chart('1 minute','10 seconds',4,40,true) :color"
+human_type_and_send "select bucket_start::time as t, aas, chart from ash.chart(now() - interval '5 minutes', now(), '1 minute', 4, 40, true) :color"
 sleep 4.8
 
-# Act 5 — drill into the culprit wait event -> guilty queries.
-human_type_and_send '\echo -- Q3: which query is stuck on Lock:tuple?'
+# Act 5 — drill: which wait EVENT dominates? ash.top on the wait_event
+# dimension — data-only now (AAS + peak + p99 per row, no presentation column).
+human_type_and_send '\echo -- Q3: which wait event is dominating?'
 sleep 1.0
-human_type_and_send "select query_id, samples, pct, bar, substr(query_text,1,42) as q from ash.event_queries('Lock:tuple','1 minute',3,20,true) :color"
+human_type_and_send "select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), p_limit => 6);"
 sleep 4.6
 
-# Act 6 — full wait profile of the #1 guilty query (closes the loop:
-# top_waits -> event_queries -> query_waits, mirroring the LLM-assisted
-# investigation flow in the main README). \gset captures the top query_id
-# silently into :top_qid; we then call query_waits with it.
-human_type_and_send '\echo -- Q4: full wait profile of the top guilty query?'
+# Act 6 — leaf: which query is stuck on Lock:tuple? The 2.0 leaf drill composes
+# the wait filter into top('query_id') — one grammar for what used to be
+# event_queries(). This crosses the wait<->query tie, so it reads raw samples
+# (the recent window is well within raw retention). \gset captures the top
+# query_id into :top_qid for the closing move.
+human_type_and_send '\echo -- Q4: which query is stuck on Lock:tuple?'
 sleep 1.0
-human_type_and_send "select query_id as top_qid from ash.event_queries('Lock:tuple','1 minute',1) \\gset"
+human_type_and_send "select key, avg_aas, peak_aas, pct, substr(query_text,1,40) as q from ash.top('query_id', now() - interval '5 minutes', now(), p_wait_event => 'Lock:tuple', p_limit => 3);"
+sleep 4.6
+human_type_and_send "select key as top_qid from ash.top('query_id', now() - interval '5 minutes', now(), p_wait_event => 'Lock:tuple', p_limit => 1) \\gset"
 sleep 0.5
-human_type_and_send "select wait_event, samples, pct, bar from ash.query_waits(:top_qid, '1 minute', 30, true) :color"
+
+# Act 6b — closing the loop: full wait profile of that top query — top() again,
+# this time the wait_event dimension filtered by :top_qid (the 2.0 unification
+# of query_waits()). Same one grammar, opposite direction.
+human_type_and_send '\echo -- Q5: full wait profile of the top guilty query?'
+sleep 1.0
+human_type_and_send "select key, avg_aas, peak_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), p_query_id => :top_qid, p_limit => 5);"
 sleep 4.8
 
 # Act 7 — closing lines. Held on screen for the "still" moment viewers see
