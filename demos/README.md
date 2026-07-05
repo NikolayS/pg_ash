@@ -9,7 +9,8 @@ main README, driven against a live Postgres 18 container.
 | `ash_demo.gif` | The rendered GIF (committed; used by the top-level README) |
 | `ash_demo.cast` | asciinema v3 cast file — source of truth for the GIF |
 | `record.sh` | End-to-end recorder: Docker → pg_ash install → workload → tmux/asciinema → agg |
-| `container-entrypoint.sh` | Runs inside the `postgres:18` container — creates DB, installs pg_ash, starts sampling, launches workload |
+| `Dockerfile` | Pre-baked `postgres:${PG_MAJOR}` image with pg_cron + `shared_preload_libraries` compiled in — so the container boots preloaded, no runtime apt-get + restart |
+| `container-entrypoint.sh` | Runs inside the container — creates DB, installs pg_ash, starts sampling, launches workload |
 | `workload.sh` | Three-phase mixed workload: baseline pgbench → row-lock spike → tail |
 | `Makefile` | Thin wrapper: `make record`, `make clean`, `make open` |
 
@@ -73,8 +74,8 @@ install asciinema`, release tarball for
 ```bash
 cd demos
 make record     # ~8 minutes end-to-end (5.5 min warmup so the AAS windows have
-                # enough history — see WARMUP_SEC below — plus the postgres:18
-                # pull and pg_cron install)
+                # enough history — see WARMUP_SEC below — plus a one-time build
+                # of the pre-baked demos/Dockerfile image on first run)
 make open       # open the produced gif
 ```
 
@@ -97,6 +98,7 @@ Override via environment variables:
 | `TAIL_SEC` | 30 | Phase-3 quiet pgbench coda |
 | `LOCK_WORKERS` | 5 | Contender count — more = more lock waits |
 | `KEEP_CONTAINER` | 0 | Set `1` to leave the container running after recording (for re-takes) |
+| `PG_MAJOR` | 18 | Postgres major version — sets both the base image (`postgres:$PG_MAJOR`) and the pre-baked image tag/build arg |
 
 Example — slower pacing and a larger spike:
 
@@ -140,6 +142,16 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
 
 ## Design notes
 
+- **Pre-baked image (`Dockerfile`):** pg_cron and the
+  `shared_preload_libraries` / `cron.*` config are baked into a
+  `postgres:${PG_MAJOR}` derivative (the config is appended to
+  `postgresql.conf.sample` so a fresh `initdb` comes up preloaded). The
+  container therefore boots with the extensions already active — no runtime
+  `apt-get install …-cron` and no container restart at record time. This
+  removes the record-time dependency on the PGDG apt mirror (which occasionally
+  lags) and shaves the install + restart round-trip off every run.
+  `record.sh` builds the image automatically when `Dockerfile` is present and
+  falls back to the old runtime-install path if the build fails.
 - **Geometry (140 × 32):** wider than typical README embeds so long wait
   event names like `Lock:transactionid` / `Client:ClientRead` and the colored
   bar charts fit on a single line. Compensated by `agg --font-size 12` so the
@@ -175,10 +187,15 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
 
 ## Troubleshooting
 
-**`pg_cron install failed`** — the container's `apt` couldn't fetch the PGDG
-package for this major. Either use a different `IMAGE` or temporarily set
-`ASH_CRON_OPTIONAL=1` (pg_ash supports a no-cron mode; the demo will skip
-`ash.start()` and rely on manual `ash.take_sample()` calls).
+**pre-baked build failed** — `record.sh` builds `demos/Dockerfile` (which
+`apt`-installs `postgresql-$PG_MAJOR-cron` from the PGDG mirror) once at the
+start of a run. If that mirror is unreachable the build fails and the recorder
+logs a warning and falls back to the plain `postgres:$PG_MAJOR` base with the
+old runtime install + restart — so recording still proceeds. If the runtime
+fallback also can't fetch the package, temporarily set `ASH_CRON_OPTIONAL=1`
+(pg_ash supports a no-cron mode; the demo will skip `ash.start()` and rely on
+manual `ash.take_sample()` calls). Remove `demos/Dockerfile` to force the
+fallback path directly.
 
 **`agg: unknown option --last-frame-duration`** — upgrade to `agg` 1.7+
 (`brew upgrade agg`).

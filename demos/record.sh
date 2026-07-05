@@ -2,7 +2,9 @@
 # record.sh — End-to-end demo recorder for pg_ash.
 #
 # Pipeline (all local, no cloud):
-#   1. Start postgres:18 in Docker with pg_cron + pg_stat_statements.
+#   1. Start Postgres in Docker with pg_cron + pg_stat_statements preloaded
+#      (via the pre-baked demos/Dockerfile image; falls back to a runtime
+#      pg_cron install + restart on the plain postgres:${PG_MAJOR} base).
 #   2. Install pg_ash via `\i sql/ash-install.sql`, seed pgbench, start sampling.
 #   3. Kick off a workload that transitions baseline -> row-lock spike -> tail.
 #   4. After the spike is well underway, start tmux + asciinema with psql
@@ -20,7 +22,14 @@ set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 CONTAINER="pg_ash_demo"
-IMAGE="postgres:18"
+PG_MAJOR="${PG_MAJOR:-18}"
+IMAGE="postgres:${PG_MAJOR}"
+# Pre-baked image: demos/Dockerfile bakes pg_cron + shared_preload_libraries
+# into a postgres:${PG_MAJOR} derivative so the container boots preloaded with
+# no runtime apt-get + restart. Built automatically when the Dockerfile exists;
+# falls back to IMAGE + runtime install if it is absent or the build fails.
+DOCKERFILE="$HERE/Dockerfile"
+BAKED_IMAGE="pg_ash_demo:${PG_MAJOR}"
 SESSION="ash-demo"
 CAST="$HERE/ash_demo.cast"
 GIF="$HERE/ash_demo.gif"
@@ -100,14 +109,31 @@ fi
 for t in docker tmux asciinema agg; do require "$t"; done
 
 # --- 1. Start container ------------------------------------------------------
+# Prefer the pre-baked image (demos/Dockerfile): pg_cron and the
+# shared_preload_libraries / cron config are compiled in, so the container
+# boots preloaded with no runtime apt-get + restart. Fall back to the plain
+# base image + runtime install if the Dockerfile is absent or the build fails.
+RUN_IMAGE="$IMAGE"
+BAKED=0
+if [ -f "$DOCKERFILE" ]; then
+  log "building pre-baked image $BAKED_IMAGE (PG_MAJOR=$PG_MAJOR)"
+  if $DOCKER build --build-arg "PG_MAJOR=$PG_MAJOR" -t "$BAKED_IMAGE" "$HERE" >/dev/null 2>&1; then
+    RUN_IMAGE="$BAKED_IMAGE"
+    BAKED=1
+    log "using pre-baked image $BAKED_IMAGE"
+  else
+    log "WARN: pre-baked build failed — falling back to runtime pg_cron install on $IMAGE"
+  fi
+fi
+
 $DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
-log "starting $IMAGE as $CONTAINER"
+log "starting $RUN_IMAGE as $CONTAINER"
 $DOCKER run -d --name "$CONTAINER" \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=postgres \
   -v "$REPO":/repo:ro \
-  "$IMAGE" \
+  "$RUN_IMAGE" \
   -c track_activity_query_size=4096 \
   -c log_min_messages=warning \
   >/dev/null
@@ -115,23 +141,27 @@ $DOCKER run -d --name "$CONTAINER" \
 log "waiting for first-boot PostgreSQL"
 until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
 
-log "installing pg_cron package + configuring shared_preload_libraries"
-$DOCKER exec "$CONTAINER" bash -c '
-  set -e
-  apt-get update -qq >/dev/null 2>&1
-  apt-get install -y -qq "postgresql-${PG_MAJOR}-cron" >/dev/null 2>&1
-  cat >> "${PGDATA}/postgresql.conf" <<CONF
+if [ "$BAKED" -eq 1 ]; then
+  log "pre-baked image already preloads pg_cron + pg_stat_statements — no runtime install/restart"
+else
+  log "installing pg_cron package + configuring shared_preload_libraries"
+  $DOCKER exec "$CONTAINER" bash -c '
+    set -e
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq "postgresql-${PG_MAJOR}-cron" >/dev/null 2>&1
+    cat >> "${PGDATA}/postgresql.conf" <<CONF
 
 # --- pg_ash demo ---
 shared_preload_libraries = '"'"'pg_cron,pg_stat_statements'"'"'
 cron.database_name = '"'"'demo'"'"'
 cron.use_background_workers = on
 CONF
-' >/dev/null 2>&1
+  ' >/dev/null 2>&1
 
-log "restarting container so pg_cron + pg_stat_statements load"
-$DOCKER restart "$CONTAINER" >/dev/null
-until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+  log "restarting container so pg_cron + pg_stat_statements load"
+  $DOCKER restart "$CONTAINER" >/dev/null
+  until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+fi
 
 # --- 2. Install pg_ash + seed + start sampling + workload --------------------
 log "installing pg_ash, seeding pgbench, starting sampling, kicking off workload"
