@@ -1788,6 +1788,80 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test 2.0: pgss shadow mitigation (non-public schema, security #76)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Regression for security review #76 AND the 2.0 rename regression that
+          -- silently un-covered it (the reader list was hand-maintained with v1.x
+          -- names). When pgss lives outside `public`, ash._apply_pgss_search_path()
+          -- must rewrite EVERY pgss-probing reader so the real pgss schema is listed
+          -- BEFORE `public` — otherwise a planted `public.pg_stat_statements` view
+          -- shadows the real one and feeds attacker-controlled query_text (and, via
+          -- SECURITY INVOKER, code execution) into monitoring calls.
+          do $$
+          declare
+            r record;
+            v_bad text := '';
+            v_ext_pos int;
+            v_pub_pos int;
+            v_readers text[] := array['_pgss_query_text','top','compare','samples','summary'];
+          begin
+            if not exists (select 1 from pg_extension where extname = 'pg_stat_statements') then
+              raise notice 'SKIP: pg_stat_statements not installed on this PG major';
+              return;
+            end if;
+
+            -- Relocate the real pgss into a non-public schema (the RDS/Supabase/
+            -- AlloyDB "extensions" layout this helper exists for).
+            create schema if not exists ash_pgss_ext;
+            execute 'alter extension pg_stat_statements set schema ash_pgss_ext';
+            perform ash._apply_pgss_search_path();
+
+            assert ash._pgss_schema() = 'ash_pgss_ext',
+              'pgss schema should be ash_pgss_ext after relocation';
+
+            -- Every pgss-touching reader must list ash_pgss_ext before public.
+            for r in
+              select p.proname, unnest(p.proconfig) as cfg
+              from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+              where n.nspname = 'ash' and p.proname = any(v_readers)
+            loop
+              if r.cfg like 'search_path=%' then
+                v_ext_pos := position('ash_pgss_ext' in r.cfg);
+                v_pub_pos := position('public' in r.cfg);
+                if v_ext_pos = 0 or v_ext_pos > v_pub_pos then
+                  v_bad := v_bad || r.proname || ' ';
+                end if;
+              end if;
+            end loop;
+            assert v_bad = '',
+              'pgss shadow mitigation FAILED — these readers do not list the pgss '
+              || 'schema before public: ' || v_bad;
+
+            -- The derivation must cover exactly the pgss-probing readers (guards
+            -- against the list drifting on a future rename).
+            select string_agg(proname, ' ' order by proname) into v_bad
+            from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'ash' and p.prokind = 'f'
+              and exists (
+                select 1 from unnest(coalesce(p.proconfig, array[]::text[])) c
+                where c like 'search_path=%'
+                  and (',' || replace(split_part(c, '=', 2), ' ', '') || ',') like '%,public,%'
+              );
+            assert v_bad = '_pgss_query_text compare samples summary top',
+              'unexpected pgss-reader set (drift?): ' || coalesce(v_bad, '<none>');
+
+            raise notice 'pgss shadow mitigation PASSED (all 5 readers protected)';
+
+            -- Restore pgss to public so downstream steps see the default layout.
+            execute 'alter extension pg_stat_statements set schema public';
+            perform ash._apply_pgss_search_path();
+            drop schema if exists ash_pgss_ext;
+          end $$;
+          EOF
+
       - name: Test internal helper functions
         env:
           PGPASSWORD: postgres
@@ -1950,17 +2024,18 @@ jobs:
             select count(*) into v_count
               from ash.top('wait_event', '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
             assert v_count = 0, 'top(pre-epoch) should return 0 rows';
-            -- TODO(post-horizon #63): once the installer clamps v_end_ts in
-            -- top/aas/timeline/report (v_end_ts := least(v_start_ts::bigint + 60,
-            -- 2147483647)::int4), add the post-horizon guards below — they must
-            -- return empty / null instead of raising 'integer out of range':
-            --   select count(*) into v_count
-            --     from ash.top('wait_event', '3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
-            --   assert v_count = 0, 'top(post-horizon) should return 0 rows';
-            --   perform * from ash.aas('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
-            --   perform * from ash.timeline('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
-            --   assert ash.report('3000-01-01'::timestamptz, '3000-01-02'::timestamptz) is null,
-            --     'report(post-horizon) should be null';
+            -- Post-horizon (#63): the installer clamps v_end_ts to INT4_MAX in
+            -- top/aas/timeline/report, so an absurd far-future window must return
+            -- empty / null instead of raising 'integer out of range'.
+            select count(*) into v_count
+              from ash.top('wait_event', '3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            assert v_count = 0, 'top(post-horizon) should return 0 rows';
+            -- aas is scalar (always 1 row) and timeline emits per-bucket no-data
+            -- rows: the guarantee is "does not raise", so PERFORM is the assertion.
+            perform * from ash.aas('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            perform * from ash.timeline('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            assert ash.report('3000-01-01'::timestamptz, '3000-01-02'::timestamptz) is null,
+              'report(post-horizon) should be null';
 
             -- === decode_sample corner cases ===
             select count(*) into v_count from ash.decode_sample(null::integer[]);
