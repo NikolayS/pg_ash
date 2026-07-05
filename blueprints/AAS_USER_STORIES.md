@@ -9,10 +9,10 @@ the API against.
   running (Oracle/ASH term of art). `avg_aas` is backend-time per wall-clock
   second; `peak_aas` / `p99_aas` are the max / 99th-percentile of per-bucket AAS.
   All values scale by the configured sample interval.
-- Related work: implementation in **PR #112** (`aas-rework`, supersedes #106),
-  design discussion in **issue #113**.
+- Related work: decided 2.0 API in **[AAS_API.md](AAS_API.md)**, design
+  discussion in **issue #113**; earlier drafts: PR #106, PR #112.
 
-## Status legend (per-story API coverage in PR #112)
+## Status legend (per-story coverage of the 2.0 API design)
 
 - ✅ **Covered** — a function already satisfies the story.
 - 🟡 **Partial** — a function exists but misses part of the acceptance criteria.
@@ -38,15 +38,15 @@ Each stage constrains a different part of the API:
 ```
 US-1 Triage         broad   "is it bad? spike or sustained?"      → aas_periods
    ↓
-US-2 Locate         when    "find the spike in time"              → aas_timeline
+US-2 Locate         when    "find the spike in time"              → aas_series
    ↓
-US-3 Drill          what    "type → event → query, with p99"      → aas_wait_event_types / aas_wait_events / aas_queryids
+US-3 Drill          what    "type → event → query, with p99"      → aas_by(dimension, filters…)
    ↓
-US-4 Leaf           who     "for THIS event, which queries?"       → (event-scoped, raw samples)
+US-4 Leaf           who     "for THIS event, which queries?"       → aas(event…) + aas_by('query_id', event…)
 ```
 
-US-5 (programmatic consumers), US-6 (capacity/trend), and US-7 (before/after)
-are cross-cutting or extension stories.
+US-5 (programmatic consumers), US-6 (capacity/trend), US-7 (before/after),
+and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 
 ---
 
@@ -64,8 +64,8 @@ are cross-cutting or extension stories.
   2. Each row exposes `avg_aas`, `peak_aas`, **and** `p99_aas`, so spike-vs-sustained is legible without a second query.
   3. Answers from rollup data alone (no raw dependency); works across full rollup retention.
   4. Meets the performance budget for a rollup read (see §6).
-- **Primary API:** `ash.aas_periods(p_end, p_bucket)`.
-- **Coverage:** ✅ Covered.
+- **Primary API:** `ash.aas_periods(p_end)`.
+- **Coverage:** ✅ Covered (adds a `source` column in 2.0).
 
 ### US-2 — Locate: find when it spiked
 
@@ -79,8 +79,8 @@ are cross-cutting or extension stories.
   2. Includes `peak_aas` per bucket (not just `avg_aas`), so short spikes are not averaged away; orderable by peak to surface the worst buckets.
   3. Auto-selects rollup granularity by span — per-minute for short spans, per-hour for long spans — and reaches back across the relevant rollup retention.
   4. Distinguishes "no data" buckets from "zero load" buckets.
-- **Primary API:** `ash.aas_timeline(p_interval, p_bucket)` / `ash.aas_timeline_at(...)`.
-- **Coverage:** ✅ Covered.
+- **Primary API:** `ash.aas_series(p_from, p_to, p_bucket)`.
+- **Coverage:** ✅ Covered by design ([AAS_API.md §2.3](AAS_API.md)); adds per-bucket `p99_aas` and explicit no-data rows.
 
 ### US-3 — Drill to culprit: type → event → query, with p99
 
@@ -95,8 +95,8 @@ are cross-cutting or extension stories.
   3. Breakdown by `query_id`, with `query_text` when pg_stat_statements is present (and degrading to `query_id` only otherwise).
   4. **Every breakdown row carries `avg_aas`, `peak_aas`, AND `p99_aas`** — not avg alone — so a spiky member is distinguishable from a steadily-busy one.
   5. The doc/comment is explicit that the deeper event→query tie is NOT recoverable from rollups (see US-4).
-- **Primary API:** `ash.aas_wait_event_types*`, `ash.aas_wait_events*`, `ash.aas_queryids*`.
-- **Coverage:** 🟡 Partial — breakdowns exist but currently return only `avg_aas` + `pct`. **Gap: add `peak_aas` and `p99_aas` to every breakdown row.**
+- **Primary API:** `ash.aas_by(p_dimension, …)` — one function; the drill levels are `aas_by('wait_event_type')` → `aas_by('wait_event', p_wait_event_type => …)` → `aas_by('query_id', …)`.
+- **Coverage:** ✅ Covered by design — every `aas_by` row carries `avg_aas`, `peak_aas`, `p99_aas` ([AAS_API.md §2.4](AAS_API.md)).
 
 ### US-4 — Leaf: for a specific wait event, which queries?
 
@@ -110,8 +110,8 @@ are cross-cutting or extension stories.
   2. Return, per `query_id` contributing to that event, `avg_aas` + `p99_aas` (+ `peak_aas`), with `query_text` when available.
   3. Because rollups do not preserve the wait_event ↔ query_id association, this **reads raw samples** within raw retention.
   4. **MUST signal clearly** when the requested window exceeds raw retention, so the result is never silently empty or partial (see US-5 criterion 3).
-- **Primary API:** an event-scoped query reader on raw samples (working name `ash.aas_wait_event_queries(p_wait_event, ...)` / `_at`), plus `p99_aas` on the per-event summary (via the enhanced `aas_wait_events` filtered to one event).
-- **Coverage:** ❌ Missing — `aas_queryids` is period-wide; raw `event_queries` exists but is sample-count shaped, not AAS/p99 shaped. **This is the largest gap and the reason US-3/US-4 were both selected.**
+- **Primary API:** `ash.aas(p_wait_event => …)` for the event summary; `ash.aas_by('query_id', p_wait_event => …)` for the per-query breakdown (raw-samples-backed; raises past raw retention).
+- **Coverage:** ✅ Covered by design ([AAS_API.md §2.2/§2.4](AAS_API.md)); no dedicated leaf function needed — the filter grammar expresses it.
 
 ---
 
@@ -131,7 +131,7 @@ are cross-cutting or extension stories.
   4. Self-describing catalog comments (`obj_description`) covering the term, the columns, and the recommended next call.
   5. Callable by the least-privilege reader role, and degrades gracefully when pg_stat_statements is absent.
 - **Primary API:** cross-cutting across the whole family.
-- **Coverage:** 🟡 Partial — typed columns + rich catalog comments already present; **gap: an explicit `source`/availability signal** (esp. for US-4's raw-retention boundary).
+- **Coverage:** ✅ Covered by design — `source` column on every reader, retention rows in `ash.status()`, and the raise-don't-return-empty rule for unanswerable drills ([AAS_API.md §5–§6](AAS_API.md)).
 
 ### US-6 — Capacity & trend
 
@@ -144,8 +144,8 @@ are cross-cutting or extension stories.
   1. Long-window timeline (weeks) reads `rollup_1h` efficiently.
   2. Per-bucket `peak_aas` (and ideally `p99_aas`) preserved at hour/day grain.
   3. Works to the limit of `rollup_1h` retention and signals that horizon.
-- **Primary API:** `ash.aas_timeline*` over long spans.
-- **Coverage:** 🟡 Partial — auto rollup_1h selection + per-bucket peak exist; **gap: per-bucket p99 at hour/day grain (optional).**
+- **Primary API:** `ash.aas_series` over long spans.
+- **Coverage:** ✅ Covered by design — auto `rollup_1h` selection, per-bucket `peak_aas`, per-bucket `p99_aas` where the source grain allows (null on `rollup_1h`-backed buckets).
 
 ### US-7 — Before/after comparison
 
@@ -158,8 +158,24 @@ are cross-cutting or extension stories.
   1. Accept two windows (baseline, comparison); return AAS for each plus the delta.
   2. Support overall and at least one breakdown dimension (wait type and/or query).
   3. Sort/highlight the largest regressions by delta.
-- **Primary API:** a new comparison function (working name `ash.aas_compare(...)`).
-- **Coverage:** ❌ Missing — no comparison function exists.
+- **Primary API:** `ash.aas_compare(p_from_1, p_to_1, p_from_2, p_to_2, p_dimension, …)`.
+- **Coverage:** ✅ Covered by design ([AAS_API.md §2.5](AAS_API.md)).
+
+### US-8 — Machine load-report ingest
+
+> **As an** external monitoring / health-assessment platform,
+> **I want** one call that returns a complete load report — per-wait-class avg, worst-1-minute, p99, p99.9 AAS plus top wait events and top query ids per extreme window — as a single JSON document,
+> **so that** a lightweight collector can ingest pg_ash as a data source with one query per period, with pg_ash being the only thing installed on the target database.
+
+- **Trigger:** periodic collection (per assessment run or scheduled).
+- **Acceptance criteria:**
+  1. One call returns a single `jsonb` matching the documented payload contract exactly: `aas_avg` / `aas_worst1m` / `aas_p99` / `aas_p999` keyed by `total, cpu, io, ipc, lock, lwlock`; `top_events_*` (no `cpu`/`total` keys, entries `"Event(aas)"`); `top_queryids_*` (int64-safe string entries).
+  2. `total` = cpu+io+ipc+lock+lwlock; `Activity`/`Client`/`Timeout` excluded (not real load).
+  3. All series at 1-minute resolution, zero-filled.
+  4. The payload carries raw AAS only — scoring/normalization (e.g. against vCPUs) is the consumer's job; a caller-supplied `vcpus` is echoed, never used.
+  5. Degrades honestly: `top_queryids_*` omitted when the needed raw samples are gone; `null` when the window has no coverage at all; callable by `grant_reader`.
+- **Primary API:** `ash.health_report(p_from, p_to, p_vcpus, p_top)` ([AAS_API.md §4](AAS_API.md)).
+- **Coverage:** ✅ Covered by design.
 
 ---
 
@@ -168,12 +184,16 @@ are cross-cutting or extension stories.
 | Story | Primary function(s) | Coverage | Gap to close |
 |---|---|---|---|
 | US-1 Triage | `aas_periods` | ✅ | — |
-| US-2 Locate | `aas_timeline` / `_at` | ✅ | — |
-| US-3 Drill | `aas_wait_event_types*`, `aas_wait_events*`, `aas_queryids*` | 🟡 | add `peak_aas` + `p99_aas` to breakdown rows |
-| US-4 Leaf | `aas_wait_event_queries*` (new) + per-event `p99_aas` | ❌ | event-scoped query reader on raw samples; raw-retention signal |
-| US-5 Programmatic | whole family | 🟡 | explicit `source`/availability signal |
-| US-6 Capacity | `aas_timeline*` (long span) | 🟡 | optional per-bucket `p99_aas` at hour/day |
-| US-7 Before/after | `aas_compare` (new) | ❌ | new two-window comparison function |
+| US-2 Locate | `aas_series` | ✅ | — |
+| US-3 Drill | `aas_by(dimension, filters…)` | ✅ | — |
+| US-4 Leaf | `aas(event…)` + `aas_by('query_id', event…)` | ✅ | — |
+| US-5 Programmatic | whole family (`source` column, retention in `status()`) | ✅ | — |
+| US-6 Capacity | `aas_series` (long span) | ✅ | — |
+| US-7 Before/after | `aas_compare` | ✅ | — |
+| US-8 Load report | `health_report` | ✅ | — |
+
+Coverage above is **by design** ([AAS_API.md](AAS_API.md)); implementation
+tracks in the 2.0 branch.
 
 ## 6. Cross-cutting (non-functional) requirements
 
@@ -182,8 +202,8 @@ These apply to every story above.
 - **Unit consistency.** AAS is the primary unit (`avg_aas` / `peak_aas` / `p99_aas`); `backend_seconds` may appear as a secondary column. No third unit.
 - **Percentile definition.** `p99_aas` = the 99th percentile of per-sub-bucket AAS. The sub-bucket grain is a parameter (default `'1 minute'`). `peak_aas` is the max over the same sub-buckets.
 - **Raw-vs-rollup honesty (trust property).** Any reader auto-selects its source by window; when a requested drill or window cannot be answered (rollup can't tie event→query; window exceeds retention), it signals this explicitly rather than returning a silent empty/partial result.
-- **Time addressing convention.** Each reader ships as a trailing-window form `f(p_interval, …)` and an absolute-range form `f_at(p_start, p_end, …)`, consistent with the existing reader API. (The alternative of collapsing to `from`/`to` defaults was considered in #113 and not adopted, to stay consistent with all sibling readers.)
-- **Naming.** Function and column names use full domain terms — no abbreviations in user-facing names. The wait dimensions spell out `wait_event_type` and `wait_event`: the level-1 drill is `aas_wait_event_types` (renamed from #112's `aas_wait_types`), the level-2 drill is `aas_wait_events` with a `p_wait_event_type` filter (renamed from `p_wait_type`), and the leaf is `aas_wait_event_queries`. The query dimension keeps the `query_id` term (`aas_queryids`).
+- **Time addressing convention (2.0).** Every reader takes `p_from timestamptz default null` (→ `now() - '1 hour'`) and `p_to timestamptz default null` (→ `now()`). The v1.x `f(p_interval)` / `f_at(p_start, p_end)` twin convention is dropped — 2.0 breaks compat, and the single convention halves the surface. ([AAS_API.md §1](AAS_API.md))
+- **Naming.** Function and column names use full domain terms — no abbreviations in user-facing names. Drill dimensions and filters spell out `wait_event_type` / `wait_event` / `query_id` / `database`, as the `p_dimension` values and parameter names of `aas_by`. The on-CPU class is spelled `CPU*` — the asterisk marks "on CPU *or* uninstrumented wait" and must not be dropped.
 - **Dual audience.** Data functions are typed and presentation-free; ASCII bars/charts live only in dedicated rendering helpers.
 - **Privileges & degradation.** Every reader is callable by the `grant_reader` role and degrades gracefully without pg_stat_statements (show `query_id`, NULL `query_text`) and without pg_cron.
 - **Performance budgets.** Align with [SPEC.md §6](SPEC.md): rollup-backed reads target sub-100ms for a 1-day window; raw-backed leaf reads (US-4) stay within the budget for a 1-hour window on a 1-day partition.
