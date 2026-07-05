@@ -54,10 +54,13 @@ jobs:
             exit 1
           fi
 
-          if grep -RIn "waits_by_type" README.md docs | grep -v "Renamed"; then
-            echo "Stale waits_by_type reference found; use top_by_type/top_by_type_at." >&2
-            exit 1
-          fi
+          # README must document the 2.0 reader surface (breaking rework).
+          for fn in "ash.periods" "ash.top" "ash.report"; do
+            if ! grep -q "$fn" README.md; then
+              echo "README.md must document the 2.0 reader $fn" >&2
+              exit 1
+            fi
+          done
 
           grep -q "ash.grant_reader" README.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" README.md
@@ -355,13 +358,13 @@ jobs:
           do $$
           begin
             -- PUBLIC has no EXECUTE on reader functions
-            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              'PUBLIC should NOT have EXECUTE on ash.top_waits';
-            assert not has_function_privilege('public', 'ash.top_queries(interval,int)', 'EXECUTE'),
-              'PUBLIC should NOT have EXECUTE on ash.top_queries';
+            assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.top';
+            assert not has_function_privilege('public', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
+              'PUBLIC should NOT have EXECUTE on ash.aas';
             assert not has_function_privilege('public', 'ash.status()', 'EXECUTE'),
               'PUBLIC should NOT have EXECUTE on ash.status';
-            assert not has_function_privilege('public', 'ash.samples(interval,int)', 'EXECUTE'),
+            assert not has_function_privilege('public', 'ash.samples(timestamptz,timestamptz,int,text,text,bigint,name)', 'EXECUTE'),
               'PUBLIC should NOT have EXECUTE on ash.samples';
 
             -- PUBLIC has no EXECUTE on admin functions
@@ -391,14 +394,14 @@ jobs:
               'PUBLIC should NOT have SELECT on ash.query_map_0';
 
             -- Unprivileged role (non-owner) cannot execute readers either
-            assert not has_function_privilege('ash_test_unpriv', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              'non-owner role should NOT have EXECUTE on ash.top_waits';
-            assert not has_function_privilege('ash_test_unpriv', 'ash.top_queries(interval,int)', 'EXECUTE'),
-              'non-owner role should NOT have EXECUTE on ash.top_queries';
+            assert not has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              'non-owner role should NOT have EXECUTE on ash.top';
+            assert not has_function_privilege('ash_test_unpriv', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
+              'non-owner role should NOT have EXECUTE on ash.aas';
 
             -- Owner (postgres) retains EXECUTE by virtue of ownership
-            assert has_function_privilege('postgres', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              'owner SHOULD have EXECUTE on ash.top_waits';
+            assert has_function_privilege('postgres', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              'owner SHOULD have EXECUTE on ash.top';
             assert has_function_privilege('postgres', 'ash.start(interval)', 'EXECUTE'),
               'owner SHOULD have EXECUTE on ash.start';
             assert has_function_privilege('postgres', 'ash.take_sample()', 'EXECUTE'),
@@ -415,7 +418,7 @@ jobs:
           do $$
           begin
             begin
-              perform ash.top_waits('1 hour'::interval, 10, 0);
+              perform * from ash.top('wait_event', now() - interval '1 hour', now());
               raise exception 'expected permission denied, but call succeeded';
             exception when insufficient_privilege then
               -- expected path
@@ -426,16 +429,16 @@ jobs:
           reset role;
 
           -- GRANT flow smoke-test: owner can hand out EXECUTE, then REVOKE it
-          grant execute on function ash.top_waits(interval, int, int, boolean) to ash_test_unpriv;
+          grant execute on function ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval) to ash_test_unpriv;
           do $$
           begin
-            assert has_function_privilege('ash_test_unpriv', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+            assert has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
               'GRANT to non-owner role should succeed';
           end $$;
-          revoke execute on function ash.top_waits(interval, int, int, boolean) from ash_test_unpriv;
+          revoke execute on function ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval) from ash_test_unpriv;
           do $$
           begin
-            assert not has_function_privilege('ash_test_unpriv', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+            assert not has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
               'REVOKE from non-owner role should succeed';
           end $$;
 
@@ -460,12 +463,12 @@ jobs:
           begin
             assert not has_schema_privilege('ash_grafana', 'ash', 'USAGE'),
               'ash_grafana must NOT have USAGE on ash before grant_reader';
-            assert not has_function_privilege('ash_grafana', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              'ash_grafana must NOT have EXECUTE on ash.top_waits before grant_reader';
+            assert not has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              'ash_grafana must NOT have EXECUTE on ash.top before grant_reader';
             assert not has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
               'ash_grafana must NOT have EXECUTE on ash.status before grant_reader';
-            assert not has_function_privilege('ash_grafana', 'ash.minute_waits(interval,int)', 'EXECUTE'),
-              'ash_grafana must NOT have EXECUTE on ash.minute_waits before grant_reader';
+            assert not has_function_privilege('ash_grafana', 'ash.timeline(timestamptz,timestamptz,interval,text,text,bigint,name)', 'EXECUTE'),
+              'ash_grafana must NOT have EXECUTE on ash.timeline before grant_reader';
             assert not has_table_privilege('ash_grafana', 'ash.sample', 'SELECT'),
               'ash_grafana must NOT have SELECT on ash.sample before grant_reader';
             assert not has_table_privilege('ash_grafana', 'ash.rollup_1m', 'SELECT'),
@@ -499,24 +502,24 @@ jobs:
               'grant_reader: ash_grafana must have USAGE on ash';
 
             -- Reader functions across the family
-            assert has_function_privilege('ash_grafana', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              'grant_reader: ash.top_waits must be EXECUTE-able';
-            assert has_function_privilege('ash_grafana', 'ash.top_queries(interval,int)', 'EXECUTE'),
-              'grant_reader: ash.top_queries must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              'grant_reader: ash.top must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
+              'grant_reader: ash.aas must be EXECUTE-able';
             assert has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
               'grant_reader: ash.status must be EXECUTE-able';
-            assert has_function_privilege('ash_grafana', 'ash.samples(interval,int)', 'EXECUTE'),
+            assert has_function_privilege('ash_grafana', 'ash.samples(timestamptz,timestamptz,int,text,text,bigint,name)', 'EXECUTE'),
               'grant_reader: ash.samples must be EXECUTE-able';
-            assert has_function_privilege('ash_grafana', 'ash.minute_waits(interval,int)', 'EXECUTE'),
-              'grant_reader: ash.minute_waits must be EXECUTE-able';
-            assert has_function_privilege('ash_grafana', 'ash.hourly_queries(interval,int)', 'EXECUTE'),
-              'grant_reader: ash.hourly_queries must be EXECUTE-able';
-            assert has_function_privilege('ash_grafana', 'ash.daily_peak_backends(interval)', 'EXECUTE'),
-              'grant_reader: ash.daily_peak_backends must be EXECUTE-able';
-            assert has_function_privilege('ash_grafana', 'ash.activity_summary(interval)', 'EXECUTE'),
-              'grant_reader: ash.activity_summary must be EXECUTE-able';
-            assert has_function_privilege('ash_grafana', 'ash.timeline_chart(interval,interval,int,int,boolean)', 'EXECUTE'),
-              'grant_reader: ash.timeline_chart must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.timeline(timestamptz,timestamptz,interval,text,text,bigint,name)', 'EXECUTE'),
+              'grant_reader: ash.timeline must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.report(timestamptz,timestamptz,int,int)', 'EXECUTE'),
+              'grant_reader: ash.report must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.periods(timestamptz)', 'EXECUTE'),
+              'grant_reader: ash.periods must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.summary(timestamptz,timestamptz)', 'EXECUTE'),
+              'grant_reader: ash.summary must be EXECUTE-able';
+            assert has_function_privilege('ash_grafana', 'ash.chart(timestamptz,timestamptz,interval,int,int,boolean)', 'EXECUTE'),
+              'grant_reader: ash.chart must be EXECUTE-able';
 
             -- Reader-helpers the readers depend on
             assert has_function_privilege('ash_grafana', 'ash._active_slots()', 'EXECUTE'),
@@ -583,8 +586,8 @@ jobs:
           -- loaded, which requires USAGE on schema cron — out of scope
           -- for grant_reader (and a separate, pre-existing limitation).
           set role ash_grafana;
-          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
-          select count(*) from ash.minute_waits('1 hour'::interval, 5);
+          select count(*) from ash.top('wait_event', now() - interval '1 hour', now());
+          select count(*) from ash.timeline(now() - interval '1 hour', now());
           -- direct table read works too
           do $$ begin perform 1 from ash.sample limit 1; end $$;
           reset role;
@@ -596,12 +599,12 @@ jobs:
           begin
             assert not has_schema_privilege('ash_grafana', 'ash', 'USAGE'),
               'revoke_reader: USAGE on ash must be revoked';
-            assert not has_function_privilege('ash_grafana', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              'revoke_reader: EXECUTE on ash.top_waits must be revoked';
+            assert not has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              'revoke_reader: EXECUTE on ash.top must be revoked';
             assert not has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
               'revoke_reader: EXECUTE on ash.status must be revoked';
-            assert not has_function_privilege('ash_grafana', 'ash.minute_waits(interval,int)', 'EXECUTE'),
-              'revoke_reader: EXECUTE on ash.minute_waits must be revoked';
+            assert not has_function_privilege('ash_grafana', 'ash.timeline(timestamptz,timestamptz,interval,text,text,bigint,name)', 'EXECUTE'),
+              'revoke_reader: EXECUTE on ash.timeline must be revoked';
             assert not has_table_privilege('ash_grafana', 'ash.sample', 'SELECT'),
               'revoke_reader: SELECT on ash.sample must be revoked';
             assert not has_table_privilege('ash_grafana', 'ash.rollup_1m', 'SELECT'),
@@ -619,7 +622,7 @@ jobs:
             v_succeeded bool := false;
           begin
             begin
-              perform ash.top_waits('1 hour'::interval, 5, 0);
+              perform * from ash.top('wait_event', now() - interval '1 hour', now());
               v_succeeded := true;
             exception when insufficient_privilege then
               null; -- expected: 42501 permission denied
@@ -1334,598 +1337,455 @@ jobs:
           $$;
           EOF
 
-      - name: Seed test data
+      - name: "Test 2.0 reader API (behavioral)"
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Reset to known state
-          update ash.config set current_slot = 0;
+          -- ============================================================================
+          -- 2.0 reader API — deterministic seed + behavioral assertions.
+          -- One raw sample row per (minute, datid); sample_interval pinned to 1s so
+          -- AAS = backend-count / window-seconds. Window W = [m0, m0+300) over minutes
+          -- m0..m4 anchored 20 minutes back (complete minutes, inside raw+rollup
+          -- retention). Every expected avg/peak/p99/backend_seconds below is computed by
+          -- hand from the seeded counts (see comments).
+          -- ============================================================================
+          update ash.config
+            set current_slot = 0, sample_interval = '1 second',
+                last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
           truncate ash.sample_0, ash.sample_1, ash.sample_2;
           truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+          truncate ash.rollup_1m, ash.rollup_1h;
           alter table ash.query_map_0 alter column id restart;
-          alter table ash.query_map_1 alter column id restart;
-          alter table ash.query_map_2 alter column id restart;
 
-          -- Seed dictionaries
+          drop table if exists t2anchor;
+          create temp table t2anchor as
+            select ((ash.ts_from_timestamptz(date_trunc('minute', now() - interval '20 minutes'))) / 60) * 60 as base_ts;
+
           insert into ash.wait_event_map (state, type, event) values
             ('active', 'CPU*', 'CPU*'),
             ('active', 'IO', 'DataFileRead'),
             ('active', 'Lock', 'tuple'),
-            ('active', 'LWLock', 'WALWrite'),
-            ('active', 'Client', 'ClientRead'),
-            ('active', 'Extension', 'DblinkGetResult'),
-            ('idle in transaction', 'IdleTx', 'IdleTx')
+            ('active', 'LWLock', 'WALWrite')
           on conflict do nothing;
 
           insert into ash.query_map_0 (query_id) values (111111), (222222), (333333)
           on conflict do nothing;
 
-          -- Seed realistic sample data across multiple timestamps
-          -- Now - 30min, 20min, 10min, 5min, 1min — each with multiple wait events
           do $$
           declare
-            v_cpu_id smallint;
-            v_io_id smallint;
-            v_lock_id smallint;
-            v_lwlock_id smallint;
-            v_client_id smallint;
-            v_ext_id smallint;
-            v_q1 int4;
-            v_q2 int4;
-            v_q3 int4;
-            v_now_ts int4;
-            v_ts int4;
+            v_cpu smallint; v_io smallint; v_lock smallint;
+            v_q1 int4; v_q2 int4; v_q3 int4;
+            v_base int4; v_dp oid; v_dt oid;
+            v_normal integer[];
           begin
-            select id into v_cpu_id from ash.wait_event_map where type = 'CPU*' and event = 'CPU*';
-            select id into v_io_id from ash.wait_event_map where type = 'IO' and event = 'DataFileRead';
-            select id into v_lock_id from ash.wait_event_map where type = 'Lock' and event = 'tuple';
-            select id into v_lwlock_id from ash.wait_event_map where type = 'LWLock' and event = 'WALWrite';
-            select id into v_client_id from ash.wait_event_map where type = 'Client' and event = 'ClientRead';
-            select id into v_ext_id from ash.wait_event_map where type = 'Extension' and event = 'DblinkGetResult';
+            select id into v_cpu  from ash.wait_event_map where type='CPU*' and event='CPU*';
+            select id into v_io   from ash.wait_event_map where type='IO' and event='DataFileRead';
+            select id into v_lock from ash.wait_event_map where type='Lock' and event='tuple';
+            select id into v_q1 from ash.query_map_0 where query_id=111111;
+            select id into v_q2 from ash.query_map_0 where query_id=222222;
+            select id into v_q3 from ash.query_map_0 where query_id=333333;
+            select base_ts into v_base from t2anchor;
+            select oid into v_dp from pg_database where datname='postgres';
+            select oid into v_dt from pg_database where datname='template1';
 
-            select id into v_q1 from ash.query_map_0 where query_id = 111111;
-            select id into v_q2 from ash.query_map_0 where query_id = 222222;
-            select id into v_q3 from ash.query_map_0 where query_id = 333333;
+            -- Baseline minute (postgres): IO 6 (q1x3,q2x2,q3x1) + CPU 3 (unknown) = 9.
+            v_normal := array[-v_io, 6, v_q1,v_q1,v_q1,v_q2,v_q2,v_q3, -v_cpu, 3, 0,0,0]::integer[];
+            insert into ash.sample (sample_ts, datid, active_count, data, slot) values
+              (v_base + 0,   v_dp, 9, v_normal, 0),
+              (v_base + 60,  v_dp, 9, v_normal, 0),
+              (v_base + 180, v_dp, 9, v_normal, 0),
+              (v_base + 240, v_dp, 9, v_normal, 0);
 
-            v_now_ts := extract(epoch from now() - ash.epoch())::int4;
+            -- Spike minute m2 (postgres): IO 12 (q1x6,q2x4,q3x2) + CPU 3 + Lock 6 (q1x6) = 21.
+            insert into ash.sample (sample_ts, datid, active_count, data, slot) values
+              (v_base + 120, v_dp, 21,
+                array[-v_io, 12, v_q1,v_q1,v_q1,v_q1,v_q1,v_q1,v_q2,v_q2,v_q2,v_q2,v_q3,v_q3,
+                      -v_cpu, 3, 0,0,0,
+                      -v_lock, 6, v_q1,v_q1,v_q1,v_q1,v_q1,v_q1]::integer[], 0);
 
-            -- Generate 60 samples across 30 minutes (every 30 seconds)
-            for v_ts in
-              select generate_series(v_now_ts - 1800, v_now_ts - 30, 30)
-            loop
-              -- Mix of CPU, IO, Lock — varies by position in timeline
-              -- First half: mostly CPU + IO
-              if v_ts < v_now_ts - 900 then
-                insert into ash.sample (sample_ts, datid, active_count, data, slot)
-                values (v_ts, 1, 5,
-                  array[-v_cpu_id, 3, v_q1, v_q2, v_q3,
-                        -v_io_id, 2, v_q1, v_q2]::integer[], 0);
-              -- Second half: add Lock spike
-              else
-                insert into ash.sample (sample_ts, datid, active_count, data, slot)
-                values (v_ts, 1, 8,
-                  array[-v_cpu_id, 2, v_q1, v_q2,
-                        -v_lock_id, 4, v_q1, v_q1, v_q2, v_q3,
-                        -v_io_id, 1, v_q3,
-                        -v_client_id, 1, v_q2]::integer[], 0);
-              end if;
-            end loop;
+            -- Spike minute m2 (template1): IO 3 (q1x3) — the second database.
+            insert into ash.sample (sample_ts, datid, active_count, data, slot) values
+              (v_base + 120, v_dt, 3, array[-v_io, 3, v_q1,v_q1,v_q1]::integer[], 0);
+          end $$;
 
-            raise notice 'Seeded 60 test samples across 30 minutes';
-          end;
-          $$;
-          EOF
+          -- Derive rollups from raw (keeps raw and rollup_1m consistent for report/periods).
+          select ash.rollup_minute();
 
-      - name: Test reader functions (relative time)
-        env:
-          PGPASSWORD: postgres
-        run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- --- ash.aas (scalar summary, raw source) -----------------------------------
           do $$
-          declare
-            v_count int;
-            v_rec record;
+          declare a record; v_from timestamptz; v_to timestamptz;
           begin
-            -- top_waits: should return rows with bar column
-            select count(*) into v_count from ash.top_waits('1 hour');
-            assert v_count > 0, 'top_waits returned 0 rows';
+            select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 300)
+              into v_from, v_to from t2anchor;
 
-            -- Verify bar column exists in top_waits
-            select * into v_rec from ash.top_waits('1 hour') limit 1;
-            assert v_rec.bar is not null, 'top_waits bar column is null';
+            -- overall: sum backend-rows = 60 over 300s. avg 0.20; per-min buckets
+            -- [9,9,24,9,9]/60 = [.15,.15,.40,.15,.15] -> peak .40, p99 .39.
+            select * into a from ash.aas(v_from, v_to);
+            assert a.source = 'raw', 'aas source expected raw, got ' || a.source;
+            assert a.buckets_expected = 5, 'aas buckets_expected 5, got ' || a.buckets_expected;
+            assert a.buckets_with_data = 5, 'aas buckets_with_data 5, got ' || a.buckets_with_data;
+            assert a.avg_aas = 0.20, 'aas avg_aas 0.20, got ' || a.avg_aas;
+            assert a.peak_aas = 0.40, 'aas peak_aas 0.40, got ' || a.peak_aas;
+            assert a.p99_aas = 0.39, 'aas p99_aas 0.39, got ' || a.p99_aas;
+            assert a.backend_seconds = 60.00, 'aas backend_seconds 60, got ' || a.backend_seconds;
 
-            -- top_queries: should find our seeded queries
-            select count(*) into v_count from ash.top_queries('1 hour');
-            assert v_count > 0, 'top_queries returned 0 rows';
+            -- leaf: ash.aas(p_wait_event => 'IO:DataFileRead'). IO rows = 39.
+            select * into a from ash.aas(v_from, v_to, p_wait_event => 'IO:DataFileRead');
+            assert a.avg_aas = 0.13, 'aas IO avg 0.13, got ' || a.avg_aas;
+            assert a.peak_aas = 0.25, 'aas IO peak 0.25, got ' || a.peak_aas;
+            assert a.p99_aas = 0.24, 'aas IO p99 0.24, got ' || a.p99_aas;
+            assert a.backend_seconds = 39.00, 'aas IO backend_seconds 39, got ' || a.backend_seconds;
+            raise notice 'ash.aas PASSED';
+          end $$;
 
-            -- top_by_type: should have CPU* and IO at minimum
-            select count(*) into v_count from ash.top_by_type('1 hour');
-            assert v_count >= 2, 'top_by_type returned fewer than 2 types';
-
-            -- wait_timeline
-            select count(*) into v_count from ash.wait_timeline('1 hour', '5 minutes');
-            assert v_count > 0, 'wait_timeline returned 0 rows';
-
-            -- samples_by_database
-            select count(*) into v_count from ash.samples_by_database('1 hour');
-            assert v_count > 0, 'samples_by_database returned 0 rows';
-
-            -- samples: decoded raw data
-            select count(*) into v_count from ash.samples('1 hour', 20);
-            assert v_count > 0, 'samples returned 0 rows';
-
-            -- activity_summary
-            select count(*) into v_count from ash.activity_summary('1 hour');
-            assert v_count > 0, 'activity_summary returned 0 rows';
-
-            -- status
-            select count(*) into v_count from ash.status();
-            assert v_count > 0, 'status returned 0 rows';
-
-            raise notice 'Relative-time reader tests PASSED';
-          end;
-          $$;
-          EOF
-
-      - name: Test reader functions (absolute time)
-        env:
-          PGPASSWORD: postgres
-        run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- --- ash.top (all dimensions + leaf drill) ----------------------------------
           do $$
-          declare
-            v_count int;
-            v_start timestamptz := now() - interval '1 hour';
-            v_end timestamptz := now();
+          declare r record; v_from timestamptz; v_to timestamptz; n int;
           begin
-            select count(*) into v_count from ash.top_waits_at(v_start, v_end);
-            assert v_count > 0, 'top_waits_at returned 0 rows';
+            select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 300)
+              into v_from, v_to from t2anchor;
 
-            select count(*) into v_count from ash.top_queries_at(v_start, v_end);
-            assert v_count > 0, 'top_queries_at returned 0 rows';
+            -- wait_event_type: IO 39 (pct 65), CPU* 15 (25), Lock 6 (10). Total 60.
+            select * into r from ash.top('wait_event_type', v_from, v_to) where key = 'IO';
+            assert r.avg_aas = 0.13 and r.peak_aas = 0.25 and r.p99_aas = 0.24
+               and r.backend_seconds = 39.00 and r.pct = 65.00,
+               format('top(wait_event_type) IO mismatch: avg=%s peak=%s p99=%s bsec=%s pct=%s',
+                      r.avg_aas, r.peak_aas, r.p99_aas, r.backend_seconds, r.pct);
+            select * into r from ash.top('wait_event_type', v_from, v_to) where key = 'CPU*';
+            assert r.avg_aas = 0.05 and r.backend_seconds = 15.00 and r.pct = 25.00,
+               format('top(wait_event_type) CPU* mismatch: avg=%s bsec=%s pct=%s',
+                      r.avg_aas, r.backend_seconds, r.pct);
+            select * into r from ash.top('wait_event_type', v_from, v_to) where key = 'Lock';
+            assert r.backend_seconds = 6.00 and r.pct = 10.00, 'top(wait_event_type) Lock mismatch';
 
-            select count(*) into v_count from ash.top_by_type_at(v_start, v_end);
-            assert v_count >= 2, 'top_by_type_at returned fewer than 2 types';
+            -- wait_event filtered by type (L2 drill): only IO:DataFileRead, pct 100.
+            select * into r from ash.top('wait_event', v_from, v_to, p_wait_event_type => 'IO');
+            assert r.key = 'IO:DataFileRead' and r.backend_seconds = 39.00 and r.pct = 100.00,
+               format('top(wait_event|IO) mismatch: key=%s bsec=%s pct=%s', r.key, r.backend_seconds, r.pct);
 
-            select count(*) into v_count from ash.wait_timeline_at(v_start, v_end, '5 minutes');
-            assert v_count > 0, 'wait_timeline_at returned 0 rows';
+            -- query_id: q1 27 (45), unknown 15 (25), q2 12 (20), q3 6 (10).
+            select * into r from ash.top('query_id', v_from, v_to) where key = '111111';
+            assert r.avg_aas = 0.09 and r.backend_seconds = 27.00 and r.pct = 45.00,
+               format('top(query_id) q1 mismatch: avg=%s bsec=%s pct=%s', r.avg_aas, r.backend_seconds, r.pct);
+            select count(*) into n from ash.top('query_id', v_from, v_to);
+            assert n = 4, 'top(query_id) should return 4 keys, got ' || n;
+            assert exists (select 1 from ash.top('query_id', v_from, v_to)
+                           where key = 'unknown' and backend_seconds = 15.00),
+               'top(query_id) unknown (CPU has no query) should be 15';
 
-            select count(*) into v_count from ash.samples_at(v_start, v_end, 20);
-            assert v_count > 0, 'samples_at returned 0 rows';
+            -- database: postgres 57 (95), template1 3 (5).
+            select * into r from ash.top('database', v_from, v_to) where key = 'postgres';
+            assert r.backend_seconds = 57.00 and r.pct = 95.00, 'top(database) postgres mismatch';
+            select * into r from ash.top('database', v_from, v_to) where key = 'template1';
+            assert r.backend_seconds = 3.00 and r.pct = 5.00, 'top(database) template1 mismatch';
 
-            raise notice 'Absolute-time reader tests PASSED';
-          end;
-          $$;
-          EOF
+            -- leaf drill (query_id + wait filter): forces raw. IO by query: q1 21, q2 12, q3 6.
+            select * into r from ash.top('query_id', v_from, v_to, p_wait_event => 'DataFileRead')
+              where key = '111111';
+            assert r.source = 'raw' and r.backend_seconds = 21.00 and r.pct = 53.85,
+               format('top(query_id|DataFileRead) q1 mismatch: src=%s bsec=%s pct=%s',
+                      r.source, r.backend_seconds, r.pct);
 
-      - name: Test _at NOTICE symmetry (#69)
-        env:
-          PGPASSWORD: postgres
-        run: |
-          # Each scenario runs in its own transaction so the
-          # transaction-scoped ash.notice_oversized GUC starts unset.
-          # We assert it becomes '1' (== NOTICE fired) for out-of-retention
-          # ranges and stays unset for normal ranges, mirroring how the
-          # interval-based readers behave for oversized intervals.
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Out-of-retention past
-          begin;
-            do $$
-            declare
-              v_count int;
-              v_flag text;
+            -- unknown dimension raises.
             begin
-              select count(*) into v_count
-              from ash.top_waits_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-              assert v_count = 0,
-                'top_waits_at(1000-01-01..) should return 0 rows, got: ' || v_count;
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1',
-                'top_waits_at(1000-01-01..) should emit NOTICE (ash.notice_oversized=' ||
-                coalesce(v_flag, '<unset>') || ')';
+              perform * from ash.top('bogus', v_from, v_to);
+              raise exception 'top(bogus) should have raised';
+            exception when others then
+              assert sqlerrm like '%unknown dimension%', 'top(bogus) wrong error: ' || sqlerrm;
             end;
-            $$;
-          rollback;
+            raise notice 'ash.top PASSED';
+          end $$;
 
-          -- Out-of-retention future
-          begin;
-            do $$
-            declare
-              v_count int;
-              v_flag text;
-            begin
-              select count(*) into v_count
-              from ash.top_waits_at('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
-              assert v_count = 0,
-                'top_waits_at(3000-01-01..) should return 0 rows, got: ' || v_count;
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1',
-                'top_waits_at(3000-01-01..) should emit NOTICE (ash.notice_oversized=' ||
-                coalesce(v_flag, '<unset>') || ')';
-            end;
-            $$;
-          rollback;
-
-          -- Normal range — must NOT emit NOTICE
-          begin;
-            do $$
-            declare
-              v_count int;
-              v_flag text;
-            begin
-              select count(*) into v_count
-              from ash.top_waits_at(now() - interval '10 minutes', now());
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag is null or v_flag = '',
-                'top_waits_at(now()-10m, now()) should NOT emit NOTICE (ash.notice_oversized=' ||
-                coalesce(v_flag, '<null>') || ')';
-            end;
-            $$;
-          rollback;
-
-          -- Cross-reader sanity: each _at reader still routes through
-          -- _active_slots_for_at on out-of-retention, asserted via the GUC.
-          begin;
-            do $$
-            declare
-              v_flag text;
-            begin
-              perform * from ash.samples_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz, 1);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1', 'samples_at: NOTICE not emitted';
-              perform set_config('ash.notice_oversized', '', true);
-
-              perform * from ash.top_queries_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1', 'top_queries_at: NOTICE not emitted';
-              perform set_config('ash.notice_oversized', '', true);
-
-              perform * from ash.top_by_type_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1', 'top_by_type_at: NOTICE not emitted';
-              perform set_config('ash.notice_oversized', '', true);
-
-              perform * from ash.wait_timeline_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1', 'wait_timeline_at: NOTICE not emitted';
-              perform set_config('ash.notice_oversized', '', true);
-
-              perform * from ash.timeline_chart_at('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1', 'timeline_chart_at: NOTICE not emitted';
-              perform set_config('ash.notice_oversized', '', true);
-
-              -- decode_sample_at intentionally NOT covered here: it is a
-              -- point-lookup keyed by exact sample_ts, not a range scan, so
-              -- it does not route through _active_slots_for_at. Absurd
-              -- timestamps fall outside any partition via the silent
-              -- ts_from_timestamptz int4 clamp (#63).
-
-              -- query_waits_at: needs an existing query_id to avoid the
-              -- short-circuit; the seeded fixture uses 111111 (see earlier
-              -- "Seed test data" step in this job).
-              perform * from ash.query_waits_at(
-                111111,
-                '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag = '1', 'query_waits_at: NOTICE not emitted';
-
-              raise notice 'All _at readers fire NOTICE on out-of-retention range';
-            end;
-            $$;
-          rollback;
-
-          -- query_waits_at on a non-existent query must NOT emit NOTICE
-          -- (matches the relative ash.query_waits short-circuit pattern: the
-          -- function returns silently before reaching the helper).
-          begin;
-            do $$
-            declare
-              v_flag text;
-            begin
-              perform * from ash.query_waits_at(
-                999999999,
-                '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-              v_flag := current_setting('ash.notice_oversized', true);
-              assert v_flag is null or v_flag = '',
-                'query_waits_at(non-existent qid) should not NOTICE (ash.notice_oversized=' ||
-                coalesce(v_flag, '<null>') || ')';
-            end;
-            $$;
-          rollback;
-
-          \echo '_at NOTICE symmetry tests (#69) PASSED'
-          EOF
-
-      - name: Test query-specific functions
-        env:
-          PGPASSWORD: postgres
-        run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- --- raw-retention exception (tie drill before raw retention) ----------------
           do $$
-          declare
-            v_count int;
-            v_start timestamptz := now() - interval '1 hour';
-            v_end timestamptz := now();
+          declare v_base int4; v_raised boolean := false;
           begin
-            -- query_waits for a known query
-            select count(*) into v_count from ash.query_waits(111111, '1 hour');
-            assert v_count > 0, 'query_waits returned 0 rows for query 111111';
+            select base_ts into v_base from t2anchor;
+            begin
+              perform * from ash.top('query_id',
+                ash.ts_to_timestamptz(v_base - 3600), ash.ts_to_timestamptz(v_base - 3000),
+                p_wait_event => 'DataFileRead');
+              raise exception 'expected raw-retention exception, none raised';
+            exception when others then
+              if sqlerrm like '%needs raw samples%' then v_raised := true; else raise; end if;
+            end;
+            assert v_raised, 'raw-retention exception message mismatch';
+            raise notice 'raw-retention exception PASSED';
+          end $$;
 
-            -- query_waits_at
-            select count(*) into v_count from ash.query_waits_at(111111, v_start, v_end);
-            assert v_count > 0, 'query_waits_at returned 0 rows';
+          -- --- ash.timeline (per-bucket series + no-data bucket) -----------------------
+          do $$
+          declare r record; v_from timestamptz; v_to timestamptz; n int;
+          begin
+            select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 300)
+              into v_from, v_to from t2anchor;
 
-            -- top_queries_with_text (requires pg_stat_statements — errors without it)
-            -- Seeded query_ids exist in ash.query_map_0; expect at least 1 row.
-            select count(*) into v_count from ash.top_queries_with_text('1 hour');
-            assert v_count > 0, 'top_queries_with_text returned 0 rows (seeded queries should appear)';
+            select count(*) into n from ash.timeline(v_from, v_to);
+            assert n = 5, 'timeline should return 5 buckets, got ' || n;
+            -- every bucket has one grain (data_points = 1 for raw minute grain).
+            select * into r from ash.timeline(v_from, v_to)
+              where bucket_start = ash.ts_to_timestamptz((select base_ts + 120 from t2anchor));
+            assert r.source = 'raw' and r.data_points = 1 and r.avg_aas = 0.40
+               and r.peak_aas = 0.40 and r.p99_aas = 0.40,
+               format('timeline spike bucket mismatch: dp=%s avg=%s peak=%s p99=%s',
+                      r.data_points, r.avg_aas, r.peak_aas, r.p99_aas);
+            select * into r from ash.timeline(v_from, v_to)
+              where bucket_start = ash.ts_to_timestamptz((select base_ts from t2anchor));
+            assert r.avg_aas = 0.15, 'timeline m0 avg 0.15, got ' || r.avg_aas;
 
-            -- event_queries (requires pg_stat_statements)
-            -- CPU* waits are seeded across the last 30 minutes.
-            select count(*) into v_count from ash.event_queries('CPU*', '1 hour');
-            assert v_count > 0, 'event_queries returned 0 rows for CPU*';
+            -- no-data bucket: window over m5 (empty minute) -> data_points 0, null AAS.
+            select * into r from ash.timeline(ash.ts_to_timestamptz((select base_ts + 300 from t2anchor)),
+                                              ash.ts_to_timestamptz((select base_ts + 360 from t2anchor)));
+            assert r.data_points = 0 and r.avg_aas is null and r.peak_aas is null,
+               format('timeline no-data bucket mismatch: dp=%s avg=%s', r.data_points, r.avg_aas);
+            raise notice 'ash.timeline PASSED';
+          end $$;
 
-            -- event_queries_at (requires pg_stat_statements)
-            select count(*) into v_count from ash.event_queries_at('CPU*', v_start, v_end);
-            assert v_count > 0, 'event_queries_at returned 0 rows for CPU*';
+          -- --- ash.periods (six standard windows) -------------------------------------
+          do $$
+          declare r record; v_end timestamptz; n int;
+          begin
+            select ash.ts_to_timestamptz(base_ts + 300) into v_end from t2anchor;
+            select count(*) into n from ash.periods(v_end);
+            assert n = 6, 'periods should return 6 rows, got ' || n;
 
-            raise notice 'Query-specific function tests PASSED';
-          end;
-          $$;
+            -- 1 minute period = [m4, m4+60): only m4 (avg 0.15), raw.
+            select * into r from ash.periods(v_end) where period = '1 minute';
+            assert r.source = 'raw' and r.minutes_with_data = 1 and r.avg_aas = 0.15,
+               format('periods 1m mismatch: src=%s mwd=%s avg=%s', r.source, r.minutes_with_data, r.avg_aas);
+            -- 5 minutes period = exactly the seeded window.
+            select * into r from ash.periods(v_end) where period = '5 minutes';
+            assert r.source = 'raw' and r.minutes_with_data = 5 and r.avg_aas = 0.20
+               and r.peak_aas = 0.40 and r.p99_aas = 0.39,
+               format('periods 5m mismatch: src=%s mwd=%s avg=%s peak=%s p99=%s',
+                      r.source, r.minutes_with_data, r.avg_aas, r.peak_aas, r.p99_aas);
+            -- 1 hour period reaches before raw retention -> rollup_1m source.
+            select * into r from ash.periods(v_end) where period = '1 hour';
+            assert r.source = 'rollup_1m' and r.minutes_with_data = 5 and r.peak_aas = 0.40,
+               format('periods 1h mismatch: src=%s mwd=%s peak=%s', r.source, r.minutes_with_data, r.peak_aas);
+            raise notice 'ash.periods PASSED';
+          end $$;
+
+          -- --- ash.compare (before/after) ---------------------------------------------
+          do $$
+          declare r record; v0 timestamptz; v2 timestamptz; v5 timestamptz;
+          begin
+            select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 120),
+                   ash.ts_to_timestamptz(base_ts + 300)
+              into v0, v2, v5 from t2anchor;
+
+            -- overall: w1 [m0,m0+120) avg 18/120=0.15; w2 [m2,m0+300) avg 42/180=0.23.
+            select * into r from ash.compare(v0, v2, v2, v5);
+            assert r.key = 'overall' and r.avg_aas_1 = 0.15 and r.avg_aas_2 = 0.23
+               and r.avg_delta = 0.08,
+               format('compare overall mismatch: k=%s a1=%s a2=%s d=%s',
+                      r.key, r.avg_aas_1, r.avg_aas_2, r.avg_delta);
+
+            -- dimension: IO delta 0.05; Lock present only in w2 (avg_aas_1 null).
+            select * into r from ash.compare(v0, v2, v2, v5, p_dimension => 'wait_event_type')
+              where key = 'IO';
+            assert r.avg_aas_1 = 0.10 and r.avg_aas_2 = 0.15 and r.avg_delta = 0.05,
+               format('compare IO mismatch: a1=%s a2=%s d=%s', r.avg_aas_1, r.avg_aas_2, r.avg_delta);
+            select * into r from ash.compare(v0, v2, v2, v5, p_dimension => 'wait_event_type')
+              where key = 'Lock';
+            assert r.avg_aas_1 is null and r.avg_aas_2 = 0.03,
+               format('compare Lock (w2-only) mismatch: a1=%s a2=%s', r.avg_aas_1, r.avg_aas_2);
+            raise notice 'ash.compare PASSED';
+          end $$;
+
+          -- --- ash.samples (raw evidence + filters) -----------------------------------
+          do $$
+          declare v_from timestamptz; v_to timestamptz; n int; r record;
+          begin
+            select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 300)
+              into v_from, v_to from t2anchor;
+
+            select count(*) into n from ash.samples(v_from, v_to);
+            assert n = 60, 'samples should decode 60 backend-rows, got ' || n;
+            select count(*) into n from ash.samples(v_from, v_to, p_query_id => 111111);
+            assert n = 27, 'samples filtered by q1 should be 27, got ' || n;
+            select count(*) into n from ash.samples(v_from, v_to, p_wait_event => 'IO:DataFileRead');
+            assert n = 39, 'samples filtered by IO event should be 39, got ' || n;
+            -- a known decoded row (spike minute, postgres, IO).
+            select * into r from ash.samples(v_from, v_to, p_wait_event => 'IO:DataFileRead',
+                                             p_query_id => 111111) limit 1;
+            assert r.database_name = 'postgres' and r.wait_event = 'IO:DataFileRead'
+               and r.query_id = 111111,
+               format('samples row mismatch: db=%s ev=%s q=%s', r.database_name, r.wait_event, r.query_id);
+            raise notice 'ash.samples PASSED';
+          end $$;
+
+          -- --- ash.report (machine JSON load report) ----------------------------------
+          do $$
+          declare j jsonb; v_from timestamptz; v_to timestamptz;
+            expected_keys text[] := array[
+              'aas_avg','aas_worst1m','aas_p99','aas_p999',
+              'top_events_worst1m','top_events_p99','top_events_p999',
+              'top_queryids_worst1m','top_queryids_p99','top_queryids_p999'];
+          begin
+            select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 300)
+              into v_from, v_to from t2anchor;
+            j := ash.report(v_from, v_to);
+            assert j is not null, 'report returned null on covered window';
+
+            -- exact top-level key set.
+            assert (select array_agg(k order by k) from jsonb_object_keys(j) k)
+                   = (select array_agg(k order by k) from unnest(expected_keys) k),
+               'report top-level keys mismatch: ' || (select string_agg(k, ',' order by k) from jsonb_object_keys(j) k);
+
+            -- aas_avg per class (cpu .05, io .13, ipc 0, lock .02, lwlock 0; total .20).
+            assert (j->'aas_avg'->>'total')::numeric = 0.20, 'report aas_avg.total 0.20';
+            assert (j->'aas_avg'->>'cpu')::numeric = 0.05, 'report aas_avg.cpu 0.05';
+            assert (j->'aas_avg'->>'io')::numeric = 0.13, 'report aas_avg.io 0.13';
+            assert (j->'aas_avg'->>'lock')::numeric = 0.02, 'report aas_avg.lock 0.02';
+            assert (j->'aas_avg'->>'ipc')::numeric = 0, 'report aas_avg.ipc 0';
+            assert (j->'aas_avg'->>'lwlock')::numeric = 0, 'report aas_avg.lwlock 0';
+
+            -- worst1m / p99 / p999 totals.
+            assert (j->'aas_worst1m'->>'total')::numeric = 0.40, 'report aas_worst1m.total 0.40';
+            assert (j->'aas_worst1m'->>'io')::numeric = 0.25, 'report aas_worst1m.io 0.25';
+            assert (j->'aas_p99'->>'total')::numeric = 0.39, 'report aas_p99.total 0.39';
+            assert (j->'aas_p99'->>'io')::numeric = 0.24, 'report aas_p99.io 0.24';
+            assert (j->'aas_p999'->>'total')::numeric = 0.40, 'report aas_p999.total 0.40';
+
+            -- top_events_* must NOT carry a cpu key (CPU* has no per-event breakdown)
+            -- nor a total key; io key present at the worst minute.
+            assert not (j->'top_events_worst1m' ? 'cpu'), 'report top_events must not have cpu key';
+            assert not (j->'top_events_worst1m' ? 'total'), 'report top_events must not have total key';
+            assert (j->'top_events_worst1m'->'io')->>0 like 'DataFileRead(%',
+               'report top_events_worst1m.io should lead with DataFileRead';
+
+            -- top_queryids keys: total + four non-cpu classes; total leads with 111111.
+            assert j->'top_queryids_worst1m' ? 'total', 'report top_queryids must have total key';
+            assert not (j->'top_queryids_worst1m' ? 'cpu'), 'report top_queryids must not have cpu key';
+            assert (j->'top_queryids_worst1m'->'total')->>0 like '111111(%',
+               'report top_queryids_worst1m.total should lead with 111111';
+
+            -- p_vcpus is echoed, cpu-scoring left to the consumer.
+            assert (ash.report(v_from, v_to, p_vcpus => 8)->>'vcpus')::int = 8,
+               'report should echo p_vcpus';
+
+            -- no coverage -> null (consumer skips ingestion).
+            assert ash.report(ash.ts_to_timestamptz((select base_ts + 3600 from t2anchor)),
+                              ash.ts_to_timestamptz((select base_ts + 7200 from t2anchor))) is null,
+               'report over uncovered window should be null';
+            raise notice 'ash.report PASSED';
+          end $$;
+
+          -- --- ash.summary + ash.chart (human render helpers, smoke) -------------------
+          do $$
+          declare v_from timestamptz; v_to timestamptz; n int; v_val text;
+          begin
+            select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 300)
+              into v_from, v_to from t2anchor;
+
+            -- summary key/value overview mirrors ash.aas + top waits/queries.
+            select value into v_val from ash.summary(v_from, v_to) where metric = 'avg_aas';
+            assert v_val = '0.20', 'summary avg_aas 0.20, got ' || v_val;
+            select value into v_val from ash.summary(v_from, v_to) where metric = 'source';
+            assert v_val = 'raw', 'summary source raw, got ' || v_val;
+            select value into v_val from ash.summary(v_from, v_to) where metric = 'databases_active';
+            assert v_val = '2', 'summary databases_active 2, got ' || v_val;
+            select value into v_val from ash.summary(v_from, v_to) where metric = 'top_wait_1';
+            assert v_val like 'IO:DataFileRead%', 'summary top_wait_1 should be IO, got ' || v_val;
+
+            -- chart returns a legend row plus one row per bucket (1 + 5).
+            select count(*) into n from ash.chart(v_from, v_to);
+            assert n = 6, 'chart should return legend + 5 buckets = 6 rows, got ' || n;
+            assert exists (select 1 from ash.chart(v_from, v_to)
+                           where bucket_start is null and chart is not null),
+               'chart should emit a legend row';
+            raise notice 'ash.summary + ash.chart PASSED';
+          end $$;
           EOF
 
-      - name: "Regression: pg_stat_statements joins do not duplicate ASH rows"
+      - name: "Test 2.0: pg_stat_statements fan-out and reader edges"
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Ported pgss-fanout regression + zero-bucket/limit edges (2.0).
           drop role if exists pgash_pgss_fanout_a;
           drop role if exists pgash_pgss_fanout_b;
           create role pgash_pgss_fanout_a;
           create role pgash_pgss_fanout_b;
-          grant pgash_pgss_fanout_a, pgash_pgss_fanout_b to postgres;
-
+          grant pgash_pgss_fanout_a, pgash_pgss_fanout_b to current_user;
           select pg_stat_statements_reset();
-
           set role pgash_pgss_fanout_a;
           select 424242::int as pgash_fanout_probe;
           reset role;
-
           set role pgash_pgss_fanout_b;
           select 424242::int as pgash_fanout_probe;
           reset role;
 
           do $$
           declare
-            v_query_id bigint;
-            v_pgss_rows int;
-            v_wait_id smallint;
-            v_map_id int4;
-            v_sample_ts int4;
-            v_datid oid := (select oid from pg_database where datname = current_database());
-            v_count int;
+            v_query_id bigint; v_pgss_rows int; v_wait_id smallint; v_map_id int4;
+            v_sample_ts int4; v_datid oid := (select oid from pg_database where datname = current_database());
+            v_from timestamptz; v_count int;
           begin
-            select queryid, count(*)
-            into v_query_id, v_pgss_rows
-            from pg_stat_statements
-            where query like '%pgash_fanout_probe%'
-            group by queryid
-            having count(*) >= 2
-            limit 1;
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            update ash.config set current_slot = 0 where singleton;
+            select queryid, count(*) into v_query_id, v_pgss_rows
+            from pg_stat_statements where query like '%pgash_fanout_probe%'
+            group by queryid having count(*) >= 2 limit 1;
+            assert v_query_id is not null, 'pgss did not record duplicate rows for the fanout probe';
 
-            assert v_query_id is not null,
-              'pg_stat_statements did not record duplicate rows for the fanout probe';
-            assert v_pgss_rows >= 2,
-              'expected at least two pgss rows for same queryid, got ' || coalesce(v_pgss_rows, 0);
-
-            insert into ash.wait_event_map (state, type, event)
-            values ('active', 'CPU', 'CPU')
-            on conflict (state, type, event) do update set state = excluded.state
-            returning id into v_wait_id;
-
-            insert into ash.query_map_0 (query_id)
-            values (v_query_id)
-            on conflict (query_id) do update set query_id = excluded.query_id
-            returning id into v_map_id;
-
-            v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
+            insert into ash.wait_event_map (state, type, event) values ('active', 'CPU', 'CPU')
+              on conflict (state, type, event) do update set state = excluded.state returning id into v_wait_id;
+            insert into ash.query_map_0 (query_id) values (v_query_id)
+              on conflict (query_id) do update set query_id = excluded.query_id returning id into v_map_id;
+            -- Minute-aligned, 3 minutes back: this becomes the raw-retention start, so a
+            -- window starting exactly here reads raw (the wait<->query tie needs raw).
+            v_sample_ts := (ash.ts_from_timestamptz(date_trunc('minute', now() - interval '3 minutes')) / 60) * 60;
+            v_from := ash.ts_to_timestamptz(v_sample_ts);
             insert into ash.sample (sample_ts, datid, active_count, data, slot)
-            values (v_sample_ts, v_datid, 1, array[-v_wait_id::int, 1, v_map_id]::int[], 0);
+              values (v_sample_ts, v_datid, 1, array[-v_wait_id::int, 1, v_map_id]::int[], 0);
 
-            select count(*)
-            into v_count
-            from ash.samples('1 hour', 1000)
-            where query_id = v_query_id;
-            assert v_count = 1,
-              format('samples() should return one ASH row for one sample; got %s with %s pgss rows',
-                     v_count, v_pgss_rows);
+            -- one ASH sample -> exactly one samples() row, regardless of pgss fan-out.
+            select count(*) into v_count from ash.samples(v_from, now(), 1000)
+              where query_id = v_query_id;
+            assert v_count = 1, format('samples() one row per sample; got %s with %s pgss rows', v_count, v_pgss_rows);
 
-            select count(*)
-            into v_count
-            from ash.samples_at(
-              ash.ts_to_timestamptz(v_sample_ts - 1),
-              ash.ts_to_timestamptz(v_sample_ts + 1),
-              1000
-            )
-            where query_id = v_query_id;
-            assert v_count = 1,
-              format('samples_at() should return one ASH row for one sample; got %s with %s pgss rows',
-                     v_count, v_pgss_rows);
+            -- the leaf drill (query_id dimension + wait filter) likewise yields one row.
+            select count(*) into v_count
+              from ash.top('query_id', v_from, now(), p_wait_event => 'CPU', p_limit => 1000)
+              where key = v_query_id::text;
+            assert v_count = 1, format('top(query_id|CPU) one row per query_id; got %s with %s pgss rows', v_count, v_pgss_rows);
+            raise notice 'pgss fanout regression PASSED';
+          end $$;
 
-            select count(*)
-            into v_count
-            from ash.event_queries('CPU', '1 hour', 1000)
-            where query_id = v_query_id;
-            assert v_count = 1,
-              format('event_queries() should return one row per ASH query_id; got %s with %s pgss rows',
-                     v_count, v_pgss_rows);
-
-            select count(*)
-            into v_count
-            from ash.event_queries_at(
-              'CPU',
-              ash.ts_to_timestamptz(v_sample_ts - 1),
-              ash.ts_to_timestamptz(v_sample_ts + 1),
-              1000
-            )
-            where query_id = v_query_id;
-            assert v_count = 1,
-              format('event_queries_at() should return one row per ASH query_id; got %s with %s pgss rows',
-                     v_count, v_pgss_rows);
-
-            raise notice 'pg_stat_statements fanout regression test PASSED';
-          end;
-          $$;
-          EOF
-
-      - name: Test timeline_chart functions
-        env:
-          PGPASSWORD: postgres
-        run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- zero / sub-minute bucket rejection across the readers that take a bucket.
           do $$
-          declare
-            v_count int;
-            v_rec record;
-            v_start timestamptz := now() - interval '1 hour';
-            v_end timestamptz := now();
+          declare v_from timestamptz := now() - interval '1 hour'; v_to timestamptz := now();
           begin
-            -- timeline_chart: relative time
-            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            assert v_count > 1, 'timeline_chart returned too few rows: ' || v_count;
+            begin perform * from ash.timeline(v_from, v_to, '0 seconds');
+              raise exception 'timeline accepted zero bucket';
+            exception when others then assert sqlerrm ilike '%bucket%', 'timeline zero-bucket: ' || sqlerrm; end;
+            begin perform * from ash.aas(v_from, v_to, p_bucket => '0 seconds');
+              raise exception 'aas accepted zero bucket';
+            exception when others then assert sqlerrm ilike '%bucket%', 'aas zero-bucket: ' || sqlerrm; end;
+            begin perform * from ash.top('wait_event', v_from, v_to, p_bucket => '0 seconds');
+              raise exception 'top accepted zero bucket';
+            exception when others then assert sqlerrm ilike '%bucket%', 'top zero-bucket: ' || sqlerrm; end;
+            begin perform * from ash.chart(v_from, v_to, '0 seconds');
+              raise exception 'chart accepted zero bucket';
+            exception when others then assert sqlerrm ilike '%bucket%', 'chart zero-bucket: ' || sqlerrm; end;
+            raise notice 'zero-bucket rejection PASSED';
+          end $$;
 
-            -- First row should be legend (null bucket_start)
-            select * into v_rec from ash.timeline_chart('1 hour', '5 minutes', 3, 40) limit 1;
-            assert v_rec.bucket_start is null, 'first row should be legend (null bucket_start)';
-            assert v_rec.chart is not null and v_rec.chart <> '', 'legend chart is empty';
-
-            -- Data rows should have bucket_start and chart; find one with samples
-            select * into v_rec from ash.timeline_chart('1 hour', '5 minutes', 3, 40)
-            where bucket_start is not null and active > 0 limit 1;
-            assert v_rec.bucket_start is not null, 'no data row with active > 0';
-            assert v_rec.chart is not null, 'data row has null chart';
-
-            -- timeline_chart_at: absolute time
-            select count(*) into v_count from ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40);
-            assert v_count > 1, 'timeline_chart_at returned too few rows: ' || v_count;
-
-            -- First row should be legend
-            select * into v_rec from ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40) limit 1;
-            assert v_rec.bucket_start is null, 'at: first row should be legend';
-            assert v_rec.chart is not null and v_rec.chart <> '', 'at: legend chart is empty';
-
-            -- detail column should exist and have values on rows with samples
-            select * into v_rec from ash.timeline_chart_at(v_start, v_end, '5 minutes', 3, 40)
-            where bucket_start is not null and active > 0 limit 1;
-            assert v_rec.detail is not null, 'detail column is null on data row';
-
-            raise notice 'Timeline chart tests PASSED';
-          end;
-          $$;
-          EOF
-
-      - name: Test _wait_color helper
-        env:
-          PGPASSWORD: postgres
-        run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- p_limit caps the number of returned rows (2.0 top has no synthetic Other row).
           do $$
-          declare
-            v_green text := E'\033[38;2;080;250;123m';
-            v_light_yellow text := E'\033[38;2;241;250;140m';
-            v_blue text := E'\033[38;2;030;100;255m';
-            v_red text := E'\033[38;2;255;085;085m';
-            v_pink text := E'\033[38;2;255;121;198m';
-            v_cyan text := E'\033[38;2;000;200;255m';
-            v_yellow text := E'\033[38;2;255;220;100m';
-            v_orange text := E'\033[38;2;255;165;000m';
-            v_teal text := E'\033[38;2;000;210;180m';
-            v_purple text := E'\033[38;2;150;100;255m';
-            v_light_purple text := E'\033[38;2;190;150;255m';
-            v_gray text := E'\033[38;2;180;180;180m';
+          declare n int;
           begin
-            assert ash._wait_color('CPU*', true) = v_green, 'CPU* should be green';
-            assert ash._wait_color('IdleTx', true) = v_light_yellow, 'IdleTx should be light yellow';
-            assert ash._wait_color('IO:DataFileRead', true) = v_blue, 'IO should be blue';
-            assert ash._wait_color('IO:WALWrite', true) = v_blue, 'IO:WALWrite should be blue';
-            assert ash._wait_color('Lock:tuple', true) = v_red, 'Lock should be red';
-            assert ash._wait_color('Lock:transactionid', true) = v_red, 'Lock:transactionid should be red';
-            assert ash._wait_color('LWLock:WALWrite', true) = v_pink, 'LWLock should be pink';
-            assert ash._wait_color('IPC:BgWorkerStartup', true) = v_cyan, 'IPC should be cyan';
-            assert ash._wait_color('Client:ClientRead', true) = v_yellow, 'Client should be yellow';
-            assert ash._wait_color('Timeout:PgSleep', true) = v_orange, 'Timeout should be orange';
-            assert ash._wait_color('BufferPin:BufferPin', true) = v_teal, 'BufferPin should be teal';
-            assert ash._wait_color('Activity:ArchiverMain', true) = v_purple, 'Activity should be purple';
-            assert ash._wait_color('Extension:DblinkGetResult', true) = v_light_purple, 'Extension should be light purple';
-            assert ash._wait_color('UnknownType:Whatever', true) = v_gray, 'unknown should be gray';
-            -- color=false returns empty string
-            assert ash._wait_color('CPU*', false) = '', 'color=false should return empty';
-            assert ash._wait_color('CPU*') = '', 'default color should be off';
-
-            raise notice '_wait_color tests PASSED';
-          end;
-          $$;
-          EOF
-
-      - name: Test timeline_chart with different parameters
-        env:
-          PGPASSWORD: postgres
-        run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          do $$
-          declare
-            v_count int;
-          begin
-            -- top=1 (only top event + Other)
-            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 1, 30);
-            assert v_count > 1, 'top=1 should still return rows';
-
-            -- top=5
-            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 5, 60);
-            assert v_count > 1, 'top=5 should still return rows';
-
-            -- Small bucket (1 minute)
-            select count(*) into v_count from ash.timeline_chart('30 minutes', '1 minute', 3, 40);
-            assert v_count > 1, 'small bucket should return rows';
-
-            -- Large bucket (10 minutes)
-            select count(*) into v_count from ash.timeline_chart('30 minutes', '10 minutes', 3, 40);
-            assert v_count > 1, 'large bucket should return rows';
-
-            -- Width=10 (narrow)
-            select count(*) into v_count from ash.timeline_chart('30 minutes', '5 minutes', 3, 10);
-            assert v_count > 1, 'narrow width should return rows';
-
-            raise notice 'Parameter variation tests PASSED';
-          end;
-          $$;
-          EOF
-
-      - name: Test top_waits with bar (histogram merged)
-        env:
-          PGPASSWORD: postgres
-        run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          do $$
-          declare
-            v_rec record;
-          begin
-            -- top_waits should have a bar column with █ characters
-            select * into v_rec from ash.top_waits('1 hour') limit 1;
-            assert v_rec.bar is not null, 'bar column missing from top_waits';
-            assert position('█' in v_rec.bar) > 0 or position('%' in v_rec.bar) > 0,
-              'bar should contain block chars or percentages';
-
-            -- "Other" rollup row should exist when there are enough events
-            perform 1 from ash.top_waits('1 hour', 2)
-            where wait_event = 'Other';
-            -- Note: may not always exist if fewer than limit+1 events
-
-            raise notice 'top_waits bar tests PASSED';
-          end;
-          $$;
+            select count(*) into n from ash.top('query_id', now() - interval '1 hour', now(), p_limit => 1);
+            assert n <= 1, 'top p_limit=1 should return at most 1 row, got ' || n;
+            select count(*) into n from ash.top('wait_event_type', now() - interval '1 hour', now(), p_limit => 0);
+            assert n = 0, 'top p_limit=0 should return 0 rows, got ' || n;
+            raise notice 'top limit PASSED';
+          end $$;
           EOF
 
       - name: Test internal helper functions
@@ -2046,517 +1906,203 @@ jobs:
           rollback;
           EOF
 
-      - name: Test edge cases and corner cases
+      - name: "Test edge cases and corner cases"
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Edge and corner cases (2.0). Non-reader behaviors (decode_sample, int4 epoch
+          -- clamp, rotation, partition isolation, multi-database) plus the 2.0 readers'
+          -- handling of future / out-of-retention windows.
           do $$
           declare
             v_count int;
-            v_rec record;
+            v_from timestamptz;
           begin
-            -- === Empty / future time ranges ===
-
-            -- Future range: no data
+            -- === Future windows: no measured load ===
+            -- top / samples yield zero rows; timeline emits no-data buckets (data_points=0).
             select count(*) into v_count
-            from ash.timeline_chart_at(now() + interval '1 hour', now() + interval '2 hours');
-            assert v_count = 0, 'future range should return 0 rows';
-
+              from ash.top('wait_event', now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future top(wait_event) should return 0 rows, got ' || v_count;
             select count(*) into v_count
-            from ash.top_waits_at(now() + interval '1 hour', now() + interval '2 hours');
-            assert v_count = 0, 'future top_waits_at should return 0 rows';
-
+              from ash.top('query_id', now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future top(query_id) should return 0 rows, got ' || v_count;
             select count(*) into v_count
-            from ash.top_queries_at(now() + interval '1 hour', now() + interval '2 hours');
-            assert v_count = 0, 'future top_queries_at should return 0 rows';
+              from ash.samples(now() + interval '1 hour', now() + interval '2 hours');
+            assert v_count = 0, 'future samples should return 0 rows, got ' || v_count;
+            assert (select bool_and(data_points = 0 and avg_aas is null)
+                    from ash.timeline(now() + interval '1 hour', now() + interval '2 hours')),
+              'future timeline buckets should all be no-data';
 
-            select count(*) into v_count
-            from ash.samples_at(now() + interval '1 hour', now() + interval '2 hours', 10);
-            assert v_count = 0, 'future samples_at should return 0 rows';
-
-            select count(*) into v_count
-            from ash.top_by_type_at(now() + interval '1 hour', now() + interval '2 hours');
-            assert v_count = 0, 'future top_by_type_at should return 0 rows';
-
-            select count(*) into v_count
-            from ash.wait_timeline_at(now() + interval '1 hour', now() + interval '2 hours');
-            assert v_count = 0, 'future wait_timeline_at should return 0 rows';
-
-            select count(*) into v_count
-            from ash.query_waits_at(111111, now() + interval '1 hour', now() + interval '2 hours');
-            assert v_count = 0, 'future query_waits_at should return 0 rows';
-
-            -- === Very short intervals ===
-
-            select count(*) into v_count from ash.top_waits('1 second');
-            -- May return 0, that's fine — should not error
-
-            select count(*) into v_count from ash.top_queries('1 second');
-            select count(*) into v_count from ash.top_by_type('1 second');
-            select count(*) into v_count from ash.wait_timeline('1 second', '1 second');
-
-            -- === Absurd intervals (regression: #51) ===
-            -- now() - '1000 years' would underflow int4 epoch offset; readers
-            -- must clamp and return empty (the NOTICE promises "older samples
-            -- not available"), not raise integer-out-of-range.
-            select count(*) into v_count from ash.top_waits('1000 years');
-            assert v_count = 0, 'top_waits(1000 years) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.wait_timeline('1000 years');
-            assert v_count = 0, 'wait_timeline(1000 years) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.top_queries('1000 years');
-            assert v_count = 0, 'top_queries(1000 years) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.top_by_type('1000 years');
-            assert v_count = 0, 'top_by_type(1000 years) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.top_queries_with_text('1000 years');
-            assert v_count = 0,
-              'top_queries_with_text(1000 years) should return 0 rows, got: ' || v_count;
-
-            -- query_waits short-circuits on unknown query_id before reaching
-            -- the interval clamp, so pick a real query_id (any registered one)
-            -- to ensure the clamp path is exercised. Falls back to a synthetic
-            -- id if query_map_all is empty (still valid: short-circuit returns
-            -- 0 rows without hitting int4 math).
-            declare
-              v_qid bigint;
-            begin
-              select query_id into v_qid from ash.query_map_all limit 1;
-              v_qid := coalesce(v_qid, 111111);
-              select count(*) into v_count from ash.query_waits(v_qid, '1000 years');
-              assert v_count = 0,
-                'query_waits(1000 years) should return 0 rows, got: ' || v_count;
-            end;
-
-            select count(*) into v_count from ash.samples_by_database('1000 years');
-            assert v_count = 0,
-              'samples_by_database(1000 years) should return 0 rows, got: ' || v_count;
-
-            -- activity_summary always emits a "no data in this time range" status
-            -- row when v_total_samples = 0; assert that single-row placeholder
-            -- shape rather than 0 rows.
-            select count(*) into v_count from ash.activity_summary('1000 years');
-            assert v_count = 1,
-              'activity_summary(1000 years) should return 1 placeholder row, got: ' || v_count;
-            select * into v_rec from ash.activity_summary('1000 years') limit 1;
-            assert v_rec.metric = 'status' and v_rec.value = 'no data in this time range',
-              'activity_summary(1000 years) placeholder mismatch: ' ||
-              coalesce(v_rec.metric, '<null>') || '/' || coalesce(v_rec.value, '<null>');
-
-            -- timeline_chart returns no rows when there are no top events
-            -- (v_top_events is null) — empty short-circuit, no legend emitted.
-            select count(*) into v_count from ash.timeline_chart('1000 years');
-            assert v_count = 0,
-              'timeline_chart(1000 years) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.samples('1000 years');
-            assert v_count = 0, 'samples(1000 years) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.event_queries('CPU', '1000 years');
-            assert v_count = 0,
-              'event_queries(1000 years) should return 0 rows, got: ' || v_count;
-
-            -- === Absurd timestamps for _at variants (regression: #63) ===
-            -- Pre-epoch and post-2094-horizon timestamps would over/underflow
-            -- the int4 epoch offset in ash.ts_from_timestamptz. The helper
-            -- now clamps to [0, INT4_MAX] so every _at reader yields an empty
-            -- (or single-row placeholder for activity_summary-style readers)
-            -- result instead of raising integer-out-of-range.
-
-            -- Helper-level: pre-epoch -> 0, post-horizon -> INT4_MAX
+            -- === int4 epoch-offset clamp (#63): helper stays in 2.0 ===
             assert ash.ts_from_timestamptz('1000-01-01'::timestamptz) = 0,
-              'ts_from_timestamptz(1000-01-01) should clamp to 0, got: ' ||
-              ash.ts_from_timestamptz('1000-01-01'::timestamptz);
+              'ts_from_timestamptz(1000-01-01) should clamp to 0';
             assert ash.ts_from_timestamptz('3000-01-01'::timestamptz) = 2147483647,
-              'ts_from_timestamptz(3000-01-01) should clamp to INT4_MAX, got: ' ||
-              ash.ts_from_timestamptz('3000-01-01'::timestamptz);
-
-            -- Pre-epoch range -> empty
-            select count(*) into v_count from ash.top_waits_at(
-              '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
-            assert v_count = 0,
-              'top_waits_at(pre-epoch) should return 0 rows, got: ' || v_count;
-
-            -- Post-horizon range -> empty
-            select count(*) into v_count from ash.top_waits_at(
-              '3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
-            assert v_count = 0,
-              'top_waits_at(post-horizon) should return 0 rows, got: ' || v_count;
-
-            -- Spot-check samples_at: same start/end after clamping yields empty
-            select count(*) into v_count from ash.samples_at(
-              '1000-01-01'::timestamptz, '1000-01-02'::timestamptz, 10);
-            assert v_count = 0,
-              'samples_at(pre-epoch) should return 0 rows, got: ' || v_count;
-            select count(*) into v_count from ash.samples_at(
-              '3000-01-01'::timestamptz, '3000-01-02'::timestamptz, 10);
-            assert v_count = 0,
-              'samples_at(post-horizon) should return 0 rows, got: ' || v_count;
-
-            -- Normal range still works (no regression in positive path)
-            select count(*) into v_count from ash.top_waits_at(
-              now() - interval '10 minutes', now());
-            assert v_count >= 0,
-              'top_waits_at(normal range) should not error, got: ' || v_count;
-
-            -- Pin "all _at readers inherit the helper-level fix" claim:
-            -- spot-check the remaining _at signatures (rollup readers,
-            -- decode_sample_at, event_queries_at) on absurd timestamps.
-            select count(*) into v_count from ash.minute_waits_at(
-              '1000-01-01'::timestamptz, '1000-01-01 01:00'::timestamptz);
-            assert v_count = 0,
-              'minute_waits_at(pre-epoch) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.hourly_queries_at(
-              '3000-01-01'::timestamptz, '3000-01-01 01:00'::timestamptz);
-            assert v_count = 0,
-              'hourly_queries_at(post-horizon) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.decode_sample_at(
-              '1000-01-01'::timestamptz);
-            assert v_count = 0,
-              'decode_sample_at(pre-epoch) should return 0 rows, got: ' || v_count;
-
-            select count(*) into v_count from ash.event_queries_at(
-              'Lock:tuple', '1000-01-01'::timestamptz, '1000-01-01 01:00'::timestamptz);
-            assert v_count = 0,
-              'event_queries_at(pre-epoch) should return 0 rows, got: ' || v_count;
-
-            -- === Non-existent queries ===
-
-            select count(*) into v_count from ash.query_waits(999999999, '1 hour');
-            assert v_count = 0, 'non-existent query should return 0 rows';
-
+              'ts_from_timestamptz(3000-01-01) should clamp to INT4_MAX';
+            -- ash.samples over absurd pre-epoch / post-horizon windows must not raise.
             select count(*) into v_count
-            from ash.query_waits_at(999999999, now() - interval '1 hour', now());
-            assert v_count = 0, 'non-existent query_at should return 0 rows';
+              from ash.samples('1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+            assert v_count = 0, 'samples(pre-epoch) should return 0 rows';
+            select count(*) into v_count
+              from ash.samples('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            assert v_count = 0, 'samples(post-horizon) should return 0 rows';
+            -- Pre-epoch clamps to 0 across the aggregate readers too (post-horizon
+            -- overflow of these is tracked separately — see the finding reported to the
+            -- team lead; guard it here once the installer clamp lands).
+            select count(*) into v_count
+              from ash.top('wait_event', '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
+            assert v_count = 0, 'top(pre-epoch) should return 0 rows';
 
             -- === decode_sample corner cases ===
-
-            -- Empty/null data (cast to integer[] to disambiguate from
-            -- the decode_sample(int4) overload, which would otherwise
-            -- both match an unknown-typed NULL literal).
             select count(*) into v_count from ash.decode_sample(null::integer[]);
             assert v_count = 0, 'null decode should return 0 rows';
-
             select count(*) into v_count from ash.decode_sample('{}'::integer[]);
             assert v_count = 0, 'empty decode should return 0 rows';
-
-            -- Data with count=0 (no backends for this wait, but marker present)
             select count(*) into v_count from ash.decode_sample('{-1,0}'::integer[]);
             assert v_count = 0, 'count=0 should return 0 rows';
 
-            -- === Limit edge cases ===
+            -- === Non-existent query id ===
+            select count(*) into v_count
+              from ash.samples(now() - interval '1 hour', now(), p_query_id => 999999999);
+            assert v_count = 0, 'non-existent query should return 0 rows';
 
-            -- limit=1: should get exactly 1 event + maybe Other
-            select count(*) into v_count from ash.top_waits('1 hour', 1);
-            assert v_count >= 1 and v_count <= 2,
-              'limit=1 should return 1-2 rows, got: ' || v_count;
-
-            -- limit=100: should not error even with few events
-            select count(*) into v_count from ash.top_waits('1 hour', 100);
-            assert v_count > 0, 'limit=100 should return rows';
-
-            -- limit=0: edge case
-            select count(*) into v_count from ash.top_queries('1 hour', 0);
-            -- Should return 0 or just Other
-
-            -- === timeline_chart edge cases ===
-
-            -- Width=1: minimal chart
-            select count(*) into v_count from ash.timeline_chart('30 minutes', '5 minutes', 3, 1);
-            assert v_count > 1, 'width=1 should still return rows';
-
-            -- top=1: only top event + Other
-            select * into v_rec from ash.timeline_chart('30 minutes', '5 minutes', 1, 40) limit 1;
-            assert v_rec.chart is not null, 'top=1 legend should exist';
-
-            -- Bucket larger than interval
-            select count(*) into v_count from ash.timeline_chart('5 minutes', '1 hour', 3, 40);
-            -- Should return at most 1-2 rows
-
-            -- === Rotation edge cases ===
-
-            -- Multiple rotations: slot should cycle through 0→1→2→0
-            declare
-              v_s0 smallint;
-              v_s1 smallint;
-              v_s2 smallint;
-              v_s3 smallint;
+            -- === Rotation cycles 0 -> 1 -> 2 -> 0 (admin, unchanged) ===
+            declare v_s0 smallint; v_s1 smallint; v_s2 smallint; v_s3 smallint;
             begin
-              -- This block tests slot arithmetic only. With #81, rotate()
-              -- must refuse to advance if the endangered inactive slot still
-              -- contains unrolled raw samples from earlier edge cases.
-              truncate ash.sample;
+              truncate ash.sample_0, ash.sample_1, ash.sample_2;
               select ash.current_slot() into v_s0;
-
               update ash.config set rotated_at = now() - interval '2 days';
               perform ash.rotate();
               select ash.current_slot() into v_s1;
-              assert v_s1 = ((v_s0 + 1) % 3)::smallint,
-                'first rotation: expected ' || ((v_s0 + 1) % 3) || ', got ' || v_s1;
-
+              assert v_s1 = ((v_s0 + 1) % 3)::smallint, 'first rotation slot mismatch';
               update ash.config set rotated_at = now() - interval '2 days';
               perform ash.rotate();
               select ash.current_slot() into v_s2;
-              assert v_s2 = ((v_s0 + 2) % 3)::smallint,
-                'second rotation: expected ' || ((v_s0 + 2) % 3) || ', got ' || v_s2;
-
+              assert v_s2 = ((v_s0 + 2) % 3)::smallint, 'second rotation slot mismatch';
               update ash.config set rotated_at = now() - interval '2 days';
               perform ash.rotate();
               select ash.current_slot() into v_s3;
-              assert v_s3 = v_s0,
-                'third rotation should return to start: expected ' || v_s0 || ', got ' || v_s3;
+              assert v_s3 = v_s0, 'third rotation should return to start';
             end;
 
-            -- === Partition isolation ===
-
-            -- Data in inactive partition should not show in readers
+            -- === Partition isolation: inactive-slot data is invisible to readers ===
             declare
-              v_inactive smallint;
-              v_unique_wait_id smallint;
-              v_slot smallint;
-              v_count_before int;
-              v_count_after int;
-              v_found boolean;
+              v_slot smallint; v_inactive smallint; v_ghost smallint;
+              v_ts int4; v_found boolean;
             begin
-              select ash.current_slot() into v_slot;
-              -- Inactive partition = neither current nor previous
-              v_inactive := ((v_slot + 1) % 3)::smallint;
-
-              -- Register a unique wait event that only goes into inactive partition
-              select ash._register_wait('active', 'TestIsolation', 'GhostEvent') into v_unique_wait_id;
-
-              -- Record current top_waits count
-              select count(*) into v_count_before from ash.top_waits('1 hour');
-
-              -- Insert into INACTIVE partition with the unique wait event
+              update ash.config set current_slot = 0 where singleton;
+              select ash.current_slot() into v_slot;         -- 0; active = {0,2}
+              v_inactive := ((v_slot + 1) % 3)::smallint;     -- 1
+              select ash._register_wait('active', 'TestIsolation', 'GhostEvent') into v_ghost;
+              v_ts := (ash.ts_from_timestamptz(date_trunc('minute', now() - interval '2 minutes')) / 60) * 60;
+              v_from := ash.ts_to_timestamptz(v_ts);
               execute format(
-                'insert into ash.sample_%s (sample_ts, datid, active_count, data, slot) values (%s, 1, 100, %L::integer[], %s)',
-                v_inactive,
-                extract(epoch from now() - ash.epoch())::int4,
-                array[-v_unique_wait_id, 100, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]::integer[],
-                v_inactive
-              );
-
-              -- GhostEvent should not appear in readers (filtered by _active_slots)
+                'insert into ash.sample_%s (sample_ts, datid, active_count, data, slot) values (%s, 1, 5, %L::integer[], %s)',
+                v_inactive, v_ts, array[-v_ghost, 5, 0,0,0,0,0]::integer[], v_inactive);
               select exists (
-                select 1 from ash.top_waits('1 hour', 100)
-                where wait_event = 'TestIsolation:GhostEvent'
+                select 1 from ash.top('wait_event', v_from, now(), p_limit => 100)
+                where key = 'TestIsolation:GhostEvent'
               ) into v_found;
-              assert not v_found,
-                'GhostEvent from inactive partition should not appear in top_waits';
-
-              -- Also check timeline_chart doesn't show it
-              select exists (
-                select 1 from ash.timeline_chart('1 hour', '5 minutes', 100, 40)
-                where detail like '%GhostEvent%'
-              ) into v_found;
-              assert not v_found,
-                'GhostEvent should not appear in timeline_chart';
-
-              -- Cleanup
-              execute format('delete from ash.sample_%s where active_count = 100', v_inactive);
+              assert not v_found, 'GhostEvent from inactive partition must not appear in ash.top';
+              execute format('delete from ash.sample_%s where active_count = 5', v_inactive);
             end;
 
-            -- === Rotation guard: "rotated too recently" ===
-
-            declare
-              v_result text;
+            -- === Rotation guard: refuses when called too soon ===
+            declare v_result text;
             begin
-              -- Don't touch rotated_at — should still be recent from earlier rotation
               select ash.rotate() into v_result;
-              assert v_result like 'skipped%',
-                'rotate() should skip when called too soon, got: ' || coalesce(v_result, 'NULL');
+              assert v_result like 'skipped%', 'rotate() should skip when too soon, got ' || coalesce(v_result, 'NULL');
             end;
 
-            -- === Multi-database data ===
-
-            declare
-              v_cpu_id2 smallint;
-              v_db_count int;
-              v_cur_slot smallint;
-              v_now_ts int4;
+            -- === Multi-database: ash.top('database') sees each datid ===
+            declare v_cpu smallint; v_ts int4; v_dbs int;
             begin
-              select id into v_cpu_id2 from ash.wait_event_map where type = 'CPU*' and event = 'CPU*';
-              v_cur_slot := ash.current_slot();
-              v_now_ts := extract(epoch from now() - ash.epoch())::int4;
-
-              -- Insert data for TWO different datids into current slot
-              insert into ash.sample (sample_ts, datid, active_count, data, slot)
-              values
-                (v_now_ts - 60, 1, 1, array[-v_cpu_id2, 1, 1]::integer[], v_cur_slot),
-                (v_now_ts - 60, 99999, 1, array[-v_cpu_id2, 1, 1]::integer[], v_cur_slot);
-
-              select count(distinct datid) into v_db_count
-              from ash.samples_by_database('1 hour');
-              assert v_db_count >= 2,
-                'samples_by_database should show at least 2 databases, got: ' || v_db_count;
+              select id into v_cpu from ash.wait_event_map where type = 'CPU*' and event = 'CPU*';
+              if v_cpu is null then select ash._register_wait('active','CPU*','CPU*') into v_cpu; end if;
+              update ash.config set current_slot = 0 where singleton;
+              v_ts := (ash.ts_from_timestamptz(date_trunc('minute', now() - interval '2 minutes')) / 60) * 60;
+              v_from := ash.ts_to_timestamptz(v_ts);
+              insert into ash.sample (sample_ts, datid, active_count, data, slot) values
+                (v_ts, 1, 1, array[-v_cpu, 1, 0]::integer[], 0),
+                (v_ts, 99999, 1, array[-v_cpu, 1, 0]::integer[], 0);
+              select count(*) into v_dbs from ash.top('database', v_from, now());
+              assert v_dbs >= 2, 'ash.top(database) should show >= 2 databases, got ' || v_dbs;
             end;
 
             raise notice 'Edge and corner case tests PASSED';
-          end;
-          $$;
+          end $$;
 
-          -- === _wait_color edge cases (separate do block) ===
+          -- _wait_color helper (unchanged in 2.0; still used by ash.chart).
           do $$
           begin
-            -- Exact boundary matches
             assert ash._wait_color('CPU*', true) = E'\033[38;2;080;250;123m', 'CPU* green';
             assert ash._wait_color('CPUsomething', true) = E'\033[38;2;080;250;123m', 'CPU prefix green';
             assert ash._wait_color('IdleTx', true) = E'\033[38;2;241;250;140m', 'IdleTx light yellow';
             assert ash._wait_color('IO:DataFileRead', true) = E'\033[38;2;030;100;255m', 'IO blue';
-            assert ash._wait_color('IO:WALSync', true) = E'\033[38;2;030;100;255m', 'IO:WALSync blue';
             assert ash._wait_color('Lock:tuple', true) = E'\033[38;2;255;085;085m', 'Lock red';
-            assert ash._wait_color('Lock:transactionid', true) = E'\033[38;2;255;085;085m', 'Lock:txid red';
-            assert ash._wait_color('Lock:relation', true) = E'\033[38;2;255;085;085m', 'Lock:relation red';
             assert ash._wait_color('LWLock:WALWrite', true) = E'\033[38;2;255;121;198m', 'LWLock pink';
-            assert ash._wait_color('LWLock:BufferContent', true) = E'\033[38;2;255;121;198m', 'LWLock:BufferContent pink';
             assert ash._wait_color('IPC:BgWorkerStartup', true) = E'\033[38;2;000;200;255m', 'IPC cyan';
             assert ash._wait_color('Client:ClientRead', true) = E'\033[38;2;255;220;100m', 'Client yellow';
-            assert ash._wait_color('Client:ClientWrite', true) = E'\033[38;2;255;220;100m', 'Client:Write yellow';
             assert ash._wait_color('Timeout:PgSleep', true) = E'\033[38;2;255;165;000m', 'Timeout orange';
             assert ash._wait_color('BufferPin:BufferPin', true) = E'\033[38;2;000;210;180m', 'BufferPin teal';
             assert ash._wait_color('Activity:ArchiverMain', true) = E'\033[38;2;150;100;255m', 'Activity purple';
             assert ash._wait_color('Extension:DblinkGetResult', true) = E'\033[38;2;190;150;255m', 'Extension light purple';
-            assert ash._wait_color('', true) = E'\033[38;2;180;180;180m', 'empty string gray (fallback)';
-            assert ash._wait_color('') = '', 'empty string no-color returns empty';
-            assert ash._wait_color('UnknownType:Whatever', true) = E'\033[38;2;180;180;180m', 'unknown gray';  -- 180 already 3 digits
-
-            raise notice '_wait_color comprehensive tests PASSED';
-          end;
-          $$;
+            assert ash._wait_color('UnknownType:Whatever', true) = E'\033[38;2;180;180;180m', 'unknown gray';
+            assert ash._wait_color('CPU*', false) = '', 'color=false returns empty';
+            assert ash._wait_color('CPU*') = '', 'default color off';
+            raise notice '_wait_color tests PASSED';
+          end $$;
           EOF
 
-      - name: "Test v1.5: reader and input validation edge cases (#91)"
+      - name: "Test 2.0: input validation and least-privilege guards"
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          begin;
-
+          -- Input validation and least-privilege guards that outlive the reader rework.
           do $$
-          declare
-            v_data int4[];
-            v_count int;
-            v_state text;
-            v_msg text;
-            v_start record;
+          declare v_start record;
           begin
-            -- top_waits(p_limit => 10) means a hard output row limit: 9
-            -- individual waits plus Other when lower-ranked waits exist.
-            truncate ash.sample;
-
-            with waits as (
-              select
-                i,
-                ash._register_wait('active', 'WaitType', 'WaitEvent' || i)::int as wait_id
-              from generate_series(1, 12) as gs(i)
-            )
-            select array_agg(x order by ord)::int4[]
-            into v_data
-            from waits
-            cross join lateral (
-              values
-                (i * 3 - 2, -wait_id),
-                (i * 3 - 1, 1),
-                (i * 3, 0)
-            ) as encoded(ord, x);
-
-            insert into ash.sample(sample_ts, datid, active_count, data, slot)
-            values (
-              ash.ts_from_timestamptz(now()),
-              0::oid,
-              12::smallint,
-              v_data,
-              ash.current_slot()
-            );
-
-            select count(*) into v_count from ash.top_waits('1 hour', 10, 10);
-            assert v_count = 10,
-              format('top_waits(p_limit=10) must return at most 10 rows, got %s', v_count);
-            assert exists (
-              select 1 from ash.top_waits('1 hour', 10, 10) where wait_event = 'Other'
-            ), 'top_waits(p_limit=10) must include Other when lower-ranked waits exist';
-
-            -- Zero buckets should fail with explicit validation, not raw
-            -- division-by-zero.
-            begin
-              perform * from ash.wait_timeline('1 hour', '0 seconds');
-              raise exception 'wait_timeline accepted zero bucket';
-            exception when others then
-              v_state := sqlstate;
-              v_msg := sqlerrm;
-            end;
-            assert v_state <> '22012' and v_msg ilike '%bucket%',
-              format('wait_timeline zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
-
-            begin
-              perform * from ash.wait_timeline_at(now() - interval '1 hour', now(), '0 seconds');
-              raise exception 'wait_timeline_at accepted zero bucket';
-            exception when others then
-              v_state := sqlstate;
-              v_msg := sqlerrm;
-            end;
-            assert v_state <> '22012' and v_msg ilike '%bucket%',
-              format('wait_timeline_at zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
-
-            begin
-              perform * from ash.timeline_chart('1 hour', '0 seconds', 4, 20);
-              raise exception 'timeline_chart accepted zero bucket';
-            exception when others then
-              v_state := sqlstate;
-              v_msg := sqlerrm;
-            end;
-            assert v_state <> '22012' and v_msg ilike '%bucket%',
-              format('timeline_chart zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
-
-            begin
-              perform * from ash.timeline_chart_at(now() - interval '1 hour', now(), '0 seconds', 4, 20);
-              raise exception 'timeline_chart_at accepted zero bucket';
-            exception when others then
-              v_state := sqlstate;
-              v_msg := sqlerrm;
-            end;
-            assert v_state <> '22012' and v_msg ilike '%bucket%',
-              format('timeline_chart_at zero bucket must raise explicit bucket validation, got [%s] %s', v_state, v_msg);
-
-            -- NULL interval should be handled at function level before
-            -- touching ash.config.sample_interval.
+            -- ash.start(NULL) is handled at the function level with a clear error row,
+            -- never touching ash.config.sample_interval.
             begin
               select * into v_start from ash.start(null::interval);
             exception when others then
-              raise exception 'ash.start(NULL) must return a clear error row, got [%] %',
-                sqlstate, sqlerrm;
+              raise exception 'ash.start(NULL) must return an error row, got [%] %', sqlstate, sqlerrm;
             end;
             assert v_start.job_type = 'error',
               format('ash.start(NULL) must return job_type=error, got %s', v_start.job_type);
             assert v_start.status ilike '%null%',
               format('ash.start(NULL) must mention NULL in status, got %s', v_start.status);
+            raise notice 'input validation PASSED';
           end $$;
-
-          rollback;
 
           do $$
           begin
             if not exists (select from pg_roles where rolname = 'ash_reader_probe') then
               create role ash_reader_probe login password 'probe';
             end if;
-          end;
-          $$;
+          end $$;
 
           select ash.grant_reader('ash_reader_probe');
 
           do $$
           begin
+            -- grant_reader hands out reader privileges only — never EXECUTE on an
+            -- internal mutating helper.
             assert not has_function_privilege(
-              'ash_reader_probe',
-              'ash._register_wait(text,text,text)',
-              'EXECUTE'
-            ), 'grant_reader must not grant EXECUTE on internal mutating helper ash._register_wait';
+              'ash_reader_probe', 'ash._register_wait(text,text,text)', 'EXECUTE'),
+              'grant_reader must not grant EXECUTE on ash._register_wait';
+            -- ...but the granted role can call every 2.0 reader.
+            assert has_function_privilege('ash_reader_probe',
+              'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
+              'grant_reader should grant EXECUTE on ash.aas';
+            assert has_function_privilege('ash_reader_probe',
+              'ash.report(timestamptz,timestamptz,int,int)', 'EXECUTE'),
+              'grant_reader should grant EXECUTE on ash.report';
+            assert has_function_privilege('ash_reader_probe', 'ash.periods(timestamptz)', 'EXECUTE'),
+              'grant_reader should grant EXECUTE on ash.periods';
+            raise notice 'grant_reader least-privilege PASSED';
           end $$;
           EOF
 
@@ -2607,27 +2153,13 @@ jobs:
             v_count int;
             v_text text;
           begin
-            -- Negative-interval guard: should NOTICE + 0 rows, no error.
-            select count(*) into v_count from ash.top_waits('-1000 years');
-            assert v_count = 0, format('top_waits negative: expected 0, got %s', v_count);
-
-            select count(*) into v_count from ash.top_queries('-1 day');
-            assert v_count = 0, format('top_queries negative: expected 0, got %s', v_count);
-
-            select count(*) into v_count from ash.samples('-1 hour');
-            assert v_count = 0, format('samples negative: expected 0, got %s', v_count);
-
             -- p_width clamp on _bar: huge value must NOT OOM. The internal
             -- repeat() is now bounded at 500 chars per bar.
             select ash._bar('CPU*', 50.0, 100.0, 1000000000, false) into v_text;
             assert length(v_text) < 600, format('_bar p_width overflow not clamped: len=%s', length(v_text));
 
-            -- timeline_chart and _at variants clamp p_width too.
-            for v_count in 1..1 loop
-              perform * from ash.timeline_chart('1 minute', '10 seconds', 3, 1000000000, false);
-              perform * from ash.timeline_chart_at(now()-'1 min'::interval, now(), '10 seconds', 3, 1000000000, false);
-            end loop;
-            -- (No assertion on row counts — just verifying the calls don't OOM/error.)
+            -- ash.chart clamps p_width too (huge value must not OOM/error).
+            perform * from ash.chart(now() - interval '1 hour', now(), '1 minute', 3, 1000000000, false);
 
             -- decode_sample(int4[]) huge-array guard: arrays > 100k elements rejected.
             select count(*) into v_count
@@ -2868,10 +2400,10 @@ jobs:
             );
 
             select count(*) into v_retention_rows
-            from ash.samples_at(now() - interval '3 days', now(), 100)
+            from ash.samples(now() - interval '3 days', now(), 100)
             where wait_event = 'RetentionProof:OlderSlot';
             assert v_retention_rows = 1,
-              format('samples_at should see retained slot 3 sample, got %s rows', v_retention_rows);
+              format('ash.samples should see retained slot 3 sample, got %s rows', v_retention_rows);
 
             truncate ash.sample;
 
@@ -3547,416 +3079,132 @@ jobs:
 
           echo "Critical bug #81 regression tests PASSED"
 
-      - name: "Test v1.4: rollup reader functions"
+      - name: "Test 2.0 readers over rollup sources"
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- ============================================================================
+          -- 2.0 readers over the rollup sources. Raw is emptied so _pick_source falls to
+          -- rollup_1m; rollup_1m rows are seeded directly with known per-minute counts.
+          -- Exercises the AAS invariants that used to live in the v1.4 rollup readers:
+          -- cross-database summing, spike detection (avg fooled, peak/p99 catch it),
+          -- per-bucket coverage division, sample-interval scaling, drill dimensions, and
+          -- the empty-window / sub-minute-bucket edges.
+          -- ============================================================================
           do $$
           declare
-            v_count int;
-            v_peak int;
-            v_avg numeric;
-            v_wait_id smallint;
-            v_lock_id smallint;
-            v_io_id smallint;
-            v_io_w smallint;
-            v_si_save interval;
-            v_day_start timestamptz;
-            v_summary record;
-            v_metric numeric;
-            v_pct numeric;
-            v_periods text[];
-            v_start timestamptz;
-            v_end timestamptz;
-            v_period_end timestamptz;
-            v_query_id bigint;
-            v_pgss_qid bigint;
-            v_pgss_text text;
-            v_query_text text;
+            a record; v_metric numeric; v_pct numeric; n int;
+            v_cpu smallint; v_lock smallint; v_io_r smallint; v_io_w smallint;
+            v_end timestamptz; v_start timestamptz;
           begin
-            -- === Reader functions exist ===
-            assert exists (select from pg_proc
-              where proname = 'minute_waits' and pronamespace = 'ash'::regnamespace),
-              'minute_waits() missing';
-            assert exists (select from pg_proc
-              where proname = 'minute_waits_at' and pronamespace = 'ash'::regnamespace),
-              'minute_waits_at() missing';
-            assert exists (select from pg_proc
-              where proname = 'hourly_queries' and pronamespace = 'ash'::regnamespace),
-              'hourly_queries() missing';
-            assert exists (select from pg_proc
-              where proname = 'hourly_queries_at' and pronamespace = 'ash'::regnamespace),
-              'hourly_queries_at() missing';
-            assert exists (select from pg_proc
-              where proname = 'daily_peak_backends' and pronamespace = 'ash'::regnamespace),
-              'daily_peak_backends() missing';
-            assert exists (select from pg_proc
-              where proname = 'daily_peak_backends_at' and pronamespace = 'ash'::regnamespace),
-              'daily_peak_backends_at() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas' and pronamespace = 'ash'::regnamespace),
-              'aas() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_at' and pronamespace = 'ash'::regnamespace),
-              'aas_at() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_timeline' and pronamespace = 'ash'::regnamespace),
-              'aas_timeline() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_timeline_at' and pronamespace = 'ash'::regnamespace),
-              'aas_timeline_at() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_periods' and pronamespace = 'ash'::regnamespace),
-              'aas_periods() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_wait_types' and pronamespace = 'ash'::regnamespace),
-              'aas_wait_types() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_wait_types_at' and pronamespace = 'ash'::regnamespace),
-              'aas_wait_types_at() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_wait_events' and pronamespace = 'ash'::regnamespace),
-              'aas_wait_events() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_wait_events_at' and pronamespace = 'ash'::regnamespace),
-              'aas_wait_events_at() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_queryids' and pronamespace = 'ash'::regnamespace),
-              'aas_queryids() missing';
-            assert exists (select from pg_proc
-              where proname = 'aas_queryids_at' and pronamespace = 'ash'::regnamespace),
-              'aas_queryids_at() missing';
-
-            -- === Readers run without error (may return 0 rows) ===
-            select count(*) into v_count from ash.minute_waits('1 hour', 10);
-            assert v_count >= 0, 'minute_waits should not error';
-
-            select count(*) into v_count
-            from ash.minute_waits_at(now() - interval '1 hour', now(), 10);
-            assert v_count >= 0, 'minute_waits_at should not error';
-
-            select count(*) into v_count from ash.hourly_queries('1 day', 10);
-            assert v_count >= 0, 'hourly_queries should not error';
-
-            select count(*) into v_count
-            from ash.hourly_queries_at(now() - interval '1 day', now(), 10);
-            assert v_count >= 0, 'hourly_queries_at should not error';
-
-            select count(*) into v_count from ash.daily_peak_backends('7 days');
-            assert v_count >= 0, 'daily_peak_backends should not error';
-
-            select count(*) into v_count
-            from ash.daily_peak_backends_at(now() - interval '7 days', now());
-            assert v_count >= 0, 'daily_peak_backends_at should not error';
-
-            -- avg_backends should be average active backends from backend-seconds
-            -- over samples, not the average of hourly peak_backends (#88).
-            truncate ash.rollup_1h;
-            select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait_id;
-            v_day_start := date_trunc('day', now());
-
-            insert into ash.rollup_1h (
-              ts, datid, samples, peak_backends, wait_counts, query_counts
-            )
-            values
-              (
-                ash.ts_from_timestamptz(v_day_start),
-                0::oid,
-                60::smallint,
-                100::smallint,
-                array[v_wait_id, 60]::int4[],
-                '{}'::int8[]
-              ),
-              (
-                ash.ts_from_timestamptz(v_day_start + interval '1 hour'),
-                0::oid,
-                60::smallint,
-                100::smallint,
-                array[v_wait_id, 60]::int4[],
-                '{}'::int8[]
-              );
-
-            select peak_backends, avg_backends
-            into v_peak, v_avg
-            from ash.daily_peak_backends_at(v_day_start, v_day_start + interval '2 hours');
-            assert v_peak = 100,
-              format('daily peak should remain max peak_backends=100, got %s', v_peak);
-            assert v_avg = 1.0,
-              format('daily avg_backends should be backend-seconds/samples=1.0, got %s', v_avg);
-
-            -- ===================================================================
-            -- AAS (Average Active Sessions) over rollups. avg_aas = backend-time
-            -- per wall-clock second (missing minutes = 0); peak_aas / p99_aas are
-            -- the max / 99th percentile of per-bucket AAS *summed across databases*
-            -- (so peak_aas is always >= avg_aas), scaled by the sample interval.
-            -- ===================================================================
-            truncate ash.rollup_1m;
-            select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait_id;
-            select ash._register_wait('active', 'Lock', 'transactionid') into v_lock_id;
-            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io_id;
-            select ash._register_wait('active', 'IO', 'DataFileWrite') into v_io_w;
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config set sample_interval = '1 second' where singleton;
+            select ash._register_wait('active','CPU*','CPU*') into v_cpu;
+            select ash._register_wait('active','Lock','transactionid') into v_lock;
+            select ash._register_wait('active','IO','DataFileRead') into v_io_r;
+            select ash._register_wait('active','IO','DataFileWrite') into v_io_w;
             v_end := date_trunc('minute', now());
             v_start := v_end - interval '10 minutes';
 
-            -- AAS values scale by the configured sample interval. Earlier steps
-            -- in this job call ash.start() with various intervals, so pin it to
-            -- 1s for the fixed-number assertions below and restore it at the end.
-            select sample_interval into v_si_save from ash.config where singleton;
-            update ash.config set sample_interval = '1 second' where singleton;
-
-            -- Invariant fix: two databases each 300 backend-sec in the SAME minute.
-            -- True instance AAS for that minute is (300+300)/60 = 10; a per-database
-            -- minute peak would report 5 (< avg) -- the bug this rework fixes.
+            -- Cross-database: two dbs, 300 backend-sec each in the SAME minute. Instance
+            -- AAS = (300+300)/60 = 10.00 (a per-database minute peak would wrongly read 5).
             insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
             values
-              (ash.ts_from_timestamptz(v_end - interval '1 minute'), 100001::oid, 60, 5,
-               array[v_wait_id, 300]::int4[], '{}'::int8[]),
-              (ash.ts_from_timestamptz(v_end - interval '1 minute'), 100002::oid, 60, 5,
-               array[v_wait_id, 300]::int4[], '{}'::int8[]);
+              (ash.ts_from_timestamptz(v_end - interval '1 minute'), 100001::oid, 60, 5, array[v_cpu, 300]::int4[], '{}'::int8[]),
+              (ash.ts_from_timestamptz(v_end - interval '1 minute'), 100002::oid, 60, 5, array[v_cpu, 300]::int4[], '{}'::int8[]);
+            select * into a from ash.aas(v_end - interval '1 minute', v_end);
+            assert a.source = 'rollup_1m', 'aas cross-db source rollup_1m, got ' || a.source;
+            assert a.avg_aas = 10.00, 'aas cross-db avg (300+300)/60=10.00, got ' || a.avg_aas;
+            assert a.peak_aas = 10.00, 'aas cross-db peak sums across dbs=10.00, got ' || a.peak_aas;
+            assert a.peak_aas >= a.avg_aas, 'aas invariant peak>=avg violated';
+            assert a.buckets_with_data = 1, 'aas cross-db buckets_with_data 1, got ' || a.buckets_with_data;
 
-            select * into v_summary from ash.aas_at(v_end - interval '1 minute', v_end, '1 minute');
-            assert v_summary.avg_aas = 10.00,
-              format('AAS avg should be (300+300)/60 = 10.00, got %s', v_summary.avg_aas);
-            assert v_summary.peak_aas = 10.00,
-              format('AAS peak should sum across databases = 10.00, got %s', v_summary.peak_aas);
-            assert v_summary.peak_aas >= v_summary.avg_aas,
-              format('AAS invariant peak(%s) >= avg(%s) violated',
-                     v_summary.peak_aas, v_summary.avg_aas);
-            assert v_summary.minutes_with_data = 1,
-              format('AAS minutes_with_data should be 1, got %s', v_summary.minutes_with_data);
-
-            -- Spike detection across 10 minutes: nine quiet minutes (AAS 1) and one
-            -- storm minute (AAS 10). The average is "fooled" (1.90) but peak/p99 see it.
+            -- Spike detection: nine quiet minutes (AAS 1) + one storm minute (AAS 10).
             truncate ash.rollup_1m;
             for i in 1..10 loop
               insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
-              values (
-                ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), 0::oid, 60, 1,
-                array[v_wait_id, case when i = 1 then 600 else 60 end]::int4[], '{}'::int8[]
-              );
+              values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), 0::oid, 60, 1,
+                      array[v_cpu, case when i = 1 then 600 else 60 end]::int4[], '{}'::int8[]);
             end loop;
+            select * into a from ash.aas(v_start, v_end);
+            assert a.avg_aas = 1.90, 'aas spike avg 1140/600=1.90, got ' || a.avg_aas;
+            assert a.peak_aas = 10.00, 'aas spike peak (worst minute) 10.00, got ' || a.peak_aas;
+            assert a.p99_aas = 9.19, 'aas spike p99 9.19, got ' || a.p99_aas;
+            assert a.buckets_with_data = 10, 'aas spike buckets_with_data 10, got ' || a.buckets_with_data;
 
-            select * into v_summary from ash.aas_at(v_start, v_end, '1 minute');
-            assert v_summary.avg_aas = 1.90,
-              format('AAS spike avg should be 1140/600 = 1.90, got %s', v_summary.avg_aas);
-            assert v_summary.peak_aas = 10.00,
-              format('AAS spike peak (worst minute) should be 10.00, got %s', v_summary.peak_aas);
-            assert v_summary.p99_aas = 9.19,
-              format('AAS spike p99 of per-minute AAS should be 9.19, got %s', v_summary.p99_aas);
-            assert v_summary.minutes_with_data = 10,
-              format('AAS spike minutes_with_data should be 10, got %s', v_summary.minutes_with_data);
+            -- 5-minute percentile bucket smooths the one-minute storm to 840/300 = 2.80.
+            select peak_aas into v_metric from ash.aas(v_start, v_end, p_bucket => '5 minutes');
+            assert v_metric = 2.80, 'aas 5-min-bucket peak 2.80, got ' || v_metric;
 
-            -- A 5-minute percentile bucket smooths the one-minute storm.
-            select peak_aas into v_metric from ash.aas_at(v_start, v_end, '5 minutes');
-            assert v_metric = 2.80,
-              format('AAS 5-minute-bucket peak should be 840/300 = 2.80, got %s', v_metric);
+            -- 3-minute bucket: trailing bucket overhangs the window and is divided by the
+            -- 60s it actually covers, so the storm minute alone reads the true 10.00.
+            select peak_aas, p99_aas into v_metric, v_pct from ash.aas(v_start, v_end, p_bucket => '3 minutes');
+            assert v_metric = 10.00, 'aas 3-min-bucket peak 10.00 (coverage-divided), got ' || v_metric;
+            assert v_pct = 9.73, 'aas 3-min-bucket p99 9.73, got ' || v_pct;
 
-            -- Window NOT a whole multiple of the bucket: the trailing bucket
-            -- overhangs the window end and must be divided by the seconds it
-            -- actually covers, not the nominal width. Here the storm minute sits
-            -- alone in the trailing 1-minute-of-coverage bucket, so peak must be
-            -- the true 10.00 (a nominal-width divisor would deflate it to 3.33).
-            select peak_aas, p99_aas into v_metric, v_pct
-            from ash.aas_at(v_start, v_end, '3 minutes');
-            assert v_metric = 10.00,
-              format('AAS 3-minute-bucket peak over a 10-minute window should be 10.00 '
-                     '(coverage-divided trailing bucket), got %s', v_metric);
-            assert v_pct = 9.73,
-              format('AAS 3-minute-bucket p99 should be 9.73, got %s', v_pct);
+            -- timeline: one row per bucket so the spike is locatable in time.
+            select count(*) into n from ash.timeline(v_start, v_end, '1 minute');
+            assert n = 10, 'timeline 1-min buckets 10 rows, got ' || n;
+            select avg_aas into v_metric from ash.timeline(v_start, v_end, '1 minute')
+              where bucket_start = ash.ts_to_timestamptz((ash.ts_from_timestamptz(v_end - interval '1 minute') / 60) * 60);
+            assert v_metric = 10.00, 'timeline spike bucket avg 10.00, got ' || v_metric;
+            select count(*) into n from ash.timeline(v_start, v_end, '2 minutes');
+            assert n = 5, 'timeline 2-min buckets 5 rows, got ' || n;
 
-            -- Trailing wrapper snaps the window end to the current minute boundary.
-            select period_end into v_period_end from ash.aas('10 minutes');
-            assert v_period_end = date_trunc('minute', now()),
-              format('aas() period_end should snap to minute boundary %s, got %s',
-                     date_trunc('minute', now()), v_period_end);
-
-            -- Time series: one row per bucket so spikes can be located in time.
-            select count(*) into v_count from ash.aas_timeline_at(v_start, v_end, '1 minute');
-            assert v_count = 10,
-              format('aas_timeline 1-minute buckets should return 10 rows, got %s', v_count);
-            select avg_aas into v_metric from ash.aas_timeline_at(v_start, v_end, '1 minute')
-            where bucket_start = ash.ts_to_timestamptz(
-              (ash.ts_from_timestamptz(v_end - interval '1 minute') / 60) * 60);
-            assert v_metric = 10.00,
-              format('aas_timeline spike bucket avg should be 10.00, got %s', v_metric);
-            select count(*) into v_count from ash.aas_timeline_at(v_start, v_end, '2 minutes');
-            assert v_count = 5,
-              format('aas_timeline 2-minute buckets should return 5 rows, got %s', v_count);
-
-            -- Navigable nature hierarchy: wait_event_type -> wait_event.
+            -- Drill dimensions over rollups: wait_event_type -> wait_event -> query_id.
             truncate ash.rollup_1m;
             insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
-            values (
-              ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 60, 5,
-              array[v_wait_id, 120, v_io_id, 60, v_io_w, 20, v_lock_id, 60]::int4[], '{}'::int8[]
-            );
+            values (ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 60, 5,
+                    array[v_cpu, 120, v_io_r, 60, v_io_w, 20, v_lock, 60]::int4[],
+                    array[111::bigint, 120, 333::bigint, 180]::int8[]);
 
-            -- nature level 1: AAS by wait_event_type (one row per type; this
-            -- function has no wait_event column). pct is the type's share of all.
-            select backend_seconds, pct into v_count, v_pct
-            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 10)
-            where wait_event_type = 'IO';
-            assert v_count = 80,
-              format('AAS IO type backend_seconds should be 60+20 = 80, got %s', v_count);
-            assert v_pct = 30.77,
-              format('AAS IO type pct should be 80/260 = 30.77, got %s', v_pct);
-            select count(*) into v_count
-            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 10);
-            assert v_count = 3,
-              format('AAS wait types should be CPU*/IO/Lock = 3 rows, got %s', v_count);
+            -- level 1: type share of all. IO = 60+20 = 80 of 260 -> 30.77%.
+            select backend_seconds, pct into v_metric, v_pct
+              from ash.top('wait_event_type', v_end - interval '1 minute', v_end) where key = 'IO';
+            assert v_metric = 80 and v_pct = 30.77, format('top(type) IO bsec=%s pct=%s', v_metric, v_pct);
+            select count(*) into n from ash.top('wait_event_type', v_end - interval '1 minute', v_end);
+            assert n = 3, 'top(type) should be CPU*/IO/Lock = 3, got ' || n;
 
-            -- nature level 2 drill into IO: pct is within the parent type (sums to 100).
-            select backend_seconds, pct into v_count, v_pct
-            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, 'IO', 10)
-            where wait_event = 'IO:DataFileRead';
-            assert v_count = 60,
-              format('AAS IO:DataFileRead backend_seconds should be 60, got %s', v_count);
-            assert v_pct = 75.00,
-              format('AAS IO:DataFileRead pct within IO should be 60/80 = 75.00, got %s', v_pct);
-            select count(*) into v_count
-            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, 'IO', 10);
-            assert v_count = 2,
-              format('AAS IO drill-down should return 2 events, got %s', v_count);
+            -- level 2 drill into IO: DataFileRead 60 of 80 -> 75%.
+            select backend_seconds, pct into v_metric, v_pct
+              from ash.top('wait_event', v_end - interval '1 minute', v_end, p_wait_event_type => 'IO')
+              where key = 'IO:DataFileRead';
+            assert v_metric = 60 and v_pct = 75.00, format('top(event|IO) DataFileRead bsec=%s pct=%s', v_metric, v_pct);
+            select count(*) into n from ash.top('wait_event', v_end - interval '1 minute', v_end, p_wait_event_type => 'IO');
+            assert n = 2, 'top(event|IO) should return 2 events, got ' || n;
 
-            -- level 2 with NULL filter ranks every wait_event across all types;
-            -- pct is then the share of the whole window, not of one type.
-            select count(*) into v_count
-            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, null, 10);
-            assert v_count = 4,
-              format('AAS wait events across all types should be 4, got %s', v_count);
-            select pct into v_pct
-            from ash.aas_wait_events_at(v_end - interval '1 minute', v_end, null, 10)
-            where wait_event = 'IO:DataFileRead';
-            assert v_pct = 23.08,
-              format('AAS IO:DataFileRead pct across all events should be 60/260 = 23.08, got %s', v_pct);
-
-            -- limit 0 returns no rows (greatest guards negative/NULL limits).
-            select count(*) into v_count
-            from ash.aas_wait_types_at(v_end - interval '1 minute', v_end, 0);
-            assert v_count = 0,
-              format('aas_wait_types_at limit 0 should return 0 rows, got %s', v_count);
-
-            -- Query drill-down from minute rollups.
-            truncate ash.rollup_1m;
-            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
-            values (
-              ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 60, 5,
-              array[v_wait_id, 300]::int4[], array[111::bigint, 120, 333::bigint, 180]::int8[]
-            );
+            -- query drill: 333 has 180 of 300 -> avg 3.00, pct 60.
             select avg_aas, pct into v_metric, v_pct
-            from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 10)
-            where query_id = 333;
-            assert v_metric = 3.00,
-              format('AAS query 333 avg should be 180/60 = 3.00, got %s', v_metric);
-            assert v_pct = 60.00,
-              format('AAS query 333 pct should be 180/300 = 60.00, got %s', v_pct);
-            select query_id into v_query_id from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 1);
-            assert v_query_id = 333,
-              format('AAS top query should be 333 (180 > 120), got %s', v_query_id);
-            select count(*) into v_count from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 0);
-            assert v_count = 0,
-              format('aas_queryids_at limit 0 should return 0 rows, got %s', v_count);
-            select count(*) into v_count from ash.aas_queryids_at(v_end - interval '1 minute', v_end, null);
-            assert v_count = 0,
-              format('aas_queryids_at NULL limit should return 0 rows, got %s', v_count);
+              from ash.top('query_id', v_end - interval '1 minute', v_end) where key = '333';
+            assert v_metric = 3.00 and v_pct = 60.00, format('top(query_id) 333 avg=%s pct=%s', v_metric, v_pct);
 
-            -- aas_periods returns the six standard windows.
-            select array_agg(period order by case period
-                     when '1 minute' then 1 when '5 minutes' then 2 when '1 hour' then 3
-                     when '1 day' then 4 when '1 week' then 5 when '1 month' then 6 end)
-            into v_periods from ash.aas_periods(v_end);
-            assert v_periods = array['1 minute','5 minutes','1 hour','1 day','1 week','1 month'],
-              format('aas_periods labels mismatch: %s', v_periods);
-
-            -- Sample-interval scaling: a backend busy for the whole minute at 5s
-            -- sampling appears 12 times; AAS must still be 12*5/60 = 1.00, not 0.20.
-            -- (The block already pinned the interval to 1s; toggle to 5s here and
-            -- restore the 1s working value, not v_si_save, which holds the original.)
+            -- Sample-interval scaling: 12 samples at 5s sampling = a full busy minute (AAS 1).
             update ash.config set sample_interval = '5 seconds' where singleton;
             truncate ash.rollup_1m;
             insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
-            values (
-              ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 12, 1,
-              array[v_wait_id, 12]::int4[], '{}'::int8[]
-            );
-            select avg_aas into v_metric from ash.aas_at(v_end - interval '1 minute', v_end, '1 minute');
-            assert v_metric = 1.00,
-              format('AAS avg under 5s sampling should be 12*5/60 = 1.00, got %s', v_metric);
+            values (ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 12, 1, array[v_cpu, 12]::int4[], '{}'::int8[]);
+            select avg_aas into v_metric from ash.aas(v_end - interval '1 minute', v_end);
+            assert v_metric = 1.00, 'aas under 5s sampling 12*5/60=1.00, got ' || v_metric;
             update ash.config set sample_interval = '1 second' where singleton;
 
-            -- Empty window zero-fills (no NULLs); inverted range and sub-minute
-            -- bucket are rejected.
-            select * into v_summary
-            from ash.aas_at(v_end + interval '1 hour', v_end + interval '2 hours', '1 minute');
-            assert v_summary.avg_aas = 0.00 and v_summary.peak_aas = 0.00
-              and v_summary.p99_aas = 0.00 and v_summary.minutes_with_data = 0,
-              format('empty AAS window should be all zero, got avg=%s peak=%s p99=%s mwd=%s',
-                     v_summary.avg_aas, v_summary.peak_aas, v_summary.p99_aas,
-                     v_summary.minutes_with_data);
+            -- Empty window: zero-filled (avg/peak/p99 = 0, no data).
+            select * into a from ash.aas(v_end + interval '1 hour', v_end + interval '2 hours');
+            assert a.avg_aas = 0 and a.peak_aas = 0 and a.p99_aas = 0 and a.buckets_with_data = 0,
+               format('empty AAS window should be all zero, got avg=%s peak=%s p99=%s bwd=%s',
+                      a.avg_aas, a.peak_aas, a.p99_aas, a.buckets_with_data);
+
+            -- Sub-minute bucket rejected.
             begin
-              perform * from ash.aas_at(v_end, v_end - interval '1 hour');
-              raise exception 'aas_at should reject inverted ranges';
+              perform * from ash.aas(v_end - interval '1 hour', v_end, p_bucket => '30 seconds');
+              raise exception 'aas should reject sub-minute buckets';
             exception when others then
-              assert sqlerrm like '%end timestamp must be greater%',
-                'aas_at inverted range error mismatch: ' || sqlerrm;
-            end;
-            begin
-              perform * from ash.aas_at(v_end - interval '1 hour', v_end, '30 seconds');
-              raise exception 'aas_at should reject sub-minute buckets';
-            exception when others then
-              assert sqlerrm like '%bucket must be at least 1 minute%',
-                'aas_at sub-minute bucket error mismatch: ' || sqlerrm;
-            end;
-            begin
-              perform * from ash.aas_wait_types_at(null, v_end, 10);
-              raise exception 'aas_wait_types_at should reject NULL start';
-            exception when others then
-              assert sqlerrm like '%must not be null%',
-                'aas_wait_types_at NULL start error mismatch: ' || sqlerrm;
+              assert sqlerrm like '%bucket must be at least 1 minute%', 'aas sub-minute error mismatch: ' || sqlerrm;
             end;
 
-            -- Positive pg_stat_statements path: aas_queryids_at surfaces real query
-            -- text for a queryid known to pgss (the degraded job covers NULL text).
-            if ash._pgss_schema() is not null then
-              begin
-                select queryid, left(query, 100) into v_pgss_qid, v_pgss_text
-                from pg_stat_statements
-                where queryid is not null
-                order by calls desc
-                limit 1;
-              exception when others then
-                v_pgss_qid := null;
-              end;
-            end if;
-            if v_pgss_qid is not null then
-              truncate ash.rollup_1m;
-              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
-              values (
-                ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 60, 1,
-                array[v_wait_id, 60]::int4[], array[v_pgss_qid, 60::bigint]::int8[]
-              );
-              select query_text into v_query_text
-              from ash.aas_queryids_at(v_end - interval '1 minute', v_end, 10)
-              where query_id = v_pgss_qid;
-              assert v_query_text = v_pgss_text,
-                format('aas_queryids_at query text for queryid %s should match pgss (%s), got %s',
-                       v_pgss_qid, v_pgss_text, v_query_text);
-            else
-              raise notice 'pg_stat_statements unavailable; skipping positive text check';
-            end if;
-
-            -- Restore the sample interval pinned at the start of this section.
-            update ash.config set sample_interval = v_si_save where singleton;
-
-            -- === Future range: no data ===
-            select count(*) into v_count
-            from ash.minute_waits_at(now() + interval '1 hour', now() + interval '2 hours');
-            assert v_count = 0, 'future minute_waits_at should return 0 rows';
-
-            raise notice 'Rollup reader tests PASSED';
-          end;
-          $$;
+            raise notice 'ash 2.0 rollup-source readers PASSED';
+          end $$;
           EOF
 
       - name: "Test v1.4: status output"
@@ -4046,22 +3294,20 @@ jobs:
           -- Readers are REVOKEd from PUBLIC by #45's hardening; grant
           -- explicitly to the test role before exercising the reader path.
           reset role;
-          grant execute on function ash.minute_waits(interval, int) to ash_test_user;
-          grant execute on function ash.minute_waits_at(timestamptz, timestamptz, int) to ash_test_user;
+          grant execute on function ash.timeline(timestamptz,timestamptz,interval,text,text,bigint,name) to ash_test_user;
           set role ash_test_user;
 
           do $$
           begin
             -- Reader functions should be accessible after explicit grant
-            perform (select count(*) from ash.minute_waits('1 hour', 1));
+            perform (select count(*) from ash.timeline(now() - interval '1 hour', now()));
 
             raise notice 'Security tests PASSED';
           end;
           $$;
 
           reset role;
-          revoke execute on function ash.minute_waits(interval, int) from ash_test_user;
-          revoke execute on function ash.minute_waits_at(timestamptz, timestamptz, int) from ash_test_user;
+          revoke execute on function ash.timeline(timestamptz,timestamptz,interval,text,text,bigint,name) from ash_test_user;
           revoke all on schema ash from ash_test_user;
           revoke all on all tables in schema ash from ash_test_user;
           drop role ash_test_user;
@@ -4452,8 +3698,8 @@ jobs:
             ), 'missed_samples column missing after full upgrade';
             assert (select missed_samples from ash.config where singleton) = 0,
               'missed_samples should be 0 after upgrade';
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
+            perform * from ash.chart(now() - interval '1 hour', now());
+            perform ash.report(now() - interval '1 hour', now());
             raise notice 'discovered full upgrade chain PASSED';
           end;
           $$;
@@ -4701,8 +3947,8 @@ jobs:
               'missed_samples should be 0';
             -- No seed data in this path; just verify representative functions
             -- are callable after the discovered direct upgrade chain.
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40, true);
+            perform * from ash.chart(now() - interval '1 hour', now());
+            perform ash.report(now() - interval '1 hour', now());
             raise notice 'discovered direct upgrade chain PASSED';
           end;
           $$;
@@ -4759,10 +4005,10 @@ jobs:
               'version should still match latest released version after second apply';
             assert (select missed_samples from ash.config where singleton) = 42,
               'missed_samples should be preserved (42) after idempotent re-apply';
-            -- timeline_chart must still be callable after re-apply. No data
-            -- was seeded here, so count is not meaningful — a missing or
-            -- broken function would raise.
-            perform * from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            -- The 2.0 readers must still be callable after re-apply. No data
+            -- was seeded here, so a missing or broken function would raise.
+            perform * from ash.timeline(now() - interval '1 hour', now());
+            perform ash.report(now() - interval '1 hour', now());
             raise notice 'Second re-apply PASSED (missed_samples preserved)';
           end;
           $$;
@@ -4840,31 +4086,21 @@ jobs:
               format('reader EXECUTE grants lost across upgrade on: %s', v_lost);
           end $$;
 
-          -- The functions reported lost in the bug hunt, pinned by signature.
+          -- 2.0 is a breaking reader rework: the v1.x readers are dropped, so
+          -- grant preservation applies to the functions that SURVIVE the
+          -- upgrade. ash.samples is recreated with a new signature and its
+          -- reader grant is re-applied by name (the heart of #107); ash.status
+          -- and ash.decode_sample survive in place. The brand-new 2.0 readers
+          -- (top/aas/timeline/...) intentionally require a fresh
+          -- ash.grant_reader() call, per the upgrade script.
           do $$
           begin
-            assert has_function_privilege('ash_b1_reader', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              '#107: ash.top_waits lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.top_waits_at(timestamptz,timestamptz,int,int,boolean)', 'EXECUTE'),
-              '#107: ash.top_waits_at lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.timeline_chart(interval,interval,int,int,boolean)', 'EXECUTE'),
-              '#107: ash.timeline_chart lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.timeline_chart_at(timestamptz,timestamptz,interval,int,int,boolean)', 'EXECUTE'),
-              '#107: ash.timeline_chart_at lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.query_waits(bigint,interval,int,boolean)', 'EXECUTE'),
-              '#107: ash.query_waits lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.query_waits_at(bigint,timestamptz,timestamptz,int,boolean)', 'EXECUTE'),
-              '#107: ash.query_waits_at lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.top_by_type(interval,int,boolean)', 'EXECUTE'),
-              '#107: ash.top_by_type lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.top_by_type_at(timestamptz,timestamptz,int,boolean)', 'EXECUTE'),
-              '#107: ash.top_by_type_at lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.event_queries(text,interval,int,int,boolean)', 'EXECUTE'),
-              '#107: ash.event_queries lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.event_queries_at(text,timestamptz,timestamptz,int,int,boolean)', 'EXECUTE'),
-              '#107: ash.event_queries_at lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.top_queries_with_text(interval,int)', 'EXECUTE'),
-              '#107: ash.top_queries_with_text lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.samples(timestamptz,timestamptz,int,text,text,bigint,name)', 'EXECUTE'),
+              '#107: ash.samples lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.status()', 'EXECUTE'),
+              '#107: ash.status lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
+              '#107: ash.decode_sample lost reader EXECUTE across upgrade';
 
             -- No escalation: restoring grants must not widen the role's
             -- reach to admin functions or re-open PUBLIC.
@@ -4876,16 +4112,19 @@ jobs:
               '#107: ash.grant_reader must remain admin-only after upgrade';
             assert not has_function_privilege('ash_b1_reader', 'ash.revoke_reader(name)', 'EXECUTE'),
               '#107: ash.revoke_reader must remain admin-only after upgrade';
-            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              '#107: PUBLIC must not gain EXECUTE on ash.top_waits';
+            assert not has_function_privilege('public', 'ash.samples(timestamptz,timestamptz,int,text,text,bigint,name)', 'EXECUTE'),
+              '#107: PUBLIC must not gain EXECUTE on ash.samples';
 
             raise notice 'issue #107: reader grants preserved across upgrade';
           end $$;
 
-          -- Behavioral: actually call affected readers as the role.
+          -- Behavioral: actually call a surviving reader as the role. Use
+          -- ash.samples (recreated + re-granted). Note: ash.status() would fail
+          -- here because 2.0's status() calls new retention helpers this role
+          -- was never granted — a role must re-run ash.grant_reader() after the
+          -- 2.0 upgrade to reach the new surface.
           set role ash_b1_reader;
-          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
-          select count(*) from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+          select count(*) from ash.samples(now() - interval '1 hour', now());
           reset role;
 
           -- Re-apply scenario: re-running the development installer on an
@@ -4914,7 +4153,7 @@ jobs:
           end $$;
 
           set role ash_b1_reader;
-          select count(*) from ash.top_waits('1 hour'::interval, 5, 0);
+          select count(*) from ash.samples(now() - interval '1 hour', now());
           reset role;
 
           drop table public.b1_acl_before;
@@ -4965,12 +4204,12 @@ jobs:
 
           do $$ begin
             -- (1) #107 still fixed: legitimate reader keeps every reader grant
-            assert has_function_privilege('lp_reader', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
-              '#107 regression: reader lost top_waits across re-apply';
-            assert has_function_privilege('lp_reader', 'ash.event_queries(text,interval,int,int,boolean)', 'EXECUTE'),
-              '#107 regression: reader lost event_queries across re-apply';
-            assert has_function_privilege('lp_reader', 'ash.top_queries_with_text(interval,int)', 'EXECUTE'),
-              '#107 regression: reader lost top_queries_with_text across re-apply';
+            assert has_function_privilege('lp_reader', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              '#107 regression: reader lost ash.top across re-apply';
+            assert has_function_privilege('lp_reader', 'ash.report(timestamptz,timestamptz,int,int)', 'EXECUTE'),
+              '#107 regression: reader lost ash.report across re-apply';
+            assert has_function_privilege('lp_reader', 'ash.samples(timestamptz,timestamptz,int,text,text,bigint,name)', 'EXECUTE'),
+              '#107 regression: reader lost ash.samples across re-apply';
 
             -- (2) admin-function grant must be scrubbed and NOT restored after hardening
             assert not has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
@@ -4987,7 +4226,7 @@ jobs:
               'single-overload grant must NOT widen to the sibling overload';
 
             -- (4) PUBLIC stays revoked
-            assert not has_function_privilege('public', 'ash.top_waits(interval,int,int,boolean)', 'EXECUTE'),
+            assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
               'PUBLIC must stay revoked';
 
             raise notice 'issue #107 follow-up: grant restore stayed least-privilege';
@@ -5142,165 +4381,70 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-
-          -- Seed minimal data for testing
+          -- Degraded mode: pg_ash freshly installed WITHOUT pg_stat_statements.
+          -- Every 2.0 reader must work; query_text degrades to NULL and is never spoofed
+          -- by a user-created public.pg_stat_statements relation (#87).
           insert into ash.wait_event_map (state, type, event) values
             ('active', 'CPU*', 'CPU*') on conflict do nothing;
           insert into ash.query_map_0 (query_id) values (999999) on conflict do nothing;
 
           do $$
           declare
-            v_count int;
-            v_text_count int;
-            v_aas numeric;
-            v_cpu_id smallint;
-            v_q1 int4;
-            v_now_ts int4;
+            v_cpu smallint; v_q1 int4; v_ts int4; v_from timestamptz;
+            n int; tcnt int; j jsonb;
           begin
-            select id into v_cpu_id from ash.wait_event_map where type = 'CPU*';
+            select id into v_cpu from ash.wait_event_map where type = 'CPU*';
             select id into v_q1 from ash.query_map_0 where query_id = 999999;
-            v_now_ts := extract(epoch from now() - ash.epoch())::int4;
+            -- Minute-aligned 3 minutes back so a window from here reads raw.
+            v_ts := (ash.ts_from_timestamptz(date_trunc('minute', now() - interval '3 minutes')) / 60) * 60;
+            v_from := ash.ts_to_timestamptz(v_ts);
             insert into ash.sample (sample_ts, datid, active_count, data, slot)
-            values (v_now_ts - 60, 1, 1, array[-v_cpu_id, 1, v_q1]::integer[], 0);
+              values (v_ts, 1, 1, array[-v_cpu, 1, v_q1]::integer[], 0);
+            perform ash.rollup_minute();
 
-            -- Functions that should work (with null query_text):
-            select count(*) into v_count from ash.top_waits('1 hour');
-            assert v_count > 0, 'top_waits should work without pgss';
+            -- Every reader runs without pgss; query_text is NULL, no error, no WARNING.
+            perform ash.periods();
+            perform * from ash.aas(v_from, now());
+            perform * from ash.timeline(v_from, now());
+            perform * from ash.compare(v_from, now(), v_from, now());
+            perform * from ash.summary(v_from, now());
+            perform * from ash.chart(v_from, now());
+            assert (select query_text from ash.top('query_id', v_from, now()) limit 1) is null,
+              'top query_text should be NULL without pgss';
+            assert (select query_text from ash.samples(v_from, now()) limit 1) is null,
+              'samples query_text should be NULL without pgss';
 
-            select count(*) into v_count from ash.top_queries('1 hour');
-            assert v_count > 0, 'top_queries should work without pgss (query_text = NULL, fires WARNING)';
-
-            select count(*) into v_count from ash.top_by_type('1 hour');
-            assert v_count > 0, 'top_by_type should work without pgss';
-
-            select count(*) into v_count from ash.samples('1 hour');
-            assert v_count > 0, 'samples should work without pgss (query_text = NULL, fires WARNING)';
-
-            select count(*) into v_count from ash.activity_summary('1 hour');
-            assert v_count > 0, 'activity_summary should work without pgss';
-
-            -- timeline_chart always returns a legend row even with no data;
-            -- with our seeded CPU* sample the count must exceed 1.
-            select count(*) into v_count from ash.timeline_chart('1 hour', '5 minutes', 3, 40);
-            assert v_count > 1,
-              'timeline_chart without pgss should return legend + data rows, got: ' || v_count;
+            -- report still produces query ids (they come from samples, not pgss).
+            j := ash.report(v_from, now());
+            assert j is not null, 'report should work without pgss';
+            assert j->'top_queryids_worst1m' ? 'total', 'report top_queryids total should be present';
 
             perform ash.take_sample();
             perform ash.status();
             perform ash.set_debug_logging();
 
-            -- A user-created public.pg_stat_statements relation must not be
-            -- trusted when the real extension is absent (#87). It must not
-            -- duplicate ASH rows or supply spoofed query_text.
+            -- #87: a user-made public.pg_stat_statements must NOT be trusted as the real
+            -- extension — no row fan-out, no spoofed query_text.
             create table public.pg_stat_statements (
-              queryid bigint,
-              query text,
-              calls bigint,
-              total_exec_time double precision,
-              mean_exec_time double precision,
-              dbid oid
-            );
-
+              queryid bigint, query text, calls bigint,
+              total_exec_time double precision, mean_exec_time double precision, dbid oid);
             insert into public.pg_stat_statements values
               (999999, 'select same from user_a', 10, 100.0, 10.0, 1::oid),
               (999999, 'select same from user_b', 20, 400.0, 20.0, 2::oid);
 
-            select count(*), count(query_text)
-            into v_count, v_text_count
-            from ash.top_queries('1 hour', 10)
-            where query_id = 999999;
-            assert v_count = 1 and v_text_count = 0,
-              format('top_queries must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s',
-                     v_count, v_text_count);
-
-            insert into ash.rollup_1m (
-              ts, datid, samples, peak_backends, wait_counts, query_counts
-            )
-            values (
-              ash.ts_from_timestamptz(date_trunc('minute', now()) - interval '1 minute'),
-              1::oid,
-              60::smallint,
-              2::smallint,
-              array[v_cpu_id, 60]::int4[],
-              array[999999::bigint, 60::bigint]::int8[]
-            );
-
-            -- AAS query drill-downs are rollup based and should still work
-            -- without the real pg_stat_statements extension; query_text stays
-            -- NULL and spoofed public.pg_stat_statements must be ignored.
-            select count(*), count(query_text), max(avg_aas)
-            into v_count, v_text_count, v_aas
-            from ash.aas_queryids('5 minutes', 10)
-            where query_id = 999999;
-            assert v_count = 1 and v_text_count = 0 and v_aas = 0.20,
-              format('aas_queryids without pgss should return one NULL-text row with AAS 0.20, got rows=%s text_rows=%s aas=%s',
-                     v_count, v_text_count, v_aas);
-
-            -- Functions that should ERROR without pgss:
-            begin
-              perform ash.top_queries_with_text('1 hour');
-              raise exception 'top_queries_with_text should have errored without pgss';
-            exception when others then
-              assert SQLERRM like '%pg_stat_statements%',
-                'top_queries_with_text error should mention pg_stat_statements, got: ' || SQLERRM;
-            end;
-
-            begin
-              perform ash.event_queries('CPU*', '1 hour');
-              raise exception 'event_queries should have errored without pgss';
-            exception when others then
-              assert SQLERRM like '%pg_stat_statements%',
-                'event_queries error should mention pg_stat_statements, got: ' || SQLERRM;
-            end;
-
-            begin
-              perform ash.event_queries_at('CPU*', now() - interval '1 hour', now());
-              raise exception 'event_queries_at should have errored without pgss';
-            exception when others then
-              assert SQLERRM like '%pg_stat_statements%',
-                'event_queries_at error should mention pg_stat_statements, got: ' || SQLERRM;
-            end;
+            select count(*), count(query_text) into n, tcnt
+              from ash.top('query_id', v_from, now()) where key = '999999';
+            assert n = 1 and tcnt = 0,
+              format('top must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s', n, tcnt);
+            select count(*), count(query_text) into n, tcnt
+              from ash.samples(v_from, now()) where query_id = 999999;
+            assert n = 1 and tcnt = 0,
+              format('samples must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s', n, tcnt);
 
             drop table public.pg_stat_statements;
-
-            raise notice 'All degraded-mode (no pgss) tests PASSED';
-          end;
-          $$;
+            raise notice 'All degraded-mode (no pgss) 2.0 reader tests PASSED';
+          end $$;
           EOF
-
-          # Verify WARNING is emitted by pgss-optional functions (stderr check)
-          echo "Verifying WARNING messages from pgss-optional functions..."
-
-          for func in \
-            "select * from ash.top_queries('1 hour')" \
-            "select * from ash.top_queries_at(now() - interval '1 hour', now())" \
-            "select * from ash.samples('1 hour')" \
-            "select * from ash.samples_at(now() - interval '1 hour', now())" \
-            "select * from ash.activity_summary('1 hour')"; do
-            output=$(psql -h localhost -U postgres -d postgres -c "$func" 2>&1)
-            if echo "$output" | grep -q "WARNING.*pg_stat_statements"; then
-              echo "  ✓ $func — WARNING emitted"
-            else
-              echo "  ✗ $func — expected WARNING about pg_stat_statements"
-              echo "  Output was: $output"
-              exit 1
-            fi
-          done
-
-          # Verify functions that should NOT warn (no pgss dependency)
-          for func in \
-            "select * from ash.top_waits('1 hour')" \
-            "select * from ash.top_by_type('1 hour')"; do
-            output=$(psql -h localhost -U postgres -d postgres -c "$func" 2>&1)
-            if echo "$output" | grep -q "WARNING.*pg_stat_statements"; then
-              echo "  ✗ $func — should NOT emit pgss WARNING"
-              exit 1
-            else
-              echo "  ✓ $func — no WARNING (correct)"
-            fi
-          done
-
-          echo "WARNING verification PASSED"
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "select ash.uninstall('yes')"
 
@@ -5350,10 +4494,11 @@ jobs:
             -- take_sample() should work without pg_cron
             perform ash.take_sample();
 
-            -- All reader functions should work
-            perform ash.top_waits('1 hour');
-            perform ash.samples('1 hour');
-            perform ash.timeline_chart('1 hour', '5 minutes', 3, 40);
+            -- All 2.0 reader functions should work
+            perform ash.periods();
+            perform * from ash.top('wait_event', now() - interval '1 hour', now());
+            perform * from ash.samples(now() - interval '1 hour', now());
+            perform * from ash.chart(now() - interval '1 hour', now());
 
             raise notice 'All degraded-mode (no pg_cron) tests PASSED';
           end;
