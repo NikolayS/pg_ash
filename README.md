@@ -790,8 +790,15 @@ and 99th percentile of per-bucket AAS (so `peak_aas` is always ≥ `avg_aas`);
 scaled by the configured sample interval, so they stay correct under non-1s
 sampling. Trailing windows (a `null` `p_to`) end at the current minute boundary
 so they read complete minute rollups; `ash.timeline` reads `rollup_1m` for
-short spans (per-minute peaks) and `rollup_1h` for long spans with hour-or-
-larger buckets. A trailing partial bucket is averaged over the time it actually
+short spans and `rollup_1h` for long spans. `rollup_1h` preserves each hour's
+per-minute totals (the `minute_counts` column, filled by `ash.rollup_hour()`),
+so unfiltered and database-filtered long windows keep exact minute-grain
+`peak_aas`/`p99_aas`: the same spike reads the same peak whether the window is
+served by `rollup_1m` or `rollup_1h`, and a wider window never reports a
+smaller peak. Wait/query-filtered reads over `rollup_1h` remain hour-grain
+(per-event minute detail is not stored). Hours rolled up before 2.0 whose
+minutes no longer survive in `rollup_1m` fall back to their flat hour average —
+a lower bound, never an invented spike. A trailing partial bucket is averaged over the time it actually
 covers; pass an hour- or day-aligned `p_from` for wall-clock-aligned axis labels.
 
 Rollups use backend-seconds as the count unit (Oracle ASH-compatible). Each sample appearance = 1 backend-second at 1s sampling interval.

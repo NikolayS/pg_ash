@@ -3411,6 +3411,131 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test 2.0: minute-grain peak/p99 survive the rollup_1h seam"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- ============================================================================
+          -- rollup_1h.minute_counts preserves the true per-minute AAS distribution, so
+          -- a long (rollup_1h-backed) window reports the SAME minute-grain peak_aas /
+          -- p99_aas as a short (rollup_1m-backed) window containing the same spike.
+          -- Invariants: (a) monotonic peak — widening the window never shrinks the
+          -- peak; (b) seam consistency — identical peak/p99 from either source;
+          -- (c) p99_aas non-null over rollup_1h-backed windows. Also: rollup_hour()
+          -- computes minute_counts exactly, legacy NULL rows flat-fill to the hour
+          -- average (lower bound, never an invented spike), and wait-filtered reads
+          -- honestly stay hour-grain.
+          -- ============================================================================
+          do $$
+          declare
+            a record; r record;
+            v_cpu smallint; v_io smallint;
+            v_h timestamptz;
+            v_mc int4[];
+            n int; v_peak numeric; v_p99 numeric;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config set sample_interval = '1 second',
+              last_rollup_1m_ts = null, last_rollup_1h_ts = null where singleton;
+            select ash._register_wait('active','CPU*','CPU*') into v_cpu;
+            select ash._register_wait('active','IO','DataFileRead') into v_io;
+
+            v_h := date_trunc('hour', now()) - interval '1 hour';
+
+            -- spike hour: 59 quiet minutes (CPU 40 + IO 20 = 60 -> AAS 1.00) and one
+            -- storm minute at index 30 (CPU 618 + IO 60 = 678 -> AAS 11.30)
+            for i in 0..59 loop
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (ash.ts_from_timestamptz(v_h + (i || ' minutes')::interval), 0::oid, 60,
+                      case when i = 30 then 12 else 1 end,
+                      array[v_cpu, case when i = 30 then 618 else 40 end,
+                            v_io,  case when i = 30 then 60  else 20 end]::int4[], '{}'::int8[]);
+            end loop;
+            update ash.config set last_rollup_1h_ts = ash.ts_from_timestamptz(v_h) where singleton;
+            perform ash.rollup_hour();
+
+            -- rollup_hour() computes minute_counts exactly: 60 slots, storm at 31
+            select minute_counts into v_mc from ash.rollup_1h;
+            assert cardinality(v_mc) = 60, 'minute_counts 60 slots, got ' || cardinality(v_mc);
+            assert v_mc[31] = 678, 'storm slot 678, got ' || v_mc[31];
+            assert (select count(*) from unnest(v_mc) m where m = 60) = 59, '59 quiet slots of 60';
+
+            -- seam consistency: short window (rollup_1m) vs long window (rollup_1h)
+            -- containing the same spike report IDENTICAL minute-grain peak and p99
+            select * into a from ash.aas(v_h, v_h + interval '1 hour');
+            assert a.source = 'rollup_1m' and a.peak_aas = 11.30 and a.p99_aas = 5.22,
+              format('short window: src=%s peak=%s p99=%s (want rollup_1m 11.30 5.22)',
+                     a.source, a.peak_aas, a.p99_aas);
+            select * into a from ash.aas(v_h - interval '2 hours', v_h + interval '1 hour');
+            assert a.source = 'rollup_1h', 'long window source rollup_1h, got ' || a.source;
+            assert a.peak_aas = 11.30, 'seam: long-window peak must equal true minute peak 11.30, got ' || a.peak_aas;
+            assert a.p99_aas = 5.22, 'seam: long-window p99 must be minute-grain 5.22, got ' || a.p99_aas;
+            assert a.buckets_with_data = 60, 'long window true minute coverage 60, got ' || a.buckets_with_data;
+
+            -- monotonic peak: widening the window (1h -> 30d) never shrinks the peak
+            for r in
+              select w, (select peak_aas from ash.aas(v_h + interval '1 hour' - w,
+                                                      v_h + interval '1 hour')) as peak
+              from (values (interval '1 hour'), (interval '3 hours'), (interval '1 day'),
+                           (interval '7 days'), (interval '30 days')) t(w)
+            loop
+              assert r.peak = 11.30, format('monotonic peak: width %s reads %s, want 11.30', r.w, r.peak);
+            end loop;
+
+            -- timeline over rollup_1h: minute-grain peak, non-null p99, sub-hour buckets
+            select peak_aas, p99_aas into v_peak, v_p99
+            from ash.timeline(v_h - interval '2 hours', v_h + interval '1 hour', '1 hour')
+            where data_points > 0;
+            assert v_peak = 11.30 and v_p99 = 5.22,
+              format('timeline rollup_1h bucket peak=%s p99=%s (want 11.30 5.22)', v_peak, v_p99);
+            select count(*) into n
+            from ash.timeline(v_h - interval '2 hours', v_h + interval '1 hour', '10 minutes')
+            where data_points > 0;
+            assert n = 6, 'timeline 10-min buckets with data over rollup_1h = 6, got ' || n;
+
+            -- wait-filtered long window has no per-minute detail and honestly stays
+            -- hour-grain: peak = IO hour average (59*20+60)/3600 = 0.34, timeline p99 null
+            select * into a from ash.aas(v_h - interval '2 hours', v_h + interval '1 hour',
+                                         p_wait_event_type => 'IO');
+            assert a.source = 'rollup_1h' and a.peak_aas = 0.34,
+              format('filtered long window stays hour-grain: peak=%s (want 0.34)', a.peak_aas);
+            select p99_aas into v_p99
+            from ash.timeline(v_h - interval '2 hours', v_h + interval '1 hour', '1 hour',
+                              p_wait_event_type => 'IO')
+            where data_points > 0;
+            assert v_p99 is null, 'filtered rollup_1h timeline p99 stays null, got ' || coalesce(v_p99::text, 'null');
+
+            -- legacy pre-2.0 row (minute_counts null): flat-fills to its hour average
+            -- (AAS 1.00/min) — peak keeps the real spike, p99 non-null, no fake spike
+            insert into ash.rollup_1h (ts, datid, samples, peak_backends, wait_counts, query_counts, minute_counts)
+            values (ash.ts_from_timestamptz(v_h - interval '1 hour'), 0::oid, 3600, 9,
+                    array[v_cpu, 3600]::int4[], '{}'::int8[], null);
+            select * into a from ash.aas(v_h - interval '2 hours', v_h + interval '1 hour');
+            assert a.peak_aas = 11.30 and a.p99_aas = 1.00 and a.buckets_with_data = 120,
+              format('legacy mix: peak=%s p99=%s bwd=%s (want 11.30 1.00 120)',
+                     a.peak_aas, a.p99_aas, a.buckets_with_data);
+
+            -- periods(): the long windows (1w, 1mo) carry the true minute peak and a
+            -- non-null p99 (US-6 capacity planning works past rollup_1m retention)
+            for r in select * from ash.periods(v_h + interval '1 hour') loop
+              if r.period in ('1w', '1mo') then
+                assert r.peak_aas = 11.30 and r.p99_aas is not null,
+                  format('periods %s: peak=%s p99=%s (want 11.30, non-null)',
+                         r.period, r.peak_aas, r.p99_aas);
+              end if;
+            end loop;
+
+            -- cleanup for subsequent steps
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config set last_rollup_1m_ts = null, last_rollup_1h_ts = null
+              where singleton;
+
+            raise notice 'rollup_1h seam minute-grain peak/p99 PASSED';
+          end $$;
+          EOF
+
       - name: "Test v1.4: status output"
         env:
           PGPASSWORD: postgres

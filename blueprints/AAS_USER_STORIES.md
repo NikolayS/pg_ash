@@ -145,7 +145,7 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
   2. Per-bucket `peak_aas` (and ideally `p99_aas`) preserved at hour/day grain.
   3. Works to the limit of `rollup_1h` retention and signals that horizon.
 - **Primary API:** `ash.timeline` over long spans.
-- **Coverage:** ✅ Covered by design — auto `rollup_1h` selection, per-bucket `peak_aas`, per-bucket `p99_aas` where the source grain allows (null on `rollup_1h`-backed buckets).
+- **Coverage:** ✅ Covered — auto `rollup_1h` selection; `rollup_1h.minute_counts` preserves per-minute totals, so unfiltered/database-filtered long windows report exact minute-grain `peak_aas` and non-null `p99_aas` (seam-consistent with `rollup_1m`); `p99_aas` is null only for wait/query-filtered `rollup_1h`-backed buckets (hour grain).
 
 ### US-7 — Before/after comparison
 

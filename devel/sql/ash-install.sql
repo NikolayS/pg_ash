@@ -2292,8 +2292,44 @@ create table if not exists ash.rollup_1h (
   peak_backends   smallint not null, -- max per-database peak across the hour
   wait_counts     int4[] not null,
   query_counts    int8[] not null,
+  minute_counts   int4[],            -- 60-slot per-minute total activity counts:
+                                     -- element i = sum of wait_counts counts of the
+                                     -- rollup_1m row at ts + (i-1)*60; NULL element =
+                                     -- no rollup_1m row for that minute. Preserves the
+                                     -- true minute-grain AAS distribution so long
+                                     -- (rollup_1h-backed) windows report the exact
+                                     -- per-minute peak_aas / p99_aas. NULL column =
+                                     -- legacy pre-2.0 row (readers fall back to the
+                                     -- flat hour average for such hours).
   primary key (ts, datid)
 );
+
+-- Upgrade path: pre-2.0 installs created rollup_1h without minute_counts.
+alter table ash.rollup_1h
+  add column if not exists minute_counts int4[];
+
+-- Upgrade backfill: reconstruct minute_counts for legacy rollup_1h rows whose
+-- hour is still covered by rollup_1m (per-minute detail survives there for
+-- rollup_1m_retention_days). Older hours keep minute_counts NULL and readers
+-- fall back to the flat hour average — a lower bound, never a wrong spike.
+-- Idempotent: only touches rows where minute_counts is still NULL.
+update ash.rollup_1h h
+set minute_counts = (
+  select array_agg(mt.total order by gs.idx)
+  from generate_series(0, 59) gs(idx)
+  left join lateral (
+    select (select coalesce(sum(r.wait_counts[o + 1]), 0)::int4
+            from generate_subscripts(r.wait_counts, 1) o
+            where o % 2 = 1) as total
+    from ash.rollup_1m r
+    where r.datid = h.datid and r.ts = h.ts + gs.idx * 60
+  ) mt on true
+)
+where h.minute_counts is null
+  and exists (
+    select from ash.rollup_1m r2
+    where r2.datid = h.datid and r2.ts >= h.ts and r2.ts < h.ts + 3600
+  );
 
 -- Array concatenation aggregates: flat-concatenate arrays of varying lengths.
 -- PostgreSQL's built-in array_agg() on arrays requires equal dimensions and
@@ -2722,30 +2758,47 @@ begin
     v_hour_end := v_hour_start + 3600;
 
     insert into ash.rollup_1h (
-      ts, datid, samples, peak_backends, wait_counts, query_counts
+      ts, datid, samples, peak_backends, wait_counts, query_counts,
+      minute_counts
+    )
+    with m as (
+      select datid, ts, samples, peak_backends, wait_counts, query_counts,
+             -- per-minute total activity count = sum of the wait_counts counts
+             (select coalesce(sum(wait_counts[o + 1]), 0)::int4
+              from generate_subscripts(wait_counts, 1) o
+              where o % 2 = 1) as minute_total
+      from ash.rollup_1m
+      where ts >= v_hour_start and ts < v_hour_end
     )
     select
       v_hour_start,
-      datid,
-      sum(samples)::smallint,
-      max(peak_backends)::smallint,
+      m.datid,
+      sum(m.samples)::smallint,
+      max(m.peak_backends)::smallint,
       ash._merge_wait_counts(
-        ash._int4_array_cat_agg(wait_counts) filter (where wait_counts <> '{}')
+        ash._int4_array_cat_agg(m.wait_counts) filter (where m.wait_counts <> '{}')
       ),
       ash._truncate_pairs(
         ash._merge_query_counts(
-          ash._int8_array_cat_agg(query_counts) filter (where query_counts <> '{}')
+          ash._int8_array_cat_agg(m.query_counts) filter (where m.query_counts <> '{}')
         ),
         100  -- top 100 queries per hour
-      )
-    from ash.rollup_1m
-    where ts >= v_hour_start and ts < v_hour_end
-    group by datid
+      ),
+      -- 60-slot per-minute totals (NULL element = minute without a rollup_1m
+      -- row); lets rollup_1h-backed readers keep the exact minute-grain
+      -- peak_aas / p99_aas.
+      (select array_agg(mm.minute_total order by gs.idx)
+       from generate_series(0, 59) gs(idx)
+       left join m mm on mm.datid = m.datid
+                     and mm.ts = v_hour_start + gs.idx * 60)
+    from m
+    group by m.datid
     on conflict (ts, datid) do update set
       samples = excluded.samples,
       peak_backends = excluded.peak_backends,
       wait_counts = excluded.wait_counts,
-      query_counts = excluded.query_counts;
+      query_counts = excluded.query_counts,
+      minute_counts = excluded.minute_counts;
 
     get diagnostics v_count = row_count;
     v_total := v_total + v_count;
@@ -3034,7 +3087,9 @@ $$;
 -- when nothing matched) so callers can distinguish measured-zero from no-data.
 -- 'raw' supports the wait<->query tie (both a wait filter and p_query_id);
 -- the rollup sources cannot and must not be asked for it (caller routes such
--- requests to 'raw'). grain_secs is 60 (raw/rollup_1m) or 3600 (rollup_1h).
+-- requests to 'raw'). grain_secs is 60 (raw / rollup_1m / rollup_1h_minutes)
+-- or 3600 (rollup_1h). 'rollup_1h_minutes' is the internal minute-grain view
+-- of rollup_1h (unfiltered / database-filtered only) via minute_counts.
 create or replace function ash._grain_counts(
   p_start_ts int4,
   p_end_ts int4,
@@ -3108,6 +3163,44 @@ begin
     select m.mts, coalesce(mm.cnt, 0)::numeric, 60
     from mins m
     left join matched mm on mm.mts = m.mts;
+
+  elsif p_source = 'rollup_1h_minutes' then
+    -- Internal minute-grain view of rollup_1h via the preserved minute_counts
+    -- arrays, so peak_aas / p99_aas survive the rollup_1m -> rollup_1h seam
+    -- (same values a rollup_1m read of the window would produce). Totals only:
+    -- wait/query filters need the hour-grain arrays, so callers route filtered
+    -- reads to 'rollup_1h'. Legacy pre-2.0 rows (minute_counts is null) flatten
+    -- to their hour average per covered minute — a lower bound for the peak and
+    -- an "hour was flat" assumption for percentiles, never an invented spike.
+    if p_wait_event_type is not null or p_wait_event is not null
+       or p_query_id is not null then
+      raise exception 'ash._grain_counts: rollup_1h_minutes supports no wait/query filters';
+    end if;
+    return query
+    with hours as (
+      select r.ts, r.datid, r.minute_counts, r.wait_counts
+      from ash.rollup_1h r
+      where r.ts >= p_start_ts - 3540 and r.ts < p_end_ts
+        and (v_datid is null or r.datid = v_datid)
+    ),
+    mins as (
+      select (h.ts + (u.idx - 1) * 60)::int4 as mts, u.mc::numeric as cnt
+      from hours h,
+        unnest(h.minute_counts) with ordinality u(mc, idx)
+      where h.minute_counts is not null and u.mc is not null
+      union all
+      select (h.ts + gs.idx * 60)::int4,
+             (select coalesce(sum(h.wait_counts[o + 1]), 0)
+              from generate_subscripts(h.wait_counts, 1) o
+              where o % 2 = 1)::numeric / 60.0
+      from hours h,
+        generate_series(0, 59) gs(idx)
+      where h.minute_counts is null
+    )
+    select mins.mts, sum(mins.cnt)::numeric, 60
+    from mins
+    where mins.mts >= p_start_ts and mins.mts < p_end_ts
+    group by mins.mts;
 
   elsif p_source = 'rollup_1h' then
     if p_query_id is not null then
@@ -3222,6 +3315,7 @@ declare
   v_grain_secs int4;
   v_si numeric;
   v_source text;
+  v_read_source text;
   v_tie boolean;
   v_raw_start timestamptz;
 begin
@@ -3256,6 +3350,19 @@ begin
                                      ash.ts_to_timestamptz(v_end_ts));
     v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
   end if;
+  v_read_source := v_source;
+
+  -- rollup_1h preserves the per-minute totals (minute_counts), so the
+  -- unfiltered / database-only read keeps minute grain across the
+  -- rollup_1m -> rollup_1h seam: peak_aas / p99_aas stay per-minute and match
+  -- what a rollup_1m-backed window of the same span reports (wider window
+  -- never shrinks the peak). Wait/query filters still need the hour-grain
+  -- arrays. The reported source stays 'rollup_1h' — that is what was read.
+  if v_source = 'rollup_1h' and p_wait_event_type is null
+     and p_wait_event is null and p_query_id is null then
+    v_read_source := 'rollup_1h_minutes';
+    v_grain_secs := 60;
+  end if;
 
   -- peak/p99 bucket cannot be finer than the source grain
   v_bucket_secs := greatest(v_bucket_secs, v_grain_secs);
@@ -3269,7 +3376,7 @@ begin
   with grains as (
     select v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
            g.cnt
-    from ash._grain_counts(v_start_ts, v_end_ts, v_source,
+    from ash._grain_counts(v_start_ts, v_end_ts, v_read_source,
            p_wait_event_type, p_wait_event, p_query_id, p_database) g
   ),
   per_bucket as (
@@ -3300,8 +3407,10 @@ $$;
 -- AAS time series: one row per bucket across the whole window (no-data buckets
 -- included with data_points = 0 and null AAS). p_bucket => null auto-selects
 -- grain by span. peak_aas is the worst underlying grain within the bucket;
--- p99_aas is the 99th percentile of the per-grain AAS, returned for rollup_1m-
--- backed buckets and null for rollup_1h-backed buckets.
+-- p99_aas is the 99th percentile of the per-grain AAS. Unfiltered /
+-- database-filtered reads are minute-grain on every source (rollup_1h keeps
+-- per-minute totals in minute_counts); p99_aas is null only for wait/query-
+-- filtered rollup_1h-backed buckets, which remain hour-grain.
 create or replace function ash.timeline(
   p_from timestamptz default null,
   p_to timestamptz default null,
@@ -3334,6 +3443,7 @@ declare
   v_grain_secs int4;
   v_si numeric;
   v_source text;
+  v_read_source text;
   v_tie boolean;
   v_raw_start timestamptz;
 begin
@@ -3381,14 +3491,24 @@ begin
   else
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
                                      ash.ts_to_timestamptz(v_end_ts));
-    -- sub-hour buckets need minute grain; rollup_1h cannot supply it, so fall
-    -- back to rollup_1m (older buckets simply show no data). 'none' (a truly
-    -- empty window) is left as-is and reported honestly.
-    if v_source = 'rollup_1h' and v_bucket_secs < 3600 then
+    if v_source = 'rollup_1h' and p_wait_event_type is null
+       and p_wait_event is null and p_query_id is null then
+      -- rollup_1h preserves per-minute totals (minute_counts), so the
+      -- unfiltered / database-only read keeps minute grain: peak_aas / p99_aas
+      -- stay per-minute across the rollup_1m -> rollup_1h seam, and sub-hour
+      -- buckets work. The reported source stays 'rollup_1h'.
+      v_read_source := 'rollup_1h_minutes';
+    elsif v_source = 'rollup_1h' and v_bucket_secs < 3600 then
+      -- filtered sub-hour buckets need minute grain; the hour-grain arrays
+      -- cannot supply it, so fall back to rollup_1m (older buckets simply show
+      -- no data). 'none' (a truly empty window) is left as-is and reported
+      -- honestly.
       v_source := 'rollup_1m';
     end if;
-    v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
+    v_read_source := coalesce(v_read_source, v_source);
+    v_grain_secs := case when v_read_source = 'rollup_1h' then 3600 else 60 end;
   end if;
+  v_read_source := coalesce(v_read_source, v_source);
 
   return query
   -- Arithmetic bucket-keying + equi-join (was an O(buckets x grains) range
@@ -3397,7 +3517,7 @@ begin
   with grains as (
     select v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
            (g.cnt * v_si / v_grain_secs) as gaas, g.cnt
-    from ash._grain_counts(v_start_ts, v_end_ts, v_source,
+    from ash._grain_counts(v_start_ts, v_end_ts, v_read_source,
            p_wait_event_type, p_wait_event, p_query_id, p_database) g
   ),
   agg as (
@@ -3418,7 +3538,11 @@ begin
       round(a.cnt * v_si / (least(b.bstart + v_bucket_secs, v_end_ts) - b.bstart), 2)
     end,
     case when a.n > 0 then round(a.peak, 2) end,
-    case when a.n > 0 and v_source <> 'rollup_1h' then
+    -- p99 stays null only for the genuinely hour-grain read (filtered
+    -- rollup_1h): a percentile over hour averages would masquerade as a
+    -- minute percentile. The unfiltered rollup_1h read is minute-grain via
+    -- minute_counts and reports a real per-minute p99.
+    case when a.n > 0 and v_read_source <> 'rollup_1h' then
       round(a.p99::numeric, 2)
     end
   from buckets b
@@ -4594,7 +4718,7 @@ comment on function ash.aas(timestamptz, timestamptz, text, text, bigint, name, 
 $$Scalar AAS summary for one window [p_from, p_to) (defaults: last 1 hour). Optional uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-p_bucket AAS. Also the US-4 leaf event summary: ash.aas(p_wait_event => 'IO:DataFileRead'). Combining a wait filter with p_query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h. Next: ash.top('query_id', p_wait_event => ...).$$;
 
 comment on function ash.timeline(timestamptz, timestamptz, interval, text, text, bigint, name) is
-$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc to find the worst buckets, then drill that window with ash.top(). p99_aas is null for rollup_1h-backed buckets.$$;
+$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc to find the worst buckets, then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts); p99_aas is null only for wait/query-filtered rollup_1h-backed buckets (hour grain).$$;
 
 comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval) is
 $$The single vertical drill (US-3): AAS broken down by p_dimension in wait_event_type|wait_event|query_id|database over [p_from, p_to). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). Filters compose: ash.top('wait_event', p_wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', p_wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + p_query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
