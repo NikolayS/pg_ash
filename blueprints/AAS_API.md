@@ -96,9 +96,12 @@ avg_aas numeric, peak_aas numeric, p99_aas numeric, backend_seconds numeric)`
 ### 2.3 `ash.timeline(p_from, p_to, p_bucket interval default null, filters…)`
 
 Time series. `p_bucket => null` auto-selects grain by span (≤ 6 h → 1 minute,
-≤ 7 d → 1 hour, else 1 day). Emits a row for **every** bucket in the window:
-`data_points = 0` with null AAS marks "no data", distinguishing it from
-measured-zero load.
+≤ 7 d → 1 hour, else 1 day) and is always safely bounded. Emits a row for
+**every** bucket in the window: `data_points = 0` with null AAS marks
+"no data", distinguishing it from measured-zero load. An **explicit**
+`p_bucket` that would emit more than 100 000 buckets (e.g. `'1 minute'` over a
+year) raises rather than materialize an unbounded result — pass `null` for
+auto-grain or a coarser bucket.
 
 Returns:
 `(bucket_start timestamptz, source text, data_points bigint,
@@ -174,11 +177,18 @@ For `report` (and documented for all readers):
 
 - **Classes:** `cpu` = `CPU*`, `io` = `IO`, `ipc` = `IPC`, `lock` = `Lock`,
   `lwlock` = `LWLock`.
-- **`total` = cpu + io + ipc + lock + lwlock.** `Activity`, `Client`,
-  `Timeout`, `Extension`, `BufferPin` are *excluded from `total`* in
-  `report` (idle internal workers, client waits, and timeout artifacts
-  are not real load) but still visible in `top('wait_event_type')`, which
-  reports every recorded type.
+- **`total` combines the five classes** (`cpu + io + ipc + lock + lwlock`).
+  For an **average** this is unambiguous — the sum of per-class averages
+  equals the average of the summed series — so `aas_avg.total` is that sum.
+  For an **extreme** (`aas_worst1m` / `aas_p99` / `aas_p999`) the sum of each
+  class's *independent* worst minute would describe a minute that never
+  occurred; instead `total` is the extreme of the **summed per-minute series**
+  (its own worst minute / percentile). This matches how `top_queryids_*.total`
+  is computed and how downstream consumers derive a total-load series.
+  `Activity`, `Client`, `Timeout`, `Extension`, `BufferPin` are *excluded from
+  `total`* (idle internal workers, client waits, and timeout artifacts are not
+  real load) but still visible in `top('wait_event_type')`, which reports every
+  recorded type.
 
 ## 4. `ash.report` — machine-readable load report (JSON)
 
@@ -265,11 +275,24 @@ function does any of that.
 
 ## 6. Source selection & retention metadata
 
-- Auto-selection: window within raw retention → `raw`; else `rollup_1m`
-  within its retention; else `rollup_1h`. Scalar readers and `top` pick the
-  single finest source that covers `p_from` (never mixing sources within one
-  result — no double-counting risk); `timeline` reports its source per
-  bucket, so a long series may show different sources across rows.
+- **Aggregate readers** (`aas`, `timeline`, `periods`, and non-tie `top` /
+  `chart`) prefer `rollup_1m` for any window wider than ~1 hour that
+  `rollup_1m` fully covers — even when that window is still within raw
+  retention. Rollups are far cheaper for wide windows and just as accurate at
+  minute grain, so triage never pays the cost of decoding raw samples. `raw`
+  is used only for narrow (≤ ~1 h) windows, where it is both cheap and
+  freshest, and for windows rollups cannot cover.
+- **Leaf tie-drills** — any drill that needs the `wait_event ↔ query_id`
+  association (`top('query_id', p_wait_event/​p_wait_event_type => …)`,
+  `top('wait_event', p_query_id => …)`) and `samples` — force `raw`, because
+  rollups don't preserve that association; past raw retention they raise (§1
+  rule 5) rather than return empty.
+- Each reader reports the source it used in the `source` column
+  (`raw` | `rollup_1m` | `rollup_1h` | `none`). Scalar readers and `top` pick a
+  single source per result (never mixing — no double-counting); `timeline`
+  reports its source per bucket, so a long series may show different sources
+  across rows. A window with no data at all reports `source = 'none'`
+  uniformly across readers.
 - `ash.status()` gains rows for `raw_retention_start`,
   `rollup_1m_retention_start`, `rollup_1h_retention_start` so callers can
   plan windows before querying.
