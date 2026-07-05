@@ -186,8 +186,8 @@ footer a{border-bottom:none}
 <div class="numbers reveal" style="animation-delay:.3s">
   <div><div class="n r">25×2<small> → </small><span class="g">7+2</span></div><p>v1.x shipped ~25 readers, each duplicated as <code>f()</code> / <code>f_at()</code>. 2.0 is seven data functions plus two render helpers.</p></div>
   <div><div class="n g">1</div><p>load unit everywhere: <code>avg_aas</code> · <code>peak_aas</code> · <code>p99_aas</code>. No more samples vs backend_seconds confusion.</p></div>
-  <div><div class="n b">p_from, p_to</div><p>one time convention; defaults mean "the last hour". The <code>_at</code> twins are gone.</p></div>
-  <div><div class="n p">0</div><p>silent empty results. Every reader reports its <code>source</code>; unanswerable drills raise, with the retention boundary named.</p></div>
+  <div><div class="n b">p_from, p_to</div><p>one time convention; defaults mean "the last hour" (<code>report</code>: the last day). The <code>_at</code> twins are gone.</p></div>
+  <div><div class="n p">0</div><p>silent empty results. Data readers report the <code>source</code> they used; unanswerable drills raise (<code>report</code> degrades by omitting keys), with the retention boundary named.</p></div>
 </div>
 
 <section>
@@ -197,7 +197,7 @@ footer a{border-bottom:none}
     <div class="arc-row"><span class="us">US-1</span><span class="stage">TRIAGE</span><span class="q">"Is it bad? Spike or sustained?"</span><span class="fn">ash.periods()</span></div>
     <div class="arc-row"><span class="us">US-2</span><span class="stage">LOCATE</span><span class="q">"When did it spike?"</span><span class="fn">ash.timeline(…)</span></div>
     <div class="arc-row"><span class="us">US-3</span><span class="stage">DRILL</span><span class="q">"Wait type → event → query — with p99 on every row."</span><span class="fn">ash.top(dimension, …)</span></div>
-    <div class="arc-row"><span class="us">US-4</span><span class="stage">LEAF</span><span class="q">"For this wait event, which queries?"</span><span class="fn">ash.top('query_id', p_wait_event ⇒ …)</span></div>
+    <div class="arc-row"><span class="us">US-4</span><span class="stage">LEAF</span><span class="q">"For this wait event, which queries?"</span><span class="fn">ash.aas(event) + top('query_id', …)</span></div>
   </div>
 </section>
 
@@ -254,17 +254,17 @@ footer a{border-bottom:none}
 <span class="k">select</span> * <span class="k">from</span> ash.<span class="f">periods</span>();
 
 <span class="c">-- 2 · when? (order the worst buckets first)</span>
-<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">timeline</span>(<span class="n">p_from</span> ⇒ <span class="f">now</span>() - <span class="s">'1 day'</span>::interval)
+<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">timeline</span>(<span class="n">p_from</span> => <span class="f">now</span>() - <span class="s">'1 day'</span>::interval)
 <span class="k">order by</span> peak_aas <span class="k">desc</span>;
 
 <span class="c">-- 3 · what? drill L1 → L2 inside the spike window</span>
-<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">top</span>(<span class="s">'wait_event_type'</span>, <span class="n">p_from</span> ⇒ :t0, <span class="n">p_to</span> ⇒ :t1);
+<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">top</span>(<span class="s">'wait_event_type'</span>, <span class="n">p_from</span> => :t0, <span class="n">p_to</span> => :t1);
 <span class="k">select</span> * <span class="k">from</span> ash.<span class="f">top</span>(<span class="s">'wait_event'</span>,
-        <span class="n">p_wait_event_type</span> ⇒ <span class="s">'IO'</span>, <span class="n">p_from</span> ⇒ :t0, <span class="n">p_to</span> ⇒ :t1);
+        <span class="n">p_wait_event_type</span> => <span class="s">'IO'</span>, <span class="n">p_from</span> => :t0, <span class="n">p_to</span> => :t1);
 
 <span class="c">-- 4 · leaf: which queries drive DataFileRead?</span>
 <span class="k">select</span> * <span class="k">from</span> ash.<span class="f">top</span>(<span class="s">'query_id'</span>,
-        <span class="n">p_wait_event</span> ⇒ <span class="s">'DataFileRead'</span>, <span class="n">p_from</span> ⇒ :t0, <span class="n">p_to</span> ⇒ :t1);</pre>
+        <span class="n">p_wait_event</span> => <span class="s">'DataFileRead'</span>, <span class="n">p_from</span> => :t0, <span class="n">p_to</span> => :t1);</pre>
     </div>
     <div>
       <p class="panel-label">machine ingest — ash.report()</p>
@@ -275,7 +275,7 @@ footer a{border-bottom:none}
   <span class="p">"top_events_worst1m"</span>:  {<span class="p">"io"</span>: [<span class="s">"DataFileRead(89.0)"</span>, …], …},
   <span class="p">"top_queryids_worst1m"</span>:{<span class="p">"total"</span>: [<span class="s">"8231…417(12.3)"</span>, …], …}
 }</pre>
-      <p style="font-size:14.5px;color:var(--ink-dim);margin-top:12px">Per-wait-class avg, worst-1-minute, p99, p99.9 — 1-minute resolution, zero-filled — plus top events and top query ids per extreme window. Raw AAS only: scoring, thresholds, vCPU normalization are the <em>consumer's</em> job. Contract is frozen: keys are only ever added.</p>
+      <p style="font-size:14.5px;color:var(--ink-dim);margin-top:12px">Per-wait-class avg, worst-1-minute, p99, p99.9 — 1-minute resolution, zero-filled — plus top events and top query ids per extreme window. <code>total</code> sums the five real-load classes and <em>excludes</em> Activity, Client and Timeout, so it can trail the full <code>top('wait_event_type')</code> list. Raw AAS only: scoring, thresholds, vCPU normalization are the <em>consumer's</em> job. Contract is frozen: keys are only ever added.</p>
     </div>
   </div>
 </section>
@@ -287,7 +287,7 @@ footer a{border-bottom:none}
     <div><h3>one time convention</h3><p><code>p_from</code> / <code>p_to</code>, defaulting to the last hour. Dropping the <code>f</code>/<code>f_at</code> twins alone halves the surface.</p></div>
     <div><h3>dimensions are parameters</h3><p>Group-by is an argument of <code>top</code>; filters are uniform named parameters. Six v1.x drill functions collapse into one grammar.</p></div>
     <div><h3>data ≠ presentation</h3><p>Data functions return typed columns only. Bars, colors and charts live in exactly two human helpers: <code>chart</code> and <code>summary</code>.</p></div>
-    <div><h3>source honesty</h3><p>Readers auto-select raw → rollup_1m → rollup_1h and say so in a <code>source</code> column. A drill that needs expired raw samples <em>raises</em>, naming the boundary — never a silent empty result.</p></div>
+    <div><h3>source honesty</h3><p>Data readers auto-select raw → rollup_1m → rollup_1h and say so in a <code>source</code> column. A drill that needs expired raw samples <em>raises</em>, naming the boundary — never a silent empty result; <code>ash.status()</code> exposes each tier's <code>retention_start</code> so callers can see it coming.</p></div>
     <div><h3>self-describing</h3><p>Every function's catalog comment states the unit, the column contract, and the recommended next call — an agent can navigate from <code>\df+</code> alone.</p></div>
   </div>
 
@@ -299,7 +299,7 @@ footer a{border-bottom:none}
 
 <section>
   <div class="sec-head"><span class="no">§5</span><h2>before / after — every reader</h2></div>
-  <p class="lede">The same incident, investigated with the v1.5 surface and with 2.0. Outputs are <strong>illustrative</strong> (column contracts exact, numbers invented). Full catalog: <a href="https://github.com/NikolayS/pg_ash/blob/aas-2.0/blueprints/AAS_EXAMPLES.md">AAS_EXAMPLES.md</a>.</p>
+  <p class="lede">The same incident, investigated with the v1.5 surface and with 2.0. Outputs are <strong>illustrative</strong> (columns abridged for space — full contracts in AAS_API.md; numbers invented). Full catalog: <a href="https://github.com/NikolayS/pg_ash/blob/aas-2.0/blueprints/AAS_EXAMPLES.md">AAS_EXAMPLES.md</a>.</p>
   <details class="ba">
     <summary><span class="was">activity_summary('1 hour')</span><span class="arr">→</span><span class="now">periods()</span></summary>
     <div class="inner">
@@ -329,7 +329,7 @@ footer a{border-bottom:none}
  14:20:00     | IO:DataFileRead    |     188
  14:30:00     | IO:DataFileRead    |    9411
  14:30:00     | Lock:transactionid |    2050</span></pre></div>
-      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>timeline</span>(<span class='n'>p_from</span> ⇒ <span class='s'>'14:15'</span>, <span class='n'>p_to</span> ⇒ <span class='s'>'14:45'</span>);
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>timeline</span>(<span class='n'>p_from</span> => <span class='s'>'2026-07-04 14:15'</span>, <span class='n'>p_to</span> => <span class='s'>'2026-07-04 14:45'</span>);
 <span class='c'> bucket_start | source | data_points | avg_aas | peak_aas
 --------------+--------+-------------+---------+---------
  14:20:00     | raw    |         300 |    2.9  |     4.1
@@ -347,7 +347,7 @@ footer a{border-bottom:none}
  IO              |   14210 | 62.4 | ██████████████████
  Lock            |    4180 | 18.4 | █████
  CPU*            |    3390 | 14.9 | ████</span></pre></div>
-      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event_type'</span>, <span class='n'>p_from</span> ⇒ :t0, <span class='n'>p_to</span> ⇒ :t1);
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event_type'</span>, <span class='n'>p_from</span> => :t0, <span class='n'>p_to</span> => :t1);
 <span class='c'> key    | source | avg_aas | peak_aas | p99_aas |  pct
 --------+--------+---------+----------+---------+------
  IO     | raw    |   15.8  |    33.0  |   31.5  | 62.4
@@ -365,7 +365,7 @@ footer a{border-bottom:none}
  Lock:transactionid |    3910 | 17.2 | █████
  CPU*               |    3390 | 14.9 | ████</span></pre></div>
       <div><p class="panel-label">after · 2.0</p><pre><span class='c'>-- L2 composes with the L1 filter — no separate function</span>
-<span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event'</span>, <span class='n'>p_wait_event_type</span> ⇒ <span class='s'>'IO'</span>);
+<span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event'</span>, <span class='n'>p_wait_event_type</span> => <span class='s'>'IO'</span>);
 <span class='c'> key              | source | avg_aas | peak_aas | p99_aas |  pct
 ------------------+--------+---------+----------+---------+-----
  IO:DataFileRead  | raw    |   14.0  |    31.0  |   29.8  | 55.4
@@ -380,7 +380,7 @@ footer a{border-bottom:none}
 ------------------+---------+------+------------------------
  8231004856741017 |   11890 | 52.2 | select o.*, c.name fro…
  -882290014352918 |    3020 | 13.3 | update inventory set q…</span></pre></div>
-      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'query_id'</span>, <span class='n'>p_limit</span> ⇒ <span class='n'>3</span>);
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'query_id'</span>, <span class='n'>p_limit</span> => <span class='n'>3</span>);
 <span class='c'> key              | query_text  | avg_aas | peak_aas | p99_aas |  pct
 ------------------+-------------+---------+----------+---------+-----
  8231004856741017 | select o.*… |   13.2  |    30.0  |   28.7  | 52.2
@@ -388,14 +388,14 @@ footer a{border-bottom:none}
     </div>
   </details>
   <details class="ba">
-    <summary><span class="was">query_waits(qid, …)</span><span class="arr">→</span><span class="now">top('wait_event', p_query_id ⇒ …)</span></summary>
+    <summary><span class="was">query_waits(qid, …)</span><span class="arr">→</span><span class="now">top('wait_event', p_query_id => …)</span></summary>
     <div class="inner">
       <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>query_waits</span>(<span class='n'>8231004856741017</span>, <span class='s'>'15 minutes'</span>);
 <span class='c'> wait_event      | samples |  pct | bar
 -----------------+---------+------+--------------
  IO:DataFileRead |   10110 | 85.0 | █████████████
  CPU*            |    1300 | 10.9 | ██</span></pre></div>
-      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event'</span>, <span class='n'>p_query_id</span> ⇒ <span class='n'>8231004856741017</span>);
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event'</span>, <span class='n'>p_query_id</span> => <span class='n'>8231004856741017</span>);
 <span class='c'> key             | source | avg_aas | peak_aas | p99_aas |  pct
 -----------------+--------+---------+----------+---------+-----
  IO:DataFileRead | raw    |   11.2  |    26.0  |   24.9  | 85.0
@@ -410,12 +410,12 @@ footer a{border-bottom:none}
 <span class='c'> query_id         | samples |  pct | query_text
 ------------------+---------+------+---------------
  8231004856741017 |   10110 | 80.1 | select o.*, c…</span></pre></div>
-      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'query_id'</span>, <span class='n'>p_wait_event</span> ⇒ <span class='s'>'DataFileRead'</span>);
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'query_id'</span>, <span class='n'>p_wait_event</span> => <span class='s'>'DataFileRead'</span>);
 <span class='c'>-- past raw retention it raises, never silently empty:</span>
 <span class='c'>ERROR: pg_ash: this drill needs raw samples; raw
-       retention starts at 2026-07-03 00:00 but the
+       retention starts at 2026-07-03 00:00 but
        requested window starts at 2026-06-28 …
-HINT:  Narrow the window or drill without the
+       Narrow the window or drill without the
        query/event tie.</span></pre></div>
     </div>
   </details>
@@ -428,7 +428,7 @@ HINT:  Narrow the window or drill without the
 ------------+---------------+-------------
  2026-06-28 |            12 |          2.4
  2026-06-29 |            41 |          2.9</span></pre></div>
-      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>timeline</span>(<span class='n'>p_from</span> ⇒ <span class='f'>now</span>() - <span class='s'>'7 days'</span>::interval);
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>timeline</span>(<span class='n'>p_from</span> => <span class='f'>now</span>() - <span class='s'>'7 days'</span>::interval);
 <span class='c'>-- grain + source picked from the window, and reported</span>
 <span class='c'> bucket_start     | source    | avg_aas | peak_aas
 ------------------+-----------+---------+---------
@@ -456,20 +456,20 @@ HINT:  Narrow the window or drill without the
     <div class="inner">
       <div><p class="panel-label">before · v1.5</p><pre><span class='c'>-- v1.x: run top_waits twice, diff by hand</span>
 <span class='c'>(two psql sessions and a spreadsheet)</span></pre></div>
-      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>compare</span>(<span class='n'>p_from_1</span> ⇒ <span class='s'>'14:00'</span>, <span class='n'>p_to_1</span> ⇒ <span class='s'>'14:30'</span>,
-       <span class='n'>p_from_2</span> ⇒ <span class='s'>'14:30'</span>, <span class='n'>p_to_2</span> ⇒ <span class='s'>'15:00'</span>, <span class='n'>p_dimension</span> ⇒ <span class='s'>'wait_event'</span>);
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>compare</span>(<span class='n'>p_from_1</span> => <span class='s'>'2026-07-04 14:00'</span>, <span class='n'>p_to_1</span> => <span class='s'>'2026-07-04 14:30'</span>,
+       <span class='n'>p_from_2</span> => <span class='s'>'2026-07-04 14:30'</span>, <span class='n'>p_to_2</span> => <span class='s'>'2026-07-04 15:00'</span>, <span class='n'>p_dimension</span> => <span class='s'>'wait_event'</span>);
 <span class='c'> key                | avg_aas_1 | avg_aas_2 | avg_delta
 --------------------+-----------+-----------+----------
  IO:DataFileRead    |      1.1  |     14.0  |    +12.9
  Lock:transactionid |      0.2  |      4.6  |     +4.4</span></pre></div>
     </div>
   </details>
-  <p class="ba-note">Every v1.5 example above also existed as an <code>_at(start, end)</code> twin — all of those collapse into the single <code>p_from</code>/<code>p_to</code> form. <code>samples()</code> keeps its role unchanged; <code>ash.aas()</code> and <code>ash.report()</code> are new (see §2).</p>
+  <p class="ba-note">Every v1.5 example above also existed as an <code>_at(start, end)</code> twin — all of those collapse into the single <code>p_from</code>/<code>p_to</code> form. <code>samples()</code> keeps its role unchanged; <code>ash.aas()</code>, <code>ash.compare()</code> and <code>ash.report()</code> are new in the §3 surface.</p>
 </section>
 
 <section>
   <div class="sec-head"><span class="no">§6</span><h2>removed in 2.0</h2></div>
-  <p class="lede">2.0 is a breaking release. Every v1.x reader has a strictly more capable replacement; sampling, storage, rollups and admin functions are untouched.</p>
+  <p class="lede">2.0 is a breaking release. Every v1.x reader has a more capable, uniform replacement; sampling, storage, rollups and admin functions are untouched.</p>
   <ul class="gone">
     <li data-to="top('wait_event')"><s>top_waits</s></li>
     <li data-to="top('wait_event_type')"><s>top_by_type</s></li>
@@ -481,7 +481,7 @@ HINT:  Narrow the window or drill without the
     <li data-to="summary"><s>activity_summary</s></li>
     <li data-to="top('database')"><s>samples_by_database</s></li>
     <li data-to="timeline / top"><s>minute_waits, hourly_queries, daily_peak_backends</s></li>
-    <li data-to="samples(from, to)"><s>every *_at twin</s></li>
+    <li data-to="samples(from, to)"><s>samples_at</s></li>
   </ul>
 </section>
 
