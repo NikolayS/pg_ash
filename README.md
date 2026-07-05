@@ -185,6 +185,13 @@ select * from ash.top('wait_event', p_query_id => 8231004856741017);   -- query 
 select * from ash.top('query_id', p_wait_event => 'IO:DataFileRead');  -- event → queries (leaf)
 ```
 
+`ash.top` also takes `p_order_by` ∈ `avg` / `peak` / `p99` (default `avg`),
+applied **before** the `p_limit` cut — `p_order_by => 'peak'` is the spike-first
+triage: a query that spiked for one minute outranks steady background rows a
+mean would keep on top. For the `query_id` dimension, the unattributed bucket is
+a **NULL `key`** (activity whose `query_id` was not captured), not the string
+`'unknown'`.
+
 Readers auto-select their source by window — `raw` within raw retention, else
 `rollup_1m`, else `rollup_1h` — and report it in the `source` column, so they
 keep working after raw samples have rotated away. A drill that needs the
@@ -270,16 +277,18 @@ select * from ash.periods();
 ```
 
 ```
- period | period_start        | source    | minutes_with_data | avg_aas | peak_aas | p99_aas
---------+---------------------+-----------+-------------------+---------+----------+---------
- 1m     | 2026-07-04 14:44:00 | raw       |                 1 |    2.9  |     3.4  |    3.4
- 5m     | 2026-07-04 14:40:00 | raw       |                 5 |    3.1  |     4.0  |    3.9
- 1h     | 2026-07-04 13:45:00 | rollup_1m |                60 |    3.2  |    41.0  |   12.7
- 1d     | 2026-07-03 14:45:00 | rollup_1m |              1440 |    2.8  |    41.0  |    6.3
- 1w     | 2026-06-27 14:45:00 | rollup_1h |             10080 |    2.6  |    41.0  |    5.9
- 1mo    | 2026-06-04 14:45:00 | rollup_1h |             43200 |    2.5  |    41.0  |    5.7
+ period | period_start        | source    | bucket   | buckets_with_data | avg_aas | peak_aas | p99_aas
+--------+---------------------+-----------+----------+-------------------+---------+----------+---------
+ 1m     | 2026-07-04 14:44:00 | raw       | 00:01:00 |                 1 |    2.9  |     3.4  |    3.4
+ 5m     | 2026-07-04 14:40:00 | raw       | 00:01:00 |                 5 |    3.1  |     4.0  |    3.9
+ 1h     | 2026-07-04 13:45:00 | rollup_1m | 00:01:00 |                60 |    3.2  |    41.0  |   12.7
+ 1d     | 2026-07-03 14:45:00 | rollup_1m | 00:01:00 |              1440 |    2.8  |    41.0  |    6.3
+ 1w     | 2026-06-27 14:45:00 | rollup_1h | 00:01:00 |             10080 |    2.6  |    41.0  |    5.9
+ 1mo    | 2026-06-04 14:45:00 | rollup_1h | 00:01:00 |             43200 |    2.5  |    41.0  |    5.7
 ```
 
+The `buckets_with_data` column (renamed from `minutes_with_data`) counts covered
+buckets at the grain named by the `bucket` column — always `1 minute` here.
 The last hour averaged 3.2 but peaked at 41 — a spike, not a sustained shift.
 `ash.summary()` renders the same picture as a key/value overview for humans.
 
@@ -391,7 +400,9 @@ Visualize wait event patterns over time — spot spikes, correlate with deployme
 
 `ash.chart` renders the AAS timeline as a stacked ASCII bar chart (`ash.timeline`
 is the typed-data companion). The `chart` column stacks the top wait events per
-bucket; `aas` is the bucket total.
+bucket; `aas` is the bucket total. `ash.chart` returns a composite/set, so
+**`select *` (or an explicit column list) is required** — a bare
+`select ash.chart(...)` collapses everything into one composite `chart` column.
 
 ```sql
 select bucket_start, aas, detail, chart
@@ -409,7 +420,7 @@ from ash.chart(p_from => now() - interval '5 minutes', p_bucket => '1 minute');
  2026-07-04 14:34:00+00  |   3.8 | IO:DataFileRead=2.3 CPU*=0.9 Other=0.6                          | ███████████████▓▓░░····
 ```
 
-Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. Buckets are at least one minute (the rollup grain); `p_bucket => null` auto-selects the grain by span.
+Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. Buckets are at least one minute (the rollup grain); `p_bucket => null` auto-selects the grain by span. Buckets are calendar-aligned (floored to `p_bucket` on UTC/epoch boundaries, not anchored to `p_from`), so the same absolute window renders the same `bucket_start` labels on every call. The legend is the window-wide top-`p_top` wait events plus any event that is top-1 in at least one bucket, so a single-bucket spike culprit always shows up.
 
 ```sql
 -- zoom into a specific time window
@@ -483,12 +494,30 @@ are the consumer's job; pg_ash emits raw AAS numbers only.
 select ash.report(p_from => now() - interval '1 day');
 ```
 
+Two additive keys make the payload self-reconciling. `top_queryids_available`
+(boolean, **always present**) tells a scraper whether any query attribution was
+possible — branch on it rather than probing for optional `top_queryids_*` keys.
+Query attribution is decided **per extreme minute**: the worst / percentile
+minute is attributed when raw samples still cover it, even if the window *start*
+predates raw retention (the default 1-day window starts at the boundary while
+the worst minute is usually well inside it). `coverage` (`{from, to, source,
+minutes_expected, minutes_with_data, raw_retention_start}`, `source` always
+`rollup_1m`) lets the consumer reconcile the report against `ash.aas()` /
+`ash.top()` for the same window and detect degraded resolution.
+
 The payload contract is frozen per 2.0 minor line (keys are only ever added,
 never renamed or removed). It returns `null` when the window has no coverage.
 
 ### LLM-assisted investigation
 
 pg_ash functions chain naturally for how an LLM investigates a problem — each answer tells it what to ask next.
+
+pg_ash is also **drivable from the catalog alone**: it self-documents in-DB, so
+an agent needs no external reference. `select obj_description('ash'::regnamespace)`
+names the reader entry points and the reader-vs-ops split, and every function —
+readers and the owner-only ops functions alike — carries an `obj_description`
+comment (`select obj_description('ash.top(...)'::regprocedure)`) stating its
+unit, column contract, and recommended next call.
 
 **Prompt:** *"There was a performance issue about 5 minutes ago. Investigate."*
 
@@ -499,11 +528,11 @@ select * from ash.periods();
 ```
 
 ```
- period | source    | minutes_with_data | avg_aas | peak_aas | p99_aas
---------+-----------+-------------------+---------+----------+---------
- 1m     | raw       |                 1 |    2.2  |     2.4  |    2.4
- 5m     | raw       |                 5 |    5.1  |    12.0  |   11.4
- 1h     | rollup_1m |                60 |    2.6  |    12.0  |    4.8
+ period | source    | bucket   | buckets_with_data | avg_aas | peak_aas | p99_aas
+--------+-----------+----------+-------------------+---------+----------+---------
+ 1m     | raw       | 00:01:00 |                 1 |    2.2  |     2.4  |    2.4
+ 5m     | raw       | 00:01:00 |                 5 |    5.1  |    12.0  |   11.4
+ 1h     | rollup_1m | 00:01:00 |                60 |    2.6  |    12.0  |    4.8
 ```
 
 *"The 5-minute window averages 5.1 AAS but peaked at 12 — something spiked in the last few minutes."*

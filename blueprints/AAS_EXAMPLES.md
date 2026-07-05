@@ -47,18 +47,21 @@ columns, p99 so a spike is legible without a second call:
 select * from ash.periods();
 ```
 ```
- period | period_start        | source    | minutes_with_data | avg_aas | peak_aas | p99_aas
---------+---------------------+-----------+-------------------+---------+----------+---------
- 1m     | 2026-07-04 14:44:00 | raw       |                 1 |    2.9  |     3.4  |    3.4
- 5m     | 2026-07-04 14:40:00 | raw       |                 5 |    3.1  |     4.0  |    3.9
- 1h     | 2026-07-04 13:45:00 | rollup_1m |                60 |    3.2  |    41.0  |   12.7
- 1d     | 2026-07-03 14:45:00 | rollup_1m |              1440 |    2.8  |    41.0  |    6.3
- 1w     | 2026-06-27 14:45:00 | rollup_1h |             10080 |    2.6  |    41.0  |    5.9
- 1mo    | 2026-06-04 14:45:00 | rollup_1h |             43200 |    2.5  |    41.0  |    5.7
+ period | period_start        | source    | bucket   | buckets_with_data | avg_aas | peak_aas | p99_aas
+--------+---------------------+-----------+----------+-------------------+---------+----------+---------
+ 1m     | 2026-07-04 14:44:00 | raw       | 00:01:00 |                 1 |    2.9  |     3.4  |    3.4
+ 5m     | 2026-07-04 14:40:00 | raw       | 00:01:00 |                 5 |    3.1  |     4.0  |    3.9
+ 1h     | 2026-07-04 13:45:00 | rollup_1m | 00:01:00 |                60 |    3.2  |    41.0  |   12.7
+ 1d     | 2026-07-03 14:45:00 | rollup_1m | 00:01:00 |              1440 |    2.8  |    41.0  |    6.3
+ 1w     | 2026-06-27 14:45:00 | rollup_1h | 00:01:00 |             10080 |    2.6  |    41.0  |    5.9
+ 1mo    | 2026-06-04 14:45:00 | rollup_1h | 00:01:00 |             43200 |    2.5  |    41.0  |    5.7
 ```
 
 Reading: the last hour peaked at 41 while the average is 3.2 — a spike, not a
-sustained shift. (`ash.summary()` renders the same picture for humans.)
+sustained shift. (`ash.summary()` renders the same picture for humans.) The
+`buckets_with_data` column (renamed from `minutes_with_data`) counts covered
+buckets at the grain named by `bucket` — always `1 minute` post-`rollup_1h`
+seam fix, so `43200` reads as `43200 @ 1 minute`.
 
 ## 2. Locate
 
@@ -95,6 +98,11 @@ select * from ash.timeline(p_from => '2026-07-04 14:15', p_to => '2026-07-04 14:
  2026-07-04 14:35:00 | raw    |         300 |    6.1  |    11.4  |   10.9
  2026-07-04 14:40:00 | raw    |         300 |    3.0  |     3.8  |    3.7
 ```
+
+`bucket_start` labels are **calendar-aligned** (floored to `p_bucket` on
+UTC/epoch boundaries, not anchored to `p_from`), so this same absolute window
+returns these same labels on every call — even if the first bucket precedes
+`p_from` and edge buckets average over their in-window part only.
 
 `ash.chart()` is the human rendering of the same series (stacked by wait
 class, colors optional) — unchanged in spirit from `timeline_chart`.
@@ -251,12 +259,32 @@ select * from ash.top('query_id', p_wait_event => 'DataFileRead',
 ```
 
 And if you ask for a window whose raw samples are gone, you get an error, not
-an empty table:
+an empty table — and the message differs by how the window sits against the
+raw-retention boundary.
+
+**Window entirely past raw retention** — the tie is gone for good; narrowing
+cannot recover it, so the error says so and redirects to the untied aggregate
+readers:
+
+```
+ERROR:  pg_ash: this drill needs the raw wait<->query tie, but the requested
+        window (2026-06-28 00:00:00+00 to 2026-06-28 01:00:00+00) is entirely
+        outside raw retention (raw retention starts at 2026-07-03 00:00:00+00).
+        The tie is unrecoverable for that window — narrowing it will not help.
+        Use the untied aggregate readers instead: drop either the wait filter
+        or p_query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of
+        the two).
+```
+
+**Partial overlap** — the window end is still inside retention, so the error
+names the exact boundary to move the start to:
 
 ```
 ERROR:  pg_ash: this drill needs raw samples; raw retention starts at
-        2026-07-03 00:00:00+00 but requested window starts at 2026-06-28 …
-HINT:   Narrow the window or drill without the query/event tie.
+        2026-07-03 00:00:00+00 but the requested window starts at
+        2026-07-02 23:00:00+00. Narrow the window to start at or after
+        2026-07-03 00:00:00+00 (the window end is still inside raw retention),
+        or drill without the query/event tie.
 ```
 
 ## 5. Long windows (rollup readers)
@@ -359,8 +387,96 @@ select ash.report(p_from => '2026-07-04 00:00', p_to => '2026-07-05 00:00');
   "top_events_p999":      {"io": ["DataFileRead(27.0)"], "ipc": [], "lock": ["transactionid(8.8)"], "lwlock": ["WALWrite(1.6)"]},
   "top_queryids_worst1m": {"total": ["8231004856741017(28.4)"], "io": ["8231004856741017(26.1)"], "ipc": [], "lock": ["-882290014352918(8.9)"], "lwlock": []},
   "top_queryids_p99":     {"total": ["8231004856741017(4.9)"], "io": ["8231004856741017(4.4)"], "ipc": [], "lock": [], "lwlock": []},
-  "top_queryids_p999":    {"total": ["8231004856741017(24.7)"], "io": ["8231004856741017(23.0)"], "ipc": [], "lock": ["-882290014352918(8.1)"], "lwlock": []}
+  "top_queryids_p999":    {"total": ["8231004856741017(24.7)"], "io": ["8231004856741017(23.0)"], "ipc": [], "lock": ["-882290014352918(8.1)"], "lwlock": []},
+  "top_queryids_available": true,
+  "coverage": {
+    "from": "2026-07-04T00:00:00+00:00",
+    "to":   "2026-07-05T00:00:00+00:00",
+    "source": "rollup_1m",
+    "minutes_expected": 1440,
+    "minutes_with_data": 1438,
+    "raw_retention_start": "2026-07-04T18:11:00+00:00"
+  }
 }
+```
+
+`top_queryids_available` is **always present** (branch on it, not on key
+absence): here the worst/percentile minutes are inside raw retention even though
+the 1-day window *starts* at `2026-07-04 00:00` and `raw_retention_start` is
+`18:11` — attribution is decided per extreme minute. `coverage` lets the
+consumer reconcile this payload against `ash.aas()` / `ash.top()` for the same
+window and spot degraded resolution (`minutes_with_data < minutes_expected`).
+When the extremes themselves predate raw retention, the `top_queryids_*` objects
+are omitted and `top_queryids_available` is `false` — the `aas_*` keys still
+carry the load numbers.
+
+---
+
+## 8. Recipes
+
+Short patterns worth having in muscle memory (all three run as shown).
+
+### (a) `ash.chart()` needs `select *`
+
+`ash.chart` returns a composite/set. A bare `select ash.chart(...)` collapses
+every column into one composite `chart` column — a guaranteed first-call
+stumble:
+
+```sql
+-- WRONG: one composite column
+select ash.chart(p_from => now() - interval '30 minutes', p_bucket => '1 minute');
+```
+```
+                    chart
+----------------------------------------------
+ (,,,"█ Lock:transactionid  ▓ CPU*  · Other")
+ ("2026-07-05 16:26:00-07",0.00,"","          ")
+ …
+```
+
+```sql
+-- RIGHT: typed columns
+select * from ash.chart(p_from => now() - interval '30 minutes', p_bucket => '1 minute');
+```
+
+### (b) Spike-first drill — `p_order_by => 'peak'`
+
+Default `top()` ranks by average, so a query that spiked hard for one minute can
+fall below steady background rows and get cut by `p_limit`. During incident
+triage rank by the spike instead:
+
+```sql
+-- the one-minute incident query, even at p_limit => 1
+select * from ash.top('query_id', p_order_by => 'peak', p_limit => 1,
+                       p_from => now() - interval '15 minutes');
+```
+
+Locate the spike in time the same way — order the timeline by peak:
+
+```sql
+select * from ash.timeline(p_from => now() - interval '6 hours') order by peak_aas desc;
+```
+
+### (c) Recurring peak hours (capacity / US-6)
+
+`rollup_1h.minute_counts` preserves per-minute extremes across the hourly seam,
+so `peak_aas` stays honest over weeks. Group hourly buckets by hour-of-day to
+find the recurring hot hours:
+
+```sql
+select extract(hour from bucket_start) as hod, max(peak_aas) as peak
+from ash.timeline(p_from => now() - interval '30 days', p_bucket => '1 hour')
+group by 1
+order by 2 desc nulls last
+limit 5;
+```
+```
+ hod | peak
+-----+------
+  16 | 41.0
+  17 | 38.2
+   9 | 22.4
+  …
 ```
 
 ---

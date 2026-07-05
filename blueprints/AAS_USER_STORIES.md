@@ -132,6 +132,15 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
   5. Callable by the least-privilege reader role, and degrades gracefully when pg_stat_statements is absent.
 - **Primary API:** cross-cutting across the whole family.
 - **Coverage:** ✅ Covered by design — `source` column on every reader, retention rows in `ash.status()`, and the raise-don't-return-empty rule for unanswerable drills ([AAS_API.md §5–§6](AAS_API.md)).
+- **Drivable from the catalog alone.** pg_ash self-documents in-DB, which is what
+  lets an agent navigate it without external docs: `COMMENT ON SCHEMA ash` names
+  the reader entry points and the reader-vs-ops split, and **every** function —
+  the readers *and* the owner-only ops functions (`start`, `stop`,
+  `take_sample`, `rotate`, `rollup_*`, `rebuild_partitions`,
+  `set_debug_logging`, `uninstall`, `grant_reader`, `revoke_reader`) — carries an
+  `obj_description` comment. One lookup orients the caller:
+  `select obj_description('ash'::regnamespace)`, then
+  `select obj_description('ash.<name>(<argtypes>)'::regprocedure)` per function.
 
 ### US-6 — Capacity & trend
 
