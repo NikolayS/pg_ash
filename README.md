@@ -154,7 +154,7 @@ A before/after mapping of every old function to its 2.0 replacement:
 
 Every reader answers in **AAS** (average active sessions): `avg_aas`,
 `peak_aas`, `p99_aas`, with `backend_seconds` as a secondary absolute column
-and a `source` column (`raw` / `rollup_1m` / `rollup_1h` / `mixed`) showing
+and a `source` column (`raw` / `rollup_1m` / `rollup_1h` / `none`) showing
 where the data came from. `peak_aas` / `p99_aas` are the max / 99th percentile
 of per-bucket AAS, so a short spike stays visible next to the average. Every
 reader takes `p_from timestamptz default null` (→ `now() - '1 hour'`) and
