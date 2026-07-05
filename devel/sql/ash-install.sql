@@ -129,6 +129,11 @@ begin
         '_to_sample_ts', '_pick_rollup_source',
         'aas', 'aas_at',
         'aas_periods',
+        -- signature/return-type changes during the 2.0 development cycle:
+        -- periods() renamed minutes_with_data -> buckets_with_data and gained a
+        -- bucket column; top() gained p_order_by. Drop stale overloads so
+        -- re-apply over an earlier 2.0 draft converges on the final surface.
+        'periods', 'top',
         'aas_series', 'aas_by', 'aas_compare', 'health_report',
         'aas_timeline', 'aas_timeline_at',
         'aas_wait_types', 'aas_wait_types_at',
@@ -3081,6 +3086,40 @@ as $$
   end
 $$;
 
+-- Raw-retention guard for the wait<->query tie drills (aas / timeline / top
+-- with both a wait filter and p_query_id). Returns silently when raw samples
+-- cover the window start; otherwise raises, with guidance split by case:
+--   * window ENTIRELY past raw retention (or no raw samples at all): the tie
+--     is unrecoverable — narrowing the window cannot help, so point to the
+--     untied aggregate readers instead;
+--   * PARTIAL overlap (window starts before raw retention but ends inside
+--     it): narrowing the window to the raw-covered part recovers the drill.
+create or replace function ash._raise_tie_retention(
+  p_raw_start timestamptz,
+  p_start_ts int4,
+  p_end_ts int4
+)
+returns void
+language plpgsql
+stable
+set search_path = pg_catalog, ash
+as $$
+begin
+  if p_raw_start is not null
+     and ash.ts_to_timestamptz(p_start_ts) >= p_raw_start then
+    return;  -- raw covers the window start: the tie drill can proceed
+  end if;
+  if p_raw_start is null or ash.ts_to_timestamptz(p_end_ts) <= p_raw_start then
+    raise exception 'pg_ash: this drill needs the raw wait<->query tie, but the requested window (% to %) is entirely outside raw retention (%). The tie is unrecoverable for that window — narrowing it will not help. Use the untied aggregate readers instead: drop either the wait filter or p_query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of the two).',
+      ash.ts_to_timestamptz(p_start_ts),
+      ash.ts_to_timestamptz(p_end_ts),
+      coalesce('raw retention starts at ' || p_raw_start, 'no raw samples exist');
+  end if;
+  raise exception 'pg_ash: this drill needs raw samples; raw retention starts at % but the requested window starts at %. Narrow the window to start at or after % (the window end is still inside raw retention), or drill without the query/event tie.',
+    p_raw_start, ash.ts_to_timestamptz(p_start_ts), p_raw_start;
+end;
+$$;
+
 -- Workhorse: matching backend-count per underlying grain row (minute for raw /
 -- rollup_1m, hour for rollup_1h) over [p_start_ts, p_end_ts), with uniform
 -- filters. One row per grain timestamp that EXISTS in the source (cnt may be 0
@@ -3339,11 +3378,7 @@ begin
   if v_tie then
     v_source := 'raw';
     v_raw_start := ash._raw_retention_start();
-    if v_raw_start is null or ash.ts_to_timestamptz(v_start_ts) < v_raw_start then
-      raise exception 'pg_ash: this drill needs raw samples; raw retention starts at % but requested window starts at %. Narrow the window or drill without the query/event tie.',
-        coalesce(v_raw_start::text, '(no raw samples)'),
-        ash.ts_to_timestamptz(v_start_ts);
-    end if;
+    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts);
     v_grain_secs := 60;
   else
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
@@ -3373,8 +3408,14 @@ begin
   -- nested-loop range join took ~38s). Only sampler-covered buckets appear in
   -- per_bucket, which is exactly the peak/p99 zero-fill frame; buckets_expected
   -- is counted arithmetically.
+  -- Buckets are calendar-aligned: keyed by flooring the grain timestamp to
+  -- p_bucket relative to ash.epoch() (midnight UTC), NOT to p_from's offset —
+  -- a '1 hour' bucket starts on the hour, '1 day' on the UTC day. The same
+  -- absolute window therefore always yields the same bucket boundaries
+  -- (reproducible regardless of when the call is made). Edge buckets clipped
+  -- by the window divide by their in-window coverage only.
   with grains as (
-    select v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+    select (g.ts / v_bucket_secs) * v_bucket_secs as bstart,
            g.cnt
     from ash._grain_counts(v_start_ts, v_end_ts, v_read_source,
            p_wait_event_type, p_wait_event, p_query_id, p_database) g
@@ -3386,14 +3427,15 @@ begin
   ),
   bucket_aas as (
     select bstart,
-           (cnt * v_si / (least(bstart + v_bucket_secs, v_end_ts) - bstart)) as aas
+           (cnt * v_si / (least(bstart + v_bucket_secs, v_end_ts)
+                          - greatest(bstart, v_start_ts))) as aas
     from per_bucket
   )
   select
     ash.ts_to_timestamptz(v_start_ts),
     ash.ts_to_timestamptz(v_end_ts),
     v_source,
-    ceil((v_end_ts - v_start_ts)::numeric / v_bucket_secs)::bigint,
+    (((v_end_ts - 1) / v_bucket_secs) - (v_start_ts / v_bucket_secs) + 1)::bigint,
     (select count(*) from per_bucket)::bigint,
     round((select coalesce(sum(cnt), 0) from per_bucket) * v_si
           / (v_end_ts - v_start_ts)::numeric, 2),
@@ -3482,11 +3524,7 @@ begin
   if v_tie then
     v_source := 'raw';
     v_raw_start := ash._raw_retention_start();
-    if v_raw_start is null or ash.ts_to_timestamptz(v_start_ts) < v_raw_start then
-      raise exception 'pg_ash: this drill needs raw samples; raw retention starts at % but requested window starts at %. Narrow the window or drill without the query/event tie.',
-        coalesce(v_raw_start::text, '(no raw samples)'),
-        ash.ts_to_timestamptz(v_start_ts);
-    end if;
+    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts);
     v_grain_secs := 60;
   else
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
@@ -3514,8 +3552,13 @@ begin
   -- Arithmetic bucket-keying + equi-join (was an O(buckets x grains) range
   -- join). No-data buckets still appear via the left join from the full bucket
   -- series, with data_points = 0 and null AAS.
+  -- Buckets are calendar-aligned (floored to p_bucket relative to ash.epoch(),
+  -- midnight UTC), not anchored to p_from: the same absolute window always
+  -- yields the same bucket_start labels, and an hour/day bucket carries its
+  -- calendar hour/UTC-day label. The first bucket_start may therefore precede
+  -- p_from; edge buckets divide by their in-window coverage only.
   with grains as (
-    select v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+    select (g.ts / v_bucket_secs) * v_bucket_secs as bstart,
            (g.cnt * v_si / v_grain_secs) as gaas, g.cnt
     from ash._grain_counts(v_start_ts, v_end_ts, v_read_source,
            p_wait_event_type, p_wait_event, p_query_id, p_database) g
@@ -3528,14 +3571,16 @@ begin
   ),
   buckets as (
     select gs.ts::int4 as bstart
-    from generate_series(v_start_ts::bigint, (v_end_ts - 1)::bigint, v_bucket_secs) gs(ts)
+    from generate_series(((v_start_ts / v_bucket_secs) * v_bucket_secs)::bigint,
+                         (v_end_ts - 1)::bigint, v_bucket_secs) gs(ts)
   )
   select
     ash.ts_to_timestamptz(b.bstart),
     v_source,
     coalesce(a.n, 0)::bigint,
     case when a.n > 0 then
-      round(a.cnt * v_si / (least(b.bstart + v_bucket_secs, v_end_ts) - b.bstart), 2)
+      round(a.cnt * v_si / (least(b.bstart + v_bucket_secs, v_end_ts)
+                            - greatest(b.bstart, v_start_ts)), 2)
     end,
     case when a.n > 0 then round(a.peak, 2) end,
     -- p99 stays null only for the genuinely hour-grain read (filtered
@@ -3555,9 +3600,13 @@ $$;
 -- p_end. Each window delegates to ash.aas(), which auto-selects its source
 -- (short windows may read raw for the freshest partial minute; the wide windows
 -- read rollups). peak_aas/p99_aas are per-minute (worst / 99th-percentile
--- minute), which is what capacity triage wants, and minutes_with_data stays a
--- true minute count. After the arithmetic-bucketing fix this is cheap even for
--- the 1-month window (~90ms for the whole call on a month of rollups).
+-- minute), which is what capacity triage wants, and buckets_with_data is a
+-- true count of covered buckets at the grain named by the bucket column —
+-- always '1 minute' here (unfiltered reads are minute-grain on every source,
+-- incl. rollup_1h via minute_counts), exposed per row so "43200 buckets" reads
+-- as "43200 @ 1 minute" without cross-referencing. After the
+-- arithmetic-bucketing fix this is cheap even for the 1-month window (~90ms
+-- for the whole call on a month of rollups).
 create or replace function ash.periods(
   p_end timestamptz default null
 )
@@ -3566,7 +3615,8 @@ returns table (
   period_start timestamptz,
   period_end timestamptz,
   source text,
-  minutes_with_data bigint,
+  bucket interval,
+  buckets_with_data bigint,
   avg_aas numeric,
   peak_aas numeric,
   p99_aas numeric
@@ -3593,6 +3643,7 @@ as $$
     a.period_start,
     a.period_end,
     a.source,
+    interval '1 minute',
     a.buckets_with_data,
     a.avg_aas,
     a.peak_aas,
@@ -3682,7 +3733,10 @@ begin
            case p_dimension
              when 'wait_event_type' then d.wet
              when 'wait_event' then d.evt
-             when 'query_id' then coalesce(d.qid::text, 'unknown')
+             -- unattributed activity (no query_id captured) keeps a NULL key,
+             -- not a sentinel string: callers can tell "no attribution" from a
+             -- real key without parsing.
+             when 'query_id' then d.qid::text
              else coalesce((select dd.datname::text from pg_database dd where dd.oid = d.datid),
                            '<oid:' || d.datid || '>')
            end,
@@ -3767,7 +3821,10 @@ $$;
 -- compose with the dimension. Crossing the wait<->query tie (query_id
 -- dimension with a wait filter, or a wait dimension with p_query_id) needs raw
 -- samples and raises past raw retention. query_text is filled only for the
--- query_id dimension with pg_stat_statements present.
+-- query_id dimension with pg_stat_statements present. p_order_by picks the
+-- ranking metric BEFORE the p_limit cut: 'avg' (default; sustained load),
+-- 'peak' or 'p99' (spike-first — a query dominant for one minute of an
+-- incident ranks above cosmetic baseline rows that beat it on average).
 create or replace function ash.top(
   p_dimension text,
   p_from timestamptz default null,
@@ -3777,7 +3834,8 @@ create or replace function ash.top(
   p_query_id bigint default null,
   p_database name default null,
   p_limit int default 10,
-  p_bucket interval default '1 minute'
+  p_bucket interval default '1 minute',
+  p_order_by text default 'avg'
 )
 returns table (
   key text,
@@ -3812,6 +3870,9 @@ begin
   if p_dimension not in ('wait_event_type', 'wait_event', 'query_id', 'database') then
     raise exception 'ash.top: unknown dimension %; use wait_event_type|wait_event|query_id|database', p_dimension;
   end if;
+  if p_order_by not in ('avg', 'peak', 'p99') then
+    raise exception 'ash.top: unknown p_order_by %; use avg|peak|p99', p_order_by;
+  end if;
   v_bucket_secs := extract(epoch from p_bucket)::int4;
   if v_bucket_secs is null or v_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', p_bucket;
@@ -3833,11 +3894,7 @@ begin
   if v_tie then
     v_source := 'raw';
     v_raw_start := ash._raw_retention_start();
-    if v_raw_start is null or ash.ts_to_timestamptz(v_start_ts) < v_raw_start then
-      raise exception 'pg_ash: this drill needs raw samples; raw retention starts at % but requested window starts at %. Narrow the window or drill without the query/event tie.',
-        coalesce(v_raw_start::text, '(no raw samples)'),
-        ash.ts_to_timestamptz(v_start_ts);
-    end if;
+    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts);
     v_grain_secs := 60;
   else
     -- non-tie breakdown is an aggregate read: prefer rollup for wide windows.
@@ -3857,8 +3914,12 @@ begin
   end if;
 
   for key, v_key_num, source, avg_aas, peak_aas, p99_aas, backend_seconds, pct in
+  -- Buckets are calendar-aligned (floored to p_bucket relative to ash.epoch(),
+  -- midnight UTC), matching ash.aas()/ash.timeline(): the same absolute window
+  -- always yields the same bucket boundaries. Edge buckets clipped by the
+  -- window divide by their in-window coverage only.
   with keyed as (
-    select v_start_ts + ((b.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+    select (b.ts / v_bucket_secs) * v_bucket_secs as bstart,
            b.key, b.key_num, b.cnt
     from ash._grain_by(v_start_ts, v_end_ts, v_source, p_dimension,
            p_wait_event_type, p_wait_event, p_query_id, p_database) b
@@ -3869,7 +3930,7 @@ begin
   -- with ash.aas() for the same drill. p_database is the only filter that
   -- legitimately restricts coverage, so it is the only one passed here.
   covered as (
-    select distinct v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart
+    select distinct (g.ts / v_bucket_secs) * v_bucket_secs as bstart
     from ash._grain_counts(v_start_ts, v_end_ts, v_source,
            null, null, null, p_database) g
   ),
@@ -3880,10 +3941,16 @@ begin
     having sum(k.cnt) > 0
   ),
   grand as (select coalesce(sum(total), 0) as g from keys),
-  -- Only the returned top-N need per-bucket peak/p99, so limit before the
-  -- cross-join zero-fill (bounds it to N x covered buckets).
+  -- Only the returned top-N need per-bucket peak/p99, so for the default
+  -- avg ordering, limit before the cross-join zero-fill (bounds it to
+  -- N x covered buckets). peak/p99 ordering must rank on the per-bucket
+  -- stats themselves, so it keeps every key through the zero-fill (same
+  -- cost class as compare(), which already runs top with an unbounded
+  -- limit) and cuts at the final ORDER BY.
   top_keys as (
-    select * from keys order by total desc limit greatest(p_limit, 0)
+    select * from keys order by total desc
+    limit case when p_order_by = 'avg' then greatest(p_limit, 0)
+          else 2147483647 end
   ),
   key_bucket_data as (
     select k2.key, k2.bstart, sum(k2.cnt) as bcnt
@@ -3894,16 +3961,19 @@ begin
            coalesce(kbd.bcnt, 0) as bcnt
     from top_keys tk
     cross join covered cb
-    left join key_bucket_data kbd on kbd.key = tk.key and kbd.bstart = cb.bstart
+    left join key_bucket_data kbd
+      on kbd.key is not distinct from tk.key and kbd.bstart = cb.bstart
   ),
   per_key as (
     select kb.key, kb.key_num, kb.total,
            round(kb.total * v_si / (v_end_ts - v_start_ts)::numeric, 2) as avg_aas,
            round(max(kb.bcnt * v_si
-                     / (least(kb.bstart + v_bucket_secs, v_end_ts) - kb.bstart)), 2) as peak_aas,
+                     / (least(kb.bstart + v_bucket_secs, v_end_ts)
+                        - greatest(kb.bstart, v_start_ts))), 2) as peak_aas,
            round(percentile_cont(0.99) within group (
                    order by kb.bcnt * v_si
-                     / (least(kb.bstart + v_bucket_secs, v_end_ts) - kb.bstart))::numeric, 2) as p99_aas
+                     / (least(kb.bstart + v_bucket_secs, v_end_ts)
+                        - greatest(kb.bstart, v_start_ts)))::numeric, 2) as p99_aas
     from key_bucket kb
     group by kb.key, kb.key_num, kb.total
   )
@@ -3918,7 +3988,11 @@ begin
     round(pk.total * 100.0 / nullif(g.g, 0), 2)
   from per_key pk
   cross join grand g
-  order by pk.total desc
+  order by case p_order_by
+             when 'peak' then pk.peak_aas
+             when 'p99' then pk.p99_aas
+             else pk.total
+           end desc, pk.total desc
   limit greatest(p_limit, 0)
   loop
     query_text := null;
@@ -3939,6 +4013,11 @@ $$;
 -- overall row; a dimension gives the top rows by abs(avg_delta) via a full outer
 -- join across the two windows (a key present in only one window still appears).
 -- avg_delta is window-2 minus window-1.
+-- Coverage honesty: a window with NO data coverage (e.g. entirely past
+-- retention) reports NULL on its side — in both overall and per-dimension
+-- modes — and avg_delta is NULL, never a fake zero-baseline "regression";
+-- a NOTICE names the uncovered window. Within a covered window, a key absent
+-- from one side is a true measured zero and the delta stands.
 create or replace function ash.compare(
   p_from_1 timestamptz,
   p_to_1 timestamptz,
@@ -3970,16 +4049,51 @@ stable
 set jit = off
 set search_path = pg_catalog, ash, public
 as $$
+declare
+  a1 record;
+  a2 record;
+  v_cov1 boolean;
+  v_cov2 boolean;
 begin
+  -- validate here, in compare's own frame, so the error names ash.compare
+  -- and never leaks the internal delegation to ash.top.
+  if p_dimension is not null
+     and p_dimension not in ('wait_event_type', 'wait_event', 'query_id', 'database') then
+    raise exception 'ash.compare: unknown p_dimension %; use wait_event_type|wait_event|query_id|database (or null for one overall row)', p_dimension;
+  end if;
+
+  -- Per-window coverage probe (rollup-backed, cheap). buckets_with_data = 0
+  -- means the window holds no data at all — its side must read NULL, and the
+  -- caller is warned: comparing against an uncovered window says nothing
+  -- about a regression.
+  select * into a1 from ash.aas(p_from_1, p_to_1,
+    p_wait_event_type, p_wait_event, p_query_id, p_database, p_bucket);
+  select * into a2 from ash.aas(p_from_2, p_to_2,
+    p_wait_event_type, p_wait_event, p_query_id, p_database, p_bucket);
+  v_cov1 := a1.buckets_with_data > 0;
+  v_cov2 := a2.buckets_with_data > 0;
+  if not v_cov1 then
+    raise notice 'ash.compare: window 1 (% to %) has no data coverage — its columns and avg_delta are NULL, not zero. Check retention with ash.status() before reading a delta as a change.',
+      a1.period_start, a1.period_end;
+  end if;
+  if not v_cov2 then
+    raise notice 'ash.compare: window 2 (% to %) has no data coverage — its columns and avg_delta are NULL, not zero. Check retention with ash.status() before reading a delta as a change.',
+      a2.period_start, a2.period_end;
+  end if;
+
   if p_dimension is null then
     return query
     select
       'overall'::text, null::text,
-      a1.avg_aas, a2.avg_aas, round(coalesce(a2.avg_aas, 0) - coalesce(a1.avg_aas, 0), 2),
-      a1.peak_aas, a2.peak_aas, a1.p99_aas, a2.p99_aas,
-      null::numeric, null::numeric
-    from ash.aas(p_from_1, p_to_1, p_wait_event_type, p_wait_event, p_query_id, p_database, p_bucket) a1
-    cross join ash.aas(p_from_2, p_to_2, p_wait_event_type, p_wait_event, p_query_id, p_database, p_bucket) a2;
+      case when v_cov1 then a1.avg_aas end,
+      case when v_cov2 then a2.avg_aas end,
+      case when v_cov1 and v_cov2
+           then round(a2.avg_aas - a1.avg_aas, 2) end,
+      case when v_cov1 then a1.peak_aas end,
+      case when v_cov2 then a2.peak_aas end,
+      case when v_cov1 then a1.p99_aas end,
+      case when v_cov2 then a2.p99_aas end,
+      null::numeric, null::numeric;
     return;
   end if;
 
@@ -3996,12 +4110,18 @@ begin
     coalesce(w1.key, w2.key),
     coalesce(w1.query_text, w2.query_text),
     w1.avg_aas, w2.avg_aas,
-    round(coalesce(w2.avg_aas, 0) - coalesce(w1.avg_aas, 0), 2),
+    -- a key absent from a COVERED window is a true zero; an UNCOVERED window
+    -- contributes NULL (no fake regression against an empty baseline).
+    case when v_cov1 and v_cov2
+         then round(coalesce(w2.avg_aas, 0) - coalesce(w1.avg_aas, 0), 2) end,
     w1.peak_aas, w2.peak_aas,
     w1.p99_aas, w2.p99_aas,
     w1.pct, w2.pct
   from w1
-  full outer join w2 on w1.key = w2.key
+  -- NULL-safe: the unattributed-query bucket keeps a NULL key in both windows
+  -- and must pair up like any other key. (FULL JOIN cannot use IS NOT DISTINCT
+  -- FROM, so NULL is folded to an out-of-band sentinel for the join only.)
+  full outer join w2 on coalesce(w1.key, chr(1)) = coalesce(w2.key, chr(1))
   order by abs(coalesce(w2.avg_aas, 0) - coalesce(w1.avg_aas, 0)) desc
   limit greatest(p_limit, 0);
 end;
@@ -4213,8 +4333,11 @@ $$;
 
 -- Machine-readable load report (US-8): one self-contained jsonb load report for
 -- the window. Per-class per-minute AAS (zero-filled) drives avg/worst1m/p99/p999;
--- top_events_* come from rollup_1m, top_queryids_* from raw samples (omitted when
--- raw retention no longer covers the window). Returns null when no coverage.
+-- top_events_* come from rollup_1m, top_queryids_* from raw samples, attributed
+-- per extreme minute (a key is present iff raw samples still cover that
+-- worst/percentile minute set — even when the window start predates raw
+-- retention); top_queryids_available + coverage metadata make the attribution
+-- state explicit. Returns null when no coverage.
 create or replace function ash.report(
   p_from timestamptz default null,
   p_to timestamptz default null,
@@ -4235,7 +4358,7 @@ declare
   v_si numeric;
   v_n int;
   v_cluster text;
-  v_raw_ok boolean;
+  v_raw_min int4;
   v_result jsonb;
   v_class record;
   v_agg jsonb := '{}'::jsonb;
@@ -4278,8 +4401,19 @@ begin
     return null;
   end if;
 
-  v_raw_ok := ash._raw_retention_start() is not null
-              and ash._raw_retention_start() <= ash.ts_to_timestamptz(v_start_ts);
+  -- top_queryids_* attribution needs the raw wait<->query tie, decided PER
+  -- EXTREME MINUTE (not per window start): the default 1-day window typically
+  -- starts right at the raw-retention boundary, but the worst/percentile
+  -- minutes themselves are usually well inside raw retention — dropping the
+  -- attribution wholesale threw away exactly the answer the report exists to
+  -- give. v_raw_min is the first minute raw samples can attribute; each
+  -- extreme-minute set below is filtered to covered minutes and attributed
+  -- when any survive.
+  -- (greatest/least in ts_from_timestamptz ignore NULLs, so a missing raw
+  -- retention start must be short-circuited here, not passed through.)
+  v_raw_min := case when ash._raw_retention_start() is null then null
+                    else (ash.ts_from_timestamptz(ash._raw_retention_start()) / 60) * 60
+               end;
 
   -- Per-class metrics over the zero-filled per-minute AAS series.
   for v_class in
@@ -4369,13 +4503,25 @@ begin
           to_jsonb(ash._hr_top_events(v_class.t, v_p99_mins, p_top, v_si)));
         v_te_99 := v_te_99 || jsonb_build_object(v_class.k,
           to_jsonb(ash._hr_top_events(v_class.t, v_p999_mins, p_top, v_si)));
-        if v_raw_ok then
+        -- attribution per extreme minute: a key appears when raw samples still
+        -- cover its minute(s); percentile sets attribute over the raw-covered
+        -- subset (a partially-covered set is better than none — the coverage
+        -- metadata lets a consumer detect the reduced attribution window).
+        if v_raw_min is not null and v_worst_min >= v_raw_min then
           v_tq_w := v_tq_w || jsonb_build_object(v_class.k,
             to_jsonb(ash._hr_top_queryids(v_class.t, array[v_worst_min], p_top, v_si)));
-          v_tq_9 := v_tq_9 || jsonb_build_object(v_class.k,
-            to_jsonb(ash._hr_top_queryids(v_class.t, v_p99_mins, p_top, v_si)));
-          v_tq_99 := v_tq_99 || jsonb_build_object(v_class.k,
-            to_jsonb(ash._hr_top_queryids(v_class.t, v_p999_mins, p_top, v_si)));
+        end if;
+        if v_raw_min is not null then
+          v_p99_mins := array(select m from unnest(v_p99_mins) m where m >= v_raw_min);
+          v_p999_mins := array(select m from unnest(v_p999_mins) m where m >= v_raw_min);
+          if cardinality(v_p99_mins) > 0 then
+            v_tq_9 := v_tq_9 || jsonb_build_object(v_class.k,
+              to_jsonb(ash._hr_top_queryids(v_class.t, v_p99_mins, p_top, v_si)));
+          end if;
+          if cardinality(v_p999_mins) > 0 then
+            v_tq_99 := v_tq_99 || jsonb_build_object(v_class.k,
+              to_jsonb(ash._hr_top_queryids(v_class.t, v_p999_mins, p_top, v_si)));
+          end if;
         end if;
       end if;
     end;
@@ -4439,23 +4585,58 @@ begin
     'top_events_p999', v_te_99
   );
 
-  if v_raw_ok then
-    -- 'total' top_queryids for each window = top queries at the window's overall
-    -- worst/percentile minutes (the summed-series extremes computed above), so
-    -- these agree with aas_worst1m/p99/p999.total.
-    v_tq_w := v_tq_w || jsonb_build_object('total',
-      to_jsonb(ash._hr_top_queryids(null, array[v_tworst_min], p_top, v_si)));
-    v_tq_9 := v_tq_9 || jsonb_build_object('total',
-      to_jsonb(ash._hr_top_queryids(null, v_t99_mins, p_top, v_si)));
-    v_tq_99 := v_tq_99 || jsonb_build_object('total',
-      to_jsonb(ash._hr_top_queryids(null, v_t999_mins, p_top, v_si)));
-
-    v_result := v_result || jsonb_build_object(
-      'top_queryids_worst1m', v_tq_w,
-      'top_queryids_p99', v_tq_9,
-      'top_queryids_p999', v_tq_99
-    );
+  -- 'total' top_queryids for each window = top queries at the window's overall
+  -- worst/percentile minutes (the summed-series extremes computed above), so
+  -- these agree with aas_worst1m/p99/p999.total. Same per-extreme-minute
+  -- attribution rule as the per-class keys above.
+  if v_raw_min is not null then
+    if v_tworst_min >= v_raw_min then
+      v_tq_w := v_tq_w || jsonb_build_object('total',
+        to_jsonb(ash._hr_top_queryids(null, array[v_tworst_min], p_top, v_si)));
+    end if;
+    v_t99_mins := array(select m from unnest(v_t99_mins) m where m >= v_raw_min);
+    v_t999_mins := array(select m from unnest(v_t999_mins) m where m >= v_raw_min);
+    if cardinality(v_t99_mins) > 0 then
+      v_tq_9 := v_tq_9 || jsonb_build_object('total',
+        to_jsonb(ash._hr_top_queryids(null, v_t99_mins, p_top, v_si)));
+    end if;
+    if cardinality(v_t999_mins) > 0 then
+      v_tq_99 := v_tq_99 || jsonb_build_object('total',
+        to_jsonb(ash._hr_top_queryids(null, v_t999_mins, p_top, v_si)));
+    end if;
   end if;
+
+  -- Each top_queryids_* object appears when it attributed at least one key
+  -- (consumers MUST treat these keys as optional per the frozen contract);
+  -- top_queryids_available (additive, always present) is the explicit signal
+  -- so ingest can branch on a field rather than on key absence.
+  if v_tq_w <> '{}'::jsonb then
+    v_result := v_result || jsonb_build_object('top_queryids_worst1m', v_tq_w);
+  end if;
+  if v_tq_9 <> '{}'::jsonb then
+    v_result := v_result || jsonb_build_object('top_queryids_p99', v_tq_9);
+  end if;
+  if v_tq_99 <> '{}'::jsonb then
+    v_result := v_result || jsonb_build_object('top_queryids_p999', v_tq_99);
+  end if;
+
+  -- Additive metadata (frozen contract: keys only ever added): the window and
+  -- coverage actually used, so a consumer can reconcile this payload against
+  -- ash.aas()/ash.top() for the same window and detect degraded resolution
+  -- (minutes_with_data < minutes_expected) or a reduced attribution window
+  -- (raw_retention_start inside the window).
+  v_result := v_result || jsonb_build_object(
+    'top_queryids_available',
+      (v_tq_w <> '{}'::jsonb or v_tq_9 <> '{}'::jsonb or v_tq_99 <> '{}'::jsonb),
+    'coverage', jsonb_build_object(
+      'from', ash.ts_to_timestamptz(v_start_ts),
+      'to', ash.ts_to_timestamptz(v_end_ts),
+      'source', 'rollup_1m',
+      'minutes_expected', (v_end_ts - v_start_ts) / 60,
+      'minutes_with_data', v_n,
+      'raw_retention_start', ash._raw_retention_start()
+    )
+  );
 
   -- optional / conditional top-level keys
   if p_vcpus is not null then
@@ -4544,25 +4725,42 @@ begin
   end if;
   v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
 
-  select array_agg(ev order by tot desc)
-  into v_top_events
-  from (
-    select b.key as ev, sum(b.cnt) as tot
+  -- Legend/series events: the window-wide top-p_top PLUS any event that is
+  -- top-1 in at least one bucket. A spike event dominant in a single bucket —
+  -- the very bucket under investigation — would otherwise never make the
+  -- window-wide top-3 and disappear into Other, hiding the culprit.
+  with g as (
+    select (b.ts / v_bucket_secs) * v_bucket_secs as bstart,
+           b.key as ev, sum(b.cnt) as cnt
     from ash._grain_by(v_start_ts, v_end_ts, v_source, 'wait_event') b
-    group by b.key
-    order by tot desc limit greatest(p_top, 0)
-  ) t;
+    group by 1, b.key
+  ),
+  totals as (
+    select ev, sum(cnt) as tot from g group by ev
+  ),
+  wtop as (
+    select ev from totals order by tot desc limit greatest(p_top, 0)
+  ),
+  btop as (
+    select distinct on (bstart) ev from g order by bstart, cnt desc, ev
+  )
+  select array_agg(t.ev order by t.tot desc)
+  into v_top_events
+  from totals t
+  where t.ev in (select ev from wtop union select ev from btop);
 
   if v_top_events is null then
     return;
   end if;
 
+  -- Calendar-aligned buckets (floored to p_bucket relative to ash.epoch(),
+  -- midnight UTC), matching timeline(); edge buckets divide by their
+  -- in-window coverage.
   select max(tot) into v_max from (
-    select v_start_ts + ((b.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+    select (b.ts / v_bucket_secs) * v_bucket_secs as bstart,
            sum(b.cnt) * v_si
-           / (least(v_start_ts + ((b.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs
-                    + v_bucket_secs, v_end_ts)
-              - (v_start_ts + ((b.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs)) as tot
+           / (least((b.ts / v_bucket_secs) * v_bucket_secs + v_bucket_secs, v_end_ts)
+              - greatest((b.ts / v_bucket_secs) * v_bucket_secs, v_start_ts)) as tot
     from ash._grain_by(v_start_ts, v_end_ts, v_source, 'wait_event') b
     group by 1
   ) t;
@@ -4589,19 +4787,22 @@ begin
   for v_rec in
     with buckets as (
       select gs.ts::int4 as bstart
-      from generate_series(v_start_ts::bigint, (v_end_ts - 1)::bigint, v_bucket_secs) gs(ts)
+      from generate_series(((v_start_ts / v_bucket_secs) * v_bucket_secs)::bigint,
+                           (v_end_ts - 1)::bigint, v_bucket_secs) gs(ts)
     ),
     per_bucket as (
       select b.bstart,
              round(coalesce(sum(t.cnt), 0) * v_si
-                   / (least(b.bstart + v_bucket_secs, v_end_ts) - b.bstart), 2) as total,
+                   / (least(b.bstart + v_bucket_secs, v_end_ts)
+                      - greatest(b.bstart, v_start_ts)), 2) as total,
              coalesce(jsonb_object_agg(t.ev,
                round(t.cnt * v_si
-                     / (least(b.bstart + v_bucket_secs, v_end_ts) - b.bstart), 2))
+                     / (least(b.bstart + v_bucket_secs, v_end_ts)
+                        - greatest(b.bstart, v_start_ts)), 2))
                filter (where t.ev is not null), '{}'::jsonb) as events
       from buckets b
       left join (
-        select v_start_ts + ((g.ts - v_start_ts) / v_bucket_secs) * v_bucket_secs as bstart,
+        select (g.ts / v_bucket_secs) * v_bucket_secs as bstart,
                g.key as ev, sum(g.cnt) as cnt
         from ash._grain_by(v_start_ts, v_end_ts, v_source, 'wait_event') g
         group by 1, g.key
@@ -4699,8 +4900,9 @@ begin
     from ash.top('query_id', v_from, v_to, p_limit => 3) b
   loop
     v_rank := v_rank + 1;
+    -- a NULL key is the unattributed bucket (no query_id captured)
     return query select 'top_query_' || v_rank,
-      r.key || coalesce(' — ' || left(r.query_text, 60), '')
+      coalesce(r.key, '(unattributed)') || coalesce(' — ' || left(r.query_text, 60), '')
       || ' (avg_aas ' || r.avg_aas || ', ' || r.pct || '%)';
   end loop;
 end;
@@ -4712,31 +4914,71 @@ $$;
 -- the recommended next call, so a human or AI agent can navigate the catalog
 -- alone. On-CPU/uninstrumented work is spelled 'CPU*' everywhere user-facing.
 comment on function ash.periods(timestamptz) is
-$$START HERE (US-1 triage): AAS for six standard trailing windows (1m, 5m, 1h, 1d, 1w, 1mo) ending at p_end (default now()), one row each. Columns (period, period_start, period_end, source, minutes_with_data, avg_aas, peak_aas, p99_aas): peak/p99 vs avg distinguishes a spike from sustained load. Rollup-backed (source = rollup_1m|rollup_1h). Next: locate the spike in time with ash.timeline(), then drill with ash.top().$$;
+$$START HERE (US-1 triage): AAS for six standard trailing windows (1m, 5m, 1h, 1d, 1w, 1mo) ending at p_end (default now()), one row each. Columns (period, period_start, period_end, source, bucket, buckets_with_data, avg_aas, peak_aas, p99_aas): peak/p99 vs avg distinguishes a spike from sustained load; buckets_with_data counts covered buckets at the grain named by bucket (always 1 minute here). Rollup-backed (source = rollup_1m|rollup_1h). Next: locate the spike in time with ash.timeline(), then drill with ash.top().$$;
 
 comment on function ash.aas(timestamptz, timestamptz, text, text, bigint, name, interval) is
-$$Scalar AAS summary for one window [p_from, p_to) (defaults: last 1 hour). Optional uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-p_bucket AAS. Also the US-4 leaf event summary: ash.aas(p_wait_event => 'IO:DataFileRead'). Combining a wait filter with p_query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h. Next: ash.top('query_id', p_wait_event => ...).$$;
+$$Scalar AAS summary for one window [p_from, p_to) (defaults: last 1 hour). Optional uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-p_bucket AAS. Buckets are calendar-aligned (floored to p_bucket in UTC: an hour bucket starts on the hour, a day bucket on the UTC day) — the same absolute window always produces the same buckets. Also the US-4 leaf event summary: ash.aas(p_wait_event => 'IO:DataFileRead'). Combining a wait filter with p_query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h. Next: ash.top('query_id', p_wait_event => ...).$$;
 
 comment on function ash.timeline(timestamptz, timestamptz, interval, text, text, bigint, name) is
-$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc to find the worst buckets, then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts); p99_aas is null only for wait/query-filtered rollup_1h-backed buckets (hour grain).$$;
+$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). bucket_start is calendar-aligned (floored to p_bucket in UTC: hour buckets start on the hour, day buckets on the UTC day), so the same absolute window always returns identical bucket_start labels; the first bucket may start before p_from and edge buckets average over their in-window part only. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc to find the worst buckets, then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts); p99_aas is null only for wait/query-filtered rollup_1h-backed buckets (hour grain).$$;
 
-comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval) is
-$$The single vertical drill (US-3): AAS broken down by p_dimension in wait_event_type|wait_event|query_id|database over [p_from, p_to). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). Filters compose: ash.top('wait_event', p_wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', p_wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + p_query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
+comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval, text) is
+$$The single vertical drill (US-3): AAS broken down by p_dimension in wait_event_type|wait_event|query_id|database over [p_from, p_to). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). p_order_by in avg|peak|p99 (default avg) picks the ranking metric BEFORE the p_limit cut — use p_order_by => 'peak' during incident triage so a query that spiked for one minute outranks steady background rows. For the query_id dimension, a NULL key is the unattributed bucket (activity whose query_id was not captured: not run with a queryid-reporting client, truncated, or utility/idle-in-transaction work) — it is real load, not an error. Filters compose: ash.top('wait_event', p_wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', p_wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + p_query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
 
 comment on function ash.compare(timestamptz, timestamptz, timestamptz, timestamptz, text, int, text, text, bigint, name, interval) is
-$$Before/after comparison of two windows (US-7): window 1 = [p_from_1, p_to_1), window 2 = [p_from_2, p_to_2). p_dimension => null gives one overall row; a dimension gives the top p_limit keys by abs(avg_delta) via a full outer join (a key present in only one window still appears). Columns (key, query_text, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2); avg_delta = window 2 minus window 1. Use to tell whether a deploy regressed load and where.$$;
+$$Before/after comparison of two windows (US-7): window 1 = [p_from_1, p_to_1), window 2 = [p_from_2, p_to_2). p_dimension => null gives one overall row; a dimension gives the top p_limit keys by abs(avg_delta) via a full outer join (a key present in only one window still appears). Columns (key, query_text, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2); avg_delta = window 2 minus window 1. A window with no data coverage (e.g. past retention) reports NULL on its side and a NULL avg_delta (plus a NOTICE) — never a fake zero baseline; within a covered window an absent key is a true zero. Use to tell whether a deploy regressed load and where.$$;
 
 comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigint, name) is
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [p_from, p_to) (default last 1 hour), up to p_limit. Uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements (null otherwise). Reads ash.sample directly (raw retention only).$$;
 
 comment on function ash.report(timestamptz, timestamptz, int, int) is
-$$Machine-readable load report as one jsonb (US-8) for [p_from, p_to) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"), the latter omitted when raw retention no longer covers the window. p_vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
+$$Machine-readable load report as one jsonb (US-8) for [p_from, p_to) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution. p_vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage; never raises. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
 
 comment on function ash.chart(timestamptz, timestamptz, interval, int, int, boolean) is
-$$Human render helper: stacked ASCII per-bucket AAS chart over [p_from, p_to) (default last 1 hour), top p_top wait events plus Other. p_bucket => null auto-selects grain by span. Presentation-only (columns bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with p_color => true or "set ash.color = on".$$;
+$$Human render helper: stacked ASCII per-bucket AAS chart over [p_from, p_to) (default last 1 hour). Series/legend = the window-wide top p_top wait events PLUS any event that is top-1 in at least one bucket (so a single-bucket spike culprit is always visible), plus Other. p_bucket => null auto-selects grain by span; buckets are calendar-aligned like ash.timeline(). Presentation-only (columns bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with p_color => true or "set ash.color = on".$$;
 
 comment on function ash.summary(timestamptz, timestamptz) is
 $$Human render helper: key/value AAS overview for one window [p_from, p_to) (default last 1 hour) — the companion to ash.periods(). Returns (metric, value): period bounds, source, minutes_with_data, avg/peak/p99 AAS, backend_seconds, databases_active, and top waits/queries. Presentation-only; for typed data use ash.aas() and ash.top().$$;
+
+-- Schema-level map: one obj_description() lookup orients a human or agent on
+-- the whole surface (readers vs operations) before any \df spelunking.
+comment on schema ash is
+$$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader entry points (start with ash.periods()): periods, aas, timeline, top, compare, samples, report, chart, summary, status — every reader reports load in AAS (Average Active Sessions) and names its data source. Operations/admin (owner-only, not granted by grant_reader): start, stop, take_sample, rotate, rollup_minute, rollup_hour, rollup_cleanup, rebuild_partitions, set_debug_logging, uninstall, grant_reader, revoke_reader. Each function documents itself: select obj_description('ash.<name>(<argtypes>)'::regprocedure).$$;
+
+-- Operational / admin surface: obj_description for every entry point, so the
+-- reader-vs-ops split is legible from \df+ alone.
+comment on function ash.status() is
+$$Installation health snapshot (readable by monitoring roles): sampling state and interval, pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start, rollup_1m_retention_start, rollup_1h_retention_start — use these to plan reader windows), error counters (insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
+
+comment on function ash.start(interval) is
+$$Admin: start sampling — schedules take_sample() every p_interval (default 1 second) plus rollup_minute()/rollup_hour()/rollup_cleanup() and rotation via pg_cron when available; without pg_cron it enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
+
+comment on function ash.stop() is
+$$Admin: stop sampling — unschedules the pg_cron jobs created by ash.start() (or disables sampling when pg_cron is absent). Collected data is kept and remains readable. Inverse: ash.start().$$;
+
+comment on function ash.take_sample() is
+$$Admin/internal: take one wait-event sample of pg_stat_activity into the current slot (the every-second worker that ash.start() schedules). Returns the number of active backends captured. Call manually only for testing; continuous sampling belongs to ash.start().$$;
+
+comment on function ash.rotate() is
+$$Admin: rotate to the next partition slot, rolling up and truncating the oldest (the daily job scheduled by ash.start()). Controls raw retention: num_partitions x rotation_period of raw samples are kept. Safe to call manually to force a rotation.$$;
+
+comment on function ash.rollup_minute(int) is
+$$Admin: fold completed minutes of raw samples into ash.rollup_1m (the every-minute job scheduled by ash.start()); p_batch_limit caps catch-up minutes per call. Returns minutes processed. Readers pick rollups automatically — this only needs manual calls when pg_cron is absent.$$;
+
+comment on function ash.rollup_hour() is
+$$Admin: fold completed hours of ash.rollup_1m into ash.rollup_1h, preserving per-minute totals in minute_counts so long-window peak/p99 stay minute-grain (the hourly job scheduled by ash.start()). Returns hours processed.$$;
+
+comment on function ash.rollup_cleanup() is
+$$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Returns a summary of rows deleted.$$;
+
+comment on function ash.rebuild_partitions(int, text) is
+$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions with p_num_partitions slots (3-32; raw retention = slots x rotation_period). Requires p_confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Re-run ash.grant_reader() for every monitoring role afterwards — the new partitions carry no grants.$$;
+
+comment on function ash.set_debug_logging(bool) is
+$$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
+
+comment on function ash.uninstall(text) is
+$$Admin, DESTRUCTIVE: remove pg_ash entirely — unschedules jobs and drops schema ash with all collected data. Requires p_confirm => 'yes'.$$;
 
 -- Helper: detect the schema that holds the pg_stat_statements view.
 -- Managed services differ: RDS/Cloud SQL/Supabase/AlloyDB/Neon default to

@@ -358,7 +358,7 @@ jobs:
           do $$
           begin
             -- PUBLIC has no EXECUTE on reader functions
-            assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'PUBLIC should NOT have EXECUTE on ash.top';
             assert not has_function_privilege('public', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
               'PUBLIC should NOT have EXECUTE on ash.aas';
@@ -394,13 +394,13 @@ jobs:
               'PUBLIC should NOT have SELECT on ash.query_map_0';
 
             -- Unprivileged role (non-owner) cannot execute readers either
-            assert not has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert not has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'non-owner role should NOT have EXECUTE on ash.top';
             assert not has_function_privilege('ash_test_unpriv', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
               'non-owner role should NOT have EXECUTE on ash.aas';
 
             -- Owner (postgres) retains EXECUTE by virtue of ownership
-            assert has_function_privilege('postgres', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert has_function_privilege('postgres', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'owner SHOULD have EXECUTE on ash.top';
             assert has_function_privilege('postgres', 'ash.start(interval)', 'EXECUTE'),
               'owner SHOULD have EXECUTE on ash.start';
@@ -429,16 +429,16 @@ jobs:
           reset role;
 
           -- GRANT flow smoke-test: owner can hand out EXECUTE, then REVOKE it
-          grant execute on function ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval) to ash_test_unpriv;
+          grant execute on function ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text) to ash_test_unpriv;
           do $$
           begin
-            assert has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'GRANT to non-owner role should succeed';
           end $$;
-          revoke execute on function ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval) from ash_test_unpriv;
+          revoke execute on function ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text) from ash_test_unpriv;
           do $$
           begin
-            assert not has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert not has_function_privilege('ash_test_unpriv', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'REVOKE from non-owner role should succeed';
           end $$;
 
@@ -463,7 +463,7 @@ jobs:
           begin
             assert not has_schema_privilege('ash_grafana', 'ash', 'USAGE'),
               'ash_grafana must NOT have USAGE on ash before grant_reader';
-            assert not has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert not has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'ash_grafana must NOT have EXECUTE on ash.top before grant_reader';
             assert not has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
               'ash_grafana must NOT have EXECUTE on ash.status before grant_reader';
@@ -502,7 +502,7 @@ jobs:
               'grant_reader: ash_grafana must have USAGE on ash';
 
             -- Reader functions across the family
-            assert has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'grant_reader: ash.top must be EXECUTE-able';
             assert has_function_privilege('ash_grafana', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
               'grant_reader: ash.aas must be EXECUTE-able';
@@ -599,7 +599,7 @@ jobs:
           begin
             assert not has_schema_privilege('ash_grafana', 'ash', 'USAGE'),
               'revoke_reader: USAGE on ash must be revoked';
-            assert not has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert not has_function_privilege('ash_grafana', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'revoke_reader: EXECUTE on ash.top must be revoked';
             assert not has_function_privilege('ash_grafana', 'ash.status()', 'EXECUTE'),
               'revoke_reader: EXECUTE on ash.status must be revoked';
@@ -670,7 +670,7 @@ jobs:
               'default grant: pg_monitor must have USAGE on schema ash';
             assert has_function_privilege('pg_monitor', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
               'default grant: pg_monitor must have EXECUTE on ash.aas';
-            assert has_function_privilege('pg_monitor', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert has_function_privilege('pg_monitor', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'default grant: pg_monitor must have EXECUTE on ash.top';
             assert has_table_privilege('pg_monitor', 'ash.sample', 'SELECT'),
               'default grant: pg_monitor must have SELECT on ash.sample';
@@ -1560,15 +1560,19 @@ jobs:
             assert r.key = 'IO:DataFileRead' and r.backend_seconds = 39.00 and r.pct = 100.00,
                format('top(wait_event|IO) mismatch: key=%s bsec=%s pct=%s', r.key, r.backend_seconds, r.pct);
 
-            -- query_id: q1 27 (45), unknown 15 (25), q2 12 (20), q3 6 (10).
+            -- query_id: q1 27 (45), unattributed NULL 15 (25), q2 12 (20), q3 6 (10).
             select * into r from ash.top('query_id', v_from, v_to) where key = '111111';
             assert r.avg_aas = 0.09 and r.backend_seconds = 27.00 and r.pct = 45.00,
                format('top(query_id) q1 mismatch: avg=%s bsec=%s pct=%s', r.avg_aas, r.backend_seconds, r.pct);
             select count(*) into n from ash.top('query_id', v_from, v_to);
             assert n = 4, 'top(query_id) should return 4 keys, got ' || n;
+            -- the unattributed bucket is a NULL key (not the literal 'unknown').
             assert exists (select 1 from ash.top('query_id', v_from, v_to)
-                           where key = 'unknown' and backend_seconds = 15.00),
-               'top(query_id) unknown (CPU has no query) should be 15';
+                           where key is null and backend_seconds = 15.00),
+               'top(query_id) NULL key (CPU has no query) should be 15';
+            assert not exists (select 1 from ash.top('query_id', v_from, v_to)
+                               where key = 'unknown'),
+               'top(query_id) must not emit the literal string unknown';
 
             -- database: postgres 57 (95), template1 3 (5).
             select * into r from ash.top('database', v_from, v_to) where key = 'postgres';
@@ -1604,7 +1608,14 @@ jobs:
                 p_wait_event => 'DataFileRead');
               raise exception 'expected raw-retention exception, none raised';
             exception when others then
-              if sqlerrm like '%needs raw samples%' then v_raised := true; else raise; end if;
+              -- window is ENTIRELY past raw retention: the error must say the
+              -- tie is unrecoverable and point to the untied readers, and must
+              -- NOT suggest narrowing (which cannot help here).
+              if sqlerrm like '%entirely outside raw retention%'
+                 and sqlerrm like '%untied aggregate readers%'
+                 and sqlerrm not like '%Narrow the window%' then
+                v_raised := true;
+              else raise; end if;
             end;
             assert v_raised, 'raw-retention exception message mismatch';
             raise notice 'raw-retention exception PASSED';
@@ -1646,20 +1657,27 @@ jobs:
             select count(*) into n from ash.periods(v_end);
             assert n = 6, 'periods should return 6 rows, got ' || n;
 
-            -- 1m period = [m4, m4+60): only m4 (avg 0.15), raw.
+            -- 1m period = [m4, m4+60): only m4 (avg 0.15), raw. buckets_with_data
+            -- counts covered buckets at the grain named by the bucket column
+            -- (always 1 minute for periods).
             select * into r from ash.periods(v_end) where period = '1m';
-            assert r.source = 'raw' and r.minutes_with_data = 1 and r.avg_aas = 0.15,
-               format('periods 1m mismatch: src=%s mwd=%s avg=%s', r.source, r.minutes_with_data, r.avg_aas);
+            assert r.source = 'raw' and r.buckets_with_data = 1 and r.avg_aas = 0.15,
+               format('periods 1m mismatch: src=%s bwd=%s avg=%s', r.source, r.buckets_with_data, r.avg_aas);
+            assert r.bucket = interval '1 minute',
+               'periods bucket column must be 1 minute, got ' || r.bucket;
             -- 5m period = exactly the seeded window.
             select * into r from ash.periods(v_end) where period = '5m';
-            assert r.source = 'raw' and r.minutes_with_data = 5 and r.avg_aas = 0.20
+            assert r.source = 'raw' and r.buckets_with_data = 5 and r.avg_aas = 0.20
                and r.peak_aas = 0.40 and r.p99_aas = 0.39,
-               format('periods 5m mismatch: src=%s mwd=%s avg=%s peak=%s p99=%s',
-                      r.source, r.minutes_with_data, r.avg_aas, r.peak_aas, r.p99_aas);
+               format('periods 5m mismatch: src=%s bwd=%s avg=%s peak=%s p99=%s',
+                      r.source, r.buckets_with_data, r.avg_aas, r.peak_aas, r.p99_aas);
             -- 1h period reaches before raw retention -> rollup_1m source.
             select * into r from ash.periods(v_end) where period = '1h';
-            assert r.source = 'rollup_1m' and r.minutes_with_data = 5 and r.peak_aas = 0.40,
-               format('periods 1h mismatch: src=%s mwd=%s peak=%s', r.source, r.minutes_with_data, r.peak_aas);
+            assert r.source = 'rollup_1m' and r.buckets_with_data = 5 and r.peak_aas = 0.40,
+               format('periods 1h mismatch: src=%s bwd=%s peak=%s', r.source, r.buckets_with_data, r.peak_aas);
+            -- every row exposes its grain: 6 rows, all 1-minute buckets.
+            select count(*) into n from ash.periods(v_end) where bucket = interval '1 minute';
+            assert n = 6, 'periods bucket column on all 6 rows, got ' || n;
             raise notice 'ash.periods PASSED';
           end $$;
 
@@ -1718,7 +1736,8 @@ jobs:
             expected_keys text[] := array[
               'aas_avg','aas_worst1m','aas_p99','aas_p999',
               'top_events_worst1m','top_events_p99','top_events_p999',
-              'top_queryids_worst1m','top_queryids_p99','top_queryids_p999'];
+              'top_queryids_worst1m','top_queryids_p99','top_queryids_p999',
+              'top_queryids_available','coverage'];
           begin
             select ash.ts_to_timestamptz(base_ts), ash.ts_to_timestamptz(base_ts + 300)
               into v_from, v_to from t2anchor;
@@ -1757,6 +1776,18 @@ jobs:
             assert not (j->'top_queryids_worst1m' ? 'cpu'), 'report top_queryids must not have cpu key';
             assert (j->'top_queryids_worst1m'->'total')->>0 like '111111(%',
                'report top_queryids_worst1m.total should lead with 111111';
+
+            -- attribution/coverage metadata: available flag + coverage object
+            -- reconcile the payload against ash.aas() for the same window.
+            assert (j->>'top_queryids_available')::boolean is true,
+               'report top_queryids_available must be true when attribution present';
+            assert j->'coverage'->>'source' = 'rollup_1m', 'report coverage.source rollup_1m';
+            assert (j->'coverage'->>'minutes_expected')::int = 5, 'report coverage.minutes_expected 5';
+            assert (j->'coverage'->>'minutes_with_data')::int = 5, 'report coverage.minutes_with_data 5';
+            assert (j->'coverage'->>'from')::timestamptz = v_from
+               and (j->'coverage'->>'to')::timestamptz = v_to,
+               'report coverage window must echo the minute-floored request';
+            assert j->'coverage' ? 'raw_retention_start', 'report coverage.raw_retention_start present';
 
             -- p_vcpus is echoed, cpu-scoring left to the consumer.
             assert (ash.report(v_from, v_to, p_vcpus => 8)->>'vcpus')::int = 8,
@@ -3309,7 +3340,10 @@ jobs:
             select ash._register_wait('active','Lock','transactionid') into v_lock;
             select ash._register_wait('active','IO','DataFileRead') into v_io_r;
             select ash._register_wait('active','IO','DataFileWrite') into v_io_w;
-            v_end := date_trunc('minute', now());
+            -- Hour-aligned anchor: buckets are calendar-aligned, so expectations
+            -- for 2/3/5-minute buckets are deterministic only when the window
+            -- boundaries sit on those calendar boundaries themselves.
+            v_end := date_trunc('hour', now());
             v_start := v_end - interval '10 minutes';
 
             -- Cross-database: two dbs, 300 backend-sec each in the SAME minute. Instance
@@ -3342,11 +3376,14 @@ jobs:
             select peak_aas into v_metric from ash.aas(v_start, v_end, p_bucket => '5 minutes');
             assert v_metric = 2.80, 'aas 5-min-bucket peak 2.80, got ' || v_metric;
 
-            -- 3-minute bucket: trailing bucket overhangs the window and is divided by the
-            -- 60s it actually covers, so the storm minute alone reads the true 10.00.
+            -- 3-minute calendar buckets: the hour-aligned grid puts boundaries at
+            -- -12,-9,-6,-3,0, so the leading bucket [-12,-9) is clipped to the
+            -- window ([-10,-9): one quiet minute over its 60s coverage = 1.00) and
+            -- the storm minute lands in [-3,0) with two quiet minutes: 720/180 =
+            -- 4.00. p99 over [1,1,1,4] = 3.91.
             select peak_aas, p99_aas into v_metric, v_pct from ash.aas(v_start, v_end, p_bucket => '3 minutes');
-            assert v_metric = 10.00, 'aas 3-min-bucket peak 10.00 (coverage-divided), got ' || v_metric;
-            assert v_pct = 9.73, 'aas 3-min-bucket p99 9.73, got ' || v_pct;
+            assert v_metric = 4.00, 'aas 3-min calendar-bucket peak 4.00, got ' || v_metric;
+            assert v_pct = 3.91, 'aas 3-min calendar-bucket p99 3.91, got ' || v_pct;
 
             -- timeline: one row per bucket so the spike is locatable in time.
             select count(*) into n from ash.timeline(v_start, v_end, '1 minute');
@@ -4564,7 +4601,7 @@ jobs:
               '#107: ash.status lost reader EXECUTE across upgrade';
             assert has_function_privilege('ash_b1_reader', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
               '#107: ash.decode_sample lost reader EXECUTE across upgrade';
-            assert has_function_privilege('ash_b1_reader', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert has_function_privilege('ash_b1_reader', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               '#107: preserved reader must gain the new 2.0 readers (ash.top)';
             assert has_function_privilege('ash_b1_reader', 'ash._pgss_query_text(bigint,int)', 'EXECUTE'),
               '#107: preserved reader must gain new internal helpers (ash._pgss_query_text)';
@@ -4703,7 +4740,7 @@ jobs:
 
           do $$ begin
             -- (1) #107 still fixed: legitimate reader keeps every reader grant
-            assert has_function_privilege('lp_reader', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert has_function_privilege('lp_reader', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               '#107 regression: reader lost ash.top across re-apply';
             assert has_function_privilege('lp_reader', 'ash.report(timestamptz,timestamptz,int,int)', 'EXECUTE'),
               '#107 regression: reader lost ash.report across re-apply';
@@ -4725,7 +4762,7 @@ jobs:
               'single-overload grant must NOT widen to the sibling overload';
 
             -- (4) PUBLIC stays revoked
-            assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+            assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'PUBLIC must stay revoked';
 
             raise notice 'issue #107 follow-up: grant restore stayed least-privilege';
