@@ -5016,3 +5016,40 @@ begin
   end loop;
   drop table pg_temp._ash_install_func_acl;
 end $$;
+
+-- Default reader: pg_monitor.
+--
+-- pg_monitor is the predefined monitoring role (PG10+); its members already
+-- hold pg_read_all_stats / pg_read_all_settings / pg_stat_scan_tables and can
+-- therefore read pg_stat_activity and pg_stat_statements directly — the very
+-- sources pg_ash samples from. Granting them pg_ash's derived data exposes
+-- nothing they could not already see, and it makes monitoring tools running
+-- as pg_monitor members (Grafana, exporters) work out of the box.
+--
+-- Opt out at any time (the grant is a plain ash.grant_reader() bundle):
+--   select ash.revoke_reader('pg_monitor');
+--
+-- Best-effort: this must NEVER abort the install. On a locked-down managed
+-- platform the installing role may not be allowed to grant on behalf of
+-- pg_monitor — warn and continue; the operator can grant_reader() manually.
+do $$
+begin
+  if exists (select from pg_catalog.pg_roles where rolname = 'pg_monitor') then
+    -- Revoke first so pg_monitor's aclitem always lands LAST on every
+    -- function/table, on fresh installs and re-applies alike. Without this,
+    -- CREATE OR REPLACE preserves proacl across a re-apply, and the mid-file
+    -- REVOKE-then-GRANT-to-PUBLIC on epoch/ts_* would leave pg_monitor in a
+    -- different aclitem position than on a fresh install — same effective
+    -- privileges, but a text-level proacl diff in equivalence snapshots.
+    perform ash.revoke_reader('pg_monitor');
+    perform ash.grant_reader('pg_monitor');
+  else
+    -- pg_monitor is predefined on every supported PG version; this branch is
+    -- purely defensive (e.g. an exotic fork without predefined roles).
+    raise notice 'pg_ash: role pg_monitor not found, skipping default reader grant';
+  end if;
+exception when others then
+  raise warning 'pg_ash: could not grant default reader privileges to pg_monitor (%: %); '
+    'run "select ash.grant_reader(''pg_monitor'')" manually, or ignore to leave pg_monitor without access',
+    sqlstate, sqlerrm;
+end $$;

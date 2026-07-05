@@ -654,6 +654,101 @@ jobs:
           drop role ash_grafana;
           EOF
 
+      - name: "Test 2.0: pg_monitor gets reader access by default (opt-out via revoke_reader)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- 2.0 installs grant the reader bundle to pg_monitor by default:
+          -- its members already hold pg_read_all_stats et al. and can read
+          -- the sources pg_ash samples from, so monitoring tools running as
+          -- pg_monitor members work out of the box. Opt-out is
+          -- ash.revoke_reader('pg_monitor').
+          do $$
+          begin
+            assert has_schema_privilege('pg_monitor', 'ash', 'USAGE'),
+              'default grant: pg_monitor must have USAGE on schema ash';
+            assert has_function_privilege('pg_monitor', 'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)', 'EXECUTE'),
+              'default grant: pg_monitor must have EXECUTE on ash.aas';
+            assert has_function_privilege('pg_monitor', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              'default grant: pg_monitor must have EXECUTE on ash.top';
+            assert has_table_privilege('pg_monitor', 'ash.sample', 'SELECT'),
+              'default grant: pg_monitor must have SELECT on ash.sample';
+            -- Admin surface must NOT be part of the default grant.
+            assert not has_function_privilege('pg_monitor', 'ash.start(interval)', 'EXECUTE'),
+              'default grant: ash.start must remain admin-only';
+            assert not has_function_privilege('pg_monitor', 'ash.grant_reader(name)', 'EXECUTE'),
+              'default grant: ash.grant_reader must remain admin-only';
+          end $$;
+
+          -- Behavioral: a MEMBER of pg_monitor can call the readers.
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_pgmon_member') then
+              create role ash_pgmon_member login password 'x';
+            end if;
+          end $$;
+          grant pg_monitor to ash_pgmon_member;
+
+          set role ash_pgmon_member;
+          select count(*) from ash.aas();
+          select count(*) from ash.top('wait_event', now() - interval '1 hour', now());
+          select count(*) from ash.timeline(now() - interval '1 hour', now());
+          do $$ begin perform 1 from ash.sample limit 1; end $$;
+          reset role;
+
+          -- A bare role that is NOT a pg_monitor member stays locked out.
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_pgmon_outsider') then
+              create role ash_pgmon_outsider login password 'x';
+            end if;
+          end $$;
+          set role ash_pgmon_outsider;
+          do $$
+          declare
+            v_succeeded bool := false;
+          begin
+            begin
+              perform * from ash.aas();
+              v_succeeded := true;
+            exception when insufficient_privilege then
+              null; -- expected: 42501 permission denied
+            end;
+            assert not v_succeeded,
+              'non-member must not inherit the default pg_monitor grant';
+          end $$;
+          reset role;
+
+          -- Opt-out: revoke_reader('pg_monitor') locks the member out again.
+          select ash.revoke_reader('pg_monitor');
+          set role ash_pgmon_member;
+          do $$
+          declare
+            v_succeeded bool := false;
+          begin
+            begin
+              perform * from ash.aas();
+              v_succeeded := true;
+            exception when insufficient_privilege then
+              null; -- expected after opt-out
+            end;
+            assert not v_succeeded,
+              'pg_monitor member must be denied after revoke_reader(pg_monitor)';
+          end $$;
+          reset role;
+
+          -- Opt back in restores access (and the default state for the
+          -- remaining test steps, which run against this same install).
+          select ash.grant_reader('pg_monitor');
+          set role ash_pgmon_member;
+          select count(*) from ash.aas();
+          reset role;
+
+          drop role ash_pgmon_member;
+          drop role ash_pgmon_outsider;
+          EOF
+
       - name: Test sampler and decoder
         env:
           PGPASSWORD: postgres

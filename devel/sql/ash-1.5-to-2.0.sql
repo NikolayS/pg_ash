@@ -12,7 +12,10 @@
 --   * re-applies the snapshotted reader grants to the surviving/recreated
 --     functions (so a role configured via ash.grant_reader keeps least-privilege
 --     access; functions newly introduced by 2.0 still need a fresh
---     ash.grant_reader call, exactly as for every prior upgrade), and
+--     ash.grant_reader call, exactly as for every prior upgrade),
+--   * grants the default reader bundle to pg_monitor (best-effort, new in
+--     2.0 — see the block at the end of the installer; opt out afterwards
+--     with `select ash.revoke_reader('pg_monitor')`), and
 --   * stamps ash.config.version = '2.0' (and the column default).
 --
 -- Sampling, storage, rollups, and admin/lifecycle functions are unchanged.

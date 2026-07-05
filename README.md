@@ -924,6 +924,14 @@ Don't forget to also schedule rotation and rollups:
 
 pg_ash installs with a locked-down privilege model: admin functions (`ash.start()`, `ash.stop()`, `ash.rotate()`, `ash.take_sample()`, `ash.set_debug_logging()`, `ash.rebuild_partitions()`, `ash.rollup_minute()`, `ash.rollup_hour()`, `ash.rollup_cleanup()`, `ash.grant_reader()`, `ash.revoke_reader()`, `ash.uninstall()`, and internal maintenance helpers) are restricted to the schema owner, and `EXECUTE` on reader functions plus `SELECT` on reader tables (`ash.sample`, `ash.query_map_all`, `ash.config`, `ash.wait_event_map`, rollup tables, and per-slot partitions) is revoked from `PUBLIC`. The installing role retains full access.
 
+**Default reader: `pg_monitor`.** The installer grants the reader bundle (the exact `ash.grant_reader()` set below — never the admin functions) to the predefined `pg_monitor` role by default. This is safe: `pg_monitor` already implies `pg_read_all_stats`, `pg_read_all_settings`, and `pg_stat_scan_tables`, so its members can already read `pg_stat_activity` and `pg_stat_statements` — the very sources pg_ash samples from; pg_ash's derived data exposes nothing new to them. The upside is that monitoring tools running as `pg_monitor` members (Grafana, exporters) work out of the box. The grant is best-effort: if it fails on a locked-down platform, the install completes with a `WARNING` and you can run `select ash.grant_reader('pg_monitor')` manually. Opt out at any time:
+
+```sql
+select ash.revoke_reader('pg_monitor');
+```
+
+Note that installers and upgrade scripts re-establish the default, so re-run the opt-out after an upgrade if you rely on it.
+
 Grant access to a monitoring or read-only role with the convenience helpers:
 
 ```sql
