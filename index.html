@@ -128,6 +128,12 @@ pre .k{color:var(--lwlock)} pre .s{color:var(--amber)} pre .f{color:var(--cpu)} 
 .gone li::after{content:" → " attr(data-to);color:var(--ink-dim)}
 .gone li[data-to=""]::after{content:""}
 
+/* personas */
+.personas{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}
+.persona{font-family:var(--mono);font-size:12.5px;color:var(--ink-dim);border:1px solid var(--line);border-left:3px solid var(--io);border-radius:5px;padding:9px 13px;background:var(--panel)}
+.persona b{color:var(--ink);font-weight:600}
+.persona.machine{border-left-color:var(--cpu)}
+
 /* before/after */
 details.ba{border:1px solid var(--line);border-radius:8px;background:var(--panel);margin-top:14px;overflow:hidden}
 details.ba summary{cursor:pointer;list-style:none;padding:15px 20px;font-family:var(--mono);font-size:13.5px;display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
@@ -196,7 +202,34 @@ footer a{border-bottom:none}
 </section>
 
 <section>
-  <div class="sec-head"><span class="no">§2</span><h2>the surface</h2></div>
+  <div class="sec-head"><span class="no">§2</span><h2>user stories &amp; personas</h2></div>
+  <p class="lede">The surface is polished against concrete stories — the source of truth in <a href="https://github.com/NikolayS/pg_ash/blob/aas-2.0/blueprints/AAS_USER_STORIES.md">AAS_USER_STORIES.md</a>. Five personas, two of them machines: the API has to read well in psql <em>and</em> be drivable by an agent or a scraper with no docs but the catalog comments.</p>
+  <div class="personas">
+    <span class="persona"><b>On-call engineer</b> · human · "it's slow right now"</span>
+    <span class="persona"><b>Performance engineer</b> · human · attributes load to waits &amp; queries</span>
+    <span class="persona"><b>Capacity planner</b> · human · trends, peak hours, weeks</span>
+    <span class="persona machine"><b>Monitoring system</b> · machine · scrapes AAS for plots &amp; alerts</span>
+    <span class="persona machine"><b>AI agent</b> · machine · autonomous broad→locate→drill</span>
+  </div>
+  <div class="tblwrap" style="margin-top:26px">
+  <table>
+    <thead><tr><th>#</th><th>as a…</th><th>I want… so that…</th><th>served by</th></tr></thead>
+    <tbody>
+      <tr><td class="fn"><b>US-1</b></td><td class="q">on-call engineer</td><td>AAS across standard windows (1m…1mo) in one call, so spike-vs-sustained is legible instantly.</td><td class="fn">periods</td></tr>
+      <tr><td class="fn"><b>US-2</b></td><td class="q">engineer on a past incident</td><td>a time series with per-bucket peak, so I can pinpoint <em>when</em> it spiked and zoom in.</td><td class="fn">timeline</td></tr>
+      <tr><td class="fn"><b>US-3</b></td><td class="q">engineer at a spike window</td><td>drill wait_type → event → query with avg+peak+p99 on every row, so a spiky member stands out from a busy one.</td><td class="fn">top(dim, …)</td></tr>
+      <tr><td class="fn"><b>US-4</b></td><td class="q">engineer with a suspect event</td><td>that event's own AAS <em>and</em> its per-query split, so I can attribute the wait to the queries causing it.</td><td class="fn">aas(event) + top('query_id', event)</td></tr>
+      <tr><td class="fn"><b>US-5</b></td><td class="q">monitoring system / AI agent</td><td>typed, stable columns and an explicit <code>source</code> signal, so I plot/threshold reliably and never get a silently-empty drill.</td><td class="fn">whole family + source col</td></tr>
+      <tr><td class="fn"><b>US-6</b></td><td class="q">capacity planner</td><td>AAS by hour/day over weeks with peak (and p99) per bucket, so I can see growth and recurring peak hours.</td><td class="fn">timeline (long span)</td></tr>
+      <tr><td class="fn"><b>US-7</b></td><td class="q">engineer who just deployed</td><td>to compare two windows overall and by dimension, so I can tell if the change regressed load and where.</td><td class="fn">compare</td></tr>
+      <tr><td class="fn"><b>US-8</b></td><td class="q">external monitoring platform</td><td>one JSON call with per-wait-class avg/worst-1m/p99/p99.9 + top events &amp; queries, so a collector ingests pg_ash as a data source with no extra queries.</td><td class="fn">report</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="no">§3</span><h2>the surface</h2></div>
   <div class="tblwrap">
   <table>
     <thead><tr><th>function</th><th>question answered</th><th>kind</th></tr></thead>
@@ -248,7 +281,7 @@ footer a{border-bottom:none}
 </section>
 
 <section>
-  <div class="sec-head"><span class="no">§3</span><h2>principles</h2></div>
+  <div class="sec-head"><span class="no">§4</span><h2>principles</h2></div>
   <div class="prin">
     <div><h3>AAS is the only unit</h3><p>Every reader reports <code>avg_aas</code>, <code>peak_aas</code>, <code>p99_aas</code>; <code>backend_seconds</code> rides along as the absolute. The three v1.x units are gone.</p></div>
     <div><h3>one time convention</h3><p><code>p_from</code> / <code>p_to</code>, defaulting to the last hour. Dropping the <code>f</code>/<code>f_at</code> twins alone halves the surface.</p></div>
@@ -265,7 +298,7 @@ footer a{border-bottom:none}
 </section>
 
 <section>
-  <div class="sec-head"><span class="no">§4</span><h2>before / after — every reader</h2></div>
+  <div class="sec-head"><span class="no">§5</span><h2>before / after — every reader</h2></div>
   <p class="lede">The same incident, investigated with the v1.5 surface and with 2.0. Outputs are <strong>illustrative</strong> (column contracts exact, numbers invented). Full catalog: <a href="https://github.com/NikolayS/pg_ash/blob/aas-2.0/blueprints/AAS_EXAMPLES.md">AAS_EXAMPLES.md</a>.</p>
   <details class="ba">
     <summary><span class="was">activity_summary('1 hour')</span><span class="arr">→</span><span class="now">periods()</span></summary>
@@ -435,7 +468,7 @@ HINT:  Narrow the window or drill without the
 </section>
 
 <section>
-  <div class="sec-head"><span class="no">§5</span><h2>removed in 2.0</h2></div>
+  <div class="sec-head"><span class="no">§6</span><h2>removed in 2.0</h2></div>
   <p class="lede">2.0 is a breaking release. Every v1.x reader has a strictly more capable replacement; sampling, storage, rollups and admin functions are untouched.</p>
   <ul class="gone">
     <li data-to="top('wait_event')"><s>top_waits</s></li>
