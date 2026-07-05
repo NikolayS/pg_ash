@@ -1800,6 +1800,20 @@ jobs:
           -- BEFORE `public` — otherwise a planted `public.pg_stat_statements` view
           -- shadows the real one and feeds attacker-controlled query_text (and, via
           -- SECURITY INVOKER, code execution) into monitoring calls.
+          --
+          -- Skip cleanly when pgss is unavailable for this PG major. The probe for
+          -- the behavioral half must run at top level (pgss does not capture a
+          -- statement executed inside a DO block), hence the \gset/\if scaffolding.
+          select exists (select 1 from pg_extension where extname = 'pg_stat_statements') as has_pgss \gset
+          \if :has_pgss
+          -- Relocate the real pgss into a non-public schema (the RDS/Supabase/
+          -- AlloyDB "extensions" layout this helper exists for).
+          create schema if not exists ash_pgss_ext;
+          alter extension pg_stat_statements set schema ash_pgss_ext;
+          select ash._apply_pgss_search_path();
+
+          -- (1) Catalog form: every pgss-probing reader lists the pgss schema
+          -- before public, and the catalog-derived set has not drifted.
           do $$
           declare
             r record;
@@ -1808,21 +1822,8 @@ jobs:
             v_pub_pos int;
             v_readers text[] := array['_pgss_query_text','top','compare','samples','summary'];
           begin
-            if not exists (select 1 from pg_extension where extname = 'pg_stat_statements') then
-              raise notice 'SKIP: pg_stat_statements not installed on this PG major';
-              return;
-            end if;
-
-            -- Relocate the real pgss into a non-public schema (the RDS/Supabase/
-            -- AlloyDB "extensions" layout this helper exists for).
-            create schema if not exists ash_pgss_ext;
-            execute 'alter extension pg_stat_statements set schema ash_pgss_ext';
-            perform ash._apply_pgss_search_path();
-
             assert ash._pgss_schema() = 'ash_pgss_ext',
               'pgss schema should be ash_pgss_ext after relocation';
-
-            -- Every pgss-touching reader must list ash_pgss_ext before public.
             for r in
               select p.proname, unnest(p.proconfig) as cfg
               from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -1839,9 +1840,6 @@ jobs:
             assert v_bad = '',
               'pgss shadow mitigation FAILED — these readers do not list the pgss '
               || 'schema before public: ' || v_bad;
-
-            -- The derivation must cover exactly the pgss-probing readers (guards
-            -- against the list drifting on a future rename).
             select string_agg(proname, ' ' order by proname) into v_bad
             from pg_proc p join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'ash' and p.prokind = 'f'
@@ -1852,14 +1850,41 @@ jobs:
               );
             assert v_bad = '_pgss_query_text compare samples summary top',
               'unexpected pgss-reader set (drift?): ' || coalesce(v_bad, '<none>');
-
-            raise notice 'pgss shadow mitigation PASSED (all 5 readers protected)';
-
-            -- Restore pgss to public so downstream steps see the default layout.
-            execute 'alter extension pg_stat_statements set schema public';
-            perform ash._apply_pgss_search_path();
-            drop schema if exists ash_pgss_ext;
+            raise notice 'pgss shadow mitigation (catalog) PASSED';
           end $$;
+
+          -- (2) Behavioral form: plant the actual attack — a public.pg_stat_statements
+          -- with the SAME queryid but attacker text — and prove the reader still
+          -- resolves the REAL text from the relocated schema. Probe at top level so
+          -- pgss records it.
+          select ash_pgss_ext.pg_stat_statements_reset();
+          select 987654321 as ash_shadow_probe_marker;
+          do $$
+          declare v_qid bigint; v_txt text;
+          begin
+            select queryid into v_qid from ash_pgss_ext.pg_stat_statements
+              where query like '%ash_shadow_probe_marker%'
+                and query not like '%pg_stat_statements%'
+              limit 1;
+            assert v_qid is not null, 'behavioral probe was not captured by pgss';
+            execute format(
+              'create view public.pg_stat_statements as select %s::bigint as queryid, %L::text as query',
+              v_qid, 'ATTACKER-CONTROLLED-TEXT');
+            v_txt := ash._pgss_query_text(v_qid);
+            assert v_txt is not null and v_txt not like 'ATTACKER%',
+              format('SHADOW WON: reader returned %L for queryid %s', v_txt, v_qid);
+            drop view public.pg_stat_statements;
+            raise notice 'pgss shadow mitigation (behavioral) PASSED — real text won: %',
+              left(v_txt, 45);
+          end $$;
+
+          -- Restore pgss to public so downstream steps see the default layout.
+          alter extension pg_stat_statements set schema public;
+          select ash._apply_pgss_search_path();
+          drop schema if exists ash_pgss_ext;
+          \else
+          \echo 'SKIP: pg_stat_statements not installed on this PG major'
+          \endif
           EOF
 
       - name: Test internal helper functions
