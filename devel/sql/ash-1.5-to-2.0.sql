@@ -10,9 +10,11 @@
 --   * creates the 2.0 reader surface (periods, aas, timeline, top, compare,
 --     samples, report, chart, summary) with catalog comments and grants,
 --   * re-applies the snapshotted reader grants to the surviving/recreated
---     functions (so a role configured via ash.grant_reader keeps least-privilege
---     access; functions newly introduced by 2.0 still need a fresh
---     ash.grant_reader call, exactly as for every prior upgrade),
+--     functions, and re-runs ash.grant_reader() for every role that held the
+--     full pre-upgrade reader bundle — so a configured reader role can use
+--     the whole 2.0 surface (new readers AND their new internal helpers)
+--     without manual intervention; roles holding only partial manual grants
+--     are restored by exact signature and never widened,
 --   * grants the default reader bundle to pg_monitor (best-effort, new in
 --     2.0 — see the block at the end of the installer; opt out afterwards
 --     with `select ash.revoke_reader('pg_monitor')`), and

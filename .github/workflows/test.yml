@@ -4424,13 +4424,13 @@ jobs:
               format('reader EXECUTE grants lost across upgrade on: %s', v_lost);
           end $$;
 
-          -- 2.0 is a breaking reader rework: the v1.x readers are dropped, so
-          -- grant preservation applies to the functions that SURVIVE the
-          -- upgrade. ash.samples is recreated with a new signature and its
-          -- reader grant is re-applied by name (the heart of #107); ash.status
-          -- and ash.decode_sample survive in place. The brand-new 2.0 readers
-          -- (top/aas/timeline/...) intentionally require a fresh
-          -- ash.grant_reader() call, per the upgrade script.
+          -- 2.0 is a breaking reader rework: the v1.x readers are dropped and
+          -- new readers/helpers are created. A role that held the full reader
+          -- bundle pre-upgrade is re-run through ash.grant_reader() by the
+          -- installer's restore, so it must hold the COMPLETE current reader
+          -- set afterwards: surviving functions (status, decode_sample), the
+          -- recreated `samples`, the brand-new 2.0 readers, AND the new
+          -- internal helpers those readers call as SECURITY INVOKER.
           do $$
           begin
             assert has_function_privilege('ash_b1_reader', 'ash.samples(timestamptz,timestamptz,int,text,text,bigint,name)', 'EXECUTE'),
@@ -4439,6 +4439,12 @@ jobs:
               '#107: ash.status lost reader EXECUTE across upgrade';
             assert has_function_privilege('ash_b1_reader', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
               '#107: ash.decode_sample lost reader EXECUTE across upgrade';
+            assert has_function_privilege('ash_b1_reader', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval)', 'EXECUTE'),
+              '#107: preserved reader must gain the new 2.0 readers (ash.top)';
+            assert has_function_privilege('ash_b1_reader', 'ash._pgss_query_text(bigint,int)', 'EXECUTE'),
+              '#107: preserved reader must gain new internal helpers (ash._pgss_query_text)';
+            assert has_function_privilege('ash_b1_reader', 'ash._raw_retention_start()', 'EXECUTE'),
+              '#107: preserved reader must gain new internal helpers (ash._raw_retention_start)';
 
             -- No escalation: restoring grants must not widen the role's
             -- reach to admin functions or re-open PUBLIC.
@@ -4456,13 +4462,43 @@ jobs:
             raise notice 'issue #107: reader grants preserved across upgrade';
           end $$;
 
-          -- Behavioral: actually call a surviving reader as the role. Use
-          -- ash.samples (recreated + re-granted). Note: ash.status() would fail
-          -- here because 2.0's status() calls new retention helpers this role
-          -- was never granted — a role must re-run ash.grant_reader() after the
-          -- 2.0 upgrade to reach the new surface.
+          -- Behavioral: the preserved reader must be able to call the whole
+          -- 2.0 surface — readers old and new, plus status() — with zero
+          -- permission errors. Sample first so data-dependent helper paths
+          -- (e.g. _pgss_query_text laterals) actually execute as the invoker.
+          select ash.take_sample();
           set role ash_b1_reader;
-          select count(*) from ash.samples(now() - interval '1 hour', now());
+          do $$
+          declare
+            v_calls constant text[] := array[
+              'ash.samples(now() - interval ''1 hour'', now())',
+              'ash.aas()',
+              'ash.top(''query_id'')',
+              'ash.top(''wait_event'')',
+              'ash.timeline()',
+              'ash.periods()',
+              'ash.report()',
+              'ash.chart()',
+              'ash.summary()',
+              'ash.status()',
+              'ash.decode_sample_at(now())'
+            ];
+            v_call text;
+            v_cnt bigint;
+            v_failed text[] := '{}';
+          begin
+            foreach v_call in array v_calls loop
+              begin
+                execute format('select count(*) from %s', v_call) into v_cnt;
+              exception
+                when insufficient_privilege or undefined_function or invalid_schema_name then
+                  v_failed := v_failed || (v_call || ' -> ' || sqlerrm);
+              end;
+            end loop;
+            assert cardinality(v_failed) = 0,
+              '#107: preserved reader cannot use the 2.0 surface: ' || array_to_string(v_failed, '; ');
+            raise notice 'issue #107: preserved reader can call the full 2.0 surface';
+          end $$;
           reset role;
 
           -- Re-apply scenario: re-running the development installer on an

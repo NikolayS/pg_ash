@@ -42,6 +42,45 @@ begin
     and p.prokind in ('f', 'a')
     and acl.privilege_type = 'EXECUTE'
     and acl.grantee <> p.proowner;
+
+  -- Reader-role detection. The exact-signature restore at the end of this
+  -- script can only replay grants on functions that existed BEFORE the
+  -- upgrade, so a reader role would be left without EXECUTE on helpers
+  -- introduced by THIS version (e.g. 2.0's _pgss_query_text and the
+  -- retention helpers) and every reader call would then die mid-function.
+  -- A role that held EXECUTE on the full pre-upgrade reader bundle (every
+  -- non-admin ash.* function — exactly what ash.grant_reader() hands out)
+  -- is recorded here and re-run through ash.grant_reader() during the
+  -- restore, which grants the complete current closure. Detection uses the
+  -- snapshotted explicit aclitems, not has_function_privilege(), so
+  -- superusers and role-membership shortcuts never qualify; roles holding
+  -- only partial manual grants keep the exact-signature restore path and
+  -- are never widened. ash._admin_funcs() may not exist yet (fresh install,
+  -- or upgrade from a version predating the #45 hardening — which also
+  -- predates grant_reader, so there are no reader bundles to detect).
+  drop table if exists pg_temp._ash_install_reader_roles;
+  create temp table _ash_install_reader_roles (rolname name primary key);
+  if to_regproc('ash._admin_funcs') is not null then
+    insert into pg_temp._ash_install_reader_roles (rolname)
+    select a.grantee
+    from pg_temp._ash_install_func_acl a
+    group by a.grantee
+    having not exists (
+      select 1
+      from pg_proc p
+      join pg_namespace n on p.pronamespace = n.oid
+      where n.nspname = 'ash'
+        and p.prokind = 'f'
+        and p.proname::text <> all (ash._admin_funcs())
+        and not exists (
+          select 1
+          from pg_temp._ash_install_func_acl a2
+          where a2.grantee = a.grantee
+            and a2.proname = p.proname
+            and a2.args = pg_catalog.pg_get_function_identity_arguments(p.oid)
+        )
+    );
+  end if;
 end $$;
 
 -- Drop functions removed or changed in 1.1 (handled by DO block below)
@@ -4977,9 +5016,12 @@ end $$;
 --     name.
 -- This mirrors what CREATE OR REPLACE would have preserved: function names
 -- that no longer exist (removed/renamed) are skipped, roles dropped
--- mid-script are skipped, and a role's reach is never widened —
--- functions introduced by this version still require a fresh
--- ash.grant_reader() call, exactly as before.
+-- mid-script are skipped, and a partially-granted role's reach is never
+-- widened. Roles that held the FULL pre-upgrade reader bundle (detected in
+-- the snapshot block at the top of this script) are additionally re-run
+-- through ash.grant_reader() afterwards, so they can also execute helpers
+-- introduced by this version — otherwise the readers they kept would fail
+-- mid-call on the first new internal helper.
 do $$
 declare
   r record;
@@ -5014,7 +5056,21 @@ begin
                    r.proname, r.args, r.grantee,
                    case when r.grantable then ' with grant option' else '' end);
   end loop;
+
+  -- Preserved reader roles: grant the full CURRENT reader closure. The
+  -- exact-signature loop above only replays pre-upgrade grants, so helpers
+  -- new in this version would stay denied for these roles. grant_reader()
+  -- excludes the admin set, so this never widens beyond reader access.
+  for r in
+    select t.rolname
+    from pg_temp._ash_install_reader_roles t
+    join pg_catalog.pg_roles g on g.rolname = t.rolname
+  loop
+    perform ash.grant_reader(r.rolname);
+  end loop;
+
   drop table pg_temp._ash_install_func_acl;
+  drop table pg_temp._ash_install_reader_roles;
 end $$;
 
 -- Default reader: pg_monitor.
