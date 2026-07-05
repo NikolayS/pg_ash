@@ -213,9 +213,24 @@ rm -f "$CAST"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
 # --- 4. Record ---------------------------------------------------------------
-# asciinema CLI: --command for the command to record, --cols/--rows for
-# geometry; positional arg is the output cast file. These flags work with the
-# asciinema v2 CLI commonly packaged on Linux hosts.
+# asciinema CLI flags differ between v2 and v3 (v3 is what asciinema 3.x ships):
+#   geometry:    v2 `--cols N --rows M`      -> v3 `--window-size NxM`
+#   env capture: v2 `--env VARS`             -> v3 `--capture-env VARS`
+#   `--overwrite` and `--idle-time-limit` are common to both.
+# The positional arg is the output cast file; `--command` is what gets recorded.
+# We detect the installed major version and pick the right geometry/env flags so
+# the recorder works on both. (agg + the t=0 post-process below handle the v3
+# asciicast-v3 output format as well as v2.)
+ASCIINEMA_MAJOR="$(asciinema --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+if [ "${ASCIINEMA_MAJOR:-2}" -ge 3 ]; then
+  ASCIINEMA_GEO="--window-size ${COLS}x${ROWS}"
+  ASCIINEMA_ENV="--capture-env TERM,SHELL"
+else
+  ASCIINEMA_GEO="--cols ${COLS} --rows ${ROWS}"
+  ASCIINEMA_ENV="--env TERM,SHELL"
+fi
+log "asciinema major version ${ASCIINEMA_MAJOR:-unknown} — geometry flags: ${ASCIINEMA_GEO}"
+
 # Ship a tiny splash script into the container. It prints a coloured banner
 # (that becomes the GIF's first frame / GitHub thumbnail) and then execs psql.
 # Banner is sized for the wider 140-col terminal (138-char inner box).
@@ -241,8 +256,8 @@ chmod +x /tmp/ash_splash.sh
 
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
   "asciinema rec --overwrite --idle-time-limit 3 \
-     --cols ${COLS} --rows ${ROWS} \
-     --env TERM,SHELL \
+     ${ASCIINEMA_GEO} \
+     ${ASCIINEMA_ENV} \
      --command 'docker exec -it -e TERM=xterm-256color -e LC_ALL=C.UTF-8 -e LANG=C.UTF-8 $CONTAINER /tmp/ash_splash.sh' \
      '$CAST'"
 sleep 3.0
