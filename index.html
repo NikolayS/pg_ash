@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pg_ash 2.0 — Reader API Brief</title>
+<meta name="description" content="Design brief for the pg_ash 2.0 reader/analysis API: a minimal, AAS-based, composable surface for humans and AI agents.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>▚</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0e12; --bg2:#10141a; --panel:#12171f; --line:#232b36; --line2:#2e3947;
+  --ink:#d7dee8; --ink-dim:#8b98a8; --ink-faint:#5c6877;
+  --cpu:#50fa7b; --io:#6ea8fe; --lock:#ff5555; --lwlock:#ff79c6; --ipc:#8be9fd; --amber:#f1fa8c;
+  --serif:"Newsreader",Georgia,serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg); color:var(--ink); font-family:var(--serif);
+  font-size:17px; line-height:1.65;
+  background-image:
+    radial-gradient(1200px 500px at 80% -10%, rgba(110,168,254,.07), transparent 60%),
+    radial-gradient(900px 420px at 10% 0%, rgba(80,250,123,.05), transparent 55%);
+}
+body::after{ /* grain */
+  content:""; position:fixed; inset:0; pointer-events:none; opacity:.5; mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+a{color:var(--io);text-decoration:none;border-bottom:1px solid rgba(110,168,254,.35)}
+a:hover{color:var(--ipc);border-bottom-color:var(--ipc)}
+code,pre,kbd{font-family:var(--mono)}
+code{font-size:.85em;color:var(--amber);background:rgba(241,250,140,.06);padding:.08em .35em;border-radius:4px;border:1px solid rgba(241,250,140,.12)}
+.wrap{max-width:1060px;margin:0 auto;padding:0 28px}
+
+/* ── header ── */
+header{padding:64px 0 0}
+.crumbs{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);display:flex;gap:1em;flex-wrap:wrap}
+.crumbs .st{color:var(--cpu)}
+h1{font-family:var(--mono);font-weight:600;font-size:clamp(34px,6vw,64px);letter-spacing:-.03em;line-height:1.05;margin:22px 0 6px}
+h1 .v{color:var(--cpu)}
+.sub{font-size:clamp(19px,2.4vw,24px);font-style:italic;color:var(--ink-dim);max-width:34em}
+.sub em{color:var(--ink);font-style:italic}
+.strip{margin:40px 0 0;display:flex;height:10px;border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.strip i{display:block}
+.legend{display:flex;gap:1.4em;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);margin:10px 0 0;letter-spacing:.05em}
+.legend b{font-weight:500;color:var(--ink)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.5em;vertical-align:baseline}
+
+/* ── big numbers ── */
+.numbers{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:56px 0 0}
+.numbers>div{background:var(--panel);padding:26px 24px}
+.numbers .n{font-family:var(--mono);font-size:clamp(30px,4vw,44px);font-weight:600;letter-spacing:-.03em}
+.numbers .n small{font-size:.45em;color:var(--ink-faint);font-weight:400}
+.numbers p{font-size:14.5px;color:var(--ink-dim);margin-top:6px;line-height:1.45}
+.n.g{color:var(--cpu)} .n.b{color:var(--io)} .n.r{color:var(--lock)} .n.p{color:var(--lwlock)}
+
+/* ── sections ── */
+section{margin:88px 0 0}
+.sec-head{display:flex;align-items:baseline;gap:16px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:30px}
+.sec-head .no{font-family:var(--mono);color:var(--ink-faint);font-size:13px;letter-spacing:.1em}
+h2{font-family:var(--mono);font-weight:500;font-size:clamp(21px,2.6vw,27px);letter-spacing:-.02em}
+.lede{max-width:44em;color:var(--ink-dim);font-size:18px}
+.lede strong{color:var(--ink);font-weight:500}
+
+/* arc */
+.arc{margin-top:34px;display:grid;gap:0}
+.arc-row{display:grid;grid-template-columns:110px 92px 1fr 260px;gap:18px;align-items:baseline;padding:16px 6px;border-top:1px dashed var(--line)}
+.arc-row:last-child{border-bottom:1px dashed var(--line)}
+.arc-row .us{font-family:var(--mono);font-size:12px;color:var(--ink-faint)}
+.arc-row .stage{font-family:var(--mono);font-weight:600;font-size:15px}
+.arc-row .q{font-style:italic;color:var(--ink-dim)}
+.arc-row .fn{font-family:var(--mono);font-size:13.5px;text-align:right;color:var(--amber)}
+.arc-row:nth-child(1) .stage{color:var(--cpu)}
+.arc-row:nth-child(2) .stage{color:var(--ipc)}
+.arc-row:nth-child(3) .stage{color:var(--io)}
+.arc-row:nth-child(4) .stage{color:var(--lwlock)}
+@media(max-width:760px){.arc-row{grid-template-columns:1fr;gap:2px}.arc-row .fn{text-align:left}}
+
+/* surface table */
+table{width:100%;border-collapse:collapse;font-size:15.5px}
+.tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);text-align:left;padding:14px 18px;border-bottom:1px solid var(--line2);font-weight:500}
+td{padding:13px 18px;border-bottom:1px solid var(--line);vertical-align:baseline}
+tr:last-child td{border-bottom:none}
+td.fn{font-family:var(--mono);font-size:14px;white-space:nowrap;color:var(--ink)}
+td.fn b{color:var(--cpu);font-weight:600}
+td.q{font-style:italic;color:var(--ink-dim)}
+td.tag{font-family:var(--mono);font-size:11px;letter-spacing:.08em;white-space:nowrap}
+.t-data{color:var(--io)} .t-json{color:var(--ipc)} .t-human{color:var(--lwlock)} .t-raw{color:var(--ink-faint)}
+tr.render td{background:rgba(255,121,198,.03)}
+
+/* code panels */
+pre{
+  background:var(--bg2);border:1px solid var(--line);border-radius:8px;
+  padding:22px 24px;overflow-x:auto;font-size:13.5px;line-height:1.7;color:var(--ink);
+}
+pre .c{color:var(--ink-faint);font-style:italic}
+pre .k{color:var(--lwlock)} pre .s{color:var(--amber)} pre .f{color:var(--cpu)} pre .n{color:var(--io)} pre .p{color:var(--ipc)}
+.duo{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:30px}
+@media(max-width:860px){.duo{grid-template-columns:1fr}}
+.panel-label{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 10px}
+
+/* principles */
+.prin{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:22px;margin-top:34px;counter-reset:pr}
+.prin div{border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:6px;padding:20px 22px;background:var(--panel);counter-increment:pr}
+.prin div:nth-child(1){border-left-color:var(--cpu)} .prin div:nth-child(2){border-left-color:var(--io)}
+.prin div:nth-child(3){border-left-color:var(--ipc)} .prin div:nth-child(4){border-left-color:var(--lwlock)}
+.prin div:nth-child(5){border-left-color:var(--lock)} .prin div:nth-child(6){border-left-color:var(--amber)}
+.prin h3{font-family:var(--mono);font-size:15px;font-weight:600;margin-bottom:8px}
+.prin h3::before{content:counter(pr,decimal-leading-zero) " · ";color:var(--ink-faint);font-weight:400}
+.prin p{font-size:15px;color:var(--ink-dim)}
+.prin p code{font-size:.82em}
+
+/* callout */
+.callout{margin-top:34px;border:1px solid rgba(80,250,123,.3);background:rgba(80,250,123,.05);border-radius:8px;padding:22px 26px;display:flex;gap:18px;align-items:baseline}
+.callout .star{font-family:var(--mono);font-size:30px;color:var(--cpu);line-height:1}
+.callout p{font-size:16px;max-width:52em}
+.callout code{color:var(--cpu);background:rgba(80,250,123,.08);border-color:rgba(80,250,123,.25)}
+
+/* removed */
+.gone{columns:2;column-gap:40px;margin-top:26px;font-family:var(--mono);font-size:13.5px;line-height:2.1}
+@media(max-width:700px){.gone{columns:1}}
+.gone li{list-style:none;color:var(--ink-faint)}
+.gone li s{color:var(--ink-faint);text-decoration-color:rgba(255,85,85,.6);text-decoration-thickness:1.5px}
+.gone li::after{content:" → " attr(data-to);color:var(--ink-dim)}
+.gone li[data-to=""]::after{content:""}
+
+/* before/after */
+details.ba{border:1px solid var(--line);border-radius:8px;background:var(--panel);margin-top:14px;overflow:hidden}
+details.ba summary{cursor:pointer;list-style:none;padding:15px 20px;font-family:var(--mono);font-size:13.5px;display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+details.ba summary::-webkit-details-marker{display:none}
+details.ba summary::before{content:"▸";color:var(--ink-faint);transition:transform .2s}
+details.ba[open] summary::before{transform:rotate(90deg)}
+details.ba summary .was{color:var(--ink-faint);text-decoration:line-through;text-decoration-color:rgba(255,85,85,.55)}
+details.ba summary .arr{color:var(--ink-faint)}
+details.ba summary .now{color:var(--cpu);font-weight:600}
+details.ba .inner{padding:4px 20px 20px;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:900px){details.ba .inner{grid-template-columns:1fr}}
+details.ba pre{font-size:12px;line-height:1.6;margin:0}
+details.ba .panel-label{margin-top:10px}
+.ba-note{font-size:14px;color:var(--ink-dim);margin-top:14px;font-style:italic}
+
+/* footer */
+footer{margin:110px 0 0;border-top:1px solid var(--line);padding:30px 0 60px;display:flex;justify-content:space-between;gap:2em;flex-wrap:wrap;font-family:var(--mono);font-size:12.5px;color:var(--ink-faint)}
+footer a{border-bottom:none}
+.reveal{opacity:0;transform:translateY(14px);animation:up .7s cubic-bezier(.2,.7,.2,1) forwards}
+@keyframes up{to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.reveal{animation:none;opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="crumbs reveal">
+    <span>NikolayS/pg_ash</span><span>·</span><span>blueprints/AAS_API.md</span><span>·</span>
+    <span class="st">▲ design brief — pre-release draft</span>
+  </div>
+  <h1 class="reveal" style="animation-delay:.05s">pg_ash <span class="v">2.0</span><br>reader api</h1>
+  <p class="sub reveal" style="animation-delay:.12s">A <em>minimal, composable</em> analysis surface for Postgres active-session history — one load unit, one time convention, one drill grammar. Built for humans in psql <em>and</em> AI agents driving investigations.</p>
+
+  <div class="strip reveal" style="animation-delay:.2s" aria-hidden="true">
+    <i style="width:34%;background:var(--cpu)"></i><i style="width:26%;background:var(--io)"></i>
+    <i style="width:16%;background:var(--lock)"></i><i style="width:13%;background:var(--lwlock)"></i>
+    <i style="width:11%;background:var(--ipc)"></i>
+  </div>
+  <div class="legend reveal" style="animation-delay:.24s">
+    <span><i class="dot" style="background:var(--cpu)"></i><b>CPU*</b></span>
+    <span><i class="dot" style="background:var(--io)"></i><b>IO</b></span>
+    <span><i class="dot" style="background:var(--lock)"></i><b>Lock</b></span>
+    <span><i class="dot" style="background:var(--lwlock)"></i><b>LWLock</b></span>
+    <span><i class="dot" style="background:var(--ipc)"></i><b>IPC</b></span>
+    <span style="margin-left:auto">unit = AAS, average active sessions</span>
+  </div>
+</header>
+
+<div class="numbers reveal" style="animation-delay:.3s">
+  <div><div class="n r">25×2<small> → </small><span class="g">7+2</span></div><p>v1.x shipped ~25 readers, each duplicated as <code>f()</code> / <code>f_at()</code>. 2.0 is seven data functions plus two render helpers.</p></div>
+  <div><div class="n g">1</div><p>load unit everywhere: <code>avg_aas</code> · <code>peak_aas</code> · <code>p99_aas</code>. No more samples vs backend_seconds confusion.</p></div>
+  <div><div class="n b">p_from, p_to</div><p>one time convention; defaults mean "the last hour". The <code>_at</code> twins are gone.</p></div>
+  <div><div class="n p">0</div><p>silent empty results. Every reader reports its <code>source</code>; unanswerable drills raise, with the retention boundary named.</p></div>
+</div>
+
+<section>
+  <div class="sec-head"><span class="no">§1</span><h2>the investigation arc</h2></div>
+  <p class="lede">Every incident walks the same path — <strong>broad → locate → drill → leaf</strong>. Each step is one function, and every function speaks the same parameter grammar, so the next call is always obvious (to an engineer, or to an agent reading catalog comments).</p>
+  <div class="arc">
+    <div class="arc-row"><span class="us">US-1</span><span class="stage">TRIAGE</span><span class="q">"Is it bad? Spike or sustained?"</span><span class="fn">ash.periods()</span></div>
+    <div class="arc-row"><span class="us">US-2</span><span class="stage">LOCATE</span><span class="q">"When did it spike?"</span><span class="fn">ash.timeline(…)</span></div>
+    <div class="arc-row"><span class="us">US-3</span><span class="stage">DRILL</span><span class="q">"Wait type → event → query — with p99 on every row."</span><span class="fn">ash.top(dimension, …)</span></div>
+    <div class="arc-row"><span class="us">US-4</span><span class="stage">LEAF</span><span class="q">"For this wait event, which queries?"</span><span class="fn">ash.top('query_id', p_wait_event ⇒ …)</span></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="no">§2</span><h2>the surface</h2></div>
+  <div class="tblwrap">
+  <table>
+    <thead><tr><th>function</th><th>question answered</th><th>kind</th></tr></thead>
+    <tbody>
+      <tr><td class="fn">ash.<b>periods</b>()</td><td class="q">Is it bad right now? 1m · 5m · 1h · 1d · 1w · 1mo, side by side. The zero-argument start.</td><td class="tag t-data">DATA</td></tr>
+      <tr><td class="fn">ash.<b>aas</b>(from, to, filters…)</td><td class="q">How much load in this window? One row: avg / peak / p99 / backend_seconds + coverage.</td><td class="tag t-data">DATA</td></tr>
+      <tr><td class="fn">ash.<b>timeline</b>(from, to, bucket…)</td><td class="q">When? Time series, auto grain, explicit no-data rows (never confused with zero load).</td><td class="tag t-data">DATA</td></tr>
+      <tr><td class="fn">ash.<b>top</b>(dimension, …)</td><td class="q">What / who? One vertical drill: wait_event_type · wait_event · query_id · database — filters compose.</td><td class="tag t-data">DATA</td></tr>
+      <tr><td class="fn">ash.<b>compare</b>(w₁, w₂, …)</td><td class="q">Did the deploy change load? Two windows, full outer, sorted by |Δ avg_aas|.</td><td class="tag t-data">DATA</td></tr>
+      <tr><td class="fn">ash.<b>samples</b>(from, to, …)</td><td class="q">Show me the raw evidence — decoded sample rows, newest first.</td><td class="tag t-raw">RAW</td></tr>
+      <tr><td class="fn">ash.<b>report</b>(from, to, …)</td><td class="q">One JSON load report per period, for external monitoring / health platforms.</td><td class="tag t-json">JSONB</td></tr>
+      <tr class="render"><td class="fn">ash.<b>chart</b>(…)</td><td class="q">Stacked ASCII timeline for humans — presentation only, colors optional.</td><td class="tag t-human">RENDER</td></tr>
+      <tr class="render"><td class="fn">ash.<b>summary</b>(…)</td><td class="q">Key/value overview in psql — the human companion to periods.</td><td class="tag t-human">RENDER</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="duo">
+    <div>
+      <p class="panel-label">one grammar, whole investigation</p>
+<pre><span class="c">-- 1 · broad: is load high? spiky?</span>
+<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">periods</span>();
+
+<span class="c">-- 2 · when? (order the worst buckets first)</span>
+<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">timeline</span>(<span class="n">p_from</span> ⇒ <span class="f">now</span>() - <span class="s">'1 day'</span>::interval)
+<span class="k">order by</span> peak_aas <span class="k">desc</span>;
+
+<span class="c">-- 3 · what? drill L1 → L2 inside the spike window</span>
+<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">top</span>(<span class="s">'wait_event_type'</span>, <span class="n">p_from</span> ⇒ :t0, <span class="n">p_to</span> ⇒ :t1);
+<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">top</span>(<span class="s">'wait_event'</span>,
+        <span class="n">p_wait_event_type</span> ⇒ <span class="s">'IO'</span>, <span class="n">p_from</span> ⇒ :t0, <span class="n">p_to</span> ⇒ :t1);
+
+<span class="c">-- 4 · leaf: which queries drive DataFileRead?</span>
+<span class="k">select</span> * <span class="k">from</span> ash.<span class="f">top</span>(<span class="s">'query_id'</span>,
+        <span class="n">p_wait_event</span> ⇒ <span class="s">'DataFileRead'</span>, <span class="n">p_from</span> ⇒ :t0, <span class="n">p_to</span> ⇒ :t1);</pre>
+    </div>
+    <div>
+      <p class="panel-label">machine ingest — ash.report()</p>
+<pre>{
+  <span class="p">"aas_avg"</span>:     {<span class="p">"total"</span>: <span class="n">29.6</span>, <span class="p">"cpu"</span>: <span class="n">12.4</span>, <span class="p">"io"</span>: <span class="n">8.9</span>,
+                  <span class="p">"ipc"</span>: <span class="n">4.1</span>, <span class="p">"lock"</span>: <span class="n">3.2</span>, <span class="p">"lwlock"</span>: <span class="n">1.0</span>},
+  <span class="p">"aas_worst1m"</span>: { … }, <span class="p">"aas_p99"</span>: { … }, <span class="p">"aas_p999"</span>: { … },
+  <span class="p">"top_events_worst1m"</span>:  {<span class="p">"io"</span>: [<span class="s">"DataFileRead(89.0)"</span>, …], …},
+  <span class="p">"top_queryids_worst1m"</span>:{<span class="p">"total"</span>: [<span class="s">"8231…417(12.3)"</span>, …], …}
+}</pre>
+      <p style="font-size:14.5px;color:var(--ink-dim);margin-top:12px">Per-wait-class avg, worst-1-minute, p99, p99.9 — 1-minute resolution, zero-filled — plus top events and top query ids per extreme window. Raw AAS only: scoring, thresholds, vCPU normalization are the <em>consumer's</em> job. Contract is frozen: keys are only ever added.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="no">§3</span><h2>principles</h2></div>
+  <div class="prin">
+    <div><h3>AAS is the only unit</h3><p>Every reader reports <code>avg_aas</code>, <code>peak_aas</code>, <code>p99_aas</code>; <code>backend_seconds</code> rides along as the absolute. The three v1.x units are gone.</p></div>
+    <div><h3>one time convention</h3><p><code>p_from</code> / <code>p_to</code>, defaulting to the last hour. Dropping the <code>f</code>/<code>f_at</code> twins alone halves the surface.</p></div>
+    <div><h3>dimensions are parameters</h3><p>Group-by is an argument of <code>top</code>; filters are uniform named parameters. Six v1.x drill functions collapse into one grammar.</p></div>
+    <div><h3>data ≠ presentation</h3><p>Data functions return typed columns only. Bars, colors and charts live in exactly two human helpers: <code>chart</code> and <code>summary</code>.</p></div>
+    <div><h3>source honesty</h3><p>Readers auto-select raw → rollup_1m → rollup_1h and say so in a <code>source</code> column. A drill that needs expired raw samples <em>raises</em>, naming the boundary — never a silent empty result.</p></div>
+    <div><h3>self-describing</h3><p>Every function's catalog comment states the unit, the column contract, and the recommended next call — an agent can navigate from <code>\df+</code> alone.</p></div>
+  </div>
+
+  <div class="callout">
+    <span class="star">*</span>
+    <p><strong>The asterisk in <code>CPU*</code> is load-bearing.</strong> An active backend reporting no wait event is <em>either</em> genuinely on CPU <em>or</em> in an uninstrumented code path. <code>CPU*</code> is the spelling everywhere — outputs, filters, legends — and must never be "cleaned up" to <code>CPU</code>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="no">§4</span><h2>before / after — every reader</h2></div>
+  <p class="lede">The same incident, investigated with the v1.5 surface and with 2.0. Outputs are <strong>illustrative</strong> (column contracts exact, numbers invented). Full catalog: <a href="https://github.com/NikolayS/pg_ash/blob/aas-2.0/blueprints/AAS_EXAMPLES.md">AAS_EXAMPLES.md</a>.</p>
+  <details class="ba">
+    <summary><span class="was">activity_summary('1 hour')</span><span class="arr">→</span><span class="now">periods()</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>activity_summary</span>(<span class='s'>'1 hour'</span>);
+<span class='c'> metric               | value
+----------------------+--------------------
+ avg_active_backends  | 3.2
+ peak_active_backends | 41
+ peak_time            | 2026-07-04 14:32:10
+ top_wait_1           | IO:DataFileRead</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>periods</span>();
+<span class='c'> period | source    | avg_aas | peak_aas | p99_aas
+--------+-----------+---------+----------+--------
+ 5m     | raw       |    3.1  |     4.0  |    3.9
+ 1h     | rollup_1m |    3.2  |    41.0  |   12.7  ← spike
+ 1d     | rollup_1m |    2.8  |    41.0  |    6.3
+ 1w     | rollup_1h |    2.6  |    41.0  |    5.9</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">wait_timeline('30 min', '5 min')</span><span class="arr">→</span><span class="now">timeline(from, to)</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>wait_timeline</span>(<span class='s'>'30 minutes'</span>, <span class='s'>'5 minutes'</span>);
+<span class='c'> bucket_start | wait_event         | samples
+--------------+--------------------+--------
+ 14:20:00     | CPU*               |     612
+ 14:20:00     | IO:DataFileRead    |     188
+ 14:30:00     | IO:DataFileRead    |    9411
+ 14:30:00     | Lock:transactionid |    2050</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>timeline</span>(<span class='n'>p_from</span> ⇒ <span class='s'>'14:15'</span>, <span class='n'>p_to</span> ⇒ <span class='s'>'14:45'</span>);
+<span class='c'> bucket_start | source | data_points | avg_aas | peak_aas
+--------------+--------+-------------+---------+---------
+ 14:20:00     | raw    |         300 |    2.9  |     4.1
+ 14:25:00     | raw    |           0 |         |          ← no data ≠ zero
+ 14:30:00     | raw    |         300 |   24.8  |    41.0  ← the spike
+ 14:35:00     | raw    |         300 |    6.1  |    11.4</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">top_by_type('15 min')</span><span class="arr">→</span><span class="now">top('wait_event_type')</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top_by_type</span>(<span class='s'>'15 minutes'</span>);
+<span class='c'> wait_event_type | samples |  pct | bar
+-----------------+---------+------+------------------
+ IO              |   14210 | 62.4 | ██████████████████
+ Lock            |    4180 | 18.4 | █████
+ CPU*            |    3390 | 14.9 | ████</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event_type'</span>, <span class='n'>p_from</span> ⇒ :t0, <span class='n'>p_to</span> ⇒ :t1);
+<span class='c'> key    | source | avg_aas | peak_aas | p99_aas |  pct
+--------+--------+---------+----------+---------+------
+ IO     | raw    |   15.8  |    33.0  |   31.5  | 62.4
+ Lock   | raw    |    4.6  |    12.0  |   11.2  | 18.4
+ CPU*   | raw    |    3.8  |     6.0  |    5.7  | 14.9</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">top_waits('15 min', 5)</span><span class="arr">→</span><span class="now">top('wait_event', …)</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top_waits</span>(<span class='s'>'15 minutes'</span>, <span class='n'>5</span>);
+<span class='c'> wait_event         | samples |  pct | bar
+--------------------+---------+------+----------------
+ IO:DataFileRead    |   12630 | 55.4 | ████████████████
+ Lock:transactionid |    3910 | 17.2 | █████
+ CPU*               |    3390 | 14.9 | ████</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='c'>-- L2 composes with the L1 filter — no separate function</span>
+<span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event'</span>, <span class='n'>p_wait_event_type</span> ⇒ <span class='s'>'IO'</span>);
+<span class='c'> key              | source | avg_aas | peak_aas | p99_aas |  pct
+------------------+--------+---------+----------+---------+-----
+ IO:DataFileRead  | raw    |   14.0  |    31.0  |   29.8  | 55.4
+ IO:DataFileWrite | raw    |    1.2  |     2.0  |    1.9  |  4.7</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">top_queries / top_queries_with_text</span><span class="arr">→</span><span class="now">top('query_id')</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top_queries</span>(<span class='s'>'15 minutes'</span>, <span class='n'>3</span>);
+<span class='c'> query_id         | samples |  pct | query_text
+------------------+---------+------+------------------------
+ 8231004856741017 |   11890 | 52.2 | select o.*, c.name fro…
+ -882290014352918 |    3020 | 13.3 | update inventory set q…</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'query_id'</span>, <span class='n'>p_limit</span> ⇒ <span class='n'>3</span>);
+<span class='c'> key              | query_text  | avg_aas | peak_aas | p99_aas |  pct
+------------------+-------------+---------+----------+---------+-----
+ 8231004856741017 | select o.*… |   13.2  |    30.0  |   28.7  | 52.2
+ -882290014352918 | update inv… |    3.4  |     9.0  |    8.5  | 13.3</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">query_waits(qid, …)</span><span class="arr">→</span><span class="now">top('wait_event', p_query_id ⇒ …)</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>query_waits</span>(<span class='n'>8231004856741017</span>, <span class='s'>'15 minutes'</span>);
+<span class='c'> wait_event      | samples |  pct | bar
+-----------------+---------+------+--------------
+ IO:DataFileRead |   10110 | 85.0 | █████████████
+ CPU*            |    1300 | 10.9 | ██</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'wait_event'</span>, <span class='n'>p_query_id</span> ⇒ <span class='n'>8231004856741017</span>);
+<span class='c'> key             | source | avg_aas | peak_aas | p99_aas |  pct
+-----------------+--------+---------+----------+---------+-----
+ IO:DataFileRead | raw    |   11.2  |    26.0  |   24.9  | 85.0
+ CPU*            | raw    |    1.4  |     3.0  |    2.8  | 10.9</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">event_queries(event, …)</span><span class="arr">→</span><span class="now">aas(event…) + top('query_id', event…)</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>event_queries</span>(<span class='s'>'DataFileRead'</span>, <span class='s'>'15 minutes'</span>);
+<span class='c'>-- sample counts only; silently empty past raw retention</span>
+<span class='c'> query_id         | samples |  pct | query_text
+------------------+---------+------+---------------
+ 8231004856741017 |   10110 | 80.1 | select o.*, c…</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'query_id'</span>, <span class='n'>p_wait_event</span> ⇒ <span class='s'>'DataFileRead'</span>);
+<span class='c'>-- past raw retention it raises, never silently empty:</span>
+<span class='c'>ERROR: pg_ash: this drill needs raw samples; raw
+       retention starts at 2026-07-03 00:00 but the
+       requested window starts at 2026-06-28 …
+HINT:  Narrow the window or drill without the
+       query/event tie.</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">minute_waits / hourly_queries / daily_peak_backends</span><span class="arr">→</span><span class="now">timeline / top (auto source)</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>daily_peak_backends</span>(<span class='s'>'7 days'</span>);
+<span class='c'>-- three functions, grain baked into names, backend_seconds units</span>
+<span class='c'> day        | peak_backends | avg_backends
+------------+---------------+-------------
+ 2026-06-28 |            12 |          2.4
+ 2026-06-29 |            41 |          2.9</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>timeline</span>(<span class='n'>p_from</span> ⇒ <span class='f'>now</span>() - <span class='s'>'7 days'</span>::interval);
+<span class='c'>-- grain + source picked from the window, and reported</span>
+<span class='c'> bucket_start     | source    | avg_aas | peak_aas
+------------------+-----------+---------+---------
+ 2026-06-28 00:00 | rollup_1h |    2.1  |     4.0
+ 2026-06-28 01:00 | rollup_1h |    2.3  |     5.0</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">samples_by_database('1 hour')</span><span class="arr">→</span><span class="now">top('database')</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>samples_by_database</span>(<span class='s'>'1 hour'</span>);
+<span class='c'> database_name | datid | samples | total_backends
+---------------+-------+---------+---------------
+ shop          | 16384 |   10440 |             48
+ metrics       | 16401 |    1080 |              6</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>top</span>(<span class='s'>'database'</span>);
+<span class='c'> key     | source    | avg_aas | peak_aas | p99_aas |  pct
+---------+-----------+---------+----------+---------+-----
+ shop    | rollup_1m |    2.9  |    39.0  |   11.8  | 90.6
+ metrics | rollup_1m |    0.3  |     2.0  |    1.2  |  9.4</span></pre></div>
+    </div>
+  </details>
+  <details class="ba">
+    <summary><span class="was">— (not possible in v1.x)</span><span class="arr">→</span><span class="now">compare(w₁, w₂, dimension)</span></summary>
+    <div class="inner">
+      <div><p class="panel-label">before · v1.5</p><pre><span class='c'>-- v1.x: run top_waits twice, diff by hand</span>
+<span class='c'>(two psql sessions and a spreadsheet)</span></pre></div>
+      <div><p class="panel-label">after · 2.0</p><pre><span class='k'>select</span> * <span class='k'>from</span> ash.<span class='f'>compare</span>(<span class='n'>p_from_1</span> ⇒ <span class='s'>'14:00'</span>, <span class='n'>p_to_1</span> ⇒ <span class='s'>'14:30'</span>,
+       <span class='n'>p_from_2</span> ⇒ <span class='s'>'14:30'</span>, <span class='n'>p_to_2</span> ⇒ <span class='s'>'15:00'</span>, <span class='n'>p_dimension</span> ⇒ <span class='s'>'wait_event'</span>);
+<span class='c'> key                | avg_aas_1 | avg_aas_2 | avg_delta
+--------------------+-----------+-----------+----------
+ IO:DataFileRead    |      1.1  |     14.0  |    +12.9
+ Lock:transactionid |      0.2  |      4.6  |     +4.4</span></pre></div>
+    </div>
+  </details>
+  <p class="ba-note">Every v1.5 example above also existed as an <code>_at(start, end)</code> twin — all of those collapse into the single <code>p_from</code>/<code>p_to</code> form. <code>samples()</code> keeps its role unchanged; <code>ash.aas()</code> and <code>ash.report()</code> are new (see §2).</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="no">§5</span><h2>removed in 2.0</h2></div>
+  <p class="lede">2.0 is a breaking release. Every v1.x reader has a strictly more capable replacement; sampling, storage, rollups and admin functions are untouched.</p>
+  <ul class="gone">
+    <li data-to="top('wait_event')"><s>top_waits</s></li>
+    <li data-to="top('wait_event_type')"><s>top_by_type</s></li>
+    <li data-to="top('query_id')"><s>top_queries, top_queries_with_text</s></li>
+    <li data-to="top('wait_event', query…)"><s>query_waits</s></li>
+    <li data-to="top('query_id', event…)"><s>event_queries</s></li>
+    <li data-to="timeline"><s>wait_timeline</s></li>
+    <li data-to="chart"><s>timeline_chart</s></li>
+    <li data-to="summary"><s>activity_summary</s></li>
+    <li data-to="top('database')"><s>samples_by_database</s></li>
+    <li data-to="timeline / top"><s>minute_waits, hourly_queries, daily_peak_backends</s></li>
+    <li data-to="samples(from, to)"><s>every *_at twin</s></li>
+  </ul>
+</section>
+
+<footer>
+  <span>pg_ash — active session history for Postgres, no extension required · <a href="https://github.com/NikolayS/pg_ash">github.com/NikolayS/pg_ash</a></span>
+  <span>full blueprint: <a href="https://github.com/NikolayS/pg_ash/blob/aas-2.0/blueprints/AAS_API.md">AAS_API.md</a> · <a href="https://github.com/NikolayS/pg_ash/blob/aas-2.0/blueprints/AAS_USER_STORIES.md">user stories</a> · <a href="https://github.com/NikolayS/pg_ash/issues/113">issue #113</a></span>
+</footer>
+
+</div>
+</body>
+</html>
