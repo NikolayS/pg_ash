@@ -119,8 +119,14 @@ def emit_full_upgrade_chain(start: str) -> None:
 
 
 def emit_reapply_chain() -> None:
+    # Only the in-progress development upgrade script(s) — latest released
+    # version up to the dev head — are guaranteed re-apply-safe (lockstep
+    # policy). Finalized legacy scripts are immutable and idempotent only on
+    # the version just below: once a later release removes the surface they
+    # recreate (e.g. 2.0 drops the 1.x readers and ash._to_sample_ts),
+    # re-applying them on a current install fails by design.
     by_source = upgrades()
-    current = second_oldest_version()
+    current = latest_released_version()
     seen: set[str] = set()
     while current in by_source:
         if current in seen:

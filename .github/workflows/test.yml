@@ -4302,18 +4302,16 @@ jobs:
           PGPASSWORD: postgres
         run: |
           # Idempotency scope (issue #50, blueprints/SPEC.md "Legacy
-          # upgrade-script idempotency"): legacy upgrade scripts are
-          # idempotent only on the version just below — i.e. ash-1.1-to-1.2
-          # is safe to re-run on a 1.2 install, but NOT guaranteed on a 1.4+
-          # install. ash-1.0.sql, ash-1.0-to-1.1.sql, and ash-1.1.sql are
-          # intentionally EXCLUDED from this re-apply test: ash-1.1.sql
-          # redefines top_queries_with_text with a narrower OUT-parameter
-          # list than 1.4 ships, so re-applying on a 1.4 install fails with
-          # "cannot change return type of existing function" (CREATE OR
-          # REPLACE cannot change OUT params). The 1.0 bootstrap and the
-          # 1.0-to-1.1 wrapper hit the same path. Those finalized legacy
-          # scripts remain immutable and are still exercised end-to-end by
-          # the one-shot upgrade-chain tests above.
+          # upgrade-script idempotency"): finalized legacy upgrade scripts
+          # are immutable and idempotent only on the version just below —
+          # e.g. ash-1.1-to-1.2 is safe to re-run on a 1.2 install, but NOT
+          # on a 2.0 install (2.0 removes the 1.x reader surface and
+          # helpers like ash._to_sample_ts that those scripts recreate).
+          # Only the in-progress development upgrade script(s) — latest
+          # released version up to the dev head — are kept re-apply-safe in
+          # lockstep with the dev installer, so reapply-chain emits exactly
+          # those. Legacy scripts are still exercised end-to-end by the
+          # one-shot upgrade-chain tests above.
           python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
           python3 devel/scripts/ash_sql_chain.py reapply-chain > /tmp/ash_reapply_chain.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
