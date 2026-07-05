@@ -952,30 +952,11 @@ select pg_has_role(current_user, 'pg_read_all_stats', 'usage');
 grant pg_read_all_stats to my_monitor_role;
 ```
 
-Prefer `ash.grant_reader()` for full monitoring access. If you need manual control, grant only the specific readers and tables the role actually needs — do **not** use blanket `EXECUTE` grants on the whole `ash` schema, because that can include owner-only maintenance helpers now or after future upgrades.
-
-Minimal example for a dashboard that only calls `ash.status()` and `ash.top()`:
+Always grant reader access via `ash.grant_reader()`. The reader functions are `SECURITY INVOKER` and call shared internal helper functions (which are also revoked from `PUBLIC`), so granting `EXECUTE` on an individual reader function alone is **not** sufficient — the call will fail with `permission denied` on a helper. `ash.grant_reader()` grants EXECUTE on every reader function *and* the internal helpers they depend on, computing the current safe reader set and deliberately excluding admin/destructive functions:
 
 ```sql
-grant usage on schema ash to my_monitor_role;
-grant execute on function ash.status() to my_monitor_role;
-grant execute on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval) to my_monitor_role;
-
-grant select on table
-  ash.config,
-  ash.sample,
-  ash.sample_0,
-  ash.sample_1,
-  ash.sample_2,
-  ash.wait_event_map,
-  ash.query_map_all,
-  ash.query_map_0,
-  ash.query_map_1,
-  ash.query_map_2
-  to my_monitor_role;
+select ash.grant_reader('my_monitor_role');
 ```
-
-For all public readers, use `select ash.grant_reader('my_monitor_role');`; it computes the current safe reader set and deliberately excludes admin/destructive functions.
 
 ### pg_stat_statements in a non-default schema
 
