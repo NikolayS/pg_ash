@@ -46,9 +46,9 @@ create extension if not exists pg_stat_statements;  -- enables query text + exec
 select ash.start('1 second');
 
 -- wait a few minutes, then query
-select * from ash.top_waits('1 hour');
-select * from ash.top_queries_with_text('1 hour');
-select * from ash.top_by_type('1 hour');
+select * from ash.periods();                       -- triage: the standard windows
+select * from ash.top('wait_event_type');          -- what kind of load? (last hour)
+select * from ash.top('query_id');                 -- which queries?
 
 -- stop sampling
 select ash.stop();
@@ -82,9 +82,9 @@ job owner) should be a superuser **or** a member of the built-in
 only for activity owned by the sampling role; queries run by other users come
 back with `query_id = NULL`, which ash records under the sentinel value `0`.
 
-This silently skews `ash.top_queries*`, `ash.query_waits`, and any per-query
-drill-downs — all of that "other-user" traffic collapses into a single
-`query_id = 0` bucket. To grant the role:
+This silently skews `ash.top('query_id', …)` and any per-query drill-down —
+all of that "other-user" traffic collapses into a single `query_id = 0`
+bucket. To grant the role:
 
 ```sql
 -- as a superuser
@@ -142,62 +142,61 @@ select * from ash.status();
 | `ash.grant_reader(role)` / `ash.revoke_reader(role)` | Grant/revoke the minimum monitoring-reader privilege bundle. **Admin-only** |
 | `ash.uninstall('yes')` | Drop the `ash` schema and remove pg_cron jobs. **Admin-only and destructive**; requires the exact `'yes'` confirmation token |
 
-### Relative time (last N hours)
+### Readers
 
-| Function | Description |
-|----------|-------------|
-| `ash.top_waits(interval, limit, width)` | Top wait events ranked by sample count, with bar chart |
-| `ash.top_queries(interval, limit)` | Top queries ranked by sample count |
-| `ash.top_queries_with_text(interval, limit)` | Same as top_queries, with pg_stat_statements join (**requires pg_stat_statements**) |
-| `ash.query_waits(query_id, interval, width, color)` | Wait profile for a specific query |
-| `ash.top_by_type(interval, width, color)` | Breakdown by wait event type |
-| `ash.wait_timeline(interval, bucket)` | Wait events bucketed over time |
-| `ash.samples_by_database(interval)` | Per-database activity |
-| `ash.activity_summary(interval)` | One-call overview: samples, peak backends, top waits, top queries |
-| `ash.timeline_chart(interval, bucket, top, width)` | Stacked bar chart of wait events over time |
-| `ash.event_queries(event, interval, limit)` | Top queries for a specific wait event (**requires pg_stat_statements**) |
-| `ash.samples(interval, limit)` | Fully decoded raw samples with timestamps and query text |
+**pg_ash 2.0 is a breaking change.** The v1.x reader API (`top_waits`,
+`top_queries`, `wait_timeline`, `activity_summary`, `timeline_chart`,
+`query_waits`, `event_queries`, `samples_by_database`, their `_at` twins, and
+the interim `aas_*` drafts) has been **removed** and replaced by the compact
+surface below. Full spec: [`blueprints/AAS_API.md`](blueprints/AAS_API.md).
+A before/after mapping of every old function to its 2.0 replacement:
+[`blueprints/AAS_EXAMPLES.md`](blueprints/AAS_EXAMPLES.md).
 
-All interval-based functions default to `'1 hour'`. Limit defaults to `10` (top 9 + "Other" rollup row).
+Every reader answers in **AAS** (average active sessions): `avg_aas`,
+`peak_aas`, `p99_aas`, with `backend_seconds` as a secondary absolute column
+and a `source` column (`raw` / `rollup_1m` / `rollup_1h` / `mixed`) showing
+where the data came from. `peak_aas` / `p99_aas` are the max / 99th percentile
+of per-bucket AAS, so a short spike stays visible next to the average. Every
+reader takes `p_from timestamptz default null` (→ `now() - '1 hour'`) and
+`p_to timestamptz default null` (→ `now()`), plus the uniform optional filters
+`p_wait_event_type`, `p_wait_event`, `p_query_id`, `p_database` where they
+apply. "Last 24 hours" is `p_from => now() - interval '24 hours'`.
 
-### Absolute time (incident investigation)
+| Function | Question it answers |
+|----------|---------------------|
+| `ash.periods([end])` | **Start here.** One row per standard trailing window (1m, 5m, 1h, 1d, 1w, 1mo): is it bad right now — a spike or sustained? |
+| `ash.aas(from, to, filters…, [bucket])` | Scalar load for one window (avg / peak / p99 AAS, backend_seconds). Also the leaf summary, e.g. `ash.aas(p_wait_event => 'IO:DataFileRead')` |
+| `ash.timeline(from, to, [bucket], filters…)` | AAS time series, one row per bucket; `data_points = 0` marks a no-data bucket (distinct from measured zero). `bucket => null` auto-selects grain by span |
+| `ash.top(dimension, from, to, filters…, [limit], [bucket])` | The single drill. `dimension` ∈ `wait_event_type` / `wait_event` / `query_id` / `database`; filters compose |
+| `ash.compare(from1, to1, from2, to2, [dimension], filters…)` | Before/after two-window diff — did the deploy change load, and where? |
+| `ash.samples(from, to, [limit], filters…)` | Decoded raw sample rows, newest first |
+| `ash.report(from, to, [vcpus], [top])` → `jsonb` | One machine-readable load report for external monitoring / health-assessment platforms — a single call, no follow-up queries |
+| `ash.chart(from, to, [bucket], [top], [width], [color])` | Human: stacked ASCII AAS timeline (the `timeline_chart` replacement) |
+| `ash.summary(from, to)` | Human: key/value overview (the `activity_summary` replacement) |
 
-| Function | Description |
-|----------|-------------|
-| `ash.top_waits_at(start, end, limit, width)` | Top waits in a time range, with bar chart |
-| `ash.top_queries_at(start, end, limit)` | Top queries in a time range |
-| `ash.query_waits_at(query_id, start, end, width, color)` | Query wait profile in a time range |
-| `ash.event_queries_at(event, start, end, limit)` | Top queries for a wait event in a time range (**requires pg_stat_statements**) |
-| `ash.samples_at(start, end, limit)` | Fully decoded raw samples in a time range |
-| `ash.top_by_type_at(start, end, width, color)` | Breakdown by wait event type in a time range |
-| `ash.wait_timeline_at(start, end, bucket)` | Wait timeline in a time range |
-| `ash.timeline_chart_at(start, end, bucket, top, width)` | Stacked bar chart in a time range |
+`ash.top` composes its filters with the dimension, giving every v1.x drill as
+one grammar:
 
-Start and end are `timestamptz`. Bucket defaults to `'1 minute'`.
+```sql
+select * from ash.top('wait_event_type');                              -- level 1
+select * from ash.top('wait_event', p_wait_event_type => 'IO');        -- level 2
+select * from ash.top('query_id');                                     -- top queries
+select * from ash.top('wait_event', p_query_id => 8231004856741017);   -- query → waits
+select * from ash.top('query_id', p_wait_event => 'IO:DataFileRead');  -- event → queries (leaf)
+```
 
-### Long-term trends (from rollup tables)
+Readers auto-select their source by window — `raw` within raw retention, else
+`rollup_1m`, else `rollup_1h` — and report it in the `source` column, so they
+keep working after raw samples have rotated away. A drill that needs the
+wait↔query tie (a query filter combined with a wait filter) can only be
+answered from raw samples; if the requested window predates raw retention the
+reader **raises a clear error naming the boundary** rather than returning a
+silently empty result.
 
-| Function | Description |
-|----------|-------------|
-| `ash.minute_waits(interval, limit)` | Top wait events from minute rollups (default: last 1 hour) |
-| `ash.minute_waits_at(start, end, limit)` | Same, absolute time range |
-| `ash.hourly_queries(interval, limit)` | Top queries from hourly rollups with pg_stat_statements text (default: last 1 day) |
-| `ash.hourly_queries_at(start, end, limit)` | Same, absolute time range |
-| `ash.daily_peak_backends(interval)` | Peak and average backends per day (default: last 7 days) |
-| `ash.daily_peak_backends_at(start, end)` | Same, absolute time range |
-| `ash.aas_periods([end], [bucket])` | **Start here:** standard AAS windows side by side: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, 1 month (30 days); default end: now |
-| `ash.aas(interval, bucket)` | Average Active Sessions over a period: avg + peak + p99 of per-bucket AAS (default: last 1 hour, 1-minute bucket) |
-| `ash.aas_at(start, end, bucket)` | Same, absolute time range |
-| `ash.aas_timeline(interval, bucket)` | AAS time series: one point per bucket for visualization / locating spikes (default: last 1 day, 1-hour bucket) |
-| `ash.aas_timeline_at(start, end, bucket)` | Same, absolute time range |
-| `ash.aas_wait_types(interval, limit)` | Nature drill-down level 1: AAS by `wait_event_type` (default: last 1 hour, limit 10) |
-| `ash.aas_wait_types_at(start, end, limit)` | Same, absolute time range |
-| `ash.aas_wait_events(interval, wait_type, limit)` | Nature drill-down level 2: AAS by `wait_event`; pass `wait_type` to drill into one type, omit to rank all events (default: last 1 hour, limit 10) |
-| `ash.aas_wait_events_at(start, end, wait_type, limit)` | Same, absolute time range |
-| `ash.aas_queryids(interval, limit)` | AAS by `query_id` (the identity); query text is optional decoration, shown when pg_stat_statements is available (default: last 1 hour, limit 10) |
-| `ash.aas_queryids_at(start, end, limit)` | Same, absolute time range |
-
-Rollup readers query `rollup_1m` / `rollup_1h` tables — they work even after raw samples have rotated away.
+On-CPU / uninstrumented work is spelled `CPU*` everywhere (the asterisk is
+load-bearing — such a sample is either genuine on-CPU work or a Postgres code
+path with no wait event; never "clean" it to `CPU`). Only `ash.report`'s JSON
+payload uses a lowercase `cpu` key.
 
 ### Helpers
 
@@ -207,7 +206,7 @@ Rollup readers query `rollup_1m` / `rollup_1h` tables — they work even after r
 | `ash.ts_to_timestamptz(int4)` | Convert int4 epoch offset back to timestamptz |
 | `ash.decode_sample(integer[], smallint)` | Decode a single packed `ash.sample.data` array. Pass `slot` for unambiguous query_id resolution |
 | `ash.decode_sample(int4)` | Convenience: decode every `ash.sample` row at the given `sample_ts` (across all datids/slots). Returns `(datid, wait_event, query_id, count)` |
-| `ash.decode_sample_at(timestamptz)` | Same as above but accepts `timestamptz` (converted via `ts_from_timestamptz`). Named with the `_at` suffix (consistent with `samples_at` / `top_waits_at`) to avoid `decode_sample(unknown)` overload ambiguity |
+| `ash.decode_sample_at(timestamptz)` | Same as above but accepts `timestamptz` (converted via `ts_from_timestamptz`). The `_at` suffix avoids `decode_sample(unknown)` overload ambiguity |
 
 `decode_sample` / `decode_sample_at` have `EXECUTE` revoked from `PUBLIC` (per the privilege hardening in #45). Grant explicitly to roles that need them, e.g. `grant execute on function ash.decode_sample(int4) to my_reader;`.
 
@@ -263,116 +262,92 @@ select * from ash.status();
 
 ### What hurt recently?
 
-```sql
--- morning coffee: what happened overnight?
-select * from ash.activity_summary('5 minutes');
-```
-
-```
-        metric        |                                            value
-----------------------+---------------------------------------------------------------------------------------------
- time_range           | 00:05:00
- total_samples        | 56
- avg_active_backends  | 6.6
- peak_active_backends | 10
- peak_time            | 2026-02-16 08:38:16+00
- databases_active     | 1
- top_wait_1           | Client:ClientRead (46.77%)
- top_wait_2           | Timeout:PgSleep (11.83%)
- top_wait_3           | Lock:transactionid (9.68%)
- top_query_1          | -2835399305386018931 — COMMIT (29.73%)
- top_query_2          | 3365820675399133794 — UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE b (23.24%)
- top_query_3          | -4378765880691287891 — UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE t (11.35%)
-```
+Start with `ash.periods()` — the six standard windows side by side. `peak_aas`
+far above `avg_aas` means a spike; both high means sustained load.
 
 ```sql
--- top wait events (default: top 10 + Other)
-select * from ash.top_waits('5 minutes');
+select * from ash.periods();
 ```
 
 ```
-     wait_event     | samples |  pct  |                  bar
---------------------+---------+-------+---------------------------------------
- Client:ClientRead  |     174 | 46.77 | ██████████████████████████████ 46.77%
- Timeout:PgSleep    |      44 | 11.83 | ████████ 11.83%
- Lock:transactionid |      36 |  9.68 | ██████ 9.68%
- CPU*               |      35 |  9.41 | ██████ 9.41%
- LWLock:WALWrite    |      31 |  8.33 | █████ 8.33%
- IdleTx             |      26 |  6.99 | ████ 6.99%
- IO:WalSync         |      19 |  5.11 | ███ 5.11%
- Lock:tuple         |       5 |  1.34 | █ 1.34%
- LWLock:LockManager |       2 |  0.54 | █ 0.54%
+ period | period_start        | source    | minutes_with_data | avg_aas | peak_aas | p99_aas
+--------+---------------------+-----------+-------------------+---------+----------+---------
+ 1m     | 2026-07-04 14:44:00 | raw       |                 1 |    2.9  |     3.4  |    3.4
+ 5m     | 2026-07-04 14:40:00 | raw       |                 5 |    3.1  |     4.0  |    3.9
+ 1h     | 2026-07-04 13:45:00 | rollup_1m |                60 |    3.2  |    41.0  |   12.7
+ 1d     | 2026-07-03 14:45:00 | rollup_1m |              1440 |    2.8  |    41.0  |    6.3
+ 1w     | 2026-06-27 14:45:00 | rollup_1h |             10080 |    2.6  |    41.0  |    5.9
+ 1mo    | 2026-06-04 14:45:00 | rollup_1h |             43200 |    2.5  |    41.0  |    5.7
 ```
 
-```sql
--- top queries with text from pg_stat_statements
-select * from ash.top_queries_with_text('5 minutes', 5);
-```
-
-```
-       query_id       | samples |  pct  | calls  | total_exec_time_ms | mean_exec_time_ms |                             query_text
-----------------------+---------+-------+--------+--------------------+-------------------+---------------------------------------------------------------------
- -2835399305386018931 |     110 | 29.73 | 283202 |            1234.56 |              0.00 | commit
-  3365820675399133794 |      86 | 23.24 | 283195 |          518349.35 |              1.83 | UPDATE pgbench_branches SET bbalance = bbalance + $1 WHERE bid = $2
-  5457019535816659310 |      44 | 11.89 |     11 |          195225.25 |          17747.75 | select pg_sleep($1)
- -4378765880691287891 |      42 | 11.35 | 283195 |          113278.00 |              0.40 | UPDATE pgbench_tellers SET tbalance = tbalance + $1 WHERE tid = $2
-```
+The last hour averaged 3.2 but peaked at 41 — a spike, not a sustained shift.
+`ash.summary()` renders the same picture as a key/value overview for humans.
 
 ```sql
--- breakdown by wait event type
-select * from ash.top_by_type('5 minutes');
+-- what is the load, broken down by wait event type?
+select * from ash.top('wait_event_type', p_from => now() - interval '5 minutes');
 ```
 
 ```
- wait_event_type | samples |  pct  |                       bar
------------------+---------+-------+-------------------------------------------------
- Client          |     174 | 46.77 | ████████████████████████████████████████ 46.77%
- Timeout         |      44 | 11.83 | ██████████ 11.83%
- Lock            |      41 | 11.02 | █████████ 11.02%
- CPU*            |      35 |  9.41 | ████████ 9.41%
- LWLock          |      33 |  8.87 | ████████ 8.87%
- IdleTx          |      26 |  6.99 | ██████ 6.99%
- IO              |      19 |  5.11 | ████ 5.11%
+ key    | query_text | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
+--------+------------+--------+---------+----------+---------+-----------------+-------
+ IO     |            | raw    |   15.8  |    33.0  |   31.5  |           14210 |  62.4
+ Lock   |            | raw    |    4.6  |    12.0  |   11.2  |            4180 |  18.4
+ CPU*   |            | raw    |    3.8  |     6.0  |    5.7  |            3390 |  14.9
+ LWLock |            | raw    |    1.1  |     3.0  |    2.8  |             980 |   4.3
+```
+
+`peak_aas` per row tells a spiky class apart from a steadily-busy one — `IO`
+here is both the largest and the spikiest.
+
+```sql
+-- top queries by load; query_text comes from pg_stat_statements when present
+select * from ash.top('query_id', p_from => now() - interval '5 minutes', p_limit => 3);
+```
+
+```
+       key         |            query_text             | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
+-------------------+-----------------------------------+--------+---------+----------+---------+-----------------+------
+  8231004856741017 | select o.*, c.name from orders o… | raw    |   13.2  |    30.0  |   28.7  |           11890 | 52.2
+  -882290014352918 | update inventory set qty = qty -… | raw    |    3.4  |     9.0  |    8.5  |            3020 | 13.3
+  4411002933801220 | select count(*) from events wher… | raw    |    1.6  |     3.0  |    2.9  |            1470 |  6.5
 ```
 
 ### Analyze a specific query
 
 ```sql
--- what is query 3365820675399133794 waiting on?
-select * from ash.query_waits(3365820675399133794, '5 minutes');
+-- what is query 8231004856741017 waiting on? (query → waits)
+select * from ash.top('wait_event', p_query_id => 8231004856741017,
+                       p_from => now() - interval '5 minutes');
 ```
 
 ```
-     wait_event     | samples |  pct  |                       bar
---------------------+---------+-------+-------------------------------------------------
- Client:ClientRead  |      32 | 54.24 | ████████████████████████████████████████ 54.24%
- Lock:transactionid |      12 | 20.34 | ███████████████ 20.34%
- LWLock:WALWrite    |       6 | 10.17 | ████████ 10.17%
- CPU*               |       4 |  6.78 | █████ 6.78%
- IO:WalSync         |       3 |  5.08 | ████ 5.08%
- IdleTx             |       2 |  3.39 | ██ 3.39%
+ key             | query_text | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
+-----------------+------------+--------+---------+----------+---------+-----------------+------
+ IO:DataFileRead |            | raw    |   11.2  |    26.0  |   24.9  |           10110 | 85.0
+ CPU*            |            | raw    |    1.4  |     3.0  |    2.8  |            1300 | 10.9
 ```
 
-```sql
--- same, but during a specific time window
-select * from ash.query_waits_at(3365820675399133794, '2026-02-16 08:38', '2026-02-16 08:40');
-```
+Combining a query filter with a wait filter needs the raw wait↔query tie; the
+window must lie within raw retention or the reader raises with the boundary.
 
 ### Drill into a wait event
 
 ```sql
--- which queries are stuck on Lock:transactionid?
-select * from ash.event_queries('Lock:transactionid', '1 hour');
+-- how spiky is DataFileRead itself? (the leaf summary)
+select avg_aas, peak_aas, p99_aas
+from ash.aas(p_wait_event => 'IO:DataFileRead', p_from => now() - interval '5 minutes');
 
--- or by wait type (matches all events of that type)
-select * from ash.event_queries('IO', '1 hour');
+-- which queries drive it? (event → queries)
+select * from ash.top('query_id', p_wait_event => 'IO:DataFileRead',
+                       p_from => now() - interval '5 minutes');
 ```
 
 ### Browse raw samples
 
 ```sql
 -- see the last 20 decoded samples with query text
-select * from ash.samples('10 minutes', 20);
+select * from ash.samples(p_from => now() - interval '10 minutes', p_limit => 20);
 ```
 
 ```
@@ -388,22 +363,22 @@ select * from ash.samples('10 minutes', 20);
 
 ```sql
 -- raw samples during an incident
-select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 50);
+select * from ash.samples(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:05', p_limit => 50);
 ```
 
 ### Dump samples to CSV
 
-Always go through `ash.samples()` / `ash.samples_at()` — the underlying `ash.sample`
-table stores a packed `integer[]` and cannot be joined directly. The defaults for
-`ash.samples()` are `p_interval => '1 hour'` and `p_limit => 100`; pass a large
-`p_limit` when dumping.
+Always go through `ash.samples()` — the underlying `ash.sample` table stores a
+packed `integer[]` and cannot be joined directly. The defaults are
+`p_from => now() - '1 hour'`, `p_to => now()`, and `p_limit => 100`; pass a
+large `p_limit` when dumping.
 
 ```sql
 -- dump every sample from the last hour
-\copy (select * from ash.samples('1 hour'::interval, 10000000)) to '/tmp/ash.csv' csv header
+\copy (select * from ash.samples(p_from => now() - interval '1 hour', p_limit => 10000000)) to '/tmp/ash.csv' csv header
 
 -- dump a specific incident window
-\copy (select * from ash.samples_at('2026-02-14 03:00', '2026-02-14 03:05', 10000000)) to '/tmp/incident.csv' csv header
+\copy (select * from ash.samples(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:05', p_limit => 10000000)) to '/tmp/incident.csv' csv header
 ```
 
 Use `\copy` (psql) rather than server-side `COPY TO` if `/tmp` isn't writable by
@@ -414,28 +389,33 @@ redirecting stderr to `/dev/null` will hide errors like typos in table names.
 
 Visualize wait event patterns over time — spot spikes, correlate with deployments, see what changed.
 
+`ash.chart` renders the AAS timeline as a stacked ASCII bar chart (`ash.timeline`
+is the typed-data companion). The `chart` column stacks the top wait events per
+bucket; `aas` is the bucket total.
+
 ```sql
-select bucket_start, active, detail, chart
-from ash.timeline_chart('5 minutes', '30 seconds', 3, 40);
+select bucket_start, aas, detail, chart
+from ash.chart(p_from => now() - interval '5 minutes', p_bucket => '1 minute');
 ```
 
 ```
-      bucket_start       | active |                             detail                             |                           chart
--------------------------+--------+----------------------------------------------------------------+-----------------------------------------------------------
-                         |        |                                                                | █ Client:ClientRead  ▓ LWLock:WALWrite  ░ IdleTx  · Other
- 2026-02-16 08:37:30+00  |    2.0 | Other=2.0                                                      | ···········
- 2026-02-16 08:38:00+00  |    7.0 | Client:ClientRead=2.3 LWLock:WALWrite=0.8 IdleTx=0.4 Other=3.5 | █████████████▓▓▓▓▓░░····················
- 2026-02-16 08:38:30+00  |    6.6 | Client:ClientRead=4.0 LWLock:WALWrite=0.4 IdleTx=0.5 Other=1.7 | ███████████████████████▓▓░░░··········
- 2026-02-16 08:39:00+00  |    5.3 | Client:ClientRead=3.3 LWLock:WALWrite=0.3 IdleTx=0.7 Other=1.0 | ███████████████████▓▓░░░░······
+      bucket_start       |  aas  |                             detail                             |                           chart
+-------------------------+-------+----------------------------------------------------------------+-----------------------------------------------------------
+                         |       |                                                                | █ IO:DataFileRead  ▓ Lock:transactionid  ░ CPU*  · Other
+ 2026-07-04 14:30:00+00  |   3.6 | IO:DataFileRead=2.1 CPU*=0.9 Other=0.6                          | ███████████████▓▓░░····
+ 2026-07-04 14:31:00+00  |   4.0 | IO:DataFileRead=2.4 CPU*=1.0 Other=0.6                          | ████████████████▓▓░░····
+ 2026-07-04 14:32:00+00  |  24.8 | IO:DataFileRead=18.2 Lock:transactionid=4.1 CPU*=1.4 Other=1.1  | ██████████████████████████████▓▓▓▓▓▓░░···
+ 2026-07-04 14:33:00+00  |   6.1 | IO:DataFileRead=4.0 Lock:transactionid=1.0 CPU*=0.6 Other=0.5   | ████████████████▓▓▓▓░░··
+ 2026-07-04 14:34:00+00  |   3.8 | IO:DataFileRead=2.3 CPU*=0.9 Other=0.6                          | ███████████████▓▓░░····
 ```
 
-Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color.
+Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. Buckets are at least one minute (the rollup grain); `p_bucket => null` auto-selects the grain by span.
 
 ```sql
 -- zoom into a specific time window
-select * from ash.timeline_chart_at(
-  now() - interval '10 minutes', now(),
-  '1 minute', 3, 50
+select * from ash.chart(
+  p_from => now() - interval '10 minutes', p_to => now(),
+  p_bucket => '1 minute', p_top => 3, p_width => 50
 );
 ```
 
@@ -446,7 +426,7 @@ select * from ash.timeline_chart_at(
 set ash.color = on;
 
 -- Option 2: per-call
-select * from ash.top_waits('1 hour', p_color => true);
+select * from ash.chart(p_from => now() - interval '1 hour', p_color => true);
 ```
 
 psql's table formatter escapes ANSI codes — to render colors, pipe through sed:
@@ -456,40 +436,55 @@ psql's table formatter escapes ANSI codes — to render colors, pipe through sed
 \set color '\\g | sed ''s/\\\\x1B/\\x1b/g'' | less -R'
 
 -- then use it
-select * from ash.top_waits('1 hour') :color
-select * from ash.timeline_chart('1 hour') :color
+select * from ash.chart(p_from => now() - interval '1 hour') :color
 ```
 
 Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
 
-`top_waits` with colors:
+`ash.chart` with colors (the stacked AAS timeline; the ANSI rendering is unchanged from v1.x):
 
-![top_waits with ANSI colors](assets/top_waits_color.jpg)
-
-`timeline_chart` with colors:
-
-![timeline_chart with ANSI colors](assets/timeline_chart_color.jpg)
+![ash.chart with ANSI colors](assets/timeline_chart_color.jpg)
 
 Example data generated with `pgbench -c 8 -T 65` on Postgres 17 with concurrent lock contention and idle-in-transaction sessions.
 
 ### Investigate an incident
 
-Use the `_at` functions with absolute timestamps to zoom into a specific time window:
+Pass absolute timestamps as `p_from` / `p_to` to zoom into a specific window:
 
 ```sql
--- what happened between 3:00 and 3:10 am?
-select * from ash.top_waits_at('2026-02-14 03:00', '2026-02-14 03:10');
+-- what was the load between 3:00 and 3:10 am?
+select * from ash.aas(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10');
 
--- which queries were running during the incident?
-select * from ash.top_queries_at('2026-02-14 03:00', '2026-02-14 03:10');
+-- what and who? (breakdown by wait event, then by query)
+select * from ash.top('wait_event', p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10');
+select * from ash.top('query_id',   p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10');
 
 -- minute-by-minute timeline of the incident
-select * from ash.wait_timeline_at(
-    '2026-02-14 03:00',
-    '2026-02-14 03:10',
-    '1 minute'
-);
+select * from ash.timeline(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10', p_bucket => '1 minute');
+
+-- did a deploy at 03:05 change the load, and where?
+select * from ash.compare(
+  '2026-02-14 02:55', '2026-02-14 03:05',   -- before
+  '2026-02-14 03:05', '2026-02-14 03:15',   -- after
+  p_dimension => 'wait_event');
 ```
+
+### Machine ingestion
+
+`ash.report()` returns one self-contained `jsonb` load report for a window —
+designed so an external monitoring or health-assessment platform can ingest
+pg_ash with a single call and no follow-up queries. Per-class per-minute AAS
+(`total` / `cpu` / `io` / `ipc` / `lock` / `lwlock`) drives `aas_avg` /
+`aas_worst1m` / `aas_p99` / `aas_p999`, plus `top_events_*` and
+`top_queryids_*`. Scoring, thresholds, and normalization against vCPU counts
+are the consumer's job; pg_ash emits raw AAS numbers only.
+
+```sql
+select ash.report(p_from => now() - interval '1 day');
+```
+
+The payload contract is frozen per 2.0 minor line (keys are only ever added,
+never renamed or removed). It returns `null` when the window has no coverage.
 
 ### LLM-assisted investigation
 
@@ -500,93 +495,68 @@ pg_ash functions chain naturally for how an LLM investigates a problem — each 
 Step 1 — the LLM checks the big picture:
 
 ```sql
-select * from ash.activity_summary('10 minutes');
+select * from ash.periods();
 ```
 
 ```
-       metric        |  value
----------------------+---------
- samples             | 600
- avg_active_sessions | 4.2
- max_active_sessions | 12
- top_wait_event      | Lock:tuple
- top_query_id        | 7283901445
+ period | source    | minutes_with_data | avg_aas | peak_aas | p99_aas
+--------+-----------+-------------------+---------+----------+---------
+ 1m     | raw       |                 1 |    2.2  |     2.4  |    2.4
+ 5m     | raw       |                 5 |    5.1  |    12.0  |   11.4
+ 1h     | rollup_1m |                60 |    2.6  |    12.0  |    4.8
 ```
 
-*"Average 4.2 active sessions but peak 12 — something spiked. And Lock:tuple is the top wait event."*
+*"The 5-minute window averages 5.1 AAS but peaked at 12 — something spiked in the last few minutes."*
 
 Step 2 — drill into the waits:
 
 ```sql
-select * from ash.top_waits('10 minutes');
+select * from ash.top('wait_event', p_from => now() - interval '10 minutes');
 ```
 
 ```
-   wait_event   | samples | pct  |         bar
-----------------+---------+------+---------------------
- Lock:tuple     |    2810 |  68% | ████████████████████
- CPU*           |     830 |  20% | ██████
- IO:DataFileRead|     290 |   7% | ██
- Client:ClientRe|     125 |   3% | █
- Other          |      83 |   2% |
+ key             | query_text | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
+-----------------+------------+--------+---------+----------+---------+-----------------+------
+ Lock:tuple      |            | raw    |    3.5  |    10.0  |    9.4  |            2810 | 68.0
+ CPU*            |            | raw    |    1.0  |     2.0  |    1.9  |             830 | 20.0
+ IO:DataFileRead |            | raw    |    0.4  |     1.0  |    0.9  |             290 |  7.0
 ```
 
-*"Lock:tuple is 68% of all waits. Multiple sessions fighting over the same rows."*
+*"Lock:tuple is 68% of the load and spiky (peak 10 vs avg 3.5) — sessions fighting over the same rows."*
 
-Step 3 — see the timeline:
+Step 3 — locate the spike in time:
 
 ```sql
-select * from ash.timeline_chart('10 minutes', '30 seconds', 5, 60);
+select * from ash.timeline(p_from => now() - interval '10 minutes', p_bucket => '1 minute', p_wait_event => 'Lock:tuple');
 ```
 
 ```
-      bucket_start       | active |                              chart                              |              detail
--------------------------+--------+-----------------------------------------------------------------+----------------------------------
-                         |        | █ Lock:tuple  ▓ CPU*  ░ IO:DataFileRead  ▒ Client:ClientRead    |
- 2026-02-17 14:00:00+00  |    2.1 | ▓▓▓▓░░···                                                       | CPU*=1.2 IO=0.5 Other=0.4
- 2026-02-17 14:00:30+00  |    2.3 | ▓▓▓▓▓░░···                                                      | CPU*=1.4 IO=0.5 Other=0.4
- 2026-02-17 14:01:00+00  |    3.8 | ██▓▓▓▓░░····                                                    | Lock=0.6 CPU*=1.5 IO=0.5 Other=1.2
- 2026-02-17 14:01:30+00  |    8.5 | █████████████████▓▓▓░░···                                       | Lock=5.8 CPU*=1.3 IO=0.5 Other=0.9
- 2026-02-17 14:02:00+00  |   12.0 | █████████████████████████████▓▓░░··                             | Lock=9.8 CPU*=1.1 IO=0.4 Other=0.7
- 2026-02-17 14:02:30+00  |   11.2 | ███████████████████████████▓▓░░··                               | Lock=9.0 CPU*=1.0 IO=0.5 Other=0.7
- 2026-02-17 14:03:00+00  |    4.1 | ███▓▓▓▓░░····                                                   | Lock=1.2 CPU*=1.5 IO=0.6 Other=0.8
- 2026-02-17 14:03:30+00  |    2.0 | ▓▓▓▓░···                                                        | CPU*=1.1 IO=0.4 Other=0.5
- 2026-02-17 14:04:00+00  |    2.2 | ▓▓▓▓░░···                                                       | CPU*=1.3 IO=0.5 Other=0.4
+      bucket_start       | source | data_points | avg_aas | peak_aas | p99_aas
+-------------------------+--------+-------------+---------+----------+---------
+ 2026-02-17 14:00:00+00  | raw    |          60 |    0.5  |     1.0  |    1.0
+ 2026-02-17 14:01:00+00  | raw    |          60 |    3.2  |    10.0  |    9.6
+ 2026-02-17 14:02:00+00  | raw    |          60 |    9.4  |    12.0  |   11.8
+ 2026-02-17 14:03:00+00  | raw    |          60 |    1.2  |     2.0  |    1.9
+ 2026-02-17 14:04:00+00  | raw    |          60 |    0.4  |     1.0  |    0.9
 ```
 
-*"The spike is clearly 14:01:30 to 14:02:30 — Lock:tuple dominates. Let me find which queries."*
+*"The spike is 14:01 to 14:02 — peak_aas 12 while the minute averages settle back after. Let me find which queries drove Lock:tuple in that window."*
 
-Step 4 — find the guilty queries:
+Step 4 — find the guilty queries (event → queries, the leaf drill):
 
 ```sql
-select * from ash.event_queries_at(
-  'Lock:tuple',
-  '2026-02-17 14:01:30', '2026-02-17 14:02:30'
-);
+select * from ash.top('query_id', p_wait_event => 'Lock:tuple',
+                       p_from => '2026-02-17 14:01:30', p_to => '2026-02-17 14:02:30');
 ```
 
 ```
-  query_id   | samples | pct  |         bar
--------------+---------+------+---------------------
-  7283901445 |     412 |  85% | ████████████████████
-  9102384756 |      53 |  11% | ███
-  Other      |      19 |   4% | █
+    key     |                query_text                   | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
+------------+---------------------------------------------+--------+---------+----------+---------+-----------------+------
+ 7283901445 | UPDATE orders SET status = $1 WHERE id = $2  | raw    |    8.2  |    11.0  |   10.6  |             412 | 85.0
+ 9102384756 | UPDATE orders SET shipped_at = $1 WHERE id…  | raw    |    1.1  |     2.0  |    1.9  |              53 | 11.0
 ```
 
-*"Query 7283901445 accounts for 85% of the lock waits."*
-
-Step 5 — get the SQL text:
-
-```sql
-select * from ash.top_queries_with_text('10 minutes');
-```
-
-```
-  query_id   | samples | pct  | mean_exec_time_ms | total_exec_time_ms |                    query_text
--------------+---------+------+-------------------+--------------------+--------------------------------------------------
-  7283901445 |    2395 |  58% |            842.30 |          534120.50 | UPDATE orders SET status = $1 WHERE id = $2
-  9102384756 |     530 |  13% |            215.60 |           42347.20 | UPDATE orders SET shipped_at = $1 WHERE id = $2
-```
+*"Query 7283901445 is 85% of the lock waits, and query_text (from pg_stat_statements) already tells me the statement."*
 
 **LLM's conclusion:**
 
@@ -679,9 +649,9 @@ Measured on Postgres 17, 50 backends, 1s sampling, `jit = off` (median of 10 run
 
 | Metric | Result |
 |--------|--------|
-| `top_waits('1 hour')` | 30 ms |
-| `top_waits('24 hours')` | 6.1 s |
-| `top_queries_with_text('1 hour')` | 31 ms |
+| `top('wait_event')` over 1 hour (rollup-backed) | 30 ms |
+| `top('query_id')` over 1 hour | 31 ms |
+| `report()` over 1 day (raw-backed) | < 1 s |
 | `take_sample()` overhead | 53 ms |
 | WAL per sample | ~29 KiB (~2.4 GiB/day) |
 | Rotation (1-day partition) | 9 ms |
@@ -693,7 +663,7 @@ See [issue #1](https://github.com/NikolayS/pg_ash/issues/1) for full benchmarks 
 
 - Postgres 14+ (requires `query_id` in `pg_stat_activity`)
 - pg_cron 1.5+ (optional — for built-in scheduling; see [Scheduling without pg_cron](#scheduling-without-pg_cron) for alternatives)
-- pg_stat_statements (optional but recommended — enables query text and execution metrics; without it, `top_queries_with_text()`, `event_queries()`, and `event_queries_at()` will error, and `top_queries()`, `samples()` will return NULL for `query_text`)
+- pg_stat_statements (optional but recommended — enables `query_text`; without it every reader still works, and `ash.top('query_id', …)` / `ash.samples()` simply return NULL for `query_text`)
 
 **Note on `query_id`**: The default `compute_query_id = auto` only populates `query_id` when pg_stat_statements is in `shared_preload_libraries`. If `query_id` is NULL in `pg_stat_activity`, set:
 
@@ -773,97 +743,56 @@ Rollups are populated automatically when pg_cron is available (`ash.start()` sch
 0 3 * * * psql -qAtX -d mydb -c "SELECT ash.rollup_cleanup();"
 ```
 
-Query rollup data with the rollup reader functions:
+The rollups are not a separate API — the **same 2.0 readers** query them.
+Each reader auto-selects its source by window (raw within raw retention, else
+`rollup_1m`, else `rollup_1h`) and reports it in the `source` column, so a long
+window transparently reads the rollups even after raw samples have rotated away:
 
 ```sql
--- what were the top wait events in the last 6 hours? (from minute rollups)
-select * from ash.minute_waits('6 hours');
+-- long windows just widen p_from; source switches to the rollups automatically
+select * from ash.top('wait_event', p_from => now() - interval '6 hours');   -- top waits, 6h
+select * from ash.top('query_id',   p_from => now() - interval '7 days');    -- top queries, 1w
 
--- top queries over the last week (from hourly rollups)
-select * from ash.hourly_queries('7 days');
-
--- peak concurrency trend over the last 30 days
-select * from ash.daily_peak_backends('30 days');
-
--- investigate a specific time range (even if raw samples are gone)
-select * from ash.minute_waits_at('2026-03-01 02:00', '2026-03-01 03:00');
-
--- Average Active Sessions: start broad. avg is the period average; peak/p99 are
--- the worst / 99th-percentile 1-minute AAS, so a short storm is not hidden by
--- the average. Pass a 5-minute bucket to smooth, e.g. ash.aas('1 day', '5 minutes').
-select * from ash.aas('1 hour');
-select * from ash.aas('1 day');
-select * from ash.aas('1 week');
+-- scalar AAS over a window. avg is the window average; peak/p99 are the worst /
+-- 99th-percentile per-bucket AAS, so a short storm is not hidden by the average.
+-- Pass a coarser bucket to smooth, e.g. p_bucket => '5 minutes'.
+select * from ash.aas(p_from => now() - interval '1 day');
 
 -- all standard windows side by side (1 minute ... 1 month)
-select * from ash.aas_periods();
+select * from ash.periods();
 
--- arbitrary absolute period
-select * from ash.aas_at('2026-03-01 02:00', '2026-03-01 03:00');
+-- an arbitrary absolute period (works even after raw samples are gone)
+select * from ash.aas(p_from => '2026-03-01 02:00', p_to => '2026-03-01 03:00');
 
--- TIME dimension: a series of AAS points to visualize load and locate spikes.
--- One point per hour over a week, then zoom into the worst hour per minute.
-select bucket_start, avg_aas, peak_aas
-from ash.aas_timeline('7 days', '1 hour')
-order by peak_aas desc;          -- busiest buckets first
+-- TIME: a series of AAS points to visualize load and locate spikes. p_bucket
+-- null auto-selects grain; order by peak_aas to surface the busiest buckets.
+select bucket_start, source, avg_aas, peak_aas
+from ash.timeline(p_from => now() - interval '7 days')
+order by peak_aas desc;
 
-select * from ash.aas_timeline_at('2026-03-01 02:00', '2026-03-01 03:00', '1 minute');
+-- NATURE: drill the hierarchy on a chosen window with one function.
+select * from ash.top('wait_event_type', p_from => now() - interval '15 minutes');        -- level 1
+select * from ash.top('wait_event', p_wait_event_type => 'IO',
+                      p_from => now() - interval '15 minutes');                            -- level 2
+select * from ash.top('query_id', p_from => now() - interval '15 minutes', p_limit => 20);-- queries
 
--- NATURE dimension: drill the hierarchy on a chosen window.
--- 1) level 1 — AAS by wait_event_type (top of the hierarchy)
-select wait_event_type, avg_aas, pct
-from ash.aas_wait_types('15 minutes');
-
--- 2) level 2 — drill into one type to see its wait_events (pct is within that type)
-select wait_event, avg_aas, pct
-from ash.aas_wait_events('15 minutes', 'IO');
-
--- 3) queries by AAS for the period, keyed by query_id; query_text (optional
---    decoration) is filled when pg_stat_statements is present
-select query_id, avg_aas, pct, query_text
-from ash.aas_queryids('15 minutes', 20);
-
--- the deepest leaf, "queries within a specific wait_event", is NOT recoverable
--- from rollups (wait_counts and query_counts are decoupled); use the raw-sample
--- reader instead, within the raw-retention window:
-select * from ash.event_queries('IO:DataFileRead', '15 minutes', 20);
-
--- incident window: the summary and both drill-downs over the exact same range
-with w as (
-  select '2026-03-01 02:00'::timestamptz as start_ts,
-         '2026-03-01 02:05'::timestamptz as end_ts
-)
-select * from w, lateral ash.aas_at(w.start_ts, w.end_ts);
-
-with w as (
-  select '2026-03-01 02:00'::timestamptz as start_ts,
-         '2026-03-01 02:05'::timestamptz as end_ts
-)
-select wt.*
-from w, lateral ash.aas_wait_types_at(w.start_ts, w.end_ts, 10) wt;
-
-with w as (
-  select '2026-03-01 02:00'::timestamptz as start_ts,
-         '2026-03-01 02:05'::timestamptz as end_ts
-)
-select q.*
-from w, lateral ash.aas_queryids_at(w.start_ts, w.end_ts, 20) q;
+-- the deepest leaf, "queries within a specific wait_event", needs the raw
+-- wait↔query tie, so it is answerable only within raw retention (the reader
+-- raises past that boundary rather than returning empty):
+select * from ash.top('query_id', p_wait_event => 'IO:DataFileRead',
+                      p_from => now() - interval '15 minutes', p_limit => 20);
 ```
 
-`avg_aas` is backend-seconds of activity per elapsed wall-clock second; missed or
-empty minutes count as zero activity. `peak_aas` and `p99_aas` are the max and
-99th percentile of per-bucket AAS **summed across databases** (so `peak_aas` is
-always ≥ `avg_aas`); the `bucket` argument selects that granularity (`'1 minute'`
-or `'5 minutes'`). All AAS values are scaled by the configured sample interval,
-so they stay correct under non-1s sampling. Trailing-period helpers
-(`aas(interval)`, `aas_timeline(interval)`, `aas_wait_types(interval)`,
-`aas_wait_events(interval)`, `aas_queryids(interval)`, `aas_periods()`) end at the current minute boundary so
-they read complete minute rollups. `aas_timeline` reads `rollup_1m` for short
-spans (per-minute peaks) and `rollup_1h` for spans over two days with hour-or-
-larger buckets (per-hour peaks). Buckets are anchored at the window start and a
-trailing partial bucket is averaged over the time it actually covers; pass an
-hour- or day-aligned start (e.g. `date_trunc('hour', ...)`) for wall-clock-aligned
-axis labels.
+`avg_aas` is backend-seconds of activity per elapsed wall-clock second; missed
+or empty minutes count as zero activity. `peak_aas` and `p99_aas` are the max
+and 99th percentile of per-bucket AAS (so `peak_aas` is always ≥ `avg_aas`);
+`p_bucket` selects that granularity (must be ≥ 1 minute). All AAS values are
+scaled by the configured sample interval, so they stay correct under non-1s
+sampling. Trailing windows (a `null` `p_to`) end at the current minute boundary
+so they read complete minute rollups; `ash.timeline` reads `rollup_1m` for
+short spans (per-minute peaks) and `rollup_1h` for long spans with hour-or-
+larger buckets. A trailing partial bucket is averaged over the time it actually
+covers; pass an hour- or day-aligned `p_from` for wall-clock-aligned axis labels.
 
 Rollups use backend-seconds as the count unit (Oracle ASH-compatible). Each sample appearance = 1 backend-second at 1s sampling interval.
 
@@ -1025,12 +954,12 @@ grant pg_read_all_stats to my_monitor_role;
 
 Prefer `ash.grant_reader()` for full monitoring access. If you need manual control, grant only the specific readers and tables the role actually needs — do **not** use blanket `EXECUTE` grants on the whole `ash` schema, because that can include owner-only maintenance helpers now or after future upgrades.
 
-Minimal example for a dashboard that only calls `ash.status()` and `ash.top_waits()`:
+Minimal example for a dashboard that only calls `ash.status()` and `ash.top()`:
 
 ```sql
 grant usage on schema ash to my_monitor_role;
 grant execute on function ash.status() to my_monitor_role;
-grant execute on function ash.top_waits(interval, int, int, boolean) to my_monitor_role;
+grant execute on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval) to my_monitor_role;
 
 grant select on table
   ash.config,
@@ -1050,7 +979,7 @@ For all public readers, use `select ash.grant_reader('my_monitor_role');`; it co
 
 ### pg_stat_statements in a non-default schema
 
-pgss reader functions (`top_queries`, `top_queries_at`, `top_queries_with_text`, `samples`, `samples_at`, `event_queries`, `event_queries_at`) need the pg_stat_statements schema on their `search_path`. Install detects it automatically. If you install pg_stat_statements **after** pg_ash, or move it to a non-default schema, re-apply:
+The readers that surface `query_text` (`ash.top('query_id', …)`, `ash.samples`) need the pg_stat_statements schema on their `search_path`. Install detects it automatically. If you install pg_stat_statements **after** pg_ash, or move it to a non-default schema, re-apply:
 
 ```sql
 -- detect the pgss schema and re-apply search_path on pgss readers
@@ -1074,11 +1003,11 @@ If privileges are correct and pg_stat_statements has no row/text for the `queryi
 - **Primary only** — pg_ash requires writes (`INSERT` into sample tables, `TRUNCATE` on rotation), so it cannot run on physical standbys or read replicas. Install it on the primary; it samples all databases from there.
 - **Observer-effect protection** — the sampler pg_cron command includes `SET statement_timeout = '500ms'` to prevent `take_sample()` from becoming a problem on overloaded servers. If `pg_stat_activity` is slow (thousands of backends), the sample is canceled rather than piling up. Normal execution is ~50ms — the 500ms cap gives 10× headroom. Adjust in `cron.job` if needed.
 - **Sampling gaps under heavy load** — pg_cron runs in a single background worker and under heavy load (lock storms, many concurrent sessions) it can't always keep up with the 1-second schedule. You may see gaps of 8s, 13s, or even 30s+ between samples — ironically during the most interesting moments. This is a fundamental pg_cron limitation, not a bug. If precise 1-second sampling matters, use an [external sampler](#scheduling-without-pg_cron) which is more reliable under load.
-- **24-hour raw sample queries are slow** (~6s for full-day scan) — use rollup reader functions (`ash.minute_waits`, `ash.hourly_queries`, `ash.daily_peak_backends`) for queries over long time ranges.
+- **Long raw-sample windows are slow** — for windows longer than raw retention the readers automatically fall back to the `rollup_1m` / `rollup_1h` sources (reported in the `source` column), so `ash.top`, `ash.aas`, and `ash.timeline` stay fast over multi-day ranges. Only drills that force raw (the wait↔query tie) are bounded to raw retention.
 - **JIT protection built in** — all reader functions use `SET jit = off` to prevent JIT compilation overhead (which can be 10-750x slower depending on Postgres version and dataset size). No global configuration needed.
 - **Single-database install** — pg_ash installs in one database and samples all databases from there. Per-database filtering works via the `datid` column.
 - **query_map hard cap at 50k entries per slot** — on Postgres 14-15, volatile SQL comments (e.g., `marginalia`, `sqlcommenter` with session IDs or timestamps) produce unique `query_id` values that are not normalized. Each query-map partition is truncated in lockstep with its matching sample partition during `ash.rotate()`; there is no background garbage collector. The 50,000-entry per-slot cap prevents unbounded growth between rotations — queries beyond the cap are tracked as `unknown`. PG16+ normalizes comments, so this is rarely hit. Check `query_map_count` in `ash.status()` to monitor.
-- **Parallel query workers counted individually** — parallel workers share the same `query_id` as the leader but are counted as separate backends. This inflates the apparent "weight" of parallel queries in `top_queries()`. `leader_pid` grouping is not yet implemented.
+- **Parallel query workers counted individually** — parallel workers share the same `query_id` as the leader but are counted as separate backends. This inflates the apparent "weight" of parallel queries in `ash.top('query_id', …)`. `leader_pid` grouping is not yet implemented.
 - **WAL overhead** — 1-second sampling generates ~29 KiB WAL per sample (~2.4 GiB/day), dominated by `full_page_writes`. This is significant for WAL-sensitive replication setups. Consider 5-second or 10-second sampling intervals (`ash.start('5 seconds')`) if WAL volume is a concern. The overhead scales linearly with sampling frequency.
 - **Epoch overflow horizon (~2094)** — `sample_ts` is stored as `int4` seconds since 2026-01-01 UTC and `int4` is exhausted around 2094-01-19. Past that point, the `::int4` cast in `ash.take_sample()` raises `ERROR: integer out of range` and sampling hard-fails (it does NOT silently wrap). `ash.status()` exposes `epoch_seconds_remaining` so operators can plan a `bigint` migration of the column well before the horizon. See issue [#37](https://github.com/NikolayS/pg_ash/issues/37).
 - **Advisory-lock squat DoS** — pg_ash coordination locks use deterministic advisory-lock keys. A role that can call Postgres advisory-lock builtins can intentionally hold the same keys and stall sampling, rotation, rollups, or partition rebuilds for the duration of its transaction. See [SECURITY.md](SECURITY.md#advisory-lock-squat-dos) for mitigation guidance.
