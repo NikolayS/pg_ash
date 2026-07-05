@@ -62,7 +62,7 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 - **Acceptance criteria:**
   1. One call returns one row per standard window.
   2. Each row exposes `avg_aas`, `peak_aas`, **and** `p99_aas`, so spike-vs-sustained is legible without a second query.
-  3. Answers from rollup data alone (no raw dependency); works across full rollup retention.
+  3. Works across full rollup retention: long windows answer from rollups; short windows may answer from raw samples when that is the finest covering source (and degrade to rollups when raw is empty).
   4. Meets the performance budget for a rollup read (see §6).
 - **Primary API:** `ash.periods(p_end)`.
 - **Coverage:** ✅ Covered (adds a `source` column in 2.0).

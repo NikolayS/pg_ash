@@ -266,9 +266,10 @@ function does any of that.
 ## 6. Source selection & retention metadata
 
 - Auto-selection: window within raw retention → `raw`; else `rollup_1m`
-  within its retention; else `rollup_1h`. A window straddling boundaries
-  reports `source = 'mixed'` (scalar/`top`) or per-bucket sources
-  (`timeline`).
+  within its retention; else `rollup_1h`. Scalar readers and `top` pick the
+  single finest source that covers `p_from` (never mixing sources within one
+  result — no double-counting risk); `timeline` reports its source per
+  bucket, so a long series may show different sources across rows.
 - `ash.status()` gains rows for `raw_retention_start`,
   `rollup_1m_retention_start`, `rollup_1h_retention_start` so callers can
   plan windows before querying.
