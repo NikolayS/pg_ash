@@ -21,47 +21,45 @@ html{scroll-behavior:smooth}
 body{
   background:var(--bg); color:var(--ink); font-family:var(--serif);
   font-size:17px; line-height:1.65;
-  background-image:
-    radial-gradient(1200px 500px at 80% -10%, rgba(110,168,254,.07), transparent 60%),
-    radial-gradient(900px 420px at 10% 0%, rgba(80,250,123,.05), transparent 55%);
-}
-body::after{ /* grain */
-  content:""; position:fixed; inset:0; pointer-events:none; opacity:.5; mix-blend-mode:overlay;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 a{color:var(--io);text-decoration:none;border-bottom:1px solid rgba(110,168,254,.35)}
 a:hover{color:var(--ipc);border-bottom-color:var(--ipc)}
 code,pre,kbd{font-family:var(--mono)}
-code{font-size:.85em;color:var(--amber);background:rgba(241,250,140,.06);padding:.08em .35em;border-radius:4px;border:1px solid rgba(241,250,140,.12)}
+code{font-size:.85em;color:var(--amber)}
 .wrap{max-width:1060px;margin:0 auto;padding:0 28px}
 
 /* ── header ── */
 header{padding:64px 0 0}
 .crumbs{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);display:flex;gap:1em;flex-wrap:wrap}
 .crumbs .st{color:var(--cpu)}
-h1{font-family:var(--mono);font-weight:600;font-size:clamp(34px,6vw,64px);letter-spacing:-.03em;line-height:1.05;margin:22px 0 6px}
+h1{font-family:var(--serif);font-weight:500;font-size:clamp(40px,7vw,78px);letter-spacing:-.015em;line-height:1.02;margin:26px 0 10px}
+h1 .m{font-family:var(--mono);font-weight:600;letter-spacing:-.04em;font-size:.86em}
 h1 .v{color:var(--cpu)}
+h1 .it{font-style:italic}
 .sub{font-size:clamp(19px,2.4vw,24px);font-style:italic;color:var(--ink-dim);max-width:34em}
 .sub em{color:var(--ink);font-style:italic}
-.strip{margin:40px 0 0;display:flex;height:10px;border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.strip{margin:44px 0 0;display:flex;height:8px}
 .strip i{display:block}
 .legend{display:flex;gap:1.4em;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);margin:10px 0 0;letter-spacing:.05em}
 .legend b{font-weight:500;color:var(--ink)}
-.dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.5em;vertical-align:baseline}
+.dot{display:inline-block;width:9px;height:9px;margin-right:.5em;vertical-align:baseline}
 
-/* ── big numbers ── */
-.numbers{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:56px 0 0}
-.numbers>div{background:var(--panel);padding:26px 24px}
-.numbers .n{font-family:var(--mono);font-size:clamp(30px,4vw,44px);font-weight:600;letter-spacing:-.03em}
-.numbers .n small{font-size:.45em;color:var(--ink-faint);font-weight:400}
-.numbers p{font-size:14.5px;color:var(--ink-dim);margin-top:6px;line-height:1.45}
-.n.g{color:var(--cpu)} .n.b{color:var(--io)} .n.r{color:var(--lock)} .n.p{color:var(--lwlock)}
+/* ── ledger (what changed, at a glance) ── */
+.ledger{margin:64px 0 0}
+.ledger>div{display:flex;align-items:baseline;gap:16px;padding:10px 0}
+.ledger .term{font-family:var(--mono);font-size:15px;font-weight:600;white-space:nowrap}
+.ledger .term small{color:var(--ink-faint);font-weight:400}
+.ledger .term b{color:var(--cpu);font-weight:600}
+.ledger i{flex:1;min-width:28px;border-bottom:1px dotted var(--line2);transform:translateY(-4px)}
+.ledger p{font-size:15px;color:var(--ink-dim);width:min(56%,44em);line-height:1.55}
+@media(max-width:720px){.ledger>div{flex-wrap:wrap;gap:4px 16px}.ledger i{display:none}.ledger p{width:100%}}
 
 /* ── sections ── */
-section{margin:88px 0 0}
-.sec-head{display:flex;align-items:baseline;gap:16px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:30px}
+section{margin:104px 0 0;border-top:1px solid var(--line);padding-top:30px}
+.sec-head{display:flex;align-items:baseline;gap:16px;margin-bottom:28px}
 .sec-head .no{font-family:var(--mono);color:var(--ink-faint);font-size:13px;letter-spacing:.1em}
-h2{font-family:var(--mono);font-weight:500;font-size:clamp(21px,2.6vw,27px);letter-spacing:-.02em}
+h2{font-family:var(--serif);font-weight:500;font-size:clamp(26px,3.2vw,34px);letter-spacing:-.01em}
+@media(min-width:1240px){.sec-head{position:relative}.sec-head .no{position:absolute;left:-84px;bottom:.35em}}
 .lede{max-width:44em;color:var(--ink-dim);font-size:18px}
 .lede strong{color:var(--ink);font-weight:500}
 
@@ -73,29 +71,25 @@ h2{font-family:var(--mono);font-weight:500;font-size:clamp(21px,2.6vw,27px);lett
 .arc-row .stage{font-family:var(--mono);font-weight:600;font-size:15px}
 .arc-row .q{font-style:italic;color:var(--ink-dim)}
 .arc-row .fn{font-family:var(--mono);font-size:13.5px;text-align:right;color:var(--amber)}
-.arc-row:nth-child(1) .stage{color:var(--cpu)}
-.arc-row:nth-child(2) .stage{color:var(--ipc)}
-.arc-row:nth-child(3) .stage{color:var(--io)}
-.arc-row:nth-child(4) .stage{color:var(--lwlock)}
 @media(max-width:760px){.arc-row{grid-template-columns:1fr;gap:2px}.arc-row .fn{text-align:left}}
 
-/* surface table */
-table{width:100%;border-collapse:collapse;font-size:15.5px}
-.tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
-th{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);text-align:left;padding:14px 18px;border-bottom:1px solid var(--line2);font-weight:500}
+/* surface table — book style: heavy top rule, hairline rows, heavy foot */
+table{width:100%;border-collapse:collapse;font-size:15.5px;border-top:2px solid var(--line2)}
+.tblwrap{overflow-x:auto}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);text-align:left;padding:12px 18px;border-bottom:1px solid var(--line2);font-weight:500}
 td{padding:13px 18px;border-bottom:1px solid var(--line);vertical-align:baseline}
-tr:last-child td{border-bottom:none}
+tr:last-child td{border-bottom:1px solid var(--line2)}
+th:first-child,td:first-child{padding-left:2px}
+th:last-child,td:last-child{padding-right:2px}
 td.fn{font-family:var(--mono);font-size:14px;white-space:nowrap;color:var(--ink)}
 td.fn b{color:var(--cpu);font-weight:600}
 td.q{font-style:italic;color:var(--ink-dim)}
-td.tag{font-family:var(--mono);font-size:11px;letter-spacing:.08em;white-space:nowrap}
-.t-data{color:var(--io)} .t-json{color:var(--ipc)} .t-human{color:var(--lwlock)} .t-raw{color:var(--ink-faint)}
-tr.render td{background:rgba(255,121,198,.03)}
+td.tag{font-family:var(--mono);font-size:11px;letter-spacing:.12em;white-space:nowrap;color:var(--ink-faint);text-transform:lowercase}
 
 /* code panels */
 pre{
-  background:var(--bg2);border:1px solid var(--line);border-radius:8px;
-  padding:22px 24px;overflow-x:auto;font-size:13.5px;line-height:1.7;color:var(--ink);
+  background:var(--bg2);
+  padding:20px 22px;overflow-x:auto;font-size:13.5px;line-height:1.7;color:var(--ink);
 }
 pre .c{color:var(--ink-faint);font-style:italic}
 pre .k{color:var(--lwlock)} pre .s{color:var(--amber)} pre .f{color:var(--cpu)} pre .n{color:var(--io)} pre .p{color:var(--ipc)}
@@ -104,21 +98,18 @@ pre .k{color:var(--lwlock)} pre .s{color:var(--amber)} pre .f{color:var(--cpu)} 
 .panel-label{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 10px}
 
 /* principles */
-.prin{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:38px 44px;margin-top:38px;counter-reset:pr}
-.prin div{counter-increment:pr;border-top:1px solid var(--line2);padding-top:18px}
-.prin div::before{content:counter(pr,decimal-leading-zero);display:block;font-family:var(--mono);font-size:30px;font-weight:600;letter-spacing:-.03em;line-height:1;margin-bottom:12px}
-.prin div:nth-child(1)::before{color:var(--cpu)} .prin div:nth-child(2)::before{color:var(--io)}
-.prin div:nth-child(3)::before{color:var(--ipc)} .prin div:nth-child(4)::before{color:var(--lwlock)}
-.prin div:nth-child(5)::before{color:var(--lock)} .prin div:nth-child(6)::before{color:var(--amber)}
+.prin{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:40px 48px;margin-top:38px;counter-reset:pr}
+.prin div{counter-increment:pr;border-top:1px solid var(--line2);padding-top:16px}
+.prin div::before{content:counter(pr);display:block;font-family:var(--serif);font-style:italic;font-size:40px;font-weight:500;line-height:1;margin-bottom:10px;color:var(--ink-faint)}
 .prin h3{font-family:var(--mono);font-size:15px;font-weight:600;margin-bottom:8px}
 .prin p{font-size:15px;color:var(--ink-dim)}
 .prin p code{font-size:.82em}
 
-/* callout */
-.callout{margin-top:34px;border:1px solid rgba(80,250,123,.3);background:rgba(80,250,123,.05);border-radius:8px;padding:22px 26px;display:flex;gap:18px;align-items:baseline}
-.callout .star{font-family:var(--mono);font-size:30px;color:var(--cpu);line-height:1}
+/* footnote */
+.callout{margin-top:48px;padding-top:22px;border-top:1px solid var(--line);display:flex;gap:20px;align-items:baseline;max-width:58em}
+.callout .star{font-family:var(--serif);font-style:italic;font-size:44px;color:var(--cpu);line-height:1}
 .callout p{font-size:16px;max-width:52em}
-.callout code{color:var(--cpu);background:rgba(80,250,123,.08);border-color:rgba(80,250,123,.25)}
+.callout code{color:var(--cpu)}
 
 /* removed */
 .gone{columns:2;column-gap:40px;margin-top:26px;font-family:var(--mono);font-size:13.5px;line-height:2.1}
@@ -131,20 +122,21 @@ pre .k{color:var(--lwlock)} pre .s{color:var(--amber)} pre .f{color:var(--cpu)} 
 /* personas */
 .personas{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:0 44px;margin-top:26px}
 .persona{display:block;font-family:var(--mono);font-size:12.5px;color:var(--ink-dim);padding:11px 2px;border-top:1px dashed var(--line)}
-.persona::before{content:"";display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--io);margin-right:.7em;vertical-align:baseline}
+.persona::before{content:"";display:inline-block;width:9px;height:9px;background:var(--io);margin-right:.7em;vertical-align:baseline}
 .persona b{color:var(--ink);font-weight:600}
 .persona.machine::before{background:var(--cpu)}
 
-/* before/after */
-details.ba{border:1px solid var(--line);border-radius:8px;background:var(--panel);margin-top:14px;overflow:hidden}
-details.ba summary{cursor:pointer;list-style:none;padding:15px 20px;font-family:var(--mono);font-size:13.5px;display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+/* before/after — an index of rule-separated entries */
+details.ba{border-bottom:1px solid var(--line)}
+details.ba:first-of-type{border-top:2px solid var(--line2);margin-top:30px}
+details.ba summary{cursor:pointer;list-style:none;padding:16px 2px;font-family:var(--mono);font-size:13.5px;display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
 details.ba summary::-webkit-details-marker{display:none}
 details.ba summary::before{content:"▸";color:var(--ink-faint);transition:transform .2s}
 details.ba[open] summary::before{transform:rotate(90deg)}
 details.ba summary .was{color:var(--ink-faint);text-decoration:line-through;text-decoration-color:rgba(255,85,85,.55)}
 details.ba summary .arr{color:var(--ink-faint)}
 details.ba summary .now{color:var(--cpu);font-weight:600}
-details.ba .inner{padding:4px 20px 20px;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+details.ba .inner{padding:6px 2px 26px;display:grid;grid-template-columns:1fr 1fr;gap:18px}
 @media(max-width:900px){details.ba .inner{grid-template-columns:1fr}}
 details.ba pre{font-size:12px;line-height:1.6;margin:0}
 details.ba .panel-label{margin-top:10px}
@@ -166,7 +158,7 @@ footer a{border-bottom:none}
     <span>NikolayS/pg_ash</span><span>·</span><span>blueprints/AAS_API.md</span><span>·</span>
     <span class="st">▲ design brief — pre-release draft</span>
   </div>
-  <h1 class="reveal" style="animation-delay:.05s">pg_ash <span class="v">2.0</span><br>reader api</h1>
+  <h1 class="reveal" style="animation-delay:.05s"><span class="m">pg_ash <span class="v">2.0</span></span><br><span class="it">reader api</span></h1>
   <p class="sub reveal" style="animation-delay:.12s">A <em>minimal, composable</em> analysis surface for Postgres active-session history — one load unit, one time convention, one drill grammar. Built for humans in psql <em>and</em> AI agents driving investigations.</p>
 
   <div class="strip reveal" style="animation-delay:.2s" aria-hidden="true">
@@ -184,11 +176,11 @@ footer a{border-bottom:none}
   </div>
 </header>
 
-<div class="numbers reveal" style="animation-delay:.3s">
-  <div><div class="n r">25×2<small> → </small><span class="g">7+2</span></div><p>v1.x shipped ~25 readers, each duplicated as <code>f()</code> / <code>f_at()</code>. 2.0 is seven data functions plus two render helpers.</p></div>
-  <div><div class="n g">1</div><p>load unit everywhere: <code>avg_aas</code> · <code>peak_aas</code> · <code>p99_aas</code>. No more samples vs backend_seconds confusion.</p></div>
-  <div><div class="n b">p_from, p_to</div><p>one time convention; defaults mean "the last hour" (<code>report</code>: the last day). The <code>_at</code> twins are gone.</p></div>
-  <div><div class="n p">0</div><p>silent empty results. Data readers report the <code>source</code> they used; unanswerable drills raise (<code>report</code> degrades by omitting keys), with the retention boundary named.</p></div>
+<div class="ledger reveal" style="animation-delay:.3s">
+  <div><span class="term">25×2<small> → </small><b>7+2</b></span><i></i><p>v1.x shipped ~25 readers, each duplicated as <code>f()</code> / <code>f_at()</code>. 2.0 is seven data functions plus two render helpers.</p></div>
+  <div><span class="term">1</span><i></i><p>load unit everywhere: <code>avg_aas</code> · <code>peak_aas</code> · <code>p99_aas</code>. No more samples vs backend_seconds confusion.</p></div>
+  <div><span class="term">p_from, p_to</span><i></i><p>one time convention; defaults mean "the last hour" (<code>report</code>: the last day). The <code>_at</code> twins are gone.</p></div>
+  <div><span class="term">0</span><i></i><p>silent empty results. Data readers report the <code>source</code> they used; unanswerable drills raise (<code>report</code> degrades by omitting keys), with the retention boundary named.</p></div>
 </div>
 
 <section>
