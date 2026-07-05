@@ -23,7 +23,7 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
    The `f(interval)` / `f_at(start, end)` twin pattern is dropped — that alone
    halves the surface. "Last 24 hours" is `p_from => now() - interval '24 hours'`.
 3. **Dimensions are parameters, not function names.** Group-by is an argument
-   of `aas_by`; filters (`wait_event_type`, `wait_event`, `query_id`,
+   of `top`; filters (`wait_event_type`, `wait_event`, `query_id`,
    `database`) are uniform named parameters across all readers.
 4. **Data ≠ presentation.** Data functions return typed columns only. ASCII
    bars/charts/colors live in exactly two human helpers (§5).
@@ -35,6 +35,10 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
 6. **Self-describing.** Every function carries a catalog `comment` stating the
    unit, the column contract, and the recommended next call, so an AI agent
    can navigate via `\df+` / `obj_description()` alone.
+7. **No redundant prefixes.** The schema already says `ash.`; function names
+   don't repeat the domain (`ash.top`, not `ash.aas_top`). The name `aas`
+   survives only on the one function whose job is to return the metric
+   itself: `ash.aas()`.
 
 ## 2. The surface
 
@@ -42,13 +46,13 @@ Seven data functions, two render helpers. (v1.5 shipped ~25 readers × 2 forms.)
 
 | # | Function | Question answered |
 |---|---|---|
-| 1 | `ash.aas_periods` | "Is it bad right now? Spike or sustained?" — triage entry point |
+| 1 | `ash.periods` | "Is it bad right now? Spike or sustained?" — triage entry point |
 | 2 | `ash.aas` | "How much load in this window?" — scalar summary |
-| 3 | `ash.aas_series` | "When did it spike?" — time series |
-| 4 | `ash.aas_by` | "What is it? Who is it?" — breakdown / drill-down |
-| 5 | `ash.aas_compare` | "Did the deploy change load?" — two-window diff |
+| 3 | `ash.timeline` | "When did it spike?" — time series |
+| 4 | `ash.top` | "What is it? Who is it?" — breakdown / drill-down |
+| 5 | `ash.compare` | "Did the deploy change load?" — two-window diff |
 | 6 | `ash.samples` | "Show me the raw evidence." |
-| 7 | `ash.health_report` | Machine ingest: one JSON load report for external monitoring / health platforms |
+| 7 | `ash.report` | Machine ingest: one JSON load report for external monitoring / health platforms |
 | 8 | `ash.chart` | Human: stacked ASCII timeline (replaces `timeline_chart`) |
 | 9 | `ash.summary` | Human: key/value overview (replaces `activity_summary`) |
 
@@ -69,7 +73,7 @@ p_bucket          interval    default '1 minute'  -- sub-bucket grain for peak/p
 for buckets with no activity within data coverage. Buckets with *no data*
 (sampler off) are excluded from percentiles and reported via coverage columns.
 
-### 2.1 `ash.aas_periods(p_end timestamptz default null)`
+### 2.1 `ash.periods(p_end timestamptz default null)`
 
 One row per standard trailing window (1m, 5m, 1h, 1d, 1w, 1mo) ending at
 `p_end` (default `now()`). The zero-argument "start here" call.
@@ -89,7 +93,7 @@ Returns one row:
 buckets_expected bigint, buckets_with_data bigint,
 avg_aas numeric, peak_aas numeric, p99_aas numeric, backend_seconds numeric)`
 
-### 2.3 `ash.aas_series(p_from, p_to, p_bucket interval default null, filters…)`
+### 2.3 `ash.timeline(p_from, p_to, p_bucket interval default null, filters…)`
 
 Time series. `p_bucket => null` auto-selects grain by span (≤ 6 h → 1 minute,
 ≤ 7 d → 1 hour, else 1 day). Emits a row for **every** bucket in the window:
@@ -104,18 +108,18 @@ avg_aas numeric, peak_aas numeric, p99_aas numeric)`
 null) whenever the source grain allows it (raw or `rollup_1m`-backed buckets;
 null for `rollup_1h`-backed buckets) — serves US-6 capacity review.
 
-### 2.4 `ash.aas_by(p_dimension text, p_from, p_to, filters…, p_limit int default 10, p_bucket)`
+### 2.4 `ash.top(p_dimension text, p_from, p_to, filters…, p_limit int default 10, p_bucket)`
 
 The single vertical drill. `p_dimension` ∈
 `'wait_event_type' | 'wait_event' | 'query_id' | 'database'`.
 Filters compose with the dimension, giving every v1.x drill as one grammar:
 
 ```sql
-select * from ash.aas_by('wait_event_type');                                   -- L1
-select * from ash.aas_by('wait_event', p_wait_event_type => 'IO');             -- L2
-select * from ash.aas_by('query_id');                                          -- top queries
-select * from ash.aas_by('wait_event', p_query_id => 123456789);               -- query → waits
-select * from ash.aas_by('query_id', p_wait_event => 'DataFileRead');          -- US-4 leaf
+select * from ash.top('wait_event_type');                                   -- L1
+select * from ash.top('wait_event', p_wait_event_type => 'IO');             -- L2
+select * from ash.top('query_id');                                          -- top queries
+select * from ash.top('wait_event', p_query_id => 123456789);               -- query → waits
+select * from ash.top('query_id', p_wait_event => 'DataFileRead');          -- US-4 leaf
 ```
 
 Returns:
@@ -133,7 +137,7 @@ backend_seconds numeric, pct numeric)`
   window exceeds raw retention, the function raises:
   `pg_ash: this drill needs raw samples; raw retention starts at <ts> but requested window starts at <ts>. Narrow the window or drill without the query/event tie.`
 
-### 2.5 `ash.aas_compare(p_from_1, p_to_1, p_from_2, p_to_2, p_dimension text default null, p_limit int default 10, filters…, p_bucket)`
+### 2.5 `ash.compare(p_from_1, p_to_1, p_from_2, p_to_2, p_dimension text default null, p_limit int default 10, filters…, p_bucket)`
 
 Before/after (US-7). With `p_dimension => null`: one overall row. With a
 dimension: top rows by `abs(avg_delta)` (full outer across the two windows —
@@ -151,7 +155,7 @@ pct_1 numeric, pct_2 numeric)`
 Decoded raw sample rows, newest first. Role unchanged from v1.x `samples`,
 re-parameterized to the 2.0 conventions.
 
-### 2.7 `ash.health_report(...)` — see §4.
+### 2.7 `ash.report(...)` — see §4.
 
 ## 3. Wait-class taxonomy
 
@@ -163,23 +167,23 @@ up" to `CPU`:** such a sample is *either* genuine on-CPU work *or* an
 uninstrumented code path in Postgres (a wait that Postgres does not report).
 `CPU*` is the
 user-facing spelling everywhere — function outputs, filters, chart legends,
-catalog comments. Only the `health_report` JSON payload uses a fixed
+catalog comments. Only the `report` JSON payload uses a fixed
 lowercase key `cpu` (§4), and its docs carry the same caveat.
 
-For `health_report` (and documented for all readers):
+For `report` (and documented for all readers):
 
 - **Classes:** `cpu` = `CPU*`, `io` = `IO`, `ipc` = `IPC`, `lock` = `Lock`,
   `lwlock` = `LWLock`.
 - **`total` = cpu + io + ipc + lock + lwlock.** `Activity`, `Client`,
   `Timeout`, `Extension`, `BufferPin` are *excluded from `total`* in
-  `health_report` (idle internal workers, client waits, and timeout artifacts
-  are not real load) but still visible in `aas_by('wait_event_type')`, which
+  `report` (idle internal workers, client waits, and timeout artifacts
+  are not real load) but still visible in `top('wait_event_type')`, which
   reports every recorded type.
 
-## 4. `ash.health_report` — machine-readable load report (JSON)
+## 4. `ash.report` — machine-readable load report (JSON)
 
 ```
-ash.health_report(
+ash.report(
   p_from  timestamptz default null,   -- null → now() - '1 day'
   p_to    timestamptz default null,   -- null → now()
   p_vcpus int         default null,   -- optional; normalization is the platform's job
@@ -254,7 +258,7 @@ pg_ash never uses it in computation.
   the stacked per-bucket AAS chart (v1.x `timeline_chart`, rebuilt on the 2.0
   internals and time convention).
 - `ash.summary(p_from, p_to)` — key/value overview (v1.x `activity_summary`,
-  AAS units, plus top waits/queries), the human companion to `aas_periods`.
+  AAS units, plus top waits/queries), the human companion to `periods`.
 
 Both are presentation-only: they may format, color, truncate. No data
 function does any of that.
@@ -263,8 +267,8 @@ function does any of that.
 
 - Auto-selection: window within raw retention → `raw`; else `rollup_1m`
   within its retention; else `rollup_1h`. A window straddling boundaries
-  reports `source = 'mixed'` (scalar/`aas_by`) or per-bucket sources
-  (`aas_series`).
+  reports `source = 'mixed'` (scalar/`top`) or per-bucket sources
+  (`timeline`).
 - `ash.status()` gains rows for `raw_retention_start`,
   `rollup_1m_retention_start`, `rollup_1h_retention_start` so callers can
   plan windows before querying.
@@ -277,7 +281,7 @@ Unchanged from [AAS_USER_STORIES.md §6](AAS_USER_STORIES.md) except:
   convention is **replaced** by the single `p_from`/`p_to` convention above.
   2.0 breaks compat; consistency-with-v1.x is no longer a constraint.
 - **Performance budgets:** rollup-backed reads < 100 ms for a 1-day window;
-  raw-backed reads (incl. `health_report` over 1 day and US-4 leaf drills
+  raw-backed reads (incl. `report` over 1 day and US-4 leaf drills
   over 1 hour) < 1 s on a default-config instance.
 
 ## 8. Removed in 2.0
@@ -287,15 +291,15 @@ fresh installer). Replacements:
 
 | Removed (incl. `_at` twin where it existed) | Replacement |
 |---|---|
-| `top_waits`, `top_by_type` | `aas_by('wait_event')`, `aas_by('wait_event_type')` |
-| `top_queries`, `top_queries_with_text` | `aas_by('query_id')` |
-| `query_waits(q)` | `aas_by('wait_event', p_query_id => q)` |
-| `event_queries(e)` | `aas_by('query_id', p_wait_event => e)` |
-| `wait_timeline` | `aas_series(...)` (+ `aas_by` on the spike window) |
+| `top_waits`, `top_by_type` | `top('wait_event')`, `top('wait_event_type')` |
+| `top_queries`, `top_queries_with_text` | `top('query_id')` |
+| `query_waits(q)` | `top('wait_event', p_query_id => q)` |
+| `event_queries(e)` | `top('query_id', p_wait_event => e)` |
+| `wait_timeline` | `timeline(...)` (+ `top` on the spike window) |
 | `timeline_chart` | `ash.chart` |
 | `activity_summary` | `ash.summary` |
-| `samples_by_database` | `aas_by('database')` |
-| `minute_waits`, `hourly_queries`, `daily_peak_backends` | `aas_series` / `aas_by` with auto source |
+| `samples_by_database` | `top('database')` |
+| `minute_waits`, `hourly_queries`, `daily_peak_backends` | `timeline` / `top` with auto source |
 | `samples_at` | `samples(p_from, p_to)` |
 | draft `aas_at`, `aas_timeline(_at)`, `aas_wait_types(_at)`, `aas_wait_events(_at)`, `aas_queryids(_at)`, `aas_periods(p_end, p_bucket)` | §2 equivalents |
 
@@ -305,11 +309,11 @@ fresh installer). Replacements:
 
 | Story (AAS_USER_STORIES.md) | 2.0 function(s) |
 |---|---|
-| US-1 Triage | `aas_periods` |
-| US-2 Locate | `aas_series` |
-| US-3 Drill (avg+peak+p99 per row) | `aas_by` |
-| US-4 Leaf (event → queries) | `aas(p_wait_event=>…)` + `aas_by('query_id', p_wait_event=>…)` |
+| US-1 Triage | `periods` |
+| US-2 Locate | `timeline` |
+| US-3 Drill (avg+peak+p99 per row) | `top` |
+| US-4 Leaf (event → queries) | `aas(p_wait_event=>…)` + `top('query_id', p_wait_event=>…)` |
 | US-5 Programmatic honesty | `source` column + retention rows in `status()` + exception rule |
-| US-6 Capacity | `aas_series` (auto `rollup_1h`, per-bucket peak/p99) |
-| US-7 Before/after | `aas_compare` |
-| US-8 Machine load-report ingest | `health_report` |
+| US-6 Capacity | `timeline` (auto `rollup_1h`, per-bucket peak/p99) |
+| US-7 Before/after | `compare` |
+| US-8 Machine load-report ingest | `report` |
