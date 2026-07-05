@@ -3573,6 +3573,340 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test 2.0: calendar-aligned buckets + spike-first top ordering"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- ============================================================================
+          -- Buckets are calendar-aligned (floored to p_bucket relative to ash.epoch(),
+          -- i.e. midnight UTC): (a) the same absolute window returns IDENTICAL
+          -- bucket_start labels on repeated calls (reproducible for humans, agents, and
+          -- scrapers — the old keying anchored buckets to p_from so labels drifted with
+          -- the call time via now()-relative defaults); (b) an hour/5-min bucket carries
+          -- its calendar label, so a spike lands in the correctly-labeled bucket;
+          -- (c) raw-backed and rollup_1m-backed reads of the same window agree on the
+          -- bucketed peak (no ragged-bucket seam). Plus ash.top(p_order_by): ranking by
+          -- peak/p99 happens BEFORE the p_limit cut, so a one-minute incident query
+          -- outranks a steady baseline query that beats it on average.
+          -- ============================================================================
+          update ash.config
+            set current_slot = 0, sample_interval = '1 second',
+                last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          truncate ash.rollup_1m, ash.rollup_1h;
+
+          do $$
+          declare
+            v_cpu smallint;
+            v_end timestamptz := date_trunc('hour', now());
+            a record; v_metric numeric;
+            b1 timestamptz[]; b2 timestamptz[];
+          begin
+            select ash._register_wait('active','CPU*','CPU*') into v_cpu;
+            -- 10 minutes ending on the hour: quiet 60/min (AAS 1), storm 600
+            -- (AAS 10) at v_end - 1 minute.
+            for i in 1..10 loop
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), 0::oid, 60, 1,
+                      array[v_cpu, case when i = 1 then 600 else 60 end]::int4[], '{}'::int8[]);
+            end loop;
+
+            -- (b) calendar labels: a window STARTING mid-grid (-9m) still gets the
+            -- calendar 5-minute boundaries -10m / -5m, not -9m / -4m.
+            select array_agg(bucket_start order by bucket_start) into b1
+            from ash.timeline(v_end - interval '9 minutes', v_end, '5 minutes');
+            assert b1 = array[v_end - interval '10 minutes', v_end - interval '5 minutes'],
+              'calendar 5-min labels expected {-10m,-5m}, got ' || b1::text;
+
+            -- (a) reproducibility: the identical absolute window, called again,
+            -- returns identical labels (this held trivially here — the real
+            -- regression risk is p_from-anchored keying, which this catches).
+            select array_agg(bucket_start order by bucket_start) into b2
+            from ash.timeline(v_end - interval '9 minutes', v_end, '5 minutes');
+            assert b1 = b2, 'bucket_start not reproducible across calls';
+
+            -- the spike lands in its correctly-labeled calendar bucket [-5m, 0m).
+            select bucket_start into a from ash.timeline(v_end - interval '10 minutes', v_end, '5 minutes')
+              order by peak_aas desc nulls last limit 1;
+            assert a.bucket_start = v_end - interval '5 minutes',
+              'spike must land in the -5m calendar bucket, got ' || a.bucket_start;
+
+            -- clipped leading edge: window [-9m, 0) -> 2 expected buckets; the
+            -- clipped bucket [-10m,-5m) averages over its 4 in-window minutes
+            -- (240/240 = 1.00), the storm bucket reads 840/300 = 2.80.
+            select * into a from ash.aas(v_end - interval '9 minutes', v_end, p_bucket => '5 minutes');
+            assert a.buckets_expected = 2, 'clipped window buckets_expected 2, got ' || a.buckets_expected;
+            assert a.peak_aas = 2.80, 'clipped window peak 2.80, got ' || a.peak_aas;
+            raise notice 'calendar bucket labels PASSED';
+          end $$;
+
+          -- (c) raw-vs-rollup seam: the SAME absolute window and bucket, read from
+          -- raw and from rollup_1m, reports the SAME peak (calendar buckets cannot
+          -- straddle rollup minutes differently per source). Anchor is deliberately
+          -- NOT 5-min aligned.
+          do $$
+          declare
+            v_cpu smallint; v_dp oid;
+            v_end timestamptz := date_trunc('hour', now()) - interval '53 minutes';
+            p_raw numeric; p_ru numeric; a record;
+          begin
+            truncate ash.rollup_1m;
+            select ash._register_wait('active','CPU*','CPU*') into v_cpu;
+            select oid into v_dp from pg_database where datname = current_database();
+            -- 40 per-minute samples ending v_end: 1 quiet backend, 12 at v_end-9min.
+            for i in 1..40 loop
+              insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), v_dp,
+                      case when i = 9 then 12 else 1 end,
+                      case when i = 9 then array[-v_cpu, 12, 0,0,0,0,0,0,0,0,0,0,0,0]::integer[]
+                           else array[-v_cpu, 1, 0]::integer[] end, 0);
+            end loop;
+            perform ash.rollup_minute();
+
+            select * into a from ash.aas(v_end - interval '40 minutes', v_end, p_bucket => '5 minutes');
+            assert a.source = 'raw', 'seam: expect raw source, got ' || a.source;
+            p_raw := a.peak_aas;
+
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            select * into a from ash.aas(v_end - interval '40 minutes', v_end, p_bucket => '5 minutes');
+            assert a.source = 'rollup_1m', 'seam: expect rollup_1m source, got ' || a.source;
+            p_ru := a.peak_aas;
+            assert p_raw = p_ru, format('raw/rollup bucketed peak seam: raw %s vs rollup %s', p_raw, p_ru);
+            raise notice 'raw/rollup calendar-bucket seam PASSED';
+          end $$;
+
+          -- ash.top(p_order_by): spiky key must survive p_limit under peak ordering.
+          do $$
+          declare
+            v_end timestamptz := date_trunc('hour', now());
+            r record; k text; v_raised boolean := false;
+          begin
+            truncate ash.rollup_1m, ash.sample_0, ash.sample_1, ash.sample_2;
+            -- 10 minutes: query 111 steady 120/min (avg 2.00, peak 2.00); query 222
+            -- only in minute -2 with 300 (avg 0.50, peak 5.00).
+            for i in 1..10 loop
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), 0::oid, 60, 5,
+                      array[]::int4[],
+                      case when i = 2 then array[111::bigint, 120, 222::bigint, 300]::int8[]
+                           else array[111::bigint, 120]::int8[] end);
+            end loop;
+
+            -- default (avg): the steady query wins the single slot; the spiky one
+            -- is cut — exactly the failure mode p_order_by exists to fix.
+            select key into k from ash.top('query_id', v_end - interval '10 minutes', v_end, p_limit => 1);
+            assert k = '111', 'avg ordering should lead with 111, got ' || k;
+
+            -- peak ordering: the incident query ranks first WITH the same limit.
+            select * into r from ash.top('query_id', v_end - interval '10 minutes', v_end,
+                                         p_limit => 1, p_order_by => 'peak');
+            assert r.key = '222' and r.peak_aas = 5.00 and r.avg_aas = 0.50,
+              format('peak ordering: key=%s peak=%s avg=%s (want 222 5.00 0.50)',
+                     r.key, r.peak_aas, r.avg_aas);
+            select key into k from ash.top('query_id', v_end - interval '10 minutes', v_end,
+                                           p_limit => 1, p_order_by => 'p99');
+            assert k = '222', 'p99 ordering should lead with 222, got ' || k;
+
+            begin
+              perform * from ash.top('query_id', v_end - interval '10 minutes', v_end,
+                                     p_order_by => 'bogus');
+              raise exception 'top(p_order_by => bogus) should have raised';
+            exception when others then
+              if sqlerrm like '%unknown p_order_by%' then v_raised := true; else raise; end if;
+            end;
+            assert v_raised, 'p_order_by validation missing';
+
+            truncate ash.rollup_1m;
+            raise notice 'top spike-first ordering PASSED';
+          end $$;
+          EOF
+
+      - name: "Test 2.0: report attribution, compare coverage, retention error split, chart legend"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- ============================================================================
+          -- report(): top_queryids_* inclusion is decided PER EXTREME MINUTE — a 1-day
+          -- window that starts past raw retention still attributes its worst minute
+          -- when THAT minute is raw-covered; top_queryids_available + coverage make the
+          -- attribution state machine-checkable. compare(): an uncovered window reads
+          -- NULL (both modes) and warns, never a fake zero-baseline regression; the
+          -- dimension error names ash.compare. Tie-drill retention errors split by
+          -- case: entirely-past windows say "unrecoverable" and point to untied
+          -- readers; partial overlap keeps "narrow the window". chart(): an event
+          -- that is top-1 in any single bucket appears in the legend.
+          -- ============================================================================
+          update ash.config
+            set current_slot = 0, sample_interval = '1 second',
+                last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+          truncate ash.rollup_1m, ash.rollup_1h;
+          alter table ash.query_map_0 alter column id restart;
+
+          do $$
+          declare
+            v_cpu smallint; v_io smallint; v_q1 int4; v_dp oid;
+            v_end timestamptz := date_trunc('hour', now());
+            j jsonb; r record; n int; v_raised boolean;
+          begin
+            select ash._register_wait('active','CPU*','CPU*') into v_cpu;
+            select ash._register_wait('active','IO','DataFileRead') into v_io;
+            insert into ash.query_map_0 (query_id) values (424242);
+            select id into v_q1 from ash.query_map_0 where query_id = 424242;
+            select oid into v_dp from pg_database where datname = current_database();
+
+            -- rollup_1m: 120 quiet minutes (CPU 60) ending v_end; worst minute at
+            -- v_end-5min: + IO 540, all query 424242 (AAS 10).
+            for i in 1..120 loop
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), v_dp, 60,
+                      case when i = 5 then 10 else 1 end,
+                      case when i = 5 then array[v_cpu, 60, v_io, 540]::int4[]
+                           else array[v_cpu, 60]::int4[] end,
+                      case when i = 5 then array[424242::bigint, 540]::int8[] else '{}'::int8[] end);
+            end loop;
+            -- raw samples for the last 30 minutes ONLY (raw retention starts at
+            -- v_end-30min); worst minute carries the 424242 tie.
+            for i in 1..30 loop
+              insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), v_dp,
+                      case when i = 5 then 10 else 1 end,
+                      case when i = 5 then
+                        array[-v_io, 9, v_q1,v_q1,v_q1,v_q1,v_q1,v_q1,v_q1,v_q1,v_q1, -v_cpu, 1, 0]::integer[]
+                      else array[-v_cpu, 1, 0]::integer[] end, 0);
+            end loop;
+
+            -- window starts 2h back — BEFORE raw retention — but the worst minute
+            -- (v_end-5min) is inside it: attribution must be present, per minute.
+            j := ash.report(v_end - interval '2 hours', v_end);
+            assert j is not null, 'report null on covered window';
+            assert (j->>'top_queryids_available')::boolean is true,
+              'top_queryids_available must be true (worst minute is raw-covered)';
+            assert (j->'top_queryids_worst1m'->'total')->>0 like '424242(%',
+              'worst-minute total attribution must lead with 424242, got '
+              || coalesce((j->'top_queryids_worst1m'->'total')::text, '(absent)');
+            assert (j->'top_queryids_worst1m'->'io')->>0 like '424242(%',
+              'worst-minute io attribution must lead with 424242';
+            -- coverage metadata (exact values)
+            assert j->'coverage'->>'source' = 'rollup_1m', 'coverage.source rollup_1m';
+            assert (j->'coverage'->>'minutes_expected')::int = 120, 'coverage.minutes_expected 120';
+            assert (j->'coverage'->>'minutes_with_data')::int = 120, 'coverage.minutes_with_data 120';
+            assert (j->'coverage'->>'from')::timestamptz = v_end - interval '2 hours', 'coverage.from';
+            assert (j->'coverage'->>'to')::timestamptz = v_end, 'coverage.to';
+            assert (j->'coverage'->>'raw_retention_start')::timestamptz = v_end - interval '30 minutes',
+              'coverage.raw_retention_start -30min, got ' || (j->'coverage'->>'raw_retention_start');
+
+            -- window whose extremes all predate raw retention: aas_* still present,
+            -- attribution keys absent, availability flag false, never raises.
+            j := ash.report(v_end - interval '2 hours', v_end - interval '1 hour');
+            assert j is not null and j ? 'aas_worst1m', 'pre-raw window keeps aas_* keys';
+            assert (j->>'top_queryids_available')::boolean is false,
+              'top_queryids_available must be false past raw retention';
+            assert not (j ? 'top_queryids_worst1m') and not (j ? 'top_queryids_p99')
+               and not (j ? 'top_queryids_p999'),
+              'no attribution keys past raw retention';
+            raise notice 'report per-extreme-minute attribution PASSED';
+
+            -- ---- tie-drill retention error split ----
+            -- entirely past raw retention: unrecoverable, no "narrow" advice.
+            v_raised := false;
+            begin
+              perform * from ash.top('query_id', v_end - interval '2 hours',
+                                     v_end - interval '1 hour', p_wait_event => 'DataFileRead');
+              raise exception 'entirely-past tie drill should have raised';
+            exception when others then
+              if sqlerrm like '%entirely outside raw retention%'
+                 and sqlerrm like '%untied aggregate readers%'
+                 and sqlerrm not like '%Narrow the window%' then
+                v_raised := true;
+              else raise; end if;
+            end;
+            assert v_raised, 'entirely-past retention error mismatch';
+            -- partial overlap: narrowing to the raw-covered part recovers the drill.
+            v_raised := false;
+            begin
+              perform * from ash.aas(v_end - interval '2 hours', v_end,
+                                     p_wait_event => 'DataFileRead', p_query_id => 424242);
+              raise exception 'partial-overlap tie drill should have raised';
+            exception when others then
+              if sqlerrm like '%Narrow the window%' then v_raised := true; else raise; end if;
+            end;
+            assert v_raised, 'partial-overlap retention error mismatch';
+            -- and the narrowed drill then WORKS (the advice is actionable).
+            select count(*) into n from ash.top('query_id', v_end - interval '30 minutes', v_end,
+                                                p_wait_event => 'DataFileRead');
+            assert n = 1, 'narrowed tie drill should return the 424242 row, got ' || n;
+            raise notice 'retention error split PASSED';
+
+            -- ---- compare coverage honesty ----
+            -- window 1 uncovered (4..3h back): NULL columns + NULL delta, overall mode.
+            select * into r from ash.compare(v_end - interval '4 hours', v_end - interval '3 hours',
+                                             v_end - interval '1 hour', v_end);
+            assert r.avg_aas_1 is null and r.peak_aas_1 is null and r.p99_aas_1 is null,
+              format('uncovered w1 must read NULL: avg=%s peak=%s p99=%s',
+                     r.avg_aas_1, r.peak_aas_1, r.p99_aas_1);
+            assert r.avg_delta is null,
+              'delta vs uncovered baseline must be NULL, got ' || coalesce(r.avg_delta::text, 'null');
+            -- w2 = last hour: 59 quiet minutes (60) + worst minute (600) = 4140/3600.
+            assert r.avg_aas_2 = 1.15, 'covered w2 avg 1.15 (4140/3600), got ' || r.avg_aas_2;
+            -- dimension mode: consistent NULL delta on the uncovered side.
+            select * into r from ash.compare(v_end - interval '4 hours', v_end - interval '3 hours',
+                                             v_end - interval '1 hour', v_end,
+                                             p_dimension => 'wait_event_type') limit 1;
+            assert r.avg_delta is null and r.avg_aas_1 is null,
+              'dimension mode must also read NULL against an uncovered window';
+            -- covered vs covered keeps numeric deltas.
+            select * into r from ash.compare(v_end - interval '2 hours', v_end - interval '1 hour',
+                                             v_end - interval '1 hour', v_end);
+            assert r.avg_delta = 0.15, 'covered/covered delta 0.15 (1.15-1.00), got ' || r.avg_delta;
+            -- dimension validation raises from compare's own frame.
+            v_raised := false;
+            begin
+              perform * from ash.compare(v_end - interval '1 hour', v_end,
+                                         v_end - interval '1 hour', v_end, p_dimension => 'bogus');
+              raise exception 'compare(bogus dimension) should have raised';
+            exception when others then
+              if sqlerrm like 'ash.compare: unknown p_dimension%' then v_raised := true; else raise; end if;
+            end;
+            assert v_raised, 'compare dimension error must name ash.compare';
+            raise notice 'compare coverage honesty PASSED';
+          end $$;
+
+          -- ---- chart legend: single-bucket culprit appears ----
+          do $$
+          declare
+            v_cpu smallint; v_lw smallint;
+            v_end timestamptz := date_trunc('hour', now());
+            v_legend text;
+          begin
+            truncate ash.rollup_1m, ash.sample_0, ash.sample_1, ash.sample_2;
+            select ash._register_wait('active','CPU*','CPU*') into v_cpu;
+            select ash._register_wait('active','LWLock','WALWrite') into v_lw;
+            -- CPU 120/min dominates the window total; WALWrite 600 exists only in
+            -- minute -2 where it is top-1 (600 > 120) but loses window-wide
+            -- (600 < 1200) — with p_top => 1 the old legend hid it entirely.
+            for i in 1..10 loop
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), 0::oid, 60, 5,
+                      case when i = 2 then array[v_cpu, 120, v_lw, 600]::int4[]
+                           else array[v_cpu, 120]::int4[] end, '{}'::int8[]);
+            end loop;
+            select chart into v_legend
+            from ash.chart(v_end - interval '10 minutes', v_end, p_top => 1)
+            where bucket_start is null;
+            assert v_legend like '%LWLock:WALWrite%',
+              'legend must include the single-bucket top-1 culprit: ' || v_legend;
+            assert v_legend like '%CPU*%', 'legend must keep the window-wide top: ' || v_legend;
+            truncate ash.rollup_1m;
+            raise notice 'chart single-bucket-culprit legend PASSED';
+          end $$;
+          EOF
+
       - name: "Test v1.4: status output"
         env:
           PGPASSWORD: postgres
