@@ -1551,18 +1551,18 @@ jobs:
             select count(*) into n from ash.periods(v_end);
             assert n = 6, 'periods should return 6 rows, got ' || n;
 
-            -- 1 minute period = [m4, m4+60): only m4 (avg 0.15), raw.
-            select * into r from ash.periods(v_end) where period = '1 minute';
+            -- 1m period = [m4, m4+60): only m4 (avg 0.15), raw.
+            select * into r from ash.periods(v_end) where period = '1m';
             assert r.source = 'raw' and r.minutes_with_data = 1 and r.avg_aas = 0.15,
                format('periods 1m mismatch: src=%s mwd=%s avg=%s', r.source, r.minutes_with_data, r.avg_aas);
-            -- 5 minutes period = exactly the seeded window.
-            select * into r from ash.periods(v_end) where period = '5 minutes';
+            -- 5m period = exactly the seeded window.
+            select * into r from ash.periods(v_end) where period = '5m';
             assert r.source = 'raw' and r.minutes_with_data = 5 and r.avg_aas = 0.20
                and r.peak_aas = 0.40 and r.p99_aas = 0.39,
                format('periods 5m mismatch: src=%s mwd=%s avg=%s peak=%s p99=%s',
                       r.source, r.minutes_with_data, r.avg_aas, r.peak_aas, r.p99_aas);
-            -- 1 hour period reaches before raw retention -> rollup_1m source.
-            select * into r from ash.periods(v_end) where period = '1 hour';
+            -- 1h period reaches before raw retention -> rollup_1m source.
+            select * into r from ash.periods(v_end) where period = '1h';
             assert r.source = 'rollup_1m' and r.minutes_with_data = 5 and r.peak_aas = 0.40,
                format('periods 1h mismatch: src=%s mwd=%s peak=%s', r.source, r.minutes_with_data, r.peak_aas);
             raise notice 'ash.periods PASSED';
