@@ -3540,6 +3540,136 @@ jobs:
           drop role ash_test_user;
           EOF
 
+      - name: "Test: grant_reader covers the full reader helper closure"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Regression for the recurring class where a SECURITY INVOKER
+          -- reader gains a new internal helper (e.g. _sample_interval_secs,
+          -- _raw_retention_start) that a grant_reader role cannot execute.
+          -- Invariant: a fresh ash.grant_reader() role can call EVERY
+          -- reader-facing function AND ash.status() with zero permission
+          -- errors — exercising each one behaviorally walks its full
+          -- transitive helper closure as the invoker.
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_closure_reader') then
+              create role ash_closure_reader login;
+            end if;
+            if not exists (select from pg_roles where rolname = 'ash_closure_bare') then
+              create role ash_closure_bare login;
+            end if;
+          end $$;
+
+          -- A bare (non-granted) role must still be denied: no leak to PUBLIC.
+          set role ash_closure_bare;
+          do $$
+          begin
+            begin
+              perform (select count(*) from ash.status());
+              raise exception 'expected permission denied for bare role on ash.status()';
+            exception when insufficient_privilege then
+              null; -- expected
+            end;
+          end $$;
+          reset role;
+
+          select ash.grant_reader('ash_closure_reader');
+          set role ash_closure_reader;
+
+          do $$
+          declare
+            -- Every reader entry point, incl. per-dimension and filtered
+            -- (leaf drill-down) variants, so each helper path is exercised.
+            v_calls constant text[] := array[
+              'ash.aas()',
+              $c$ash.aas(p_wait_event_type => 'IO')$c$,
+              $c$ash.top('wait_event_type')$c$,
+              $c$ash.top('wait_event')$c$,
+              $c$ash.top('query_id')$c$,
+              $c$ash.top('database')$c$,
+              $c$ash.top('wait_event', p_wait_event_type => 'IO')$c$,
+              $c$ash.top('query_id', p_wait_event_type => 'IO', p_wait_event => 'DataFileRead')$c$,
+              'ash.timeline()',
+              $c$ash.timeline(p_wait_event_type => 'IO')$c$,
+              'ash.periods()',
+              $c$ash.compare(now() - interval '2 hours', now() - interval '1 hour', now() - interval '1 hour', now())$c$,
+              'ash.samples()',
+              $c$ash.samples(p_wait_event_type => 'IO')$c$,
+              'ash.report()',
+              'ash.chart()',
+              'ash.summary()',
+              'ash.status()',
+              'ash.decode_sample_at(now())',
+              'ash.current_slot()'
+            ];
+            v_call text;
+            v_cnt bigint;
+            v_failed text[] := '{}';
+          begin
+            foreach v_call in array v_calls loop
+              begin
+                execute format('select count(*) from %s', v_call) into v_cnt;
+              exception
+                when insufficient_privilege or undefined_function or invalid_schema_name then
+                  v_failed := v_failed || (v_call || ' -> ' || sqlerrm);
+                when others then
+                  -- Domain errors (e.g. "needs raw samples" on a drill
+                  -- outside raw retention) are out of scope here: this
+                  -- step only asserts the privilege closure. Functional
+                  -- behavior is covered by the dedicated reader tests.
+                  null;
+              end;
+            end loop;
+            assert cardinality(v_failed) = 0,
+              'grant_reader helper closure is incomplete: ' || array_to_string(v_failed, '; ');
+            raise notice 'Reader helper closure test PASSED (% entry points)', array_length(v_calls, 1);
+          end $$;
+
+          -- Least-privilege: the granted role must still be denied on
+          -- admin/mutating entry points.
+          do $$
+          declare
+            v_admin_calls constant text[] := array[
+              'ash.take_sample()',
+              'ash.rotate()',
+              'ash.rollup_minute()',
+              $c$ash.grant_reader('ash_closure_bare')$c$
+            ];
+            v_call text;
+          begin
+            foreach v_call in array v_admin_calls loop
+              begin
+                execute format('select %s', v_call);
+                raise exception 'expected permission denied for reader role on %', v_call;
+              exception when insufficient_privilege then
+                null; -- expected
+              end;
+            end loop;
+            raise notice 'Reader role correctly denied on admin functions';
+          end $$;
+
+          reset role;
+
+          -- revoke_reader must symmetrically remove access.
+          select ash.revoke_reader('ash_closure_reader');
+          set role ash_closure_reader;
+          do $$
+          begin
+            begin
+              perform (select count(*) from ash.status());
+              raise exception 'expected permission denied after revoke_reader';
+            exception when insufficient_privilege then
+              null; -- expected
+            end;
+          end $$;
+          reset role;
+
+          drop role ash_closure_reader;
+          drop role ash_closure_bare;
+          EOF
+
       - name: "Test #61: status() works for non-superuser without cron.job access"
         if: matrix.cron == 'on'
         env:
@@ -3566,20 +3696,12 @@ jobs:
             end if;
           end $$;
 
-          grant usage on schema ash to ash_status_reader;
-          grant execute on function ash.status() to ash_status_reader;
-          -- PR #45 hardening REVOKE'd readers/helpers from PUBLIC, so the
-          -- test role needs explicit grants on every object ash.status()
-          -- touches (besides ash.epoch / ash.ts_to_timestamptz, which are
-          -- re-granted to PUBLIC in install.sql).
-          grant select on table ash.config to ash_status_reader;
-          grant select on table ash.sample to ash_status_reader;
-          grant select on table ash.wait_event_map to ash_status_reader;
-          grant select on table ash.query_map_all to ash_status_reader;
-          grant select on table ash.rollup_1m to ash_status_reader;
-          grant select on table ash.rollup_1h to ash_status_reader;
-          grant execute on function ash._color_on(boolean) to ash_status_reader;
-          grant execute on function ash._pg_cron_available() to ash_status_reader;
+          -- PR #45 hardening REVOKE'd readers/helpers from PUBLIC.
+          -- ash.grant_reader() is the one supported way to grant reader
+          -- access: it covers status() and every internal helper it calls
+          -- (SECURITY INVOKER readers run helpers as the caller), so the
+          -- test doesn't drift when status() gains a new helper.
+          select ash.grant_reader('ash_status_reader');
           -- Deliberately deny USAGE on schema cron (pg_cron grants it to
           -- PUBLIC by default — revoke from public + the role to ensure
           -- the test role really lacks access).
@@ -3677,16 +3799,7 @@ jobs:
           revoke select on cron.job from ash_status_reader;
           revoke usage on schema cron from ash_status_reader;
 
-          revoke execute on function ash._pg_cron_available() from ash_status_reader;
-          revoke execute on function ash._color_on(boolean) from ash_status_reader;
-          revoke select on table ash.rollup_1h from ash_status_reader;
-          revoke select on table ash.rollup_1m from ash_status_reader;
-          revoke select on table ash.query_map_all from ash_status_reader;
-          revoke select on table ash.wait_event_map from ash_status_reader;
-          revoke select on table ash.sample from ash_status_reader;
-          revoke select on table ash.config from ash_status_reader;
-          revoke execute on function ash.status() from ash_status_reader;
-          revoke usage on schema ash from ash_status_reader;
+          select ash.revoke_reader('ash_status_reader');
           drop role ash_status_reader;
           -- Restore pg_cron's default PUBLIC USAGE so subsequent test
           -- steps that read cron.job as superuser-but-with-search_path
