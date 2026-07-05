@@ -1946,12 +1946,21 @@ jobs:
             select count(*) into v_count
               from ash.samples('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
             assert v_count = 0, 'samples(post-horizon) should return 0 rows';
-            -- Pre-epoch clamps to 0 across the aggregate readers too (post-horizon
-            -- overflow of these is tracked separately — see the finding reported to the
-            -- team lead; guard it here once the installer clamp lands).
+            -- Pre-epoch clamps to 0 across the aggregate readers too.
             select count(*) into v_count
               from ash.top('wait_event', '1000-01-01'::timestamptz, '1000-01-02'::timestamptz);
             assert v_count = 0, 'top(pre-epoch) should return 0 rows';
+            -- TODO(post-horizon #63): once the installer clamps v_end_ts in
+            -- top/aas/timeline/report (v_end_ts := least(v_start_ts::bigint + 60,
+            -- 2147483647)::int4), add the post-horizon guards below — they must
+            -- return empty / null instead of raising 'integer out of range':
+            --   select count(*) into v_count
+            --     from ash.top('wait_event', '3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            --   assert v_count = 0, 'top(post-horizon) should return 0 rows';
+            --   perform * from ash.aas('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            --   perform * from ash.timeline('3000-01-01'::timestamptz, '3000-01-02'::timestamptz);
+            --   assert ash.report('3000-01-01'::timestamptz, '3000-01-02'::timestamptz) is null,
+            --     'report(post-horizon) should be null';
 
             -- === decode_sample corner cases ===
             select count(*) into v_count from ash.decode_sample(null::integer[]);
