@@ -34,16 +34,22 @@ SESSION="ash-demo"
 CAST="$HERE/ash_demo.cast"
 GIF="$HERE/ash_demo.gif"
 
-# Terminal geometry: wider (140 cols) so wide wait-event names like
-# `Lock:transactionid` and `Client:ClientRead` plus the colored bar charts
-# fit on one line. Compensated by smaller font-size in agg below so the
-# rendered GIF stays readable at GitHub's ~800px embed width.
-COLS="${COLS:-140}"
+# Terminal geometry: wide (168 cols) so the demo can use `select *` on every
+# reader without wrapping. The widest row is `select * from ash.top('query_id',
+# …)`, whose `query_text` column carries the full normalized guilty SQL
+# (`update pgbench_accounts set abalance = … where aid = $2`) — that row is
+# ~158 chars, over the old 140. 168 leaves margin; other readers (periods with
+# two timestamptz columns, the colored chart with its detail legend) fit well
+# under it. Compensated by a smaller agg font-size below so the rendered GIF
+# pixel width stays ~1000px (168 × 10 ≈ the old 140 × 12), readable at GitHub's
+# ~800px embed.
+COLS="${COLS:-168}"
 ROWS="${ROWS:-32}"
 
 # agg font-size in pixels. Lower = smaller text, more columns visible.
-# 12 keeps a 140-col terminal under ~1100px and still legible.
-AGG_FONT_SIZE="${AGG_FONT_SIZE:-12}"
+# 10 keeps a 168-col terminal near ~1000px (same rendered width as the old
+# 140-col × 12px) and still legible.
+AGG_FONT_SIZE="${AGG_FONT_SIZE:-10}"
 
 # baseline + spike accumulate before we record. Much longer than the v1.x demo
 # (was 30) for two 2.0-specific reasons:
@@ -347,8 +353,10 @@ sleep 1.5
 # multi-minute window to show more than one bar. The workload spike outlives
 # the recording (SPIKE_SEC), so every window still sees fresh Lock:tuple.
 
-# Act 2 — status: already sampling, version 2.0, pg_cron wired.
-human_type_and_send "select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
+# Act 2 — status: already sampling, version 2.0, pg_cron wired. status() is
+# (metric, value), so `select *` IS the full projection — we keep a WHERE only
+# to trim the ~30-row diagnostic dump to the five that matter for the intro.
+human_type_and_send "select * from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
 sleep 3.8
 
 # Act 3 — triage: is it bad right now, and is it a spike or sustained? periods()
@@ -356,7 +364,7 @@ sleep 3.8
 # peak/p99 next to avg so a spike (peak >> avg) is legible without a 2nd call.
 human_type_and_send '\echo -- Q1: triage — is it bad right now? spike or sustained?'
 sleep 1.0
-human_type_and_send "select period, source, minutes_with_data as mins, avg_aas, peak_aas, p99_aas from ash.periods();"
+human_type_and_send "select * from ash.periods();"
 sleep 4.6
 
 # Act 4 — locate + wait-class breakdown: the colored stacked chart (the 2.0
@@ -364,14 +372,14 @@ sleep 4.6
 # WHICH wait class dominates (Lock in red). Color via color => true + :color.
 human_type_and_send '\echo -- Q2: when did it land, and which wait class? (colored)'
 sleep 1.0
-human_type_and_send "select bucket_start::time as t, aas, chart from ash.chart(now() - interval '5 minutes', now(), '1 minute', 4, 40, true) :color"
+human_type_and_send "select * from ash.chart(now() - interval '5 minutes', now(), '1 minute', 4, 40, true) :color"
 sleep 4.8
 
 # Act 5 — drill: which wait EVENT dominates? ash.top on the wait_event
 # dimension — data-only now (AAS + peak + p99 per row, no presentation column).
 human_type_and_send '\echo -- Q3: which wait event is dominating?'
 sleep 1.0
-human_type_and_send "select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), n => 6);"
+human_type_and_send "select * from ash.top('wait_event', now() - interval '5 minutes', now(), n => 6);"
 sleep 4.6
 
 # Act 6 — leaf: which query is stuck on Lock:tuple? The 2.0 leaf drill composes
@@ -381,7 +389,7 @@ sleep 4.6
 # query_id into :top_qid for the closing move.
 human_type_and_send '\echo -- Q4: which query is stuck on Lock:tuple?'
 sleep 1.0
-human_type_and_send "select key, avg_aas, peak_aas, pct, substr(query_text,1,40) as q from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 3);"
+human_type_and_send "select * from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 3);"
 sleep 4.6
 human_type_and_send "select key as top_qid from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 1) \\gset"
 sleep 0.5
@@ -391,7 +399,7 @@ sleep 0.5
 # of query_waits()). Same one grammar, opposite direction.
 human_type_and_send '\echo -- Q5: full wait profile of the top guilty query?'
 sleep 1.0
-human_type_and_send "select key, avg_aas, peak_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), query_id => :top_qid, n => 5);"
+human_type_and_send "select * from ash.top('wait_event', now() - interval '5 minutes', now(), query_id => :top_qid, n => 5);"
 sleep 4.8
 
 # Act 7 — closing lines. Held on screen for the "still" moment viewers see
