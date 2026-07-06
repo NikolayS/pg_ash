@@ -115,7 +115,9 @@ absolute window always yields the same buckets regardless of when the call runs.
 Time series. `p_bucket => null` auto-selects grain by span (≤ 6 h → 1 minute,
 ≤ 7 d → 1 hour, else 1 day) and is always safely bounded. Emits a row for
 **every** bucket in the window: `data_points = 0` with null AAS marks
-"no data", distinguishing it from measured-zero load. An **explicit**
+"no data", distinguishing it from measured-zero load. When ranking buckets to
+find a spike, use `order by peak_aas desc nulls last` — no-data buckets carry
+null `peak_aas`, which sorts first under a bare `desc` and would hide the spike. An **explicit**
 `p_bucket` that would emit more than 100 000 buckets (e.g. `'1 minute'` over a
 year) raises rather than materialize an unbounded result — pass `null` for
 auto-grain or a coarser bucket.
@@ -167,7 +169,11 @@ backend_seconds numeric, pct numeric)`
   that a mean would keep on top (the spike-first triage recipe). An unknown
   value raises `ash.top: unknown p_order_by <v>; use avg|peak|p99`.
 - `query_text` is non-null only for `p_dimension = 'query_id'` with
-  pg_stat_statements present (degrades to null, never errors).
+  pg_stat_statements present **and** a caller that can read other roles'
+  pgss text — i.e. holding `pg_read_all_stats` (e.g. via `pg_monitor`
+  membership). A plain `grant_reader` role without it sees null even with
+  pgss installed, because pgss restricts query text to the owning role.
+  Degrades to null, never errors.
 - For `p_dimension = 'query_id'`, the unattributed bucket is a **NULL `key`**
   (not the literal string `'unknown'`): activity whose `query_id` was not
   captured (client not reporting a queryid, truncated, or utility /
@@ -189,6 +195,11 @@ backend_seconds numeric, pct numeric)`
     the exact boundary to move to: *"…raw retention starts at `<ts>` but the
     requested window starts at `<ts>`. Narrow the window to start at or after
     `<ts>` … or drill without the query/event tie."*
+- On a `rollup_1h`-backed window (`source = rollup_1h`), each row's `peak_aas`
+  and `p99_aas` collapse to **hour** grain — the per-dimension arrays are stored
+  per hour, so a one-minute spike is averaged into its hour. For a minute-grain
+  peak over a long window use `ash.timeline()`, whose unfiltered `peak_aas` stays
+  per-minute across the `rollup_1h` seam (§2.3).
 
 ### 2.5 `ash.compare(p_from_1, p_to_1, p_from_2, p_to_2, p_dimension text default null, p_limit int default 10, filters…, p_bucket)`
 

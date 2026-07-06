@@ -3094,16 +3094,23 @@ $$;
 --     untied aggregate readers instead;
 --   * PARTIAL overlap (window starts before raw retention but ends inside
 --     it): narrowing the window to the raw-covered part recovers the drill.
+-- p_start_ts / p_end_ts are the reader's minute-FLOORED window bounds (the guard
+-- must reason about what actually gets queried); p_from is the un-floored window
+-- start the caller passed, echoed in the messages so they reflect the user's
+-- arguments rather than looking like pg_ash misheard them.
 create or replace function ash._raise_tie_retention(
   p_raw_start timestamptz,
   p_start_ts int4,
-  p_end_ts int4
+  p_end_ts int4,
+  p_from timestamptz
 )
 returns void
 language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
+declare
+  v_next_boundary timestamptz;
 begin
   if p_raw_start is not null
      and ash.ts_to_timestamptz(p_start_ts) >= p_raw_start then
@@ -3111,12 +3118,20 @@ begin
   end if;
   if p_raw_start is null or ash.ts_to_timestamptz(p_end_ts) <= p_raw_start then
     raise exception 'pg_ash: this drill needs the raw wait<->query tie, but the requested window (% to %) is entirely outside raw retention (%). The tie is unrecoverable for that window — narrowing it will not help. Use the untied aggregate readers instead: drop either the wait filter or p_query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of the two).',
-      ash.ts_to_timestamptz(p_start_ts),
+      p_from,
       ash.ts_to_timestamptz(p_end_ts),
       coalesce('raw retention starts at ' || p_raw_start, 'no raw samples exist');
   end if;
+  -- The reader floors p_from to the minute BEFORE this guard runs, so a user
+  -- who narrows to exactly p_raw_start (when it is mid-minute) re-floors below
+  -- it and loops on this same error. Advise the first minute-aligned instant at
+  -- or after raw retention start — a value that actually clears the guard.
+  v_next_boundary := case
+    when date_trunc('minute', p_raw_start) = p_raw_start then p_raw_start
+    else date_trunc('minute', p_raw_start) + interval '1 minute'
+  end;
   raise exception 'pg_ash: this drill needs raw samples; raw retention starts at % but the requested window starts at %. Narrow the window to start at or after % (the window end is still inside raw retention), or drill without the query/event tie.',
-    p_raw_start, ash.ts_to_timestamptz(p_start_ts), p_raw_start;
+    p_raw_start, p_from, v_next_boundary;
 end;
 $$;
 
@@ -3378,7 +3393,7 @@ begin
   if v_tie then
     v_source := 'raw';
     v_raw_start := ash._raw_retention_start();
-    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts);
+    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
     v_grain_secs := 60;
   else
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
@@ -3524,7 +3539,7 @@ begin
   if v_tie then
     v_source := 'raw';
     v_raw_start := ash._raw_retention_start();
-    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts);
+    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
     v_grain_secs := 60;
   else
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
@@ -3894,7 +3909,7 @@ begin
   if v_tie then
     v_source := 'raw';
     v_raw_start := ash._raw_retention_start();
-    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts);
+    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
     v_grain_secs := 60;
   else
     -- non-tie breakdown is an aggregate read: prefer rollup for wide windows.
@@ -4920,16 +4935,16 @@ comment on function ash.aas(timestamptz, timestamptz, text, text, bigint, name, 
 $$Scalar AAS summary for one window [p_from, p_to) (defaults: last 1 hour). Optional uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-p_bucket AAS. Buckets are calendar-aligned (floored to p_bucket in UTC: an hour bucket starts on the hour, a day bucket on the UTC day) — the same absolute window always produces the same buckets. Also the US-4 leaf event summary: ash.aas(p_wait_event => 'IO:DataFileRead'). Combining a wait filter with p_query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h. Next: ash.top('query_id', p_wait_event => ...).$$;
 
 comment on function ash.timeline(timestamptz, timestamptz, interval, text, text, bigint, name) is
-$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). bucket_start is calendar-aligned (floored to p_bucket in UTC: hour buckets start on the hour, day buckets on the UTC day), so the same absolute window always returns identical bucket_start labels; the first bucket may start before p_from and edge buckets average over their in-window part only. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc to find the worst buckets, then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts); p99_aas is null only for wait/query-filtered rollup_1h-backed buckets (hour grain).$$;
+$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [p_from, p_to). p_bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). bucket_start is calendar-aligned (floored to p_bucket in UTC: hour buckets start on the hour, day buckets on the UTC day), so the same absolute window always returns identical bucket_start labels; the first bucket may start before p_from and edge buckets average over their in-window part only. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc nulls last to find the worst buckets (no-data buckets carry null peak_aas, which sorts first under a bare desc and would bury the real spike), then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts); p99_aas is null only for wait/query-filtered rollup_1h-backed buckets (hour grain).$$;
 
 comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval, text) is
-$$The single vertical drill (US-3): AAS broken down by p_dimension in wait_event_type|wait_event|query_id|database over [p_from, p_to). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). p_order_by in avg|peak|p99 (default avg) picks the ranking metric BEFORE the p_limit cut — use p_order_by => 'peak' during incident triage so a query that spiked for one minute outranks steady background rows. For the query_id dimension, a NULL key is the unattributed bucket (activity whose query_id was not captured: not run with a queryid-reporting client, truncated, or utility/idle-in-transaction work) — it is real load, not an error. Filters compose: ash.top('wait_event', p_wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', p_wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + p_query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
+$$The single vertical drill (US-3): AAS broken down by p_dimension in wait_event_type|wait_event|query_id|database over [p_from, p_to). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). p_order_by in avg|peak|p99 (default avg) picks the ranking metric BEFORE the p_limit cut — use p_order_by => 'peak' during incident triage so a query that spiked for one minute outranks steady background rows. For the query_id dimension, a NULL key is the unattributed bucket (activity whose query_id was not captured: not run with a queryid-reporting client, truncated, or utility/idle-in-transaction work) — it is real load, not an error. Filters compose: ash.top('wait_event', p_wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', p_wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present AND the caller can read other roles pg_stat_statements text — i.e. holds pg_read_all_stats (e.g. via membership in pg_monitor); a plain ash.grant_reader() role without it sees query_text NULL even though pgss is installed, because pgss restricts query text to the owning role. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + p_query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
 
 comment on function ash.compare(timestamptz, timestamptz, timestamptz, timestamptz, text, int, text, text, bigint, name, interval) is
 $$Before/after comparison of two windows (US-7): window 1 = [p_from_1, p_to_1), window 2 = [p_from_2, p_to_2). p_dimension => null gives one overall row; a dimension gives the top p_limit keys by abs(avg_delta) via a full outer join (a key present in only one window still appears). Columns (key, query_text, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2); avg_delta = window 2 minus window 1. A window with no data coverage (e.g. past retention) reports NULL on its side and a NULL avg_delta (plus a NOTICE) — never a fake zero baseline; within a covered window an absent key is a true zero. Use to tell whether a deploy regressed load and where.$$;
 
 comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigint, name) is
-$$Decoded raw sample rows, newest first (US-5 raw evidence) over [p_from, p_to) (default last 1 hour), up to p_limit. Uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements (null otherwise). Reads ash.sample directly (raw retention only).$$;
+$$Decoded raw sample rows, newest first (US-5 raw evidence) over [p_from, p_to) (default last 1 hour), up to p_limit. Uniform filters p_wait_event_type/p_wait_event/p_query_id/p_database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. Reads ash.sample directly (raw retention only).$$;
 
 comment on function ash.report(timestamptz, timestamptz, int, int) is
 $$Machine-readable load report as one jsonb (US-8) for [p_from, p_to) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution. p_vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage; never raises. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
@@ -5279,6 +5294,17 @@ begin
 
   raise notice 'ash.grant_reader: granted USAGE on schema ash, EXECUTE on % reader function(s), SELECT on % table(s) to %',
     v_func_count, v_table_count, v_role;
+
+  -- query_text from top('query_id')/samples() reads other roles' pg_stat_statements
+  -- text, which pgss restricts to holders of pg_read_all_stats (pg_monitor members
+  -- have it). We deliberately do NOT auto-grant pg_read_all_stats (least privilege);
+  -- just tell the operator so a NULL query_text is not mistaken for a bug.
+  if not pg_catalog.pg_has_role(p_role, 'pg_read_all_stats', 'MEMBER')
+     and not exists (select 1 from pg_catalog.pg_roles
+                     where rolname = p_role and rolsuper) then
+    raise notice 'ash.grant_reader: note: % lacks pg_read_all_stats (not a pg_monitor member); query_text will be NULL for it — grant pg_monitor to % if query text is needed',
+      p_role, p_role;
+  end if;
 end;
 $$;
 

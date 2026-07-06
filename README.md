@@ -310,7 +310,8 @@ select * from ash.top('wait_event_type', p_from => now() - interval '5 minutes')
 here is both the largest and the spikiest.
 
 ```sql
--- top queries by load; query_text comes from pg_stat_statements when present
+-- top queries by load; query_text needs pg_stat_statements AND pg_read_all_stats
+-- (e.g. pg_monitor membership) — see "Query text visibility" below
 select * from ash.top('query_id', p_from => now() - interval '5 minutes', p_limit => 3);
 ```
 
@@ -795,9 +796,10 @@ select * from ash.aas(p_from => '2026-03-01 02:00', p_to => '2026-03-01 03:00');
 
 -- TIME: a series of AAS points to visualize load and locate spikes. p_bucket
 -- null auto-selects grain; order by peak_aas to surface the busiest buckets.
+-- nulls last keeps no-data buckets (null peak_aas) from sorting on top.
 select bucket_start, source, avg_aas, peak_aas
 from ash.timeline(p_from => now() - interval '7 days')
-order by peak_aas desc;
+order by peak_aas desc nulls last;
 
 -- NATURE: drill the hierarchy on a chosen window with one function.
 select * from ash.top('wait_event_type', p_from => now() - interval '15 minutes');        -- level 1
@@ -989,7 +991,7 @@ quote the role name, and emit a `RAISE NOTICE` summarizing what changed.
 
 **Note on pg_cron visibility:** `ash.grant_reader()` does **not** grant `USAGE ON SCHEMA cron`, since pg_cron is not an `ash` object. When pg_cron is loaded but the monitoring role lacks USAGE on schema `cron`, `ash.status()` emits a single fallback row of the form `cron_jobs = '<no cron.job access; grant USAGE ON SCHEMA cron TO <role>>'` instead of per-job `cron_job_*` rows. To surface real cron job details, either run `grant usage on schema cron to <role>` (and `grant select on cron.job to <role>`) once, or simply ignore the row.
 
-**Query text visibility:** `ash.grant_reader()` does not grant `pg_read_all_stats`. Monitoring roles need it to resolve other users' SQL text from `pg_stat_statements`; otherwise pg_ash may show `query_id` with NULL `query_text`.
+**Query text visibility:** `ash.grant_reader()` does not grant `pg_read_all_stats` (least privilege). Monitoring roles need it — typically via membership in `pg_monitor` — to resolve other users' SQL text from `pg_stat_statements`, which restricts query text to the owning role; otherwise pg_ash shows `query_id` with NULL `query_text` even though pg_stat_statements is installed. `ash.grant_reader()` emits a `NOTICE` when the granted role lacks `pg_read_all_stats`, so a NULL `query_text` is not mistaken for a bug.
 
 ```sql
 select pg_has_role(current_user, 'pg_read_all_stats', 'usage');

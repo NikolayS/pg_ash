@@ -451,10 +451,11 @@ select * from ash.top('query_id', p_order_by => 'peak', p_limit => 1,
                        p_from => now() - interval '15 minutes');
 ```
 
-Locate the spike in time the same way — order the timeline by peak:
+Locate the spike in time the same way — order the timeline by peak. Use
+`nulls last` so no-data buckets (null `peak_aas`) do not sort above the spike:
 
 ```sql
-select * from ash.timeline(p_from => now() - interval '6 hours') order by peak_aas desc;
+select * from ash.timeline(p_from => now() - interval '6 hours') order by peak_aas desc nulls last;
 ```
 
 ### (c) Recurring peak hours (capacity / US-6)

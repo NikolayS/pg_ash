@@ -749,6 +749,96 @@ jobs:
           drop role ash_pgmon_outsider;
           EOF
 
+      - name: "Test 2.0: grant_reader NOTICEs missing pg_read_all_stats; query_text needs it (final re-test papercut)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Two throwaway reader roles: one plain (no pg_monitor), one pg_monitor
+          # member. grant_reader gives both the reader bundle but NEVER pg_read_all_stats
+          # (least privilege), so query_text from pg_stat_statements is visible only to
+          # the member — and grant_reader must SAY SO for the plain role.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$ begin
+            if not exists (select from pg_roles where rolname = 'ash_qt_plain') then create role ash_qt_plain login password 'x'; end if;
+            if not exists (select from pg_roles where rolname = 'ash_qt_mon') then create role ash_qt_mon login password 'x'; end if;
+          end $$;
+          grant pg_monitor to ash_qt_mon;
+          EOF
+
+          # (b) grant_reader on a NON-pg_monitor role must emit the pg_read_all_stats NOTICE.
+          out=$(psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+                  -c "select ash.grant_reader('ash_qt_plain');" 2>&1)
+          echo "$out"
+          echo "$out" | grep -q "ash_qt_plain lacks pg_read_all_stats" \
+            || { echo "FAIL: grant_reader must NOTICE that a non-pg_monitor role lacks pg_read_all_stats"; exit 1; }
+          # a pg_monitor member already holds pg_read_all_stats -> no such NOTICE.
+          out=$(psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+                  -c "select ash.grant_reader('ash_qt_mon');" 2>&1)
+          echo "$out"
+          if echo "$out" | grep -q "lacks pg_read_all_stats"; then
+            echo "FAIL: grant_reader must NOT warn about pg_read_all_stats for a pg_monitor member"; exit 1;
+          fi
+
+          # (a/c) query_text: NULL for the plain role, populated for the member. Skip
+          # cleanly when pgss is unavailable for this PG major; the probe SELECT must run
+          # at top level (pgss does not capture a statement executed inside a DO block).
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          select exists (select 1 from pg_extension where extname = 'pg_stat_statements') as has_pgss \gset
+          \if :has_pgss
+          select pg_stat_statements_reset();
+          select 918273645 as ash_qt_probe where 1 = 1;
+          do $$
+          declare v_qid bigint; v_io smallint; v_q1 int4; v_dp oid;
+          begin
+            select queryid into v_qid from pg_stat_statements
+              where query like '%ash_qt_probe%' and query not like '%pg_stat_statements%' limit 1;
+            assert v_qid is not null, 'probe query must be captured in pg_stat_statements';
+            truncate ash.sample_0, ash.sample_1, ash.sample_2, ash.query_map_0, ash.query_map_1, ash.query_map_2;
+            update ash.config set current_slot = 0 where singleton;
+            select ash._register_wait('active','IO','DataFileRead') into v_io;
+            insert into ash.query_map_0 (query_id) values (v_qid);
+            select id into v_q1 from ash.query_map_0 where query_id = v_qid;
+            select oid into v_dp from pg_database where datname = current_database();
+            -- Anchor the sample to a COMPLETED past minute: readers floor the window
+            -- end to the current minute, so a sample in the not-yet-finished current
+            -- minute would be excluded whenever now() is past :30 (flaky).
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values (ash.ts_from_timestamptz(date_trunc('minute', now()) - interval '2 minutes'), v_dp, 1,
+                    array[-v_io, 1, v_q1]::integer[], 0);
+          end $$;
+          -- plain role: sees the query_id row (it has SELECT on ash.sample) but NULL
+          -- query_text, because pgss restricts other roles' text to pg_read_all_stats holders.
+          set role ash_qt_plain;
+          do $$
+          declare v_qt text; v_n int;
+          begin
+            select query_text into v_qt from ash.top('query_id', now() - interval '10 minutes', now()) limit 1;
+            get diagnostics v_n = row_count;
+            assert v_n = 1, 'plain reader must still SEE the query_id row, rows=' || v_n;
+            assert v_qt is null,
+              'plain grant_reader role without pg_read_all_stats must see NULL query_text even with pgss installed, got: ' || coalesce(v_qt, '<null>');
+          end $$;
+          reset role;
+          -- pg_monitor member: same query_text is populated.
+          set role ash_qt_mon;
+          do $$
+          declare v_qt text;
+          begin
+            select query_text into v_qt from ash.top('query_id', now() - interval '10 minutes', now()) limit 1;
+            assert v_qt is not null and v_qt like '%ash_qt_probe%',
+              'pg_monitor member must see populated query_text, got: ' || coalesce(v_qt, '<null>');
+          end $$;
+          reset role;
+          \endif
+          -- cleanup so the throwaway roles do not leak into later steps.
+          select ash.revoke_reader('ash_qt_plain');
+          select ash.revoke_reader('ash_qt_mon');
+          revoke pg_monitor from ash_qt_mon;
+          drop role ash_qt_plain;
+          drop role ash_qt_mon;
+          EOF
+          echo "grant_reader pg_read_all_stats NOTICE + query_text gating PASSED"
+
       - name: Test sampler and decoder
         env:
           PGPASSWORD: postgres
@@ -3753,6 +3843,7 @@ jobs:
             v_cpu smallint; v_io smallint; v_q1 int4; v_dp oid;
             v_end timestamptz := date_trunc('hour', now());
             j jsonb; r record; n int; v_raised boolean;
+            v_raw timestamptz; v_bound timestamptz; v_passed timestamptz; v_msg text;
           begin
             select ash._register_wait('active','CPU*','CPU*') into v_cpu;
             select ash._register_wait('active','IO','DataFileRead') into v_io;
@@ -3827,21 +3918,50 @@ jobs:
               else raise; end if;
             end;
             assert v_raised, 'entirely-past retention error mismatch';
-            -- partial overlap: narrowing to the raw-covered part recovers the drill.
+            -- partial overlap (window END inside raw retention, START before it):
+            -- the message must (a) echo the un-floored start the USER passed and
+            -- (b) advise a minute-aligned boundary that, once passed, actually
+            -- clears the guard. Readers floor p_from to the minute before the
+            -- guard runs, so a mid-minute raw_retention_start otherwise loops:
+            -- narrowing to exactly raw_start re-floors below it and re-raises.
+            -- Give raw retention a mid-minute start with one earlier sample.
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+            values (ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds'),
+                    v_dp, 1, array[-v_cpu, 1, 0]::integer[], 0);
+            v_raw := ash._raw_retention_start();
+            assert date_trunc('minute', v_raw) <> v_raw,
+              'test setup: raw_retention_start must be mid-minute, got ' || v_raw;
+            v_bound := date_trunc('minute', v_raw) + interval '1 minute';
+            v_passed := v_end - interval '2 hours' + interval '23 seconds';  -- mid-minute passed start
             v_raised := false;
             begin
-              perform * from ash.aas(v_end - interval '2 hours', v_end,
+              perform * from ash.aas(v_passed, v_end,
                                      p_wait_event => 'DataFileRead', p_query_id => 424242);
               raise exception 'partial-overlap tie drill should have raised';
             exception when others then
-              if sqlerrm like '%Narrow the window%' then v_raised := true; else raise; end if;
+              if sqlerrm like '%Narrow the window%' then v_raised := true; v_msg := sqlerrm; else raise; end if;
             end;
             assert v_raised, 'partial-overlap retention error mismatch';
-            -- and the narrowed drill then WORKS (the advice is actionable).
-            select count(*) into n from ash.top('query_id', v_end - interval '30 minutes', v_end,
+            -- (a) echoes the un-floored start the user actually passed (not floored v_start_ts)
+            assert v_msg like '%' || v_passed::text || '%',
+              'message must echo the user''s passed start ' || v_passed || ', got: ' || v_msg;
+            -- (b) advises a minute-aligned boundary >= raw_start (followable, not a loop)
+            assert v_msg like '%start at or after ' || v_bound::text || '%',
+              'hint must print minute-aligned boundary ' || v_bound || ', got: ' || v_msg;
+            -- passing exactly that boundary now SUCCEEDS (the advice is actionable)
+            select count(*) into n from ash.top('query_id', v_bound, v_end,
                                                 p_wait_event => 'DataFileRead');
-            assert n = 1, 'narrowed tie drill should return the 424242 row, got ' || n;
-            raise notice 'retention error split PASSED';
+            assert n = 1, 'following the hint boundary must return the 424242 row, got ' || n;
+            -- and passing raw_start itself re-floors below it and still raises (the loop we fixed)
+            v_raised := false;
+            begin
+              perform * from ash.aas(v_raw, v_end, p_wait_event => 'DataFileRead', p_query_id => 424242);
+            exception when others then v_raised := true; end;
+            assert v_raised, 'passing a mid-minute raw_start re-floors below it and still raises';
+            -- restore pre-test raw retention so downstream assertions see original state
+            delete from ash.sample
+              where sample_ts = ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds');
+            raise notice 'retention error split PASSED (mid-minute hint is followable, echoes passed start)';
 
             -- ---- compare coverage honesty ----
             -- window 1 uncovered (4..3h back): NULL columns + NULL delta, overall mode.
