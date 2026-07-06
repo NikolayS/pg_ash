@@ -4,8 +4,11 @@
 -- blueprints/AAS_API.md). This development wrapper replays the in-progress 2.0
 -- installer, which:
 --   * snapshots existing reader-role EXECUTE grants, then drops every removed
---     v1.x reader and draft aas_* function (all overloads / _at twins) and the
---     changed-signature name `samples` via the top-of-installer drop block, so
+--     v1.x reader and draft aas_* function (all overloads / _at twins), the
+--     changed-signature name `samples`, and every param-bearing function kept
+--     from 1.x (2.0 renames all parameters: the p_ prefix is dropped, e.g.
+--     p_from -> since, p_to -> until, p_limit -> n; CREATE OR REPLACE cannot
+--     rename input parameters) via the top-of-installer drop block, so
 --     the resulting schema equals a fresh 2.0 install (CI asserts this),
 --   * creates the 2.0 reader surface (periods, aas, timeline, top, compare,
 --     samples, report, chart, summary) with catalog comments and grants,

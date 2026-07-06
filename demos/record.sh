@@ -60,8 +60,8 @@ POST_WAIT="${POST_WAIT:-3}"
 
 # Workload phase durations passed to demos/workload.sh. The spike must outlive
 # WARMUP + the ~110 s recording (~440 s) so every reader query — especially the
-# closing top('query_id', p_wait_event => 'Lock:tuple') -> top('wait_event',
-# p_query_id => ...) leaf near the end — still sees fresh `Lock:tuple` in its
+# closing top('query_id', wait_event => 'Lock:tuple') -> top('wait_event',
+# query_id => ...) leaf near the end — still sees fresh `Lock:tuple` in its
 # 5-minute window. baseline is long enough (2 min) that the baseline->spike
 # transition falls inside the trailing 5-minute chart window. Override to tune.
 export SPIKE_SEC="${SPIKE_SEC:-480}"
@@ -331,7 +331,7 @@ send_instant() {
 # investigation query.
 #
 # NOTE: psql treats any unterminated statement as continuation; every select
-# MUST end with `;`. Reader functions are invoked with `p_color => true` so
+# MUST end with `;`. Reader functions are invoked with `color => true` so
 # the bar charts emit ANSI codes; the `:color` psql variable runs the query
 # through `sed` so the codes survive psql's aligned formatter.
 sleep 1.5
@@ -361,7 +361,7 @@ sleep 4.6
 
 # Act 4 — locate + wait-class breakdown: the colored stacked chart (the 2.0
 # render helper that replaces timeline_chart). Shows WHEN the spike landed and
-# WHICH wait class dominates (Lock in red). Color via p_color => true + :color.
+# WHICH wait class dominates (Lock in red). Color via color => true + :color.
 human_type_and_send '\echo -- Q2: when did it land, and which wait class? (colored)'
 sleep 1.0
 human_type_and_send "select bucket_start::time as t, aas, chart from ash.chart(now() - interval '5 minutes', now(), '1 minute', 4, 40, true) :color"
@@ -371,7 +371,7 @@ sleep 4.8
 # dimension — data-only now (AAS + peak + p99 per row, no presentation column).
 human_type_and_send '\echo -- Q3: which wait event is dominating?'
 sleep 1.0
-human_type_and_send "select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), p_limit => 6);"
+human_type_and_send "select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), n => 6);"
 sleep 4.6
 
 # Act 6 — leaf: which query is stuck on Lock:tuple? The 2.0 leaf drill composes
@@ -381,9 +381,9 @@ sleep 4.6
 # query_id into :top_qid for the closing move.
 human_type_and_send '\echo -- Q4: which query is stuck on Lock:tuple?'
 sleep 1.0
-human_type_and_send "select key, avg_aas, peak_aas, pct, substr(query_text,1,40) as q from ash.top('query_id', now() - interval '5 minutes', now(), p_wait_event => 'Lock:tuple', p_limit => 3);"
+human_type_and_send "select key, avg_aas, peak_aas, pct, substr(query_text,1,40) as q from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 3);"
 sleep 4.6
-human_type_and_send "select key as top_qid from ash.top('query_id', now() - interval '5 minutes', now(), p_wait_event => 'Lock:tuple', p_limit => 1) \\gset"
+human_type_and_send "select key as top_qid from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 1) \\gset"
 sleep 0.5
 
 # Act 6b — closing the loop: full wait profile of that top query — top() again,
@@ -391,7 +391,7 @@ sleep 0.5
 # of query_waits()). Same one grammar, opposite direction.
 human_type_and_send '\echo -- Q5: full wait profile of the top guilty query?'
 sleep 1.0
-human_type_and_send "select key, avg_aas, peak_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), p_query_id => :top_qid, p_limit => 5);"
+human_type_and_send "select key, avg_aas, peak_aas, pct from ash.top('wait_event', now() - interval '5 minutes', now(), query_id => :top_qid, n => 5);"
 sleep 4.8
 
 # Act 7 — closing lines. Held on screen for the "still" moment viewers see

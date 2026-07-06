@@ -1616,8 +1616,8 @@ jobs:
             assert a.p99_aas = 0.39, 'aas p99_aas 0.39, got ' || a.p99_aas;
             assert a.backend_seconds = 60.00, 'aas backend_seconds 60, got ' || a.backend_seconds;
 
-            -- leaf: ash.aas(p_wait_event => 'IO:DataFileRead'). IO rows = 39.
-            select * into a from ash.aas(v_from, v_to, p_wait_event => 'IO:DataFileRead');
+            -- leaf: ash.aas(wait_event => 'IO:DataFileRead'). IO rows = 39.
+            select * into a from ash.aas(v_from, v_to, wait_event => 'IO:DataFileRead');
             assert a.avg_aas = 0.13, 'aas IO avg 0.13, got ' || a.avg_aas;
             assert a.peak_aas = 0.25, 'aas IO peak 0.25, got ' || a.peak_aas;
             assert a.p99_aas = 0.24, 'aas IO p99 0.24, got ' || a.p99_aas;
@@ -1646,7 +1646,7 @@ jobs:
             assert r.backend_seconds = 6.00 and r.pct = 10.00, 'top(wait_event_type) Lock mismatch';
 
             -- wait_event filtered by type (L2 drill): only IO:DataFileRead, pct 100.
-            select * into r from ash.top('wait_event', v_from, v_to, p_wait_event_type => 'IO');
+            select * into r from ash.top('wait_event', v_from, v_to, wait_event_type => 'IO');
             assert r.key = 'IO:DataFileRead' and r.backend_seconds = 39.00 and r.pct = 100.00,
                format('top(wait_event|IO) mismatch: key=%s bsec=%s pct=%s', r.key, r.backend_seconds, r.pct);
 
@@ -1671,7 +1671,7 @@ jobs:
             assert r.backend_seconds = 3.00 and r.pct = 5.00, 'top(database) template1 mismatch';
 
             -- leaf drill (query_id + wait filter): forces raw. IO by query: q1 21, q2 12, q3 6.
-            select * into r from ash.top('query_id', v_from, v_to, p_wait_event => 'DataFileRead')
+            select * into r from ash.top('query_id', v_from, v_to, wait_event => 'DataFileRead')
               where key = '111111';
             assert r.source = 'raw' and r.backend_seconds = 21.00 and r.pct = 53.85,
                format('top(query_id|DataFileRead) q1 mismatch: src=%s bsec=%s pct=%s',
@@ -1695,7 +1695,7 @@ jobs:
             begin
               perform * from ash.top('query_id',
                 ash.ts_to_timestamptz(v_base - 3600), ash.ts_to_timestamptz(v_base - 3000),
-                p_wait_event => 'DataFileRead');
+                wait_event => 'DataFileRead');
               raise exception 'expected raw-retention exception, none raised';
             exception when others then
               -- window is ENTIRELY past raw retention: the error must say the
@@ -1787,11 +1787,11 @@ jobs:
                       r.key, r.avg_aas_1, r.avg_aas_2, r.avg_delta);
 
             -- dimension: IO delta 0.05; Lock present only in w2 (avg_aas_1 null).
-            select * into r from ash.compare(v0, v2, v2, v5, p_dimension => 'wait_event_type')
+            select * into r from ash.compare(v0, v2, v2, v5, dimension => 'wait_event_type')
               where key = 'IO';
             assert r.avg_aas_1 = 0.10 and r.avg_aas_2 = 0.15 and r.avg_delta = 0.05,
                format('compare IO mismatch: a1=%s a2=%s d=%s', r.avg_aas_1, r.avg_aas_2, r.avg_delta);
-            select * into r from ash.compare(v0, v2, v2, v5, p_dimension => 'wait_event_type')
+            select * into r from ash.compare(v0, v2, v2, v5, dimension => 'wait_event_type')
               where key = 'Lock';
             assert r.avg_aas_1 is null and r.avg_aas_2 = 0.03,
                format('compare Lock (w2-only) mismatch: a1=%s a2=%s', r.avg_aas_1, r.avg_aas_2);
@@ -1807,13 +1807,13 @@ jobs:
 
             select count(*) into n from ash.samples(v_from, v_to);
             assert n = 60, 'samples should decode 60 backend-rows, got ' || n;
-            select count(*) into n from ash.samples(v_from, v_to, p_query_id => 111111);
+            select count(*) into n from ash.samples(v_from, v_to, query_id => 111111);
             assert n = 27, 'samples filtered by q1 should be 27, got ' || n;
-            select count(*) into n from ash.samples(v_from, v_to, p_wait_event => 'IO:DataFileRead');
+            select count(*) into n from ash.samples(v_from, v_to, wait_event => 'IO:DataFileRead');
             assert n = 39, 'samples filtered by IO event should be 39, got ' || n;
             -- a known decoded row (spike minute, postgres, IO).
-            select * into r from ash.samples(v_from, v_to, p_wait_event => 'IO:DataFileRead',
-                                             p_query_id => 111111) limit 1;
+            select * into r from ash.samples(v_from, v_to, wait_event => 'IO:DataFileRead',
+                                             query_id => 111111) limit 1;
             assert r.database_name = 'postgres' and r.wait_event = 'IO:DataFileRead'
                and r.query_id = 111111,
                format('samples row mismatch: db=%s ev=%s q=%s', r.database_name, r.wait_event, r.query_id);
@@ -1879,9 +1879,9 @@ jobs:
                'report coverage window must echo the minute-floored request';
             assert j->'coverage' ? 'raw_retention_start', 'report coverage.raw_retention_start present';
 
-            -- p_vcpus is echoed, cpu-scoring left to the consumer.
-            assert (ash.report(v_from, v_to, p_vcpus => 8)->>'vcpus')::int = 8,
-               'report should echo p_vcpus';
+            -- vcpus is echoed, cpu-scoring left to the consumer.
+            assert (ash.report(v_from, v_to, vcpus => 8)->>'vcpus')::int = 8,
+               'report should echo vcpus';
 
             -- no coverage -> null (consumer skips ingestion).
             assert ash.report(ash.ts_to_timestamptz((select base_ts + 3600 from t2anchor)),
@@ -1967,7 +1967,7 @@ jobs:
 
             -- the leaf drill (query_id dimension + wait filter) likewise yields one row.
             select count(*) into v_count
-              from ash.top('query_id', v_from, now(), p_wait_event => 'CPU', p_limit => 1000)
+              from ash.top('query_id', v_from, now(), wait_event => 'CPU', n => 1000)
               where key = v_query_id::text;
             assert v_count = 1, format('top(query_id|CPU) one row per query_id; got %s with %s pgss rows', v_count, v_pgss_rows);
             raise notice 'pgss fanout regression PASSED';
@@ -1980,10 +1980,10 @@ jobs:
             begin perform * from ash.timeline(v_from, v_to, '0 seconds');
               raise exception 'timeline accepted zero bucket';
             exception when others then assert sqlerrm ilike '%bucket%', 'timeline zero-bucket: ' || sqlerrm; end;
-            begin perform * from ash.aas(v_from, v_to, p_bucket => '0 seconds');
+            begin perform * from ash.aas(v_from, v_to, bucket => '0 seconds');
               raise exception 'aas accepted zero bucket';
             exception when others then assert sqlerrm ilike '%bucket%', 'aas zero-bucket: ' || sqlerrm; end;
-            begin perform * from ash.top('wait_event', v_from, v_to, p_bucket => '0 seconds');
+            begin perform * from ash.top('wait_event', v_from, v_to, bucket => '0 seconds');
               raise exception 'top accepted zero bucket';
             exception when others then assert sqlerrm ilike '%bucket%', 'top zero-bucket: ' || sqlerrm; end;
             begin perform * from ash.chart(v_from, v_to, '0 seconds');
@@ -1992,14 +1992,14 @@ jobs:
             raise notice 'zero-bucket rejection PASSED';
           end $$;
 
-          -- p_limit caps the number of returned rows (2.0 top has no synthetic Other row).
+          -- n caps the number of returned rows (2.0 top has no synthetic Other row).
           do $$
           declare n int;
           begin
-            select count(*) into n from ash.top('query_id', now() - interval '1 hour', now(), p_limit => 1);
-            assert n <= 1, 'top p_limit=1 should return at most 1 row, got ' || n;
-            select count(*) into n from ash.top('wait_event_type', now() - interval '1 hour', now(), p_limit => 0);
-            assert n = 0, 'top p_limit=0 should return 0 rows, got ' || n;
+            select count(*) into n from ash.top('query_id', now() - interval '1 hour', now(), n => 1);
+            assert n <= 1, 'top n=1 should return at most 1 row, got ' || n;
+            select count(*) into n from ash.top('wait_event_type', now() - interval '1 hour', now(), n => 0);
+            assert n = 0, 'top n=0 should return 0 rows, got ' || n;
             raise notice 'top limit PASSED';
           end $$;
           EOF
@@ -2036,7 +2036,7 @@ jobs:
             v_bad text := '';
             v_ext_pos int;
             v_pub_pos int;
-            v_readers text[] := array['_pgss_query_text','top','compare','samples','summary'];
+            v_readers text[] := array['_pgss_query_text','top','compare','samples','_samples','summary'];
           begin
             assert ash._pgss_schema() = 'ash_pgss_ext',
               'pgss schema should be ash_pgss_ext after relocation';
@@ -2064,7 +2064,7 @@ jobs:
                 where c like 'search_path=%'
                   and (',' || replace(split_part(c, '=', 2), ' ', '') || ',') like '%,public,%'
               );
-            assert v_bad = '_pgss_query_text compare samples summary top',
+            assert v_bad = '_pgss_query_text _samples compare samples summary top',
               'unexpected pgss-reader set (drift?): ' || coalesce(v_bad, '<none>');
             raise notice 'pgss shadow mitigation (catalog) PASSED';
           end $$;
@@ -2288,7 +2288,7 @@ jobs:
 
             -- === Non-existent query id ===
             select count(*) into v_count
-              from ash.samples(now() - interval '1 hour', now(), p_query_id => 999999999);
+              from ash.samples(now() - interval '1 hour', now(), query_id => 999999999);
             assert v_count = 0, 'non-existent query should return 0 rows';
 
             -- === Rotation cycles 0 -> 1 -> 2 -> 0 (admin, unchanged) ===
@@ -2325,7 +2325,7 @@ jobs:
                 'insert into ash.sample_%s (sample_ts, datid, active_count, data, slot) values (%s, 1, 5, %L::integer[], %s)',
                 v_inactive, v_ts, array[-v_ghost, 5, 0,0,0,0,0]::integer[], v_inactive);
               select exists (
-                select 1 from ash.top('wait_event', v_from, now(), p_limit => 100)
+                select 1 from ash.top('wait_event', v_from, now(), n => 100)
                 where key = 'TestIsolation:GhostEvent'
               ) into v_found;
               assert not v_found, 'GhostEvent from inactive partition must not appear in ash.top';
@@ -2468,7 +2468,7 @@ jobs:
           rollback;
           EOF
 
-      - name: "Release-gate fixes: negative interval, p_width clamp, decode_sample size cap"
+      - name: "Release-gate fixes: negative interval, width clamp, decode_sample size cap"
         env:
           PGPASSWORD: postgres
         run: |
@@ -2478,12 +2478,12 @@ jobs:
             v_count int;
             v_text text;
           begin
-            -- p_width clamp on _bar: huge value must NOT OOM. The internal
+            -- width clamp on _bar: huge value must NOT OOM. The internal
             -- repeat() is now bounded at 500 chars per bar.
             select ash._bar('CPU*', 50.0, 100.0, 1000000000, false) into v_text;
-            assert length(v_text) < 600, format('_bar p_width overflow not clamped: len=%s', length(v_text));
+            assert length(v_text) < 600, format('_bar width overflow not clamped: len=%s', length(v_text));
 
-            -- ash.chart clamps p_width too (huge value must not OOM/error).
+            -- ash.chart clamps width too (huge value must not OOM/error).
             perform * from ash.chart(now() - interval '1 hour', now(), '1 minute', 3, 1000000000, false);
 
             -- decode_sample(int4[]) huge-array guard: arrays > 100k elements rejected.
@@ -3463,7 +3463,7 @@ jobs:
             assert a.buckets_with_data = 10, 'aas spike buckets_with_data 10, got ' || a.buckets_with_data;
 
             -- 5-minute percentile bucket smooths the one-minute storm to 840/300 = 2.80.
-            select peak_aas into v_metric from ash.aas(v_start, v_end, p_bucket => '5 minutes');
+            select peak_aas into v_metric from ash.aas(v_start, v_end, bucket => '5 minutes');
             assert v_metric = 2.80, 'aas 5-min-bucket peak 2.80, got ' || v_metric;
 
             -- 3-minute calendar buckets: the hour-aligned grid puts boundaries at
@@ -3471,7 +3471,7 @@ jobs:
             -- window ([-10,-9): one quiet minute over its 60s coverage = 1.00) and
             -- the storm minute lands in [-3,0) with two quiet minutes: 720/180 =
             -- 4.00. p99 over [1,1,1,4] = 3.91.
-            select peak_aas, p99_aas into v_metric, v_pct from ash.aas(v_start, v_end, p_bucket => '3 minutes');
+            select peak_aas, p99_aas into v_metric, v_pct from ash.aas(v_start, v_end, bucket => '3 minutes');
             assert v_metric = 4.00, 'aas 3-min calendar-bucket peak 4.00, got ' || v_metric;
             assert v_pct = 3.91, 'aas 3-min calendar-bucket p99 3.91, got ' || v_pct;
 
@@ -3500,10 +3500,10 @@ jobs:
 
             -- level 2 drill into IO: DataFileRead 60 of 80 -> 75%.
             select backend_seconds, pct into v_metric, v_pct
-              from ash.top('wait_event', v_end - interval '1 minute', v_end, p_wait_event_type => 'IO')
+              from ash.top('wait_event', v_end - interval '1 minute', v_end, wait_event_type => 'IO')
               where key = 'IO:DataFileRead';
             assert v_metric = 60 and v_pct = 75.00, format('top(event|IO) DataFileRead bsec=%s pct=%s', v_metric, v_pct);
-            select count(*) into n from ash.top('wait_event', v_end - interval '1 minute', v_end, p_wait_event_type => 'IO');
+            select count(*) into n from ash.top('wait_event', v_end - interval '1 minute', v_end, wait_event_type => 'IO');
             assert n = 2, 'top(event|IO) should return 2 events, got ' || n;
 
             -- query drill: 333 has 180 of 300 -> avg 3.00, pct 60.
@@ -3528,7 +3528,7 @@ jobs:
 
             -- Sub-minute bucket rejected.
             begin
-              perform * from ash.aas(v_end - interval '1 hour', v_end, p_bucket => '30 seconds');
+              perform * from ash.aas(v_end - interval '1 hour', v_end, bucket => '30 seconds');
               raise exception 'aas should reject sub-minute buckets';
             exception when others then
               assert sqlerrm like '%bucket must be at least 1 minute%', 'aas sub-minute error mismatch: ' || sqlerrm;
@@ -3625,12 +3625,12 @@ jobs:
             -- wait-filtered long window has no per-minute detail and honestly stays
             -- hour-grain: peak = IO hour average (59*20+60)/3600 = 0.34, timeline p99 null
             select * into a from ash.aas(v_h - interval '2 hours', v_h + interval '1 hour',
-                                         p_wait_event_type => 'IO');
+                                         wait_event_type => 'IO');
             assert a.source = 'rollup_1h' and a.peak_aas = 0.34,
               format('filtered long window stays hour-grain: peak=%s (want 0.34)', a.peak_aas);
             select p99_aas into v_p99
             from ash.timeline(v_h - interval '2 hours', v_h + interval '1 hour', '1 hour',
-                              p_wait_event_type => 'IO')
+                              wait_event_type => 'IO')
             where data_points > 0;
             assert v_p99 is null, 'filtered rollup_1h timeline p99 stays null, got ' || coalesce(v_p99::text, 'null');
 
@@ -3669,15 +3669,15 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           -- ============================================================================
-          -- Buckets are calendar-aligned (floored to p_bucket relative to ash.epoch(),
+          -- Buckets are calendar-aligned (floored to bucket relative to ash.epoch(),
           -- i.e. midnight UTC): (a) the same absolute window returns IDENTICAL
           -- bucket_start labels on repeated calls (reproducible for humans, agents, and
-          -- scrapers — the old keying anchored buckets to p_from so labels drifted with
+          -- scrapers — the old keying anchored buckets to since so labels drifted with
           -- the call time via now()-relative defaults); (b) an hour/5-min bucket carries
           -- its calendar label, so a spike lands in the correctly-labeled bucket;
           -- (c) raw-backed and rollup_1m-backed reads of the same window agree on the
-          -- bucketed peak (no ragged-bucket seam). Plus ash.top(p_order_by): ranking by
-          -- peak/p99 happens BEFORE the p_limit cut, so a one-minute incident query
+          -- bucketed peak (no ragged-bucket seam). Plus ash.top(order_by): ranking by
+          -- peak/p99 happens BEFORE the n cut, so a one-minute incident query
           -- outranks a steady baseline query that beats it on average.
           -- ============================================================================
           update ash.config
@@ -3712,7 +3712,7 @@ jobs:
 
             -- (a) reproducibility: the identical absolute window, called again,
             -- returns identical labels (this held trivially here — the real
-            -- regression risk is p_from-anchored keying, which this catches).
+            -- regression risk is since-anchored keying, which this catches).
             select array_agg(bucket_start order by bucket_start) into b2
             from ash.timeline(v_end - interval '9 minutes', v_end, '5 minutes');
             assert b1 = b2, 'bucket_start not reproducible across calls';
@@ -3726,7 +3726,7 @@ jobs:
             -- clipped leading edge: window [-9m, 0) -> 2 expected buckets; the
             -- clipped bucket [-10m,-5m) averages over its 4 in-window minutes
             -- (240/240 = 1.00), the storm bucket reads 840/300 = 2.80.
-            select * into a from ash.aas(v_end - interval '9 minutes', v_end, p_bucket => '5 minutes');
+            select * into a from ash.aas(v_end - interval '9 minutes', v_end, bucket => '5 minutes');
             assert a.buckets_expected = 2, 'clipped window buckets_expected 2, got ' || a.buckets_expected;
             assert a.peak_aas = 2.80, 'clipped window peak 2.80, got ' || a.peak_aas;
             raise notice 'calendar bucket labels PASSED';
@@ -3740,7 +3740,7 @@ jobs:
           declare
             v_cpu smallint; v_dp oid;
             v_end timestamptz := date_trunc('hour', now()) - interval '53 minutes';
-            p_raw numeric; p_ru numeric; a record;
+            peak_raw numeric; peak_ru numeric; a record;
           begin
             truncate ash.rollup_1m;
             select ash._register_wait('active','CPU*','CPU*') into v_cpu;
@@ -3755,19 +3755,19 @@ jobs:
             end loop;
             perform ash.rollup_minute();
 
-            select * into a from ash.aas(v_end - interval '40 minutes', v_end, p_bucket => '5 minutes');
+            select * into a from ash.aas(v_end - interval '40 minutes', v_end, bucket => '5 minutes');
             assert a.source = 'raw', 'seam: expect raw source, got ' || a.source;
-            p_raw := a.peak_aas;
+            peak_raw := a.peak_aas;
 
             truncate ash.sample_0, ash.sample_1, ash.sample_2;
-            select * into a from ash.aas(v_end - interval '40 minutes', v_end, p_bucket => '5 minutes');
+            select * into a from ash.aas(v_end - interval '40 minutes', v_end, bucket => '5 minutes');
             assert a.source = 'rollup_1m', 'seam: expect rollup_1m source, got ' || a.source;
-            p_ru := a.peak_aas;
-            assert p_raw = p_ru, format('raw/rollup bucketed peak seam: raw %s vs rollup %s', p_raw, p_ru);
+            peak_ru := a.peak_aas;
+            assert peak_raw = peak_ru, format('raw/rollup bucketed peak seam: raw %s vs rollup %s', peak_raw, peak_ru);
             raise notice 'raw/rollup calendar-bucket seam PASSED';
           end $$;
 
-          -- ash.top(p_order_by): spiky key must survive p_limit under peak ordering.
+          -- ash.top(order_by): spiky key must survive n under peak ordering.
           do $$
           declare
             v_end timestamptz := date_trunc('hour', now());
@@ -3785,28 +3785,28 @@ jobs:
             end loop;
 
             -- default (avg): the steady query wins the single slot; the spiky one
-            -- is cut — exactly the failure mode p_order_by exists to fix.
-            select key into k from ash.top('query_id', v_end - interval '10 minutes', v_end, p_limit => 1);
+            -- is cut — exactly the failure mode order_by exists to fix.
+            select key into k from ash.top('query_id', v_end - interval '10 minutes', v_end, n => 1);
             assert k = '111', 'avg ordering should lead with 111, got ' || k;
 
             -- peak ordering: the incident query ranks first WITH the same limit.
             select * into r from ash.top('query_id', v_end - interval '10 minutes', v_end,
-                                         p_limit => 1, p_order_by => 'peak');
+                                         n => 1, order_by => 'peak');
             assert r.key = '222' and r.peak_aas = 5.00 and r.avg_aas = 0.50,
               format('peak ordering: key=%s peak=%s avg=%s (want 222 5.00 0.50)',
                      r.key, r.peak_aas, r.avg_aas);
             select key into k from ash.top('query_id', v_end - interval '10 minutes', v_end,
-                                           p_limit => 1, p_order_by => 'p99');
+                                           n => 1, order_by => 'p99');
             assert k = '222', 'p99 ordering should lead with 222, got ' || k;
 
             begin
               perform * from ash.top('query_id', v_end - interval '10 minutes', v_end,
-                                     p_order_by => 'bogus');
-              raise exception 'top(p_order_by => bogus) should have raised';
+                                     order_by => 'bogus');
+              raise exception 'top(order_by => bogus) should have raised';
             exception when others then
-              if sqlerrm like '%unknown p_order_by%' then v_raised := true; else raise; end if;
+              if sqlerrm like '%unknown order_by%' then v_raised := true; else raise; end if;
             end;
-            assert v_raised, 'p_order_by validation missing';
+            assert v_raised, 'order_by validation missing';
 
             truncate ash.rollup_1m;
             raise notice 'top spike-first ordering PASSED';
@@ -3908,7 +3908,7 @@ jobs:
             v_raised := false;
             begin
               perform * from ash.top('query_id', v_end - interval '2 hours',
-                                     v_end - interval '1 hour', p_wait_event => 'DataFileRead');
+                                     v_end - interval '1 hour', wait_event => 'DataFileRead');
               raise exception 'entirely-past tie drill should have raised';
             exception when others then
               if sqlerrm like '%entirely outside raw retention%'
@@ -3921,7 +3921,7 @@ jobs:
             -- partial overlap (window END inside raw retention, START before it):
             -- the message must (a) echo the un-floored start the USER passed and
             -- (b) advise a minute-aligned boundary that, once passed, actually
-            -- clears the guard. Readers floor p_from to the minute before the
+            -- clears the guard. Readers floor since to the minute before the
             -- guard runs, so a mid-minute raw_retention_start otherwise loops:
             -- narrowing to exactly raw_start re-floors below it and re-raises.
             -- Give raw retention a mid-minute start with one earlier sample.
@@ -3936,7 +3936,7 @@ jobs:
             v_raised := false;
             begin
               perform * from ash.aas(v_passed, v_end,
-                                     p_wait_event => 'DataFileRead', p_query_id => 424242);
+                                     wait_event => 'DataFileRead', query_id => 424242);
               raise exception 'partial-overlap tie drill should have raised';
             exception when others then
               if sqlerrm like '%Narrow the window%' then v_raised := true; v_msg := sqlerrm; else raise; end if;
@@ -3950,12 +3950,12 @@ jobs:
               'hint must print minute-aligned boundary ' || v_bound || ', got: ' || v_msg;
             -- passing exactly that boundary now SUCCEEDS (the advice is actionable)
             select count(*) into n from ash.top('query_id', v_bound, v_end,
-                                                p_wait_event => 'DataFileRead');
+                                                wait_event => 'DataFileRead');
             assert n = 1, 'following the hint boundary must return the 424242 row, got ' || n;
             -- and passing raw_start itself re-floors below it and still raises (the loop we fixed)
             v_raised := false;
             begin
-              perform * from ash.aas(v_raw, v_end, p_wait_event => 'DataFileRead', p_query_id => 424242);
+              perform * from ash.aas(v_raw, v_end, wait_event => 'DataFileRead', query_id => 424242);
             exception when others then v_raised := true; end;
             assert v_raised, 'passing a mid-minute raw_start re-floors below it and still raises';
             -- restore pre-test raw retention so downstream assertions see original state
@@ -3977,7 +3977,7 @@ jobs:
             -- dimension mode: consistent NULL delta on the uncovered side.
             select * into r from ash.compare(v_end - interval '4 hours', v_end - interval '3 hours',
                                              v_end - interval '1 hour', v_end,
-                                             p_dimension => 'wait_event_type') limit 1;
+                                             dimension => 'wait_event_type') limit 1;
             assert r.avg_delta is null and r.avg_aas_1 is null,
               'dimension mode must also read NULL against an uncovered window';
             -- covered vs covered keeps numeric deltas.
@@ -3988,10 +3988,10 @@ jobs:
             v_raised := false;
             begin
               perform * from ash.compare(v_end - interval '1 hour', v_end,
-                                         v_end - interval '1 hour', v_end, p_dimension => 'bogus');
+                                         v_end - interval '1 hour', v_end, dimension => 'bogus');
               raise exception 'compare(bogus dimension) should have raised';
             exception when others then
-              if sqlerrm like 'ash.compare: unknown p_dimension%' then v_raised := true; else raise; end if;
+              if sqlerrm like 'ash.compare: unknown dimension%' then v_raised := true; else raise; end if;
             end;
             assert v_raised, 'compare dimension error must name ash.compare';
             raise notice 'compare coverage honesty PASSED';
@@ -4009,7 +4009,7 @@ jobs:
             select ash._register_wait('active','LWLock','WALWrite') into v_lw;
             -- CPU 120/min dominates the window total; WALWrite 600 exists only in
             -- minute -2 where it is top-1 (600 > 120) but loses window-wide
-            -- (600 < 1200) — with p_top => 1 the old legend hid it entirely.
+            -- (600 < 1200) — with n => 1 the old legend hid it entirely.
             for i in 1..10 loop
               insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
               values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), 0::oid, 60, 5,
@@ -4017,7 +4017,7 @@ jobs:
                            else array[v_cpu, 120]::int4[] end, '{}'::int8[]);
             end loop;
             select chart into v_legend
-            from ash.chart(v_end - interval '10 minutes', v_end, p_top => 1)
+            from ash.chart(v_end - interval '10 minutes', v_end, n => 1)
             where bucket_start is null;
             assert v_legend like '%LWLock:WALWrite%',
               'legend must include the single-bucket top-1 culprit: ' || v_legend;
@@ -4200,19 +4200,19 @@ jobs:
             -- (leaf drill-down) variants, so each helper path is exercised.
             v_calls constant text[] := array[
               'ash.aas()',
-              $c$ash.aas(p_wait_event_type => 'IO')$c$,
+              $c$ash.aas(wait_event_type => 'IO')$c$,
               $c$ash.top('wait_event_type')$c$,
               $c$ash.top('wait_event')$c$,
               $c$ash.top('query_id')$c$,
               $c$ash.top('database')$c$,
-              $c$ash.top('wait_event', p_wait_event_type => 'IO')$c$,
-              $c$ash.top('query_id', p_wait_event_type => 'IO', p_wait_event => 'DataFileRead')$c$,
+              $c$ash.top('wait_event', wait_event_type => 'IO')$c$,
+              $c$ash.top('query_id', wait_event_type => 'IO', wait_event => 'DataFileRead')$c$,
               'ash.timeline()',
-              $c$ash.timeline(p_wait_event_type => 'IO')$c$,
+              $c$ash.timeline(wait_event_type => 'IO')$c$,
               'ash.periods()',
               $c$ash.compare(now() - interval '2 hours', now() - interval '1 hour', now() - interval '1 hour', now())$c$,
               'ash.samples()',
-              $c$ash.samples(p_wait_event_type => 'IO')$c$,
+              $c$ash.samples(wait_event_type => 'IO')$c$,
               'ash.report()',
               'ash.chart()',
               'ash.summary()',
