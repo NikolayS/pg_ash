@@ -59,7 +59,7 @@ select ash.uninstall('yes');
 
 ### Sampling intervals
 
-`ash.start(interval)` accepts PostgreSQL interval values. The interval is converted to a pg_cron schedule:
+`ash.start(every)` accepts PostgreSQL interval values. The interval is converted to a pg_cron schedule:
 
 | Interval range | Example input | pg_cron schedule | Description |
 |----------------|---------------|------------------|-------------|
@@ -129,7 +129,7 @@ select * from ash.status();
 
 | Function | Description |
 |----------|-------------|
-| `ash.start(interval)` | Start sampling (default: `'1 second'`). Uses pg_cron if available, otherwise prints external scheduling instructions. Also schedules rollup jobs. **Admin-only** |
+| `ash.start([every])` | Start sampling (default: `every => '1 second'`). Uses pg_cron if available, otherwise prints external scheduling instructions. Also schedules rollup jobs. **Admin-only** |
 | `ash.stop()` | Stop sampling and rollups (removes pg_cron jobs, sets `sampling_enabled = false`). **Admin-only** |
 | `ash.status()` | Sampling status, version, partition info, rollup metrics, debug_logging state. Reader-safe |
 | `ash.take_sample()` | Take one sample manually (called automatically by the scheduler). Writes to raw sample/query-map partitions and updates counters. **Admin-only** |
@@ -157,36 +157,36 @@ Every reader answers in **AAS** (average active sessions): `avg_aas`,
 and a `source` column (`raw` / `rollup_1m` / `rollup_1h` / `none`) showing
 where the data came from. `peak_aas` / `p99_aas` are the max / 99th percentile
 of per-bucket AAS, so a short spike stays visible next to the average. Every
-reader takes `p_from timestamptz default null` (→ `now() - '1 hour'`) and
-`p_to timestamptz default null` (→ `now()`), plus the uniform optional filters
-`p_wait_event_type`, `p_wait_event`, `p_query_id`, `p_database` where they
-apply. "Last 24 hours" is `p_from => now() - interval '24 hours'`.
+reader takes `since timestamptz default null` (→ `now() - '1 hour'`) and
+`until timestamptz default null` (→ `now()`), plus the uniform optional filters
+`wait_event_type`, `wait_event`, `query_id`, `database` where they
+apply. "Last 24 hours" is `since => now() - interval '24 hours'`.
 
 | Function | Question it answers |
 |----------|---------------------|
-| `ash.periods([end])` | **Start here.** One row per standard trailing window (1m, 5m, 1h, 1d, 1w, 1mo): is it bad right now — a spike or sustained? |
-| `ash.aas(from, to, filters…, [bucket])` | Scalar load for one window (avg / peak / p99 AAS, backend_seconds). Also the leaf summary, e.g. `ash.aas(p_wait_event => 'IO:DataFileRead')` |
-| `ash.timeline(from, to, [bucket], filters…)` | AAS time series, one row per bucket; `data_points = 0` marks a no-data bucket (distinct from measured zero). `bucket => null` auto-selects grain by span |
-| `ash.top(dimension, from, to, filters…, [limit], [bucket])` | The single drill. `dimension` ∈ `wait_event_type` / `wait_event` / `query_id` / `database`; filters compose |
-| `ash.compare(from1, to1, from2, to2, [dimension], filters…)` | Before/after two-window diff — did the deploy change load, and where? |
-| `ash.samples(from, to, [limit], filters…)` | Decoded raw sample rows, newest first |
-| `ash.report(from, to, [vcpus], [top])` → `jsonb` | One machine-readable load report for external monitoring / health-assessment platforms — a single call, no follow-up queries |
-| `ash.chart(from, to, [bucket], [top], [width], [color])` | Human: stacked ASCII AAS timeline (the `timeline_chart` replacement) |
-| `ash.summary(from, to)` | Human: key/value overview (the `activity_summary` replacement) |
+| `ash.periods([until])` | **Start here.** One row per standard trailing window (1m, 5m, 1h, 1d, 1w, 1mo): is it bad right now — a spike or sustained? |
+| `ash.aas(since, until, filters…, [bucket])` | Scalar load for one window (avg / peak / p99 AAS, backend_seconds). Also the leaf summary, e.g. `ash.aas(wait_event => 'IO:DataFileRead')` |
+| `ash.timeline(since, until, [bucket], filters…)` | AAS time series, one row per bucket; `data_points = 0` marks a no-data bucket (distinct from measured zero). `bucket => null` auto-selects grain by span |
+| `ash.top(dimension, since, until, filters…, [n], [bucket])` | The single drill. `dimension` ∈ `wait_event_type` / `wait_event` / `query_id` / `database`; filters compose |
+| `ash.compare(since_1, until_1, since_2, until_2, [dimension], filters…)` | Before/after two-window diff — did the deploy change load, and where? |
+| `ash.samples(since, until, [n], filters…)` | Decoded raw sample rows, newest first |
+| `ash.report(since, until, [vcpus], [n])` → `jsonb` | One machine-readable load report for external monitoring / health-assessment platforms — a single call, no follow-up queries |
+| `ash.chart(since, until, [bucket], [n], [width], [color])` | Human: stacked ASCII AAS timeline (the `timeline_chart` replacement) |
+| `ash.summary(since, until)` | Human: key/value overview (the `activity_summary` replacement) |
 
 `ash.top` composes its filters with the dimension, giving every v1.x drill as
 one grammar:
 
 ```sql
 select * from ash.top('wait_event_type');                              -- level 1
-select * from ash.top('wait_event', p_wait_event_type => 'IO');        -- level 2
+select * from ash.top('wait_event', wait_event_type => 'IO');        -- level 2
 select * from ash.top('query_id');                                     -- top queries
-select * from ash.top('wait_event', p_query_id => 8231004856741017);   -- query → waits
-select * from ash.top('query_id', p_wait_event => 'IO:DataFileRead');  -- event → queries (leaf)
+select * from ash.top('wait_event', query_id => 8231004856741017);   -- query → waits
+select * from ash.top('query_id', wait_event => 'IO:DataFileRead');  -- event → queries (leaf)
 ```
 
-`ash.top` also takes `p_order_by` ∈ `avg` / `peak` / `p99` (default `avg`),
-applied **before** the `p_limit` cut — `p_order_by => 'peak'` is the spike-first
+`ash.top` also takes `order_by` ∈ `avg` / `peak` / `p99` (default `avg`),
+applied **before** the `n` cut — `order_by => 'peak'` is the spike-first
 triage: a query that spiked for one minute outranks steady background rows a
 mean would keep on top. For the `query_id` dimension, the unattributed bucket is
 a **NULL `key`** (activity whose `query_id` was not captured), not the string
@@ -294,7 +294,7 @@ The last hour averaged 3.2 but peaked at 41 — a spike, not a sustained shift.
 
 ```sql
 -- what is the load, broken down by wait event type?
-select * from ash.top('wait_event_type', p_from => now() - interval '5 minutes');
+select * from ash.top('wait_event_type', since => now() - interval '5 minutes');
 ```
 
 ```
@@ -312,7 +312,7 @@ here is both the largest and the spikiest.
 ```sql
 -- top queries by load; query_text needs pg_stat_statements AND pg_read_all_stats
 -- (e.g. pg_monitor membership) — see "Query text visibility" below
-select * from ash.top('query_id', p_from => now() - interval '5 minutes', p_limit => 3);
+select * from ash.top('query_id', since => now() - interval '5 minutes', n => 3);
 ```
 
 ```
@@ -327,8 +327,8 @@ select * from ash.top('query_id', p_from => now() - interval '5 minutes', p_limi
 
 ```sql
 -- what is query 8231004856741017 waiting on? (query → waits)
-select * from ash.top('wait_event', p_query_id => 8231004856741017,
-                       p_from => now() - interval '5 minutes');
+select * from ash.top('wait_event', query_id => 8231004856741017,
+                       since => now() - interval '5 minutes');
 ```
 
 ```
@@ -346,18 +346,18 @@ window must lie within raw retention or the reader raises with the boundary.
 ```sql
 -- how spiky is DataFileRead itself? (the leaf summary)
 select avg_aas, peak_aas, p99_aas
-from ash.aas(p_wait_event => 'IO:DataFileRead', p_from => now() - interval '5 minutes');
+from ash.aas(wait_event => 'IO:DataFileRead', since => now() - interval '5 minutes');
 
 -- which queries drive it? (event → queries)
-select * from ash.top('query_id', p_wait_event => 'IO:DataFileRead',
-                       p_from => now() - interval '5 minutes');
+select * from ash.top('query_id', wait_event => 'IO:DataFileRead',
+                       since => now() - interval '5 minutes');
 ```
 
 ### Browse raw samples
 
 ```sql
 -- see the last 20 decoded samples with query text
-select * from ash.samples(p_from => now() - interval '10 minutes', p_limit => 20);
+select * from ash.samples(since => now() - interval '10 minutes', n => 20);
 ```
 
 ```
@@ -373,22 +373,22 @@ select * from ash.samples(p_from => now() - interval '10 minutes', p_limit => 20
 
 ```sql
 -- raw samples during an incident
-select * from ash.samples(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:05', p_limit => 50);
+select * from ash.samples(since => '2026-02-14 03:00', until => '2026-02-14 03:05', n => 50);
 ```
 
 ### Dump samples to CSV
 
 Always go through `ash.samples()` — the underlying `ash.sample` table stores a
 packed `integer[]` and cannot be joined directly. The defaults are
-`p_from => now() - '1 hour'`, `p_to => now()`, and `p_limit => 100`; pass a
-large `p_limit` when dumping.
+`since => now() - '1 hour'`, `until => now()`, and `n => 100`; pass a
+large `n` when dumping.
 
 ```sql
 -- dump every sample from the last hour
-\copy (select * from ash.samples(p_from => now() - interval '1 hour', p_limit => 10000000)) to '/tmp/ash.csv' csv header
+\copy (select * from ash.samples(since => now() - interval '1 hour', n => 10000000)) to '/tmp/ash.csv' csv header
 
 -- dump a specific incident window
-\copy (select * from ash.samples(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:05', p_limit => 10000000)) to '/tmp/incident.csv' csv header
+\copy (select * from ash.samples(since => '2026-02-14 03:00', until => '2026-02-14 03:05', n => 10000000)) to '/tmp/incident.csv' csv header
 ```
 
 Use `\copy` (psql) rather than server-side `COPY TO` if `/tmp` isn't writable by
@@ -407,7 +407,7 @@ bucket; `aas` is the bucket total. `ash.chart` returns a composite/set, so
 
 ```sql
 select bucket_start, aas, detail, chart
-from ash.chart(p_from => now() - interval '5 minutes', p_bucket => '1 minute');
+from ash.chart(since => now() - interval '5 minutes', bucket => '1 minute');
 ```
 
 ```
@@ -421,13 +421,13 @@ from ash.chart(p_from => now() - interval '5 minutes', p_bucket => '1 minute');
  2026-07-04 14:34:00+00  |   3.8 | IO:DataFileRead=2.3 CPU*=0.9 Other=0.6                          | ███████████████▓▓░░····
 ```
 
-Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. Buckets are at least one minute (the rollup grain); `p_bucket => null` auto-selects the grain by span. Buckets are calendar-aligned (floored to `p_bucket` on UTC/epoch boundaries, not anchored to `p_from`), so the same absolute window renders the same `bucket_start` labels on every call. The legend is the window-wide top-`p_top` wait events plus any event that is top-1 in at least one bucket, so a single-bucket spike culprit always shows up.
+Each rank gets a distinct character — `█` (rank 1), `▓` (rank 2), `░` (rank 3), `▒` (rank 4+), `·` (Other) — so the breakdown is visible without color. Buckets are at least one minute (the rollup grain); `bucket => null` auto-selects the grain by span. Buckets are calendar-aligned (floored to `bucket` on UTC/epoch boundaries, not anchored to `since`), so the same absolute window renders the same `bucket_start` labels on every call. The legend is the window-wide top-`n` wait events plus any event that is top-1 in at least one bucket, so a single-bucket spike culprit always shows up.
 
 ```sql
 -- zoom into a specific time window
 select * from ash.chart(
-  p_from => now() - interval '10 minutes', p_to => now(),
-  p_bucket => '1 minute', p_top => 3, p_width => 50
+  since => now() - interval '10 minutes', until => now(),
+  bucket => '1 minute', n => 3, width => 50
 );
 ```
 
@@ -438,7 +438,7 @@ select * from ash.chart(
 set ash.color = on;
 
 -- Option 2: per-call
-select * from ash.chart(p_from => now() - interval '1 hour', p_color => true);
+select * from ash.chart(since => now() - interval '1 hour', color => true);
 ```
 
 psql's table formatter escapes ANSI codes — to render colors, pipe through sed:
@@ -448,7 +448,7 @@ psql's table formatter escapes ANSI codes — to render colors, pipe through sed
 \set color '\\g | sed ''s/\\\\x1B/\\x1b/g'' | less -R'
 
 -- then use it
-select * from ash.chart(p_from => now() - interval '1 hour') :color
+select * from ash.chart(since => now() - interval '1 hour') :color
 ```
 
 Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
@@ -461,24 +461,24 @@ Example data generated with `pgbench -c 8 -T 65` on Postgres 17 with concurrent 
 
 ### Investigate an incident
 
-Pass absolute timestamps as `p_from` / `p_to` to zoom into a specific window:
+Pass absolute timestamps as `since` / `until` to zoom into a specific window:
 
 ```sql
 -- what was the load between 3:00 and 3:10 am?
-select * from ash.aas(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10');
+select * from ash.aas(since => '2026-02-14 03:00', until => '2026-02-14 03:10');
 
 -- what and who? (breakdown by wait event, then by query)
-select * from ash.top('wait_event', p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10');
-select * from ash.top('query_id',   p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10');
+select * from ash.top('wait_event', since => '2026-02-14 03:00', until => '2026-02-14 03:10');
+select * from ash.top('query_id',   since => '2026-02-14 03:00', until => '2026-02-14 03:10');
 
 -- minute-by-minute timeline of the incident
-select * from ash.timeline(p_from => '2026-02-14 03:00', p_to => '2026-02-14 03:10', p_bucket => '1 minute');
+select * from ash.timeline(since => '2026-02-14 03:00', until => '2026-02-14 03:10', bucket => '1 minute');
 
 -- did a deploy at 03:05 change the load, and where?
 select * from ash.compare(
   '2026-02-14 02:55', '2026-02-14 03:05',   -- before
   '2026-02-14 03:05', '2026-02-14 03:15',   -- after
-  p_dimension => 'wait_event');
+  dimension => 'wait_event');
 ```
 
 ### Machine ingestion
@@ -492,7 +492,7 @@ pg_ash with a single call and no follow-up queries. Per-class per-minute AAS
 are the consumer's job; pg_ash emits raw AAS numbers only.
 
 ```sql
-select ash.report(p_from => now() - interval '1 day');
+select ash.report(since => now() - interval '1 day');
 ```
 
 Two additive keys make the payload self-reconciling. `top_queryids_available`
@@ -541,7 +541,7 @@ select * from ash.periods();
 Step 2 — drill into the waits:
 
 ```sql
-select * from ash.top('wait_event', p_from => now() - interval '10 minutes');
+select * from ash.top('wait_event', since => now() - interval '10 minutes');
 ```
 
 ```
@@ -557,7 +557,7 @@ select * from ash.top('wait_event', p_from => now() - interval '10 minutes');
 Step 3 — locate the spike in time:
 
 ```sql
-select * from ash.timeline(p_from => now() - interval '10 minutes', p_bucket => '1 minute', p_wait_event => 'Lock:tuple');
+select * from ash.timeline(since => now() - interval '10 minutes', bucket => '1 minute', wait_event => 'Lock:tuple');
 ```
 
 ```
@@ -575,8 +575,8 @@ select * from ash.timeline(p_from => now() - interval '10 minutes', p_bucket => 
 Step 4 — find the guilty queries (event → queries, the leaf drill):
 
 ```sql
-select * from ash.top('query_id', p_wait_event => 'Lock:tuple',
-                       p_from => '2026-02-17 14:01:30', p_to => '2026-02-17 14:02:30');
+select * from ash.top('query_id', wait_event => 'Lock:tuple',
+                       since => '2026-02-17 14:01:30', until => '2026-02-17 14:02:30');
 ```
 
 ```
@@ -779,47 +779,47 @@ Each reader auto-selects its source by window (raw within raw retention, else
 window transparently reads the rollups even after raw samples have rotated away:
 
 ```sql
--- long windows just widen p_from; source switches to the rollups automatically
-select * from ash.top('wait_event', p_from => now() - interval '6 hours');   -- top waits, 6h
-select * from ash.top('query_id',   p_from => now() - interval '7 days');    -- top queries, 1w
+-- long windows just widen since; source switches to the rollups automatically
+select * from ash.top('wait_event', since => now() - interval '6 hours');   -- top waits, 6h
+select * from ash.top('query_id',   since => now() - interval '7 days');    -- top queries, 1w
 
 -- scalar AAS over a window. avg is the window average; peak/p99 are the worst /
 -- 99th-percentile per-bucket AAS, so a short storm is not hidden by the average.
--- Pass a coarser bucket to smooth, e.g. p_bucket => '5 minutes'.
-select * from ash.aas(p_from => now() - interval '1 day');
+-- Pass a coarser bucket to smooth, e.g. bucket => '5 minutes'.
+select * from ash.aas(since => now() - interval '1 day');
 
 -- all standard windows side by side (1 minute ... 1 month)
 select * from ash.periods();
 
 -- an arbitrary absolute period (works even after raw samples are gone)
-select * from ash.aas(p_from => '2026-03-01 02:00', p_to => '2026-03-01 03:00');
+select * from ash.aas(since => '2026-03-01 02:00', until => '2026-03-01 03:00');
 
--- TIME: a series of AAS points to visualize load and locate spikes. p_bucket
+-- TIME: a series of AAS points to visualize load and locate spikes. bucket
 -- null auto-selects grain; order by peak_aas to surface the busiest buckets.
 -- nulls last keeps no-data buckets (null peak_aas) from sorting on top.
 select bucket_start, source, avg_aas, peak_aas
-from ash.timeline(p_from => now() - interval '7 days')
+from ash.timeline(since => now() - interval '7 days')
 order by peak_aas desc nulls last;
 
 -- NATURE: drill the hierarchy on a chosen window with one function.
-select * from ash.top('wait_event_type', p_from => now() - interval '15 minutes');        -- level 1
-select * from ash.top('wait_event', p_wait_event_type => 'IO',
-                      p_from => now() - interval '15 minutes');                            -- level 2
-select * from ash.top('query_id', p_from => now() - interval '15 minutes', p_limit => 20);-- queries
+select * from ash.top('wait_event_type', since => now() - interval '15 minutes');        -- level 1
+select * from ash.top('wait_event', wait_event_type => 'IO',
+                      since => now() - interval '15 minutes');                            -- level 2
+select * from ash.top('query_id', since => now() - interval '15 minutes', n => 20);-- queries
 
 -- the deepest leaf, "queries within a specific wait_event", needs the raw
 -- wait↔query tie, so it is answerable only within raw retention (the reader
 -- raises past that boundary rather than returning empty):
-select * from ash.top('query_id', p_wait_event => 'IO:DataFileRead',
-                      p_from => now() - interval '15 minutes', p_limit => 20);
+select * from ash.top('query_id', wait_event => 'IO:DataFileRead',
+                      since => now() - interval '15 minutes', n => 20);
 ```
 
 `avg_aas` is backend-seconds of activity per elapsed wall-clock second; missed
 or empty minutes count as zero activity. `peak_aas` and `p99_aas` are the max
 and 99th percentile of per-bucket AAS (so `peak_aas` is always ≥ `avg_aas`);
-`p_bucket` selects that granularity (must be ≥ 1 minute). All AAS values are
+`bucket` selects that granularity (must be ≥ 1 minute). All AAS values are
 scaled by the configured sample interval, so they stay correct under non-1s
-sampling. Trailing windows (a `null` `p_to`) end at the current minute boundary
+sampling. Trailing windows (a `null` `until`) end at the current minute boundary
 so they read complete minute rollups; `ash.timeline` reads `rollup_1m` for
 short spans and `rollup_1h` for long spans. `rollup_1h` preserves each hour's
 per-minute totals (the `minute_counts` column, filled by `ash.rollup_hour()`),
@@ -830,7 +830,7 @@ smaller peak. Wait/query-filtered reads over `rollup_1h` remain hour-grain
 (per-event minute detail is not stored). Hours rolled up before 2.0 whose
 minutes no longer survive in `rollup_1m` fall back to their flat hour average —
 a lower bound, never an invented spike. A trailing partial bucket is averaged over the time it actually
-covers; pass an hour- or day-aligned `p_from` for wall-clock-aligned axis labels.
+covers; pass an hour- or day-aligned `since` for wall-clock-aligned axis labels.
 
 Rollups use backend-seconds as the count unit (Oracle ASH-compatible). Each sample appearance = 1 backend-second at 1s sampling interval.
 

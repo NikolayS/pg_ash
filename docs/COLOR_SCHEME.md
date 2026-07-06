@@ -73,16 +73,16 @@ For best results with colored output, pipe through sed:
 Then use `:color` after queries:
 
 ```sql
-select * from ash.chart(now() - interval '1 hour', now(), p_color => true) :color
+select * from ash.chart(now() - interval '1 hour', now(), color => true) :color
 ```
 
 Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
 
 ## Implementation
 
-Colors are implemented in `ash._wait_color(p_event text, p_color boolean)`.
+Colors are implemented in `ash._wait_color(event text, color boolean)`.
 The function is `IMMUTABLE` and `language sql` — Postgres inlines it into the
-calling query. When `p_color = false` (the default), it returns an empty string
+calling query. When `color = false` (the default), it returns an empty string
 with zero overhead.
 
 Functions that support color:

@@ -11,7 +11,7 @@ tail behind it.
 Conventions that repeat below, stated once:
 
 - v1.5 has two functions per reader: `f(p_interval, …)` and
-  `f_at(p_start, p_end, …)`. 2.0 has one: `f(p_from, p_to, …)`, both
+  `f_at(p_start, p_end, …)`. 2.0 has one: `f(since, until, …)`, both
   defaulting so that a bare call means "the last hour."
 - v1.5 units vary by function — `samples` (raw readers), `backend_seconds`
   (rollup readers), active sessions (chart only). 2.0 always answers in AAS
@@ -86,7 +86,7 @@ select * from ash.wait_timeline('30 minutes', '5 minutes');
 no-data rows:
 
 ```sql
-select * from ash.timeline(p_from => '2026-07-04 14:15', p_to => '2026-07-04 14:45');
+select * from ash.timeline(since => '2026-07-04 14:15', until => '2026-07-04 14:45');
 ```
 ```
     bucket_start     | source | data_points | avg_aas | peak_aas | p99_aas
@@ -99,10 +99,10 @@ select * from ash.timeline(p_from => '2026-07-04 14:15', p_to => '2026-07-04 14:
  2026-07-04 14:40:00 | raw    |         300 |    3.0  |     3.8  |    3.7
 ```
 
-`bucket_start` labels are **calendar-aligned** (floored to `p_bucket` on
-UTC/epoch boundaries, not anchored to `p_from`), so this same absolute window
+`bucket_start` labels are **calendar-aligned** (floored to `bucket` on
+UTC/epoch boundaries, not anchored to `since`), so this same absolute window
 returns these same labels on every call — even if the first bucket precedes
-`p_from` and edge buckets average over their in-window part only.
+`since` and edge buckets average over their in-window part only.
 
 `ash.chart()` is the human rendering of the same series (stacked by wait
 class, colors optional) — unchanged in spirit from `timeline_chart`.
@@ -129,7 +129,7 @@ select * from ash.top_by_type('15 minutes');
 distinguishable from a steadily-busy one), no presentation columns:
 
 ```sql
-select * from ash.top('wait_event_type', p_from => '2026-07-04 14:30', p_to => '2026-07-04 14:45');
+select * from ash.top('wait_event_type', since => '2026-07-04 14:30', until => '2026-07-04 14:45');
 ```
 ```
  key    | query_text | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
@@ -159,8 +159,8 @@ select * from ash.top_waits('15 minutes', 5);
 separate function:
 
 ```sql
-select * from ash.top('wait_event', p_wait_event_type => 'IO',
-                      p_from => '2026-07-04 14:30', p_to => '2026-07-04 14:45');
+select * from ash.top('wait_event', wait_event_type => 'IO',
+                      since => '2026-07-04 14:30', until => '2026-07-04 14:45');
 ```
 ```
  key              | query_text | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
@@ -189,7 +189,7 @@ select * from ash.top_queries('15 minutes', 3);
 **After:**
 
 ```sql
-select * from ash.top('query_id', p_from => '2026-07-04 14:30', p_to => '2026-07-04 14:45', p_limit => 3);
+select * from ash.top('query_id', since => '2026-07-04 14:30', until => '2026-07-04 14:45', n => 3);
 ```
 ```
        key         |            query_text             | source | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
@@ -204,7 +204,7 @@ select * from ash.top('query_id', p_from => '2026-07-04 14:30', p_to => '2026-07
 
 ## 4. Leaf (the drill v1.x could only half-do)
 
-### `query_waits(query_id, …)` → `ash.top('wait_event', p_query_id => …)`
+### `query_waits(query_id, …)` → `ash.top('wait_event', query_id => …)`
 
 **Before:**
 
@@ -221,13 +221,13 @@ select * from ash.query_waits(8231004856741017, '15 minutes');
 **After:**
 
 ```sql
-select * from ash.top('wait_event', p_query_id => 8231004856741017,
-                      p_from => '2026-07-04 14:30', p_to => '2026-07-04 14:45');
+select * from ash.top('wait_event', query_id => 8231004856741017,
+                      since => '2026-07-04 14:30', until => '2026-07-04 14:45');
 ```
 
 Same shape as every other `top()` call — `avg_aas 11.2, peak_aas 26.0, p99_aas 24.9` for `IO:DataFileRead`, etc.
 
-### `event_queries(event, …)` → `ash.top('query_id', p_wait_event => …)` + `ash.aas(p_wait_event => …)`
+### `event_queries(event, …)` → `ash.top('query_id', wait_event => …)` + `ash.aas(wait_event => …)`
 
 **Before** — sample counts only; no way to see whether the event itself was
 spiky, and silently empty if the window predated raw retention:
@@ -244,8 +244,8 @@ select * from ash.event_queries('DataFileRead', '15 minutes');
 **After** — the event's own avg/peak/p99 first, then its per-query split:
 
 ```sql
-select avg_aas, peak_aas, p99_aas from ash.aas(p_wait_event => 'DataFileRead',
-       p_from => '2026-07-04 14:30', p_to => '2026-07-04 14:45');
+select avg_aas, peak_aas, p99_aas from ash.aas(wait_event => 'DataFileRead',
+       since => '2026-07-04 14:30', until => '2026-07-04 14:45');
 ```
 ```
  avg_aas | peak_aas | p99_aas
@@ -254,8 +254,8 @@ select avg_aas, peak_aas, p99_aas from ash.aas(p_wait_event => 'DataFileRead',
 ```
 
 ```sql
-select * from ash.top('query_id', p_wait_event => 'DataFileRead',
-                      p_from => '2026-07-04 14:30', p_to => '2026-07-04 14:45');
+select * from ash.top('query_id', wait_event => 'DataFileRead',
+                      since => '2026-07-04 14:30', until => '2026-07-04 14:45');
 ```
 
 And if you ask for a window whose raw samples are gone, you get an error, not
@@ -272,7 +272,7 @@ ERROR:  pg_ash: this drill needs the raw wait<->query tie, but the requested
         outside raw retention (raw retention starts at 2026-07-03 00:00:00+00).
         The tie is unrecoverable for that window — narrowing it will not help.
         Use the untied aggregate readers instead: drop either the wait filter
-        or p_query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of
+        or query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of
         the two).
 ```
 
@@ -308,7 +308,7 @@ select * from ash.daily_peak_backends('7 days');
 (and reported), unit is AAS everywhere:
 
 ```sql
-select * from ash.timeline(p_from => now() - interval '7 days');  -- auto: 1-hour buckets, rollup_1h
+select * from ash.timeline(since => now() - interval '7 days');  -- auto: 1-hour buckets, rollup_1h
 ```
 ```
     bucket_start     |  source   | data_points | avg_aas | peak_aas | p99_aas
@@ -318,13 +318,13 @@ select * from ash.timeline(p_from => now() - interval '7 days');  -- auto: 1-hou
  …
 ```
 
-`hourly_queries('7 days')` becomes `ash.top('query_id', p_from => now() - interval '7 days')` —
+`hourly_queries('7 days')` becomes `ash.top('query_id', since => now() - interval '7 days')` —
 same query ranking, over rollups, in AAS.
 
 ### `samples_by_database(...)` → `ash.top('database', …)`
 
 ```sql
-select * from ash.top('database', p_from => now() - interval '1 hour');
+select * from ash.top('database', since => now() - interval '1 hour');
 ```
 ```
    key    | query_text | source    | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
@@ -335,12 +335,12 @@ select * from ash.top('database', p_from => now() - interval '1 hour');
 
 ## 6. Raw evidence
 
-### `samples(...)` / `samples_at(...)` → `ash.samples(p_from, p_to, …)`
+### `samples(...)` / `samples_at(...)` → `ash.samples(since, until, …)`
 
 Same decoded raw rows; single function, uniform filters:
 
 ```sql
-select * from ash.samples(p_limit => 3, p_wait_event => 'DataFileRead');
+select * from ash.samples(n => 3, wait_event => 'DataFileRead');
 ```
 
 ## 7. New in 2.0 (no v1.x equivalent)
@@ -359,9 +359,9 @@ select * from ash.aas();   -- the last hour, one row
 ### `ash.compare()` — before/after a deploy
 
 ```sql
-select * from ash.compare(p_from_1 => '14:00', p_to_1 => '14:30',    -- baseline
-                          p_from_2 => '14:30', p_to_2 => '15:00',    -- after deploy
-                          p_dimension => 'wait_event');
+select * from ash.compare(since_1 => '14:00', until_1 => '14:30',    -- baseline
+                          since_2 => '14:30', until_2 => '15:00',    -- after deploy
+                          dimension => 'wait_event');
 ```
 ```
         key         | avg_aas_1 | avg_aas_2 | avg_delta | peak_aas_1 | peak_aas_2 | p99_aas_1 | p99_aas_2 | pct_1 | pct_2
@@ -374,7 +374,7 @@ select * from ash.compare(p_from_1 => '14:00', p_to_1 => '14:30',    -- baseline
 ### `ash.report()` — one JSON load report per period (machine ingest)
 
 ```sql
-select ash.report(p_from => '2026-07-04 00:00', p_to => '2026-07-05 00:00');
+select ash.report(since => '2026-07-04 00:00', until => '2026-07-05 00:00');
 ```
 ```json
 {
@@ -424,7 +424,7 @@ stumble:
 
 ```sql
 -- WRONG: one composite column
-select ash.chart(p_from => now() - interval '30 minutes', p_bucket => '1 minute');
+select ash.chart(since => now() - interval '30 minutes', bucket => '1 minute');
 ```
 ```
                     chart
@@ -436,26 +436,26 @@ select ash.chart(p_from => now() - interval '30 minutes', p_bucket => '1 minute'
 
 ```sql
 -- RIGHT: typed columns
-select * from ash.chart(p_from => now() - interval '30 minutes', p_bucket => '1 minute');
+select * from ash.chart(since => now() - interval '30 minutes', bucket => '1 minute');
 ```
 
-### (b) Spike-first drill — `p_order_by => 'peak'`
+### (b) Spike-first drill — `order_by => 'peak'`
 
 Default `top()` ranks by average, so a query that spiked hard for one minute can
-fall below steady background rows and get cut by `p_limit`. During incident
+fall below steady background rows and get cut by `n`. During incident
 triage rank by the spike instead:
 
 ```sql
--- the one-minute incident query, even at p_limit => 1
-select * from ash.top('query_id', p_order_by => 'peak', p_limit => 1,
-                       p_from => now() - interval '15 minutes');
+-- the one-minute incident query, even at n => 1
+select * from ash.top('query_id', order_by => 'peak', n => 1,
+                       since => now() - interval '15 minutes');
 ```
 
 Locate the spike in time the same way — order the timeline by peak. Use
 `nulls last` so no-data buckets (null `peak_aas`) do not sort above the spike:
 
 ```sql
-select * from ash.timeline(p_from => now() - interval '6 hours') order by peak_aas desc nulls last;
+select * from ash.timeline(since => now() - interval '6 hours') order by peak_aas desc nulls last;
 ```
 
 ### (c) Recurring peak hours (capacity / US-6)
@@ -466,7 +466,7 @@ find the recurring hot hours:
 
 ```sql
 select extract(hour from bucket_start) as hod, max(peak_aas) as peak
-from ash.timeline(p_from => now() - interval '30 days', p_bucket => '1 hour')
+from ash.timeline(since => now() - interval '30 days', bucket => '1 hour')
 group by 1
 order by 2 desc nulls last
 limit 5;
@@ -492,8 +492,8 @@ limit 5;
 | `top_by_type` | `top('wait_event_type')` |
 | `top_waits` | `top('wait_event')` |
 | `top_queries`, `top_queries_with_text` | `top('query_id')` |
-| `query_waits(q)` | `top('wait_event', p_query_id => q)` |
-| `event_queries(e)` | `top('query_id', p_wait_event => e)` |
+| `query_waits(q)` | `top('wait_event', query_id => q)` |
+| `event_queries(e)` | `top('query_id', wait_event => e)` |
 | `samples_by_database` | `top('database')` |
 | `minute_waits`, `hourly_queries`, `daily_peak_backends` | `timeline` / `top` (auto source) |
 | `samples`, `samples_at` | `samples` |

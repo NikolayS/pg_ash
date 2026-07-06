@@ -24,8 +24,8 @@ output). Every reader answers in AAS (average active sessions):
 2. `ash.periods()` — triage: last-minute `peak_aas` >> `avg_aas` = a spike, not sustained
 3. `ash.chart('5 minutes', '1 minute')` — colored stacked timeline: when it landed + which wait class (`Lock` in red)
 4. `ash.top('wait_event', ...)` — drill: `Lock:tuple` dominates (AAS + peak + p99 per row)
-5. `ash.top('query_id', p_wait_event => 'Lock:tuple', ...)` — the leaf: the guilty UPDATE
-6. `ash.top('wait_event', p_query_id => <top_query_id>, ...)` — full wait profile of that query, closing the loop
+5. `ash.top('query_id', wait_event => 'Lock:tuple', ...)` — the leaf: the guilty UPDATE
+6. `ash.top('wait_event', query_id => <top_query_id>, ...)` — full wait profile of that query, closing the loop
 7. Closing frame (held ~3s) so the GIF loops gracefully in the README
 
 `ash.chart` is the only step that colors: in 2.0 the data readers (`periods`,
@@ -161,7 +161,7 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
   palette (cyan / red / yellow / pink / purple) pop.
 - **Colors on by default:** `set ash.color = on` is set in the demo's
   `~/.psqlrc`, *and* the one colored step — `ash.chart(...)` — passes
-  `p_color => true` so its `chart` column comes back with ANSI codes. (In 2.0
+  `color => true` so its `chart` column comes back with ANSI codes. (In 2.0
   the data readers `periods` / `top` / `timeline` are presentation-free;
   `ash.chart` is the only reader that emits color, and `ash.summary` — a render
   helper too — returns plain key/value text.) The `:color` psql

@@ -18,10 +18,10 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
    a secondary absolute column. The v1.x units `samples` and bare
    `backend_seconds`-as-primary disappear.
 2. **One time convention.** Every reader takes
-   `p_from timestamptz default null` → `now() - interval '1 hour'` and
-   `p_to timestamptz default null` → `now()`.
+   `since timestamptz default null` → `now() - interval '1 hour'` and
+   `until timestamptz default null` → `now()`.
    The `f(interval)` / `f_at(start, end)` twin pattern is dropped — that alone
-   halves the surface. "Last 24 hours" is `p_from => now() - interval '24 hours'`.
+   halves the surface. "Last 24 hours" is `since => now() - interval '24 hours'`.
 3. **Dimensions are parameters, not function names.** Group-by is an argument
    of `top`; filters (`wait_event_type`, `wait_event`, `query_id`,
    `database`) are uniform named parameters across all readers.
@@ -66,24 +66,24 @@ Seven data functions, two render helpers. (v1.5 shipped ~25 readers × 2 forms.)
 ### Common parameters (uniform everywhere they appear)
 
 ```
-p_from            timestamptz default null   -- null → now() - '1 hour'
-p_to              timestamptz default null   -- null → now()
-p_wait_event_type text        default null   -- filter, e.g. 'IO', 'Lock', 'CPU*'
-p_wait_event      text        default null   -- filter, e.g. 'DataFileRead'
-p_query_id        bigint      default null   -- filter
-p_database        name        default null   -- filter
-p_bucket          interval    default '1 minute'  -- sub-bucket grain for peak/p99
+since           timestamptz default null   -- null → now() - '1 hour'
+until           timestamptz default null   -- null → now()
+wait_event_type text        default null   -- filter, e.g. 'IO', 'Lock', 'CPU*'
+wait_event      text        default null   -- filter, e.g. 'DataFileRead'
+query_id        bigint      default null   -- filter
+database        name        default null   -- filter
+bucket          interval    default '1 minute'  -- sub-bucket grain for peak/p99
 ```
 
-`peak_aas` = max per-`p_bucket` AAS over the window; `p99_aas` =
+`peak_aas` = max per-`bucket` AAS over the window; `p99_aas` =
 `percentile_cont(0.99)` over the same per-bucket AAS values, **zero-filled**
 for buckets with no activity within data coverage. Buckets with *no data*
 (sampler off) are excluded from percentiles and reported via coverage columns.
 
-### 2.1 `ash.periods(p_end timestamptz default null)`
+### 2.1 `ash.periods(until timestamptz default null)`
 
 One row per standard trailing window (1m, 5m, 1h, 1d, 1w, 1mo) ending at
-`p_end` (default `now()`). The zero-argument "start here" call.
+`until` (default `now()`). The zero-argument "start here" call.
 
 Returns:
 `(period text, period_start timestamptz, period_end timestamptz, source text,
@@ -95,10 +95,10 @@ the covered buckets at the grain named by the new `bucket` column. Every
 unfiltered read is minute-grain after the `rollup_1h` seam fix, so `bucket` is
 always `'1 minute'` here — `43200 @ 1 minute` reads without cross-referencing.
 
-### 2.2 `ash.aas(p_from, p_to, p_wait_event_type, p_wait_event, p_query_id, p_database, p_bucket)`
+### 2.2 `ash.aas(since, until, wait_event_type, wait_event, query_id, database, bucket)`
 
 Scalar load summary for one window, optionally filtered. This is also the
-US-4 "leaf summary": `ash.aas(p_wait_event => 'DataFileRead')` returns that
+US-4 "leaf summary": `ash.aas(wait_event => 'DataFileRead')` returns that
 event's avg/peak/p99.
 
 Returns one row:
@@ -106,28 +106,28 @@ Returns one row:
 buckets_expected bigint, buckets_with_data bigint,
 avg_aas numeric, peak_aas numeric, p99_aas numeric, backend_seconds numeric)`
 
-The per-`p_bucket` peak/p99 buckets are **calendar-aligned** (§2.3): floored to
-`p_bucket` on UTC/epoch boundaries, not anchored to `p_from`, so the same
+The per-`bucket` peak/p99 buckets are **calendar-aligned** (§2.3): floored to
+`bucket` on UTC/epoch boundaries, not anchored to `since`, so the same
 absolute window always yields the same buckets regardless of when the call runs.
 
-### 2.3 `ash.timeline(p_from, p_to, p_bucket interval default null, filters…)`
+### 2.3 `ash.timeline(since, until, bucket interval default null, filters…)`
 
-Time series. `p_bucket => null` auto-selects grain by span (≤ 6 h → 1 minute,
+Time series. `bucket => null` auto-selects grain by span (≤ 6 h → 1 minute,
 ≤ 7 d → 1 hour, else 1 day) and is always safely bounded. Emits a row for
 **every** bucket in the window: `data_points = 0` with null AAS marks
 "no data", distinguishing it from measured-zero load. When ranking buckets to
 find a spike, use `order by peak_aas desc nulls last` — no-data buckets carry
 null `peak_aas`, which sorts first under a bare `desc` and would hide the spike. An **explicit**
-`p_bucket` that would emit more than 100 000 buckets (e.g. `'1 minute'` over a
+`bucket` that would emit more than 100 000 buckets (e.g. `'1 minute'` over a
 year) raises rather than materialize an unbounded result — pass `null` for
 auto-grain or a coarser bucket.
 
-**Calendar-aligned buckets.** `bucket_start` is floored to `p_bucket` on
+**Calendar-aligned buckets.** `bucket_start` is floored to `bucket` on
 UTC/epoch boundaries — a 1-minute bucket starts on the minute, a 1-hour bucket
-on the hour, a 1-day bucket on the UTC day — **not** anchored to `p_from`.
+on the hour, a 1-day bucket on the UTC day — **not** anchored to `since`.
 Consequences: the same absolute window returns the **same** `bucket_start`
 labels on every call (reproducible plots, stable joins); the first
-`bucket_start` may **precede** `p_from`; and edge buckets clipped by the window
+`bucket_start` may **precede** `since`; and edge buckets clipped by the window
 average over their **in-window coverage only** (raw- and `rollup_1m`-backed
 reads of one window therefore agree on the bucketed peak).
 
@@ -141,18 +141,18 @@ long-window read keeps minute-grain extremes across the hourly seam (US-6). The
 only case that returns null `p99_aas` is a **wait/query-filtered**
 `rollup_1h`-backed bucket, where the surviving grain is the hour.
 
-### 2.4 `ash.top(p_dimension text, p_from, p_to, filters…, p_limit int default 10, p_bucket, p_order_by text default 'avg')`
+### 2.4 `ash.top(dimension text, since, until, filters…, n int default 10, bucket, order_by text default 'avg')`
 
-The single vertical drill. `p_dimension` ∈
+The single vertical drill. `dimension` ∈
 `'wait_event_type' | 'wait_event' | 'query_id' | 'database'`.
 Filters compose with the dimension, giving every v1.x drill as one grammar:
 
 ```sql
 select * from ash.top('wait_event_type');                                   -- L1
-select * from ash.top('wait_event', p_wait_event_type => 'IO');             -- L2
+select * from ash.top('wait_event', wait_event_type => 'IO');             -- L2
 select * from ash.top('query_id');                                          -- top queries
-select * from ash.top('wait_event', p_query_id => 123456789);               -- query → waits
-select * from ash.top('query_id', p_wait_event => 'DataFileRead');          -- US-4 leaf
+select * from ash.top('wait_event', query_id => 123456789);               -- query → waits
+select * from ash.top('query_id', wait_event => 'DataFileRead');          -- US-4 leaf
 ```
 
 Returns:
@@ -162,26 +162,26 @@ backend_seconds numeric, pct numeric)`
 
 - **Every row carries avg + peak + p99** (US-3). `pct` is the row's share of
   the window's total AAS.
-- **`p_order_by` ∈ `'avg' | 'peak' | 'p99'` (default `'avg'`)** picks the
-  ranking metric applied **before** the `p_limit` cut. This is how you surface a
-  spiky-but-low-average row: `p_order_by => 'peak'` ranks by the per-bucket
+- **`order_by` ∈ `'avg' | 'peak' | 'p99'` (default `'avg'`)** picks the
+  ranking metric applied **before** the `n` cut. This is how you surface a
+  spiky-but-low-average row: `order_by => 'peak'` ranks by the per-bucket
   spike, so a query that spiked for one minute outranks steady background rows
   that a mean would keep on top (the spike-first triage recipe). An unknown
-  value raises `ash.top: unknown p_order_by <v>; use avg|peak|p99`.
-- `query_text` is non-null only for `p_dimension = 'query_id'` with
+  value raises `ash.top: unknown order_by <v>; use avg|peak|p99`.
+- `query_text` is non-null only for `dimension = 'query_id'` with
   pg_stat_statements present **and** a caller that can read other roles'
   pgss text — i.e. holding `pg_read_all_stats` (e.g. via `pg_monitor`
   membership). A plain `grant_reader` role without it sees null even with
   pgss installed, because pgss restricts query text to the owning role.
   Degrades to null, never errors.
-- For `p_dimension = 'query_id'`, the unattributed bucket is a **NULL `key`**
+- For `dimension = 'query_id'`, the unattributed bucket is a **NULL `key`**
   (not the literal string `'unknown'`): activity whose `query_id` was not
   captured (client not reporting a queryid, truncated, or utility /
   idle-in-transaction work). It is real load, not an error; `compare()` pairs
   NULL keys and `summary()` renders it as `(unattributed)`.
 - Combinations requiring the event↔query association
-  (`'query_id'` + `p_wait_event`/`p_wait_event_type`, or `'wait_event'` +
-  `p_query_id`) are answerable **only from raw samples**. Past raw retention the
+  (`'query_id'` + `wait_event`/`wait_event_type`, or `'wait_event'` +
+  `query_id`) are answerable **only from raw samples**. Past raw retention the
   function raises, and the message now splits by how the window sits against the
   boundary:
   - **Window entirely past raw retention** — the tie is unrecoverable and
@@ -189,7 +189,7 @@ backend_seconds numeric, pct numeric)`
     aggregate readers: *"…is entirely outside raw retention (raw retention
     starts at `<ts>`). The tie is unrecoverable for that window — narrowing it
     will not help. Use the untied aggregate readers instead: drop either the
-    wait filter or p_query_id (e.g. ash.aas(), ash.timeline(), ash.top() with
+    wait filter or query_id (e.g. ash.aas(), ash.timeline(), ash.top() with
     one of the two)."*
   - **Partial overlap** (window end still inside retention) — the message names
     the exact boundary to move to: *"…raw retention starts at `<ts>` but the
@@ -201,9 +201,9 @@ backend_seconds numeric, pct numeric)`
   peak over a long window use `ash.timeline()`, whose unfiltered `peak_aas` stays
   per-minute across the `rollup_1h` seam (§2.3).
 
-### 2.5 `ash.compare(p_from_1, p_to_1, p_from_2, p_to_2, p_dimension text default null, p_limit int default 10, filters…, p_bucket)`
+### 2.5 `ash.compare(since_1, until_1, since_2, until_2, dimension text default null, n int default 10, filters…, bucket)`
 
-Before/after (US-7). With `p_dimension => null`: one overall row. With a
+Before/after (US-7). With `dimension => null`: one overall row. With a
 dimension: top rows by `abs(avg_delta)` (full outer across the two windows —
 a wait/query present in only one window still appears).
 
@@ -214,7 +214,7 @@ peak_aas_1 numeric, peak_aas_2 numeric,
 p99_aas_1 numeric, p99_aas_2 numeric,
 pct_1 numeric, pct_2 numeric)`
 
-(With `p_dimension => null` the single row's `key` is `overall`.)
+(With `dimension => null` the single row's `key` is `overall`.)
 
 - **Zero-coverage honesty.** A window with no data coverage (e.g. entirely past
   retention) reports **NULL** on its side and a **NULL `avg_delta`** — never a
@@ -222,11 +222,11 @@ pct_1 numeric, pct_2 numeric)`
   the empty window and pointing at `ash.status()`. This is consistent across
   **both** modes: the overall row and every per-dimension row. Within a
   *covered* window, an absent key is a true zero.
-- **Validation from `compare`'s own frame.** An unknown `p_dimension` raises
-  `ash.compare: unknown p_dimension <v>; use wait_event_type|wait_event|query_id|database (or null for one overall row)` —
+- **Validation from `compare`'s own frame.** An unknown `dimension` raises
+  `ash.compare: unknown dimension <v>; use wait_event_type|wait_event|query_id|database (or null for one overall row)` —
   named `ash.compare`, not `ash.top`.
 
-### 2.6 `ash.samples(p_from, p_to, p_limit int default 100, filters…)`
+### 2.6 `ash.samples(since, until, n int default 100, filters…)`
 
 Decoded raw sample rows, newest first. Role unchanged from v1.x `samples`,
 re-parameterized to the 2.0 conventions.
@@ -267,10 +267,10 @@ For `report` (and documented for all readers):
 
 ```
 ash.report(
-  p_from  timestamptz default null,   -- null → now() - '1 day'
-  p_to    timestamptz default null,   -- null → now()
-  p_vcpus int         default null,   -- optional; normalization is the platform's job
-  p_top   int         default 3       -- top-N events/queryids per window
+  since  timestamptz default null,   -- null → now() - '1 day'
+  until    timestamptz default null,   -- null → now()
+  vcpus int         default null,   -- optional; normalization is the platform's job
+  n   int         default 3       -- top-N events/queryids per window
 ) returns jsonb
 ```
 
@@ -282,7 +282,7 @@ Shape produced:
 
 ```json
 {
-  "vcpus": 96,                          // only when p_vcpus given
+  "vcpus": 96,                          // only when vcpus given
   "cluster_name": "main",               // current_setting('cluster_name'), omitted if empty
   "aas_avg":     {"total": N, "cpu": N, "io": N, "ipc": N, "lock": N, "lwlock": N},
   "aas_worst1m": {"total": N, "cpu": N, "io": N, "ipc": N, "lock": N, "lwlock": N},
@@ -332,7 +332,7 @@ Semantics:
   `aas_p99` / `aas_p999` = `percentile_cont(0.99 / 0.999)` over the
   zero-filled per-minute series. Per-class extremes are computed
   independently (each class's own worst minute).
-- `top_events_*`: per class, top-`p_top` wait events **at that class's
+- `top_events_*`: per class, top-`n` wait events **at that class's
   extreme minute(s)** — worst1m: the single worst minute; p99/p999: minutes
   at or above that percentile. Entries are pre-formatted strings
   `"<event>(<aas>)"`, AAS rounded to 1 decimal. **No `cpu` key** (`CPU*` has
@@ -359,21 +359,21 @@ Semantics:
   (query ids still come from samples; only `query_text` is pgss-dependent and
   is not part of this payload anyway).
 
-`p_vcpus` is a pass-through convenience only (echoed into the payload);
+`vcpus` is a pass-through convenience only (echoed into the payload);
 pg_ash never uses it in computation.
 
 ## 5. Human render helpers
 
-- `ash.chart(p_from, p_to, p_bucket default null, p_top int default 3, p_width int default 40, p_color boolean default false)` —
+- `ash.chart(since, until, bucket default null, n int default 3, width int default 40, color boolean default false)` —
   the stacked per-bucket AAS chart (v1.x `timeline_chart`, rebuilt on the 2.0
   internals and time convention). Returns a composite/set, so **`select *` is
   required** — a bare `select ash.chart(...)` collapses every column into one
-  composite `chart` column. The legend/series is the window-wide top-`p_top`
+  composite `chart` column. The legend/series is the window-wide top-`n`
   wait events **UNION any event that is top-1 in at least one bucket**, plus
   `Other` — so a single-bucket spike culprit always appears in the legend even
   if it never makes the window-wide top-N. Buckets are calendar-aligned exactly
   like `ash.timeline()` (§2.3).
-- `ash.summary(p_from, p_to)` — key/value overview (v1.x `activity_summary`,
+- `ash.summary(since, until)` — key/value overview (v1.x `activity_summary`,
   AAS units, plus top waits/queries), the human companion to `periods`.
 
 Both are presentation-only: they may format, color, truncate. No data
@@ -389,8 +389,8 @@ function does any of that.
   is used only for narrow (≤ ~1 h) windows, where it is both cheap and
   freshest, and for windows rollups cannot cover.
 - **Leaf tie-drills** — any drill that needs the `wait_event ↔ query_id`
-  association (`top('query_id', p_wait_event/​p_wait_event_type => …)`,
-  `top('wait_event', p_query_id => …)`) and `samples` — force `raw`, because
+  association (`top('query_id', wait_event/​wait_event_type => …)`,
+  `top('wait_event', query_id => …)`) and `samples` — force `raw`, because
   rollups don't preserve that association; past raw retention they raise (§1
   rule 5) rather than return empty.
 - Each reader reports the source it used in the `source` column
@@ -408,8 +408,15 @@ function does any of that.
 Unchanged from [AAS_USER_STORIES.md §6](AAS_USER_STORIES.md) except:
 
 - **Time addressing (revised):** the `f(interval)` + `f_at(start, end)` twin
-  convention is **replaced** by the single `p_from`/`p_to` convention above.
+  convention is **replaced** by the single `since`/`until` convention above.
   2.0 breaks compat; consistency-with-v1.x is no longer a constraint.
+- **Named args dropped the `p_` prefix.** Every function parameter is now
+  spelled bare: `p_from` → `since`, `p_to` → `until`, `p_limit`/`p_top` → `n`,
+  `ash.start(p_interval => …)` → `ash.start(every => …)`, and the remaining
+  filters lose their prefix too (`p_wait_event` → `wait_event`, `p_query_id`
+  → `query_id`, …). Positional calls are unaffected; only callers passing
+  named arguments need to update. This is a breaking change for v1.x named-arg
+  callers.
 - **Performance budgets:** rollup-backed reads < 100 ms for a 1-day window;
   raw-backed reads (incl. `report` over 1 day and US-4 leaf drills
   over 1 hour) < 1 s on a default-config instance.
@@ -423,15 +430,15 @@ fresh installer). Replacements:
 |---|---|
 | `top_waits`, `top_by_type` | `top('wait_event')`, `top('wait_event_type')` |
 | `top_queries`, `top_queries_with_text` | `top('query_id')` |
-| `query_waits(q)` | `top('wait_event', p_query_id => q)` |
-| `event_queries(e)` | `top('query_id', p_wait_event => e)` |
+| `query_waits(q)` | `top('wait_event', query_id => q)` |
+| `event_queries(e)` | `top('query_id', wait_event => e)` |
 | `wait_timeline` | `timeline(...)` (+ `top` on the spike window) |
 | `timeline_chart` | `ash.chart` |
 | `activity_summary` | `ash.summary` |
 | `samples_by_database` | `top('database')` |
 | `minute_waits`, `hourly_queries`, `daily_peak_backends` | `timeline` / `top` with auto source |
-| `samples_at` | `samples(p_from, p_to)` |
-| draft `aas_at`, `aas_timeline(_at)`, `aas_wait_types(_at)`, `aas_wait_events(_at)`, `aas_queryids(_at)`, `aas_periods(p_end, p_bucket)` | §2 equivalents |
+| `samples_at` | `samples(since, until)` |
+| draft `aas_at`, `aas_timeline(_at)`, `aas_wait_types(_at)`, `aas_wait_events(_at)`, `aas_queryids(_at)`, `aas_periods(until, bucket)` | §2 equivalents |
 
 `decode_sample*` (debug) and all admin/lifecycle functions remain.
 
@@ -442,7 +449,7 @@ fresh installer). Replacements:
 | US-1 Triage | `periods` |
 | US-2 Locate | `timeline` |
 | US-3 Drill (avg+peak+p99 per row) | `top` |
-| US-4 Leaf (event → queries) | `aas(p_wait_event=>…)` + `top('query_id', p_wait_event=>…)` |
+| US-4 Leaf (event → queries) | `aas(wait_event=>…)` + `top('query_id', wait_event=>…)` |
 | US-5 Programmatic honesty | `source` column + retention rows in `status()` + exception rule |
 | US-6 Capacity | `timeline` (auto `rollup_1h`, per-bucket peak/p99) |
 | US-7 Before/after | `compare` |
