@@ -664,10 +664,10 @@ as $$
 $$;
 
 comment on table ash.sample is
-$$Packed wait-event samples. One row per (sample_ts, datid). Do not join directly — use ash.samples() / ash.samples_at() for decoded rows, or ash.decode_sample(data, slot) if you need a single sample's contents.$$;
+$$Packed wait-event samples. One row per (sample_ts, datid). Do not join directly — use ash.samples(since, until) for decoded rows, or ash.decode_sample(data, slot) if you need a single sample's contents.$$;
 
 comment on column ash.sample.data is
-$$Packed int4[] encoding the sample's wait events and their query_map ids. Layout: groups of (-wait_id, count, query_map_id_1, ..., query_map_id_count). A negative marker starts each group; wait_id is negated for the marker so a positive count cannot be mistaken for a group boundary. Decode via ash.samples(), ash.samples_at(), or ash.decode_sample(data, slot).$$;
+$$Packed int4[] encoding the sample's wait events and their query_map ids. Layout: groups of (-wait_id, count, query_map_id_1, ..., query_map_id_count). A negative marker starts each group; wait_id is negated for the marker so a positive count cannot be mistaken for a group boundary. Decode via ash.samples(since, until) or ash.decode_sample(data, slot).$$;
 
 /*
  * Register wait event function (upsert, returns id).
@@ -1740,7 +1740,8 @@ begin
   /*
    * Privilege check: without pg_read_all_stats (or superuser), query_id is
    * hidden for activity owned by other roles and collapses to the sentinel 0,
-   * silently skewing top_queries / query_waits results.
+   * silently skewing ash.top('query_id') and every query-attributed reader
+   * (ash.samples, ash.report top_queryids_*).
    */
   begin
     if not (
@@ -1754,8 +1755,8 @@ begin
         '  query_id will be NULL for activity owned by other roles and '
         'bucketed under 0,';
       raise notice
-        '  skewing top_queries / query_waits. '
-        'Fix: grant pg_read_all_stats to %;', current_user;
+        '  skewing ash.top(''query_id'') / ash.top(''wait_event'', '
+        'query_id => ...). Fix: grant pg_read_all_stats to %;', current_user;
     end if;
   exception when others then
     -- Don't let the privilege probe block ash.start(), but surface the failure.
@@ -3884,8 +3885,16 @@ begin
     v_grain_secs := 60;
   end if;
 
-  -- peak/p99 bucket cannot be finer than the source grain.
-  v_bucket_secs := greatest(v_bucket_secs, v_grain_secs);
+  /*
+   * peak/p99 bucket cannot be finer than the source grain, and must be a
+   * whole MULTIPLE of it: a non-multiple bucket (e.g. '90 seconds' over
+   * minute grain) misaligns with the grain rows — a bucket then holds up to
+   * ceil(bucket/grain) whole grains of activity but divides by its own
+   * (shorter) coverage, fabricating AAS peaks that no grain ever reached.
+   * Integer division snaps down to the nearest grain multiple.
+   */
+  v_bucket_secs := (greatest(v_bucket_secs, v_grain_secs) / v_grain_secs)
+                   * v_grain_secs;
 
   return query
   /*
@@ -4045,6 +4054,10 @@ begin
     v_grain_secs := case when v_read_source = 'rollup_1h' then 3600 else 60 end;
   end if;
   v_read_source := coalesce(v_read_source, v_source);
+  -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
+  -- misaligns with the grain rows and fabricates per-bucket AAS.
+  v_bucket_secs := (greatest(v_bucket_secs, v_grain_secs) / v_grain_secs)
+                   * v_grain_secs;
 
   return query
   /*
@@ -4453,7 +4466,10 @@ begin
                                      ash.ts_to_timestamptz(v_end_ts));
     v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
   end if;
-  v_bucket_secs := greatest(v_bucket_secs, v_grain_secs);
+  -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
+  -- misaligns with the grain rows and fabricates per-bucket AAS.
+  v_bucket_secs := (greatest(v_bucket_secs, v_grain_secs) / v_grain_secs)
+                   * v_grain_secs;
 
   if dimension = 'query_id' and ash._pgss_schema() is not null then
     begin
@@ -5101,6 +5117,14 @@ begin
   loop
     declare
       v_cavg numeric; v_cworst numeric; v_cp99 numeric; v_cp999 numeric;
+      /*
+       * unrounded per-class thresholds for the percentile-minute-set
+       * membership below (mirrors v_t99_thr/v_t999_thr on the total series):
+       * filtering on the ROUNDED display value can round UP above the true
+       * class max and match no minute at all, wiping out top_events_p99/p999
+       * and top_queryids_p99/p999 for low-AAS classes.
+       */
+      v_cp99_thr numeric; v_cp999_thr numeric;
       v_worst_min int4;
       v_p99_mins int4[];
       v_p999_mins int4[];
@@ -5135,8 +5159,9 @@ begin
         from grid
       )
       select round(cavg, 2), round(cworst, 2),
-             round(cp99::numeric, 2), round(cp999::numeric, 2)
-      into v_cavg, v_cworst, v_cp99, v_cp999
+             round(cp99::numeric, 2), round(cp999::numeric, 2),
+             cp99::numeric, cp999::numeric
+      into v_cavg, v_cworst, v_cp99, v_cp999, v_cp99_thr, v_cp999_thr
       from agg;
 
       -- worst minute and percentile-minute sets for top_events / top_queryids.
@@ -5159,11 +5184,12 @@ begin
         limit 1
       ) as worst_candidate;
 
+      -- membership on the UNROUNDED thresholds (v_cp99/v_cp999 are display).
       select coalesce(
-               array_agg(ts) filter (where aas >= v_cp99 and aas > 0),
+               array_agg(ts) filter (where aas >= v_cp99_thr and aas > 0),
                array[]::int4[]),
              coalesce(
-               array_agg(ts) filter (where aas >= v_cp999 and aas > 0),
+               array_agg(ts) filter (where aas >= v_cp999_thr and aas > 0),
                array[]::int4[])
       into v_p99_mins, v_p999_mins
       from (
@@ -5452,6 +5478,20 @@ begin
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
   end if;
+
+  /*
+   * Bound the emitted-row count (same cap as ash.timeline): one row per
+   * bucket, so an explicit fine bucket over a very wide window can blow up
+   * (1 minute over 10 years ~ 5M rows). Cap at 100000 and tell the caller
+   * to widen bucket.
+   */
+  if (v_span::bigint / v_bucket_secs) > 100000 then
+    raise exception
+      'ash.chart: % buckets exceeds the 100000-row cap; use a coarser '
+      'bucket (or bucket => null for auto grain)',
+      (v_span::bigint / v_bucket_secs);
+  end if;
+
   v_si := ash._sample_interval_secs();
   v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
                                    ash.ts_to_timestamptz(v_end_ts));
@@ -5460,6 +5500,10 @@ begin
     v_source := 'rollup_1m';
   end if;
   v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
+  -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
+  -- misaligns with the grain rows and fabricates per-bucket AAS.
+  v_bucket_secs := (greatest(v_bucket_secs, v_grain_secs) / v_grain_secs)
+                   * v_grain_secs;
 
   /*
    * Legend/series events: the window-wide top-n PLUS any event that is

@@ -1890,6 +1890,79 @@ jobs:
             raise notice 'ash.report PASSED';
           end $$;
 
+          -- --- ash.report p99/p999 attribution for sparse low-AAS classes (#115) -------
+          do $$
+          declare
+            j jsonb; v_from timestamptz; v_to timestamptz; v_class text;
+            v_cpu smallint; v_lw smallint; v_q2 int4; v_m0 int4; v_dp oid;
+          begin
+            select id into v_cpu from ash.wait_event_map where type='CPU*' and event='CPU*';
+            select id into v_lw from ash.wait_event_map where type='LWLock' and event='WALWrite';
+            select id into v_q2 from ash.query_map_0 where query_id=222222;
+            select base_ts + 600 into v_m0 from t2anchor;
+            select oid into v_dp from pg_database where datname='postgres';
+
+            -- Fixture: 5 covered minutes [m0..m4]; LWLock only in m3 (44) and m4 (46).
+            -- lwlock per-minute AAS grid = [0, 0, 0, 0.7333, 0.7667]:
+            --   p99  = 0.765333... -> displays as 0.77 (ABOVE the true max 0.766667)
+            --   p999 = 0.766533... -> displays as 0.77
+            -- Filtering the p99/p999 minute sets on the ROUNDED 0.77 matches no minute
+            -- at all, wiping out top_events_p99/p999 and top_queryids_p99/p999 for the
+            -- class even though aas_p99 reports 0.77; the unrounded thresholds match m4.
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts) values
+              (v_m0,       v_dp, 1, 3,  array[v_cpu, 3],  array[0, 3]::int8[]),
+              (v_m0 + 60,  v_dp, 1, 3,  array[v_cpu, 3],  array[0, 3]::int8[]),
+              (v_m0 + 120, v_dp, 1, 3,  array[v_cpu, 3],  array[0, 3]::int8[]),
+              (v_m0 + 180, v_dp, 1, 44, array[v_lw, 44],  array[222222, 44]::int8[]),
+              (v_m0 + 240, v_dp, 1, 46, array[v_lw, 46],  array[222222, 46]::int8[]);
+            -- matching raw samples for the extreme minutes (top_queryids attribution).
+            insert into ash.sample (sample_ts, datid, active_count, data, slot) values
+              (v_m0 + 180, v_dp, 44,
+                array[-v_lw, 44]::integer[] || array_fill(v_q2, array[44]), 0),
+              (v_m0 + 240, v_dp, 46,
+                array[-v_lw, 46]::integer[] || array_fill(v_q2, array[46]), 0);
+
+            v_from := ash.ts_to_timestamptz(v_m0);
+            v_to := ash.ts_to_timestamptz(v_m0 + 300);
+            j := ash.report(v_from, v_to);
+            assert j is not null, 'report(sparse lwlock) returned null';
+
+            -- displayed values round UP above the true per-minute max (0.766667).
+            assert (j->'aas_avg'->>'lwlock')::numeric = 0.30, 'sparse lwlock aas_avg 0.30';
+            assert (j->'aas_worst1m'->>'lwlock')::numeric = 0.77, 'sparse lwlock aas_worst1m 0.77';
+            assert (j->'aas_p99'->>'lwlock')::numeric = 0.77, 'sparse lwlock aas_p99 0.77';
+            assert (j->'aas_p999'->>'lwlock')::numeric = 0.77, 'sparse lwlock aas_p999 0.77';
+
+            -- attribution must survive display rounding: minute-set membership is
+            -- decided on the UNROUNDED thresholds, so m4 (0.7667) attributes.
+            assert j->'top_events_p99'->'lwlock' = '["WALWrite(0.8)"]'::jsonb,
+               'sparse lwlock top_events_p99 must attribute WALWrite, got '
+               || coalesce((j->'top_events_p99'->'lwlock')::text, '<missing>');
+            assert j->'top_events_p999'->'lwlock' = '["WALWrite(0.8)"]'::jsonb,
+               'sparse lwlock top_events_p999 must attribute WALWrite, got '
+               || coalesce((j->'top_events_p999'->'lwlock')::text, '<missing>');
+            assert j->'top_queryids_p99'->'lwlock' = '["222222(0.8)"]'::jsonb,
+               'sparse lwlock top_queryids_p99 must attribute 222222, got '
+               || coalesce((j->'top_queryids_p99'->'lwlock')::text, '<missing>');
+            assert j->'top_queryids_p999'->'lwlock' = '["222222(0.8)"]'::jsonb,
+               'sparse lwlock top_queryids_p999 must attribute 222222, got '
+               || coalesce((j->'top_queryids_p999'->'lwlock')::text, '<missing>');
+
+            -- invariant across the event-attributed classes: aas_p99 > 0 must never
+            -- come with an empty top_events_p99 (cpu has no per-event breakdown).
+            for v_class in select unnest(array['io','ipc','lock','lwlock']) loop
+              if coalesce((j->'aas_p99'->>v_class)::numeric, 0) > 0 then
+                assert jsonb_array_length(coalesce(j->'top_events_p99'->v_class, '[]'::jsonb)) > 0,
+                   format('class %s: aas_p99 > 0 but top_events_p99 empty', v_class);
+              end if;
+            end loop;
+
+            -- leave the shared fixture exactly as this block found it.
+            delete from ash.rollup_1m where ts >= v_m0 and ts < v_m0 + 300;
+            delete from ash.sample where sample_ts >= v_m0 and sample_ts < v_m0 + 300;
+            raise notice 'ash.report sparse-class p99/p999 attribution PASSED';
+          end $$;
+
           -- --- ash.summary + ash.chart (human render helpers, smoke) -------------------
           do $$
           declare v_from timestamptz; v_to timestamptz; n int; v_val text;
