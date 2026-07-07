@@ -2176,6 +2176,106 @@ jobs:
           \endif
           EOF
 
+      - name: "Test 2.0: pgss spoof must not leak via a no-USAGE reader (security #115)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Regression for #115: name resolution SKIPS search_path schemas the
+          -- caller lacks USAGE on, so the #76 ordering (real pgss schema listed
+          -- before public) is inert for a reader without USAGE on that schema —
+          -- an UNQUALIFIED pg_stat_statements reference falls through to a
+          -- planted public.pg_stat_statements and leaks attacker-controlled
+          -- query_text. The fix schema-qualifies every pgss data access with
+          -- the catalog-derived ash._pgss_schema(): such a reader gets real
+          -- text or NULL, NEVER the planted text.
+          select exists (select 1 from pg_extension where extname = 'pg_stat_statements') as has_pgss \gset
+          \if :has_pgss
+          -- Arrange: pgss relocated out of public; a world-readable fake in
+          -- public carrying a queryid the victim's dashboards will look up; a
+          -- monitoring role with the reader bundle + pg_read_all_stats but NO
+          -- USAGE on the relocated pgss schema.
+          create schema ash_spoof_s;
+          alter extension pg_stat_statements set schema ash_spoof_s;
+          select ash._apply_pgss_search_path();
+
+          create table public.pg_stat_statements (queryid bigint, query text);
+          grant select on public.pg_stat_statements to public;
+
+          drop role if exists ash_spoof_reader;
+          create role ash_spoof_reader;
+          select ash.grant_reader('ash_spoof_reader');
+          grant pg_read_all_stats to ash_spoof_reader;
+
+          -- Deterministic sample fixture (same shape as the pgss fan-out test):
+          -- one synthetic sample with a known query_id, plus the spoof row
+          -- claiming that very queryid.
+          do $$
+          declare
+            v_wait_id smallint; v_map_id int4; v_sample_ts int4;
+            v_datid oid := (select oid from pg_database where datname = current_database());
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            update ash.config set current_slot = 0 where singleton;
+            insert into ash.wait_event_map (state, type, event) values ('active', 'CPU', 'CPU')
+              on conflict (state, type, event) do update set state = excluded.state returning id into v_wait_id;
+            insert into ash.query_map_0 (query_id) values (115115115)
+              on conflict (query_id) do update set query_id = excluded.query_id returning id into v_map_id;
+            v_sample_ts := (ash.ts_from_timestamptz(date_trunc('minute', now() - interval '3 minutes')) / 60) * 60;
+            insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (v_sample_ts, v_datid, 1, array[-v_wait_id::int, 1, v_map_id]::int[], 0);
+            insert into public.pg_stat_statements values
+              (115115115, 'SPOOFED-select pg_read_file(''secrets'')');
+          end $$;
+
+          set role ash_spoof_reader;
+          do $$
+          declare
+            v_from timestamptz := ash._raw_retention_start();
+            n int; v_spoofed int; v_txt text;
+          begin
+            -- The attack preconditions really hold for THIS role: the spoof
+            -- is readable, the real pgss schema is not.
+            assert not has_schema_privilege('ash_spoof_s', 'usage'),
+              'reader must lack USAGE on the relocated pgss schema';
+            select count(*) into n from public.pg_stat_statements where query like 'SPOOFED%';
+            assert n = 1, 'spoof row must be planted and readable by the reader';
+
+            -- top('query_id'): the synthetic row comes back; its text is real
+            -- or NULL, never the planted text.
+            select count(*), count(*) filter (where query_text like 'SPOOFED%')
+              into n, v_spoofed
+              from ash.top('query_id', v_from, now(), n => 10000)
+              where key = '115115115';
+            assert n = 1, format('top must return the synthetic query row, got %s', n);
+            assert v_spoofed = 0, 'SPOOF LEAKED through ash.top query_text';
+
+            select count(*), count(*) filter (where query_text like 'SPOOFED%')
+              into n, v_spoofed
+              from ash.samples(v_from, now(), 10000)
+              where query_id = 115115115;
+            assert n = 1, format('samples must return the synthetic row, got %s', n);
+            assert v_spoofed = 0, 'SPOOF LEAKED through ash.samples query_text';
+
+            v_txt := ash._pgss_query_text(115115115);
+            assert v_txt is null or v_txt not like 'SPOOFED%',
+              format('SPOOF LEAKED through ash._pgss_query_text: %L', v_txt);
+            raise notice 'pgss no-USAGE spoof regression (#115) PASSED';
+          end $$;
+          reset role;
+
+          -- Cleanup: restore the default layout for downstream steps.
+          drop table public.pg_stat_statements;
+          select ash.revoke_reader('ash_spoof_reader');
+          drop role ash_spoof_reader;
+          alter extension pg_stat_statements set schema public;
+          select ash._apply_pgss_search_path();
+          drop schema ash_spoof_s;
+          \else
+          \echo 'SKIP: pg_stat_statements not installed on this PG major'
+          \endif
+          EOF
+
       - name: Test internal helper functions
         env:
           PGPASSWORD: postgres

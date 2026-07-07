@@ -4408,7 +4408,9 @@ returns table (
 language plpgsql
 stable
 set jit = off
--- public in search_path for pg_stat_statements query-text lookup (samples()).
+-- pgss data access is schema-qualified via ash._pgss_schema() (#115); public
+-- stays in the path only as defense-in-depth and to keep this function in the
+-- catalog-derived set that ash._apply_pgss_search_path() rewrites.
 set search_path = pg_catalog, ash, public
 as $$
 declare
@@ -4423,6 +4425,7 @@ declare
   v_tie boolean;
   v_raw_start timestamptz;
   v_has_pgss boolean := false;
+  v_pgss_schema text;
   v_key_num bigint;
 begin
   if dimension not in (
@@ -4471,9 +4474,18 @@ begin
   v_bucket_secs := (greatest(v_bucket_secs, v_grain_secs) / v_grain_secs)
                    * v_grain_secs;
 
-  if dimension = 'query_id' and ash._pgss_schema() is not null then
+  /*
+   * pgss presence/readability probe, schema-qualified from the catalog (#115):
+   * name resolution SKIPS search_path schemas the caller lacks USAGE on, so an
+   * unqualified reference could fall through to a planted
+   * public.pg_stat_statements and flip v_has_pgss on attacker data.
+   */
+  v_pgss_schema := case when dimension = 'query_id'
+                        then ash._pgss_schema() end;
+  if v_pgss_schema is not null then
     begin
-      perform 1 from pg_stat_statements limit 1;
+      execute format('select 1 from %I.pg_stat_statements limit 1',
+                     v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
@@ -4574,14 +4586,9 @@ begin
   loop
     query_text := null;
     if dimension = 'query_id' and v_has_pgss and v_key_num is not null then
-      begin
-        execute
-          'select left(query, 100) from pg_stat_statements '
-          'where queryid = $1 limit 1'
-          into query_text using v_key_num;
-      exception when others then
-        query_text := null;
-      end;
+      -- schema-qualified single lookup point (#115); returns null on any
+      -- failure, never text from a shadowing relation.
+      query_text := ash._pgss_query_text(v_key_num, 100);
     end if;
     return next;
   end loop;
@@ -4731,7 +4738,12 @@ $$;
  * Query text for a query_id from pg_stat_statements, via dynamic SQL so the
  * reference is never parsed when pgss is absent (a static reference would make
  * the caller fail to plan). Trusts pgss only when the real extension schema is
- * resolvable (#87 anti-spoof). Returns null when unavailable.
+ * resolvable (#87 anti-spoof), and schema-qualifies the reference with that
+ * catalog-derived schema (#115): name resolution SKIPS search_path schemas the
+ * caller lacks USAGE on, so an unqualified reference could fall through to a
+ * planted public.pg_stat_statements and leak attacker-controlled query_text.
+ * Returns null when unavailable (including permission-denied on the real
+ * pgss schema) — degraded, never spoofed.
  */
 create or replace function ash._pgss_query_text(
   query_id bigint,
@@ -4744,14 +4756,15 @@ set search_path = pg_catalog, ash, public
 as $$
 declare
   v_text text;
+  v_pgss_schema text := ash._pgss_schema();
 begin
-  if query_id is null or ash._pgss_schema() is null then
+  if query_id is null or v_pgss_schema is null then
     return null;
   end if;
   begin
-    execute
-      'select left(query, $1) from pg_stat_statements '
-      'where queryid = $2 limit 1'
+    execute format(
+      'select left(query, $1) from %I.pg_stat_statements '
+      'where queryid = $2 limit 1', v_pgss_schema)
       into v_text using maxlen, query_id;
   exception when others then
     v_text := null;
@@ -4801,6 +4814,7 @@ declare
   v_slots smallint[];
   v_datid oid;
   v_has_pgss boolean := false;
+  v_pgss_schema text;
 begin
   v_start := ash.ts_from_timestamptz(v_from);
   v_end := ash.ts_from_timestamptz(v_to);
@@ -4810,9 +4824,17 @@ begin
     where db.datname = database;
     if v_datid is null then return; end if;
   end if;
-  if ash._pgss_schema() is not null then
+  /*
+   * pgss presence/readability probe, schema-qualified from the catalog (#115):
+   * an unqualified reference could resolve to a planted
+   * public.pg_stat_statements when the caller lacks USAGE on the real pgss
+   * schema (name resolution skips schemas without USAGE).
+   */
+  v_pgss_schema := ash._pgss_schema();
+  if v_pgss_schema is not null then
     begin
-      perform 1 from pg_stat_statements limit 1;
+      execute format('select 1 from %I.pg_stat_statements limit 1',
+                     v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
@@ -5735,13 +5757,13 @@ comment on function ash.timeline(timestamptz, timestamptz, interval, text, text,
 $$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [since, until). bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). bucket_start is calendar-aligned (floored to bucket in UTC: hour buckets start on the hour, day buckets on the UTC day), so the same absolute window always returns identical bucket_start labels; the first bucket may start before since and edge buckets average over their in-window part only. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc nulls last to find the worst buckets (no-data buckets carry null peak_aas, which sorts first under a bare desc and would bury the real spike), then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts); p99_aas is null only for wait/query-filtered rollup_1h-backed buckets (hour grain).$$;
 
 comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval, text) is
-$$The single vertical drill (US-3): AAS broken down by dimension in wait_event_type|wait_event|query_id|database over [since, until). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). order_by in avg|peak|p99 (default avg) picks the ranking metric BEFORE the top-n cut — use order_by => 'peak' during incident triage so a query that spiked for one minute outranks steady background rows. For the query_id dimension, a NULL key is the unattributed bucket (activity whose query_id was not captured: not run with a queryid-reporting client, truncated, or utility/idle-in-transaction work) — it is real load, not an error. Filters compose: ash.top('wait_event', wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present AND the caller can read other roles pg_stat_statements text — i.e. holds pg_read_all_stats (e.g. via membership in pg_monitor); a plain ash.grant_reader() role without it sees query_text NULL even though pgss is installed, because pgss restricts query text to the owning role. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
+$$The single vertical drill (US-3): AAS broken down by dimension in wait_event_type|wait_event|query_id|database over [since, until). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). order_by in avg|peak|p99 (default avg) picks the ranking metric BEFORE the top-n cut — use order_by => 'peak' during incident triage so a query that spiked for one minute outranks steady background rows. For the query_id dimension, a NULL key is the unattributed bucket (activity whose query_id was not captured: not run with a queryid-reporting client, truncated, or utility/idle-in-transaction work) — it is real load, not an error. Filters compose: ash.top('wait_event', wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present AND the caller can read other roles pg_stat_statements text — i.e. holds pg_read_all_stats (e.g. via membership in pg_monitor); a plain ash.grant_reader() role without it sees query_text NULL even though pgss is installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is NULL. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
 
 comment on function ash.compare(timestamptz, timestamptz, timestamptz, timestamptz, text, int, text, text, bigint, name, interval) is
 $$Before/after comparison of two windows (US-7): window 1 = [since_1, until_1), window 2 = [since_2, until_2). dimension => null gives one overall row; a dimension gives the top n keys by abs(avg_delta) via a full outer join (a key present in only one window still appears). Columns (key, query_text, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2); avg_delta = window 2 minus window 1. A window with no data coverage (e.g. past retention) reports NULL on its side and a NULL avg_delta (plus a NOTICE) — never a fake zero baseline; within a covered window an absent key is a true zero. Use to tell whether a deploy regressed load and where.$$;
 
 comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigint, name) is
-$$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. Reads ash.sample directly (raw retention only).$$;
+$$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is null. Reads ash.sample directly (raw retention only).$$;
 
 comment on function ash.report(timestamptz, timestamptz, int, int) is
 $$Machine-readable load report as one jsonb (US-8) for [since, until) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution. vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage; never raises. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
@@ -5848,9 +5870,16 @@ begin
    * Always keep public in the path as a fallback (matches the managed-service
    * default and preserves behavior when pgss is not yet installed). When the
    * extension lives in a non-default schema, list THAT schema BEFORE public
-   * so an attacker who creates a `public.pg_stat_statements` view cannot
-   * shadow the real one and feed attacker-controlled query_text into
-   * monitoring dashboards. (Security review #76 finding.)
+   * so an unqualified `pg_stat_statements` cannot be shadowed by an
+   * attacker-created `public.pg_stat_statements` (security review #76).
+   *
+   * NOTE (#115): this ordering is now DEFENSE-IN-DEPTH only. Name resolution
+   * skips search_path schemas the caller lacks USAGE on, so ordering alone
+   * cannot protect a reader without USAGE on the pgss schema. The primary
+   * defense is that every pgss data access is schema-qualified via the
+   * catalog-derived ash._pgss_schema() (see ash._pgss_query_text and the
+   * probes in ash.top / ash._samples); the rewrite here still helps any
+   * caller-side unqualified references and USAGE-granted paths.
    */
   if v_pgss_schema is null
      or v_pgss_schema in ('pg_catalog', 'ash', 'public') then
