@@ -2,7 +2,9 @@
 # record.sh — End-to-end demo recorder for pg_ash.
 #
 # Pipeline (all local, no cloud):
-#   1. Start postgres:18 in Docker with pg_cron + pg_stat_statements.
+#   1. Start Postgres in Docker with pg_cron + pg_stat_statements preloaded
+#      (via the pre-baked demos/Dockerfile image; falls back to a runtime
+#      pg_cron install + restart on the plain postgres:${PG_MAJOR} base).
 #   2. Install pg_ash via `\i sql/ash-install.sql`, seed pgbench, start sampling.
 #   3. Kick off a workload that transitions baseline -> row-lock spike -> tail.
 #   4. After the spike is well underway, start tmux + asciinema with psql
@@ -20,32 +22,56 @@ set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 CONTAINER="pg_ash_demo"
-IMAGE="postgres:18"
+PG_MAJOR="${PG_MAJOR:-18}"
+IMAGE="postgres:${PG_MAJOR}"
+# Pre-baked image: demos/Dockerfile bakes pg_cron + shared_preload_libraries
+# into a postgres:${PG_MAJOR} derivative so the container boots preloaded with
+# no runtime apt-get + restart. Built automatically when the Dockerfile exists;
+# falls back to IMAGE + runtime install if it is absent or the build fails.
+DOCKERFILE="$HERE/Dockerfile"
+BAKED_IMAGE="pg_ash_demo:${PG_MAJOR}"
 SESSION="ash-demo"
 CAST="$HERE/ash_demo.cast"
 GIF="$HERE/ash_demo.gif"
 
-# Terminal geometry: wider (140 cols) so wide wait-event names like
-# `Lock:transactionid` and `Client:ClientRead` plus the colored bar charts
-# fit on one line. Compensated by smaller font-size in agg below so the
-# rendered GIF stays readable at GitHub's ~800px embed width.
-COLS="${COLS:-140}"
+# Terminal geometry: wide (168 cols) so the demo can use `select *` on every
+# reader without wrapping. The widest row is `select * from ash.top('query_id',
+# …)`, whose `query_text` column carries the full normalized guilty SQL
+# (`update pgbench_accounts set abalance = … where aid = $2`) — that row is
+# ~158 chars, over the old 140. 168 leaves margin; other readers (periods with
+# two timestamptz columns, the colored chart with its detail legend) fit well
+# under it. Compensated by a smaller agg font-size below so the rendered GIF
+# pixel width stays ~1000px (168 × 10 ≈ the old 140 × 12), readable at GitHub's
+# ~800px embed.
+COLS="${COLS:-168}"
 ROWS="${ROWS:-32}"
 
 # agg font-size in pixels. Lower = smaller text, more columns visible.
-# 12 keeps a 140-col terminal under ~1100px and still legible.
-AGG_FONT_SIZE="${AGG_FONT_SIZE:-12}"
+# 10 keeps a 168-col terminal near ~1000px (same rendered width as the old
+# 140-col × 12px) and still legible.
+AGG_FONT_SIZE="${AGG_FONT_SIZE:-10}"
 
-WARMUP_SEC="${WARMUP_SEC:-30}"  # baseline + spike accumulate before we record
+# baseline + spike accumulate before we record. Much longer than the v1.x demo
+# (was 30) for two 2.0-specific reasons:
+#   1. chart/timeline bucket at a 1-minute minimum (sub-minute grains are gone),
+#      so the colored ash.chart needs several minutes of history for a full bar
+#      chart rather than one or two bars.
+#   2. the leaf drills cross the wait<->query tie, which reads RAW samples and
+#      raises if the window START predates raw retention. Raw retention here is
+#      data-limited (it begins at the oldest sample = when ash.start() ran), so
+#      the 5-minute reader windows below require > 5 minutes of prior sampling.
+# 330 s (5.5 min) leaves a ~1 min margin at the first windowed query.
+WARMUP_SEC="${WARMUP_SEC:-330}"
 POST_WAIT="${POST_WAIT:-3}"
 
-# Workload phase durations passed to demos/workload.sh. With human-paced
-# typing the recorded session runs ~90 seconds, so we keep the spike going
-# long enough that every reader query (especially the final \gset → query_waits
-# step ~80 s into the recording) still sees fresh `Lock:tuple` samples in its
-# 1-minute window. Override these to make the spike shorter / longer.
-export SPIKE_SEC="${SPIKE_SEC:-120}"
-export BASELINE_SEC="${BASELINE_SEC:-15}"
+# Workload phase durations passed to demos/workload.sh. The spike must outlive
+# WARMUP + the ~110 s recording (~440 s) so every reader query — especially the
+# closing top('query_id', wait_event => 'Lock:tuple') -> top('wait_event',
+# query_id => ...) leaf near the end — still sees fresh `Lock:tuple` in its
+# 5-minute window. baseline is long enough (2 min) that the baseline->spike
+# transition falls inside the trailing 5-minute chart window. Override to tune.
+export SPIKE_SEC="${SPIKE_SEC:-480}"
+export BASELINE_SEC="${BASELINE_SEC:-120}"
 export TAIL_SEC="${TAIL_SEC:-30}"
 
 # Human-typing pacing (milliseconds per character, with jitter).
@@ -89,14 +115,31 @@ fi
 for t in docker tmux asciinema agg; do require "$t"; done
 
 # --- 1. Start container ------------------------------------------------------
+# Prefer the pre-baked image (demos/Dockerfile): pg_cron and the
+# shared_preload_libraries / cron config are compiled in, so the container
+# boots preloaded with no runtime apt-get + restart. Fall back to the plain
+# base image + runtime install if the Dockerfile is absent or the build fails.
+RUN_IMAGE="$IMAGE"
+BAKED=0
+if [ -f "$DOCKERFILE" ]; then
+  log "building pre-baked image $BAKED_IMAGE (PG_MAJOR=$PG_MAJOR)"
+  if $DOCKER build --build-arg "PG_MAJOR=$PG_MAJOR" -t "$BAKED_IMAGE" "$HERE" >/dev/null 2>&1; then
+    RUN_IMAGE="$BAKED_IMAGE"
+    BAKED=1
+    log "using pre-baked image $BAKED_IMAGE"
+  else
+    log "WARN: pre-baked build failed — falling back to runtime pg_cron install on $IMAGE"
+  fi
+fi
+
 $DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
-log "starting $IMAGE as $CONTAINER"
+log "starting $RUN_IMAGE as $CONTAINER"
 $DOCKER run -d --name "$CONTAINER" \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=postgres \
   -v "$REPO":/repo:ro \
-  "$IMAGE" \
+  "$RUN_IMAGE" \
   -c track_activity_query_size=4096 \
   -c log_min_messages=warning \
   >/dev/null
@@ -104,23 +147,27 @@ $DOCKER run -d --name "$CONTAINER" \
 log "waiting for first-boot PostgreSQL"
 until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
 
-log "installing pg_cron package + configuring shared_preload_libraries"
-$DOCKER exec "$CONTAINER" bash -c '
-  set -e
-  apt-get update -qq >/dev/null 2>&1
-  apt-get install -y -qq "postgresql-${PG_MAJOR}-cron" >/dev/null 2>&1
-  cat >> "${PGDATA}/postgresql.conf" <<CONF
+if [ "$BAKED" -eq 1 ]; then
+  log "pre-baked image already preloads pg_cron + pg_stat_statements — no runtime install/restart"
+else
+  log "installing pg_cron package + configuring shared_preload_libraries"
+  $DOCKER exec "$CONTAINER" bash -c '
+    set -e
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq "postgresql-${PG_MAJOR}-cron" >/dev/null 2>&1
+    cat >> "${PGDATA}/postgresql.conf" <<CONF
 
 # --- pg_ash demo ---
 shared_preload_libraries = '"'"'pg_cron,pg_stat_statements'"'"'
 cron.database_name = '"'"'demo'"'"'
 cron.use_background_workers = on
 CONF
-' >/dev/null 2>&1
+  ' >/dev/null 2>&1
 
-log "restarting container so pg_cron + pg_stat_statements load"
-$DOCKER restart "$CONTAINER" >/dev/null
-until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+  log "restarting container so pg_cron + pg_stat_statements load"
+  $DOCKER restart "$CONTAINER" >/dev/null
+  until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+fi
 
 # --- 2. Install pg_ash + seed + start sampling + workload --------------------
 log "installing pg_ash, seeding pgbench, starting sampling, kicking off workload"
@@ -140,8 +187,11 @@ sleep "$WARMUP_SEC"
 #   - Disable the default pager. psql's default `less`-based pager intercepts
 #     keystrokes from the recorder, corrupting the demo. We always want every
 #     row rendered straight to stdout.
-#   - Enable `ash.color = on` for the session so all reader functions emit
-#     ANSI escape codes in their `bar` / `chart` columns.
+#   - Enable `ash.color = on` for the session so the one render helper that
+#     colors — `ash.chart` — emits ANSI escape codes in its `chart` column.
+#     (In 2.0 the data readers `top`/`timeline`/`periods` are presentation-free;
+#     `ash.chart` is the only reader that emits ANSI color. `ash.summary` is a
+#     render helper too but returns plain key/value text.)
 #   - Define a `:color` psql variable that re-runs the previous query through
 #     `sed` to convert literal `\x1B` chars (which psql's aligned formatter
 #     emits in place of real escapes) back into real ESC bytes, so the
@@ -169,9 +219,24 @@ rm -f "$CAST"
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
 # --- 4. Record ---------------------------------------------------------------
-# asciinema CLI: --command for the command to record, --cols/--rows for
-# geometry; positional arg is the output cast file. These flags work with the
-# asciinema v2 CLI commonly packaged on Linux hosts.
+# asciinema CLI flags differ between v2 and v3 (v3 is what asciinema 3.x ships):
+#   geometry:    v2 `--cols N --rows M`      -> v3 `--window-size NxM`
+#   env capture: v2 `--env VARS`             -> v3 `--capture-env VARS`
+#   `--overwrite` and `--idle-time-limit` are common to both.
+# The positional arg is the output cast file; `--command` is what gets recorded.
+# We detect the installed major version and pick the right geometry/env flags so
+# the recorder works on both. (agg + the t=0 post-process below handle the v3
+# asciicast-v3 output format as well as v2.)
+ASCIINEMA_MAJOR="$(asciinema --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+if [ "${ASCIINEMA_MAJOR:-2}" -ge 3 ]; then
+  ASCIINEMA_GEO="--window-size ${COLS}x${ROWS}"
+  ASCIINEMA_ENV="--capture-env TERM,SHELL"
+else
+  ASCIINEMA_GEO="--cols ${COLS} --rows ${ROWS}"
+  ASCIINEMA_ENV="--env TERM,SHELL"
+fi
+log "asciinema major version ${ASCIINEMA_MAJOR:-unknown} — geometry flags: ${ASCIINEMA_GEO}"
+
 # Ship a tiny splash script into the container. It prints a coloured banner
 # (that becomes the GIF's first frame / GitHub thumbnail) and then execs psql.
 # Banner is sized for the wider 140-col terminal (138-char inner box).
@@ -181,7 +246,7 @@ printf "\033[38;2;080;250;123m"
 cat <<BANNER
 ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                                                        ║
-║   pg_ash v1.5   —   Active Session History for Postgres                                                                                ║
+║   pg_ash v2.0   —   Active Session History for Postgres                                                                                ║
 ║                                                                                                                                        ║
 ║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                                                        ║
 ║                                                                                                                                        ║
@@ -197,8 +262,8 @@ chmod +x /tmp/ash_splash.sh
 
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
   "asciinema rec --overwrite --idle-time-limit 3 \
-     --cols ${COLS} --rows ${ROWS} \
-     --env TERM,SHELL \
+     ${ASCIINEMA_GEO} \
+     ${ASCIINEMA_ENV} \
      --command 'docker exec -it -e TERM=xterm-256color -e LC_ALL=C.UTF-8 -e LANG=C.UTF-8 $CONTAINER /tmp/ash_splash.sh' \
      '$CAST'"
 sleep 3.0
@@ -272,42 +337,69 @@ send_instant() {
 # investigation query.
 #
 # NOTE: psql treats any unterminated statement as continuation; every select
-# MUST end with `;`. Reader functions are invoked with `p_color => true` so
+# MUST end with `;`. Reader functions are invoked with `color => true` so
 # the bar charts emit ANSI codes; the `:color` psql variable runs the query
 # through `sed` so the codes survive psql's aligned formatter.
 sleep 1.5
 
-# Act 2 — status: already sampling, version 1.4, pg_cron wired.
-human_type_and_send "select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
+# The 2.0 reader API: seven data functions + two human render helpers. The
+# investigation arc below walks the designed path — triage (periods) -> locate
+# + wait-class breakdown (chart, the colored render helper) -> drill (top on a
+# dimension) -> leaf (top on query_id filtered by the guilty wait event). AAS
+# (average active sessions) is the single load unit everywhere.
+#
+# Windows are `now() - interval '5 minutes'` .. `now()`: the 2.0 minimum bucket
+# is 1 minute (sub-minute grains are gone), so the timeline/chart need a
+# multi-minute window to show more than one bar. The workload spike outlives
+# the recording (SPIKE_SEC), so every window still sees fresh Lock:tuple.
+
+# Act 2 — status: already sampling, version 2.0, pg_cron wired. status() is
+# (metric, value), so `select *` IS the full projection — we keep a WHERE only
+# to trim the ~30-row diagnostic dump to the five that matter for the intro.
+human_type_and_send "select * from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
 sleep 3.8
 
-# Act 3 — top wait events: culprit is obvious. Use :color to render bars.
-human_type_and_send '\echo -- Q1: which wait event is dominating in the last minute?'
+# Act 3 — triage: is it bad right now, and is it a spike or sustained? periods()
+# is the 2.0 "start here": one row per standard trailing window, in AAS, with
+# peak/p99 next to avg so a spike (peak >> avg) is legible without a 2nd call.
+human_type_and_send '\echo -- Q1: triage — is it bad right now? spike or sustained?'
 sleep 1.0
-human_type_and_send "select * from ash.top_waits('1 minute', 10, 30, true) :color"
+human_type_and_send "select * from ash.periods();"
 sleep 4.6
 
-# Act 4 — timeline: when did the spike land?
-human_type_and_send '\echo -- Q2: when did the spike land?'
+# Act 4 — locate + wait-class breakdown: the colored stacked chart (the 2.0
+# render helper that replaces timeline_chart). Shows WHEN the spike landed and
+# WHICH wait class dominates (Lock in red). Color via color => true + :color.
+human_type_and_send '\echo -- Q2: when did it land, and which wait class? (colored)'
 sleep 1.0
-human_type_and_send "select bucket_start::time as t, active, chart from ash.timeline_chart('1 minute','10 seconds',4,40,true) :color"
+human_type_and_send "select * from ash.chart(now() - interval '5 minutes', now(), '1 minute', 4, 40, true) :color"
 sleep 4.8
 
-# Act 5 — drill into the culprit wait event -> guilty queries.
-human_type_and_send '\echo -- Q3: which query is stuck on Lock:tuple?'
+# Act 5 — drill: which wait EVENT dominates? ash.top on the wait_event
+# dimension — data-only now (AAS + peak + p99 per row, no presentation column).
+human_type_and_send '\echo -- Q3: which wait event is dominating?'
 sleep 1.0
-human_type_and_send "select query_id, samples, pct, bar, substr(query_text,1,42) as q from ash.event_queries('Lock:tuple','1 minute',3,20,true) :color"
+human_type_and_send "select * from ash.top('wait_event', now() - interval '5 minutes', now(), n => 6);"
 sleep 4.6
 
-# Act 6 — full wait profile of the #1 guilty query (closes the loop:
-# top_waits -> event_queries -> query_waits, mirroring the LLM-assisted
-# investigation flow in the main README). \gset captures the top query_id
-# silently into :top_qid; we then call query_waits with it.
-human_type_and_send '\echo -- Q4: full wait profile of the top guilty query?'
+# Act 6 — leaf: which query is stuck on Lock:tuple? The 2.0 leaf drill composes
+# the wait filter into top('query_id') — one grammar for what used to be
+# event_queries(). This crosses the wait<->query tie, so it reads raw samples
+# (the recent window is well within raw retention). \gset captures the top
+# query_id into :top_qid for the closing move.
+human_type_and_send '\echo -- Q4: which query is stuck on Lock:tuple?'
 sleep 1.0
-human_type_and_send "select query_id as top_qid from ash.event_queries('Lock:tuple','1 minute',1) \\gset"
+human_type_and_send "select * from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 3);"
+sleep 4.6
+human_type_and_send "select key as top_qid from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 1) \\gset"
 sleep 0.5
-human_type_and_send "select wait_event, samples, pct, bar from ash.query_waits(:top_qid, '1 minute', 30, true) :color"
+
+# Act 6b — closing the loop: full wait profile of that top query — top() again,
+# this time the wait_event dimension filtered by :top_qid (the 2.0 unification
+# of query_waits()). Same one grammar, opposite direction.
+human_type_and_send '\echo -- Q5: full wait profile of the top guilty query?'
+sleep 1.0
+human_type_and_send "select * from ash.top('wait_event', now() - interval '5 minutes', now(), query_id => :top_qid, n => 5);"
 sleep 4.8
 
 # Act 7 — closing lines. Held on screen for the "still" moment viewers see

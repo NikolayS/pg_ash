@@ -46,7 +46,7 @@ GNOME Terminal, VS Code integrated terminal, etc.).
 
 ## Block characters
 
-In `timeline_chart()`, each rank gets a distinct block character so the breakdown
+In `ash.chart()`, each rank gets a distinct block character so the breakdown
 is visible even without color:
 
 | Rank | Character | Name |
@@ -73,24 +73,28 @@ For best results with colored output, pipe through sed:
 Then use `:color` after queries:
 
 ```sql
-select * from ash.top_waits('1 hour', p_color => true) :color
+select * from ash.chart(now() - interval '1 hour', now(), color => true) :color
 ```
 
 Colors also render natively in pgcli, DataGrip, and other clients that pass raw bytes.
 
 ## Implementation
 
-Colors are implemented in `ash._wait_color(p_event text, p_color boolean)`.
+Colors are implemented in `ash._wait_color(event text, color boolean)`.
 The function is `IMMUTABLE` and `language sql` — Postgres inlines it into the
-calling query. When `p_color = false` (the default), it returns an empty string
+calling query. When `color = false` (the default), it returns an empty string
 with zero overhead.
 
 Functions that support color:
 
-- `top_waits()` / `top_waits_at()` — bar column
-- `query_waits()` / `query_waits_at()` — bar column
-- `top_by_type()` / `top_by_type_at()` — bar column
-- `timeline_chart()` / `timeline_chart_at()` — chart column
+- `ash.chart()` — `chart` column (stacked per-bucket AAS timeline)
+
+In 2.0 this is the only reader that emits color. The data readers (`periods`,
+`aas`, `timeline`, `top`, `compare`, `samples`, `report`) return typed columns
+only — bars, charts, and colors are confined to the render helpers, and of the
+two render helpers only `ash.chart` colors (`ash.summary` returns plain
+key/value text). The v1.x colored readers `top_waits` / `query_waits` /
+`top_by_type` / `timeline_chart` (and their `_at` twins) were removed in 2.0.
 
 ## Comparison with other tools
 

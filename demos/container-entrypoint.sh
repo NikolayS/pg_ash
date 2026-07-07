@@ -3,7 +3,8 @@
 #
 # 1. Waits for PostgreSQL to accept connections.
 # 2. Creates the `demo` database, pg_stat_statements + pg_cron extensions.
-# 3. Installs pg_ash (from the mounted /repo/sql/ash-install.sql).
+# 3. Installs pg_ash 2.0 (from the mounted /repo/devel/sql/ash-install.sql —
+#    the in-progress 2.0 dev installer, not the frozen released sql/).
 # 4. Initializes pgbench.
 # 5. Starts pg_ash sampling (1s).
 # 6. Kicks off the workload.sh in the background — this produces the spike
@@ -29,8 +30,12 @@ if ! $PSQL -d postgres -tc "select 1 from pg_database where datname='demo'" | gr
   $PSQL -d demo -c "create extension if not exists pg_cron"
   $PSQL -d demo -c "create extension if not exists pg_stat_statements"
 
-  echo "[entry] installing pg_ash (\i /repo/sql/ash-install.sql)"
-  $PSQL -d demo -f /repo/sql/ash-install.sql >/dev/null
+  # Install the 2.0 dev installer. The released sql/ is frozen at 1.5 until the
+  # 2.0 release stamp, so the demo points at devel/sql/ to exercise the new
+  # reader API (periods/aas/timeline/top/compare/chart/summary). Keep in sync
+  # with `devel/scripts/ash_sql_chain.py fresh-install-path` if that path moves.
+  echo "[entry] installing pg_ash 2.0 (\i /repo/devel/sql/ash-install.sql)"
+  $PSQL -d demo -f /repo/devel/sql/ash-install.sql >/dev/null
 
   echo "[entry] initializing pgbench (scale 5)"
   pgbench -U postgres -d demo -i -s 5 -q >/dev/null 2>&1
