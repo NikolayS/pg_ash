@@ -359,8 +359,8 @@ select * from ash.aas();   -- the last hour, one row
 ### `ash.compare()` — before/after a deploy
 
 ```sql
-select * from ash.compare(since_1 => '14:00', until_1 => '14:30',    -- baseline
-                          since_2 => '14:30', until_2 => '15:00',    -- after deploy
+select * from ash.compare(since_1 => '2026-07-04 14:00', until_1 => '2026-07-04 14:30',    -- baseline
+                          since_2 => '2026-07-04 14:30', until_2 => '2026-07-04 15:00',    -- after deploy
                           dimension => 'wait_event');
 ```
 ```

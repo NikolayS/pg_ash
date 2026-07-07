@@ -22,7 +22,7 @@ output). Every reader answers in AAS (average active sessions):
 
 1. `ash.status()` — sampling active, version 2.0, pg_cron wired up
 2. `ash.periods()` — triage: last-minute `peak_aas` >> `avg_aas` = a spike, not sustained
-3. `ash.chart('5 minutes', '1 minute')` — colored stacked timeline: when it landed + which wait class (`Lock` in red)
+3. `ash.chart(since => now() - interval '5 minutes', bucket => '1 minute', color => true)` — colored stacked timeline: when it landed + which wait class (`Lock` in red)
 4. `ash.top('wait_event', ...)` — drill: `Lock:tuple` dominates (AAS + peak + p99 per row)
 5. `ash.top('query_id', wait_event => 'Lock:tuple', ...)` — the leaf: the guilty UPDATE
 6. `ash.top('wait_event', query_id => <top_query_id>, ...)` — full wait profile of that query, closing the loop
