@@ -472,7 +472,8 @@ managed Postgres.
 - `sample_ts` is `int4` seconds since 2026-01-01 UTC; the horizon is around
   2094. `ash.status()` exposes remaining epoch seconds.
 - Advisory-lock squat DoS is possible for roles that can intentionally hold
-  pg_ash's advisory locks. See [SECURITY.md](SECURITY.md).
+  pg_ash's advisory locks. See
+  [SECURITY.md](SECURITY.md#advisory-lock-squat-dos).
 
 ## Development
 
