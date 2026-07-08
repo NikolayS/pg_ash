@@ -5,7 +5,8 @@
 #   1. Start Postgres in Docker with pg_cron + pg_stat_statements preloaded
 #      (via the pre-baked demos/Dockerfile image; falls back to a runtime
 #      pg_cron install + restart on the plain postgres:${PG_MAJOR} base).
-#   2. Install pg_ash via `\i sql/ash-install.sql`, seed pgbench, start sampling.
+#   2. Install pg_ash 2.0 via devel/sql/ash-install.sql, seed pgbench,
+#      start sampling.
 #   3. Kick off a workload that transitions baseline -> row-lock spike -> tail.
 #   4. After the spike is well underway, start tmux + asciinema with psql
 #      attached to the demo DB in the container.
@@ -372,14 +373,14 @@ sleep 4.6
 # WHICH wait class dominates (Lock in red). Color via color => true + :color.
 human_type_and_send '\echo -- Q2: when did it land, and which wait class? (colored)'
 sleep 1.0
-human_type_and_send "select * from ash.chart(now() - interval '5 minutes', now(), '1 minute', 4, 40, true) :color"
+human_type_and_send "select * from ash.chart(since => now() - interval '5 minutes', bucket => '1 minute', n => 4, width => 40, color => true) :color"
 sleep 4.8
 
 # Act 5 — drill: which wait EVENT dominates? ash.top on the wait_event
 # dimension — data-only now (AAS + peak + p99 per row, no presentation column).
 human_type_and_send '\echo -- Q3: which wait event is dominating?'
 sleep 1.0
-human_type_and_send "select * from ash.top('wait_event', now() - interval '5 minutes', now(), n => 6);"
+human_type_and_send "select * from ash.top('wait_event', since => now() - interval '5 minutes', n => 6);"
 sleep 4.6
 
 # Act 6 — leaf: which query is stuck on Lock:tuple? The 2.0 leaf drill composes
@@ -389,9 +390,9 @@ sleep 4.6
 # query_id into :top_qid for the closing move.
 human_type_and_send '\echo -- Q4: which query is stuck on Lock:tuple?'
 sleep 1.0
-human_type_and_send "select * from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 3);"
+human_type_and_send "select * from ash.top('query_id', since => now() - interval '5 minutes', wait_event => 'Lock:tuple', n => 3);"
 sleep 4.6
-human_type_and_send "select key as top_qid from ash.top('query_id', now() - interval '5 minutes', now(), wait_event => 'Lock:tuple', n => 1) \\gset"
+human_type_and_send "select key as top_qid from ash.top('query_id', since => now() - interval '5 minutes', wait_event => 'Lock:tuple', n => 1) \\gset"
 sleep 0.5
 
 # Act 6b — closing the loop: full wait profile of that top query — top() again,
@@ -399,7 +400,7 @@ sleep 0.5
 # of query_waits()). Same one grammar, opposite direction.
 human_type_and_send '\echo -- Q5: full wait profile of the top guilty query?'
 sleep 1.0
-human_type_and_send "select * from ash.top('wait_event', now() - interval '5 minutes', now(), query_id => :top_qid, n => 5);"
+human_type_and_send "select * from ash.top('wait_event', since => now() - interval '5 minutes', query_id => :top_qid, n => 5);"
 sleep 4.8
 
 # Act 7 — closing lines. Held on screen for the "still" moment viewers see
