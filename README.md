@@ -32,8 +32,11 @@ Use pg_ash when you need:
 
 The current `main` branch contains the 2.0 beta 1 SQL in `sql/`.
 
+For automatic sampling, install both optional helper extensions first:
+
 ```sql
 create extension if not exists pg_stat_statements;
+create extension if not exists pg_cron;
 
 \i sql/ash-install.sql
 
@@ -44,6 +47,11 @@ select * from ash.top('wait_event_type');
 select * from ash.top('query_id');
 select * from ash.chart(since => now() - interval '5 minutes', color => true);
 ```
+
+`pg_stat_statements` provides query text and query-level metrics. `pg_cron`
+drives automatic sampling, partition rotation, and rollups. If `pg_cron` is not
+available in your environment, omit it and use an external scheduler instead;
+see [Scheduling](#scheduling).
 
 ![pg_ash animated investigation demo](demos/ash_demo.gif)
 
