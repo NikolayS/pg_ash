@@ -2,7 +2,9 @@
 
 2.0 beta 1 promotes the rewritten reader API from `devel/sql/` into the normal
 release SQL path. Fresh installs use `\i sql/ash-install.sql`; upgrades from
-1.5 use `\i sql/ash-1.5-to-2.0.sql` after applying any missing 1.x migrations.
+1.5 use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any missing 1.x
+migrations. Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for
+compatibility.
 
 This is a breaking reader-API release. Sampling, storage, rollups, scheduler
 functions, and lifecycle/admin functions remain compatible, but the 1.x reader

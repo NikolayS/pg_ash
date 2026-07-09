@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SQL_DIRS = (ROOT / "sql", ROOT / "devel" / "sql")
+UPGRADE_DIRS = (ROOT / "sql" / "migrations", ROOT / "devel" / "sql")
 INSTALL_RE = re.compile(r"ash-(\d+)\.(\d+)\.sql$")
 UPGRADE_RE = re.compile(r"ash-(\d+\.\d+)-to-(\d+\.\d+)\.sql$")
 VERSION_DEFAULT_RE = re.compile(r"version\s+text\s+not\s+null\s+default\s+'([^']+)'")
@@ -40,7 +40,7 @@ def upgrades(
     *, include_devel: bool = True, required: bool = True
 ) -> dict[str, tuple[str, Path]]:
     found: dict[str, tuple[str, Path]] = {}
-    directories = SQL_DIRS if include_devel else (ROOT / "sql",)
+    directories = UPGRADE_DIRS if include_devel else (ROOT / "sql" / "migrations",)
     for directory in directories:
         if not directory.exists():
             continue
