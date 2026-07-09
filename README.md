@@ -45,6 +45,15 @@ select * from ash.top('query_id');
 select * from ash.chart(since => now() - interval '5 minutes', color => true);
 ```
 
+## Color Output
+
+pg_ash can render compact terminal charts with ANSI colors when `color => true`
+or `set ash.color = on` is used.
+
+![pg_ash colored wait-event breakdown](assets/top_waits_color.jpg)
+
+![pg_ash colored AAS timeline chart](assets/timeline_chart_color.jpg)
+
 For the latest stable v1.5 tag, check out `v1.5` first and use:
 
 ```sql
