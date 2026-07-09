@@ -28,7 +28,7 @@ Use pg_ash when you need:
 - a tool that can run on RDS, Cloud SQL, AlloyDB, Supabase, Neon, and similar
   managed platforms
 
-## Quick Start
+## Quick start
 
 The current `main` branch contains the 2.0 beta 1 SQL in `sql/`.
 
@@ -55,7 +55,7 @@ see [Scheduling](#scheduling).
 
 ![pg_ash animated investigation demo](demos/ash_demo.gif)
 
-## Color Output
+## Color output
 
 pg_ash can render compact terminal charts with ANSI colors when `color => true`
 or `set ash.color = on` is used.
@@ -70,7 +70,7 @@ For the latest stable v1.5 tag, check out `v1.5` first and use:
 \i sql/ash-install.sql
 ```
 
-## Upgrade To 2.0
+## Upgrade to 2.0
 
 2.0 is a breaking reader-API release. Upgrade scripts are cumulative; run the
 missing scripts in order.
@@ -141,7 +141,7 @@ Filters are consistent where they apply:
 is usually the right first cut because it surfaces short spikes that averages
 hide.
 
-## Investigation Flow
+## Investigation flow
 
 ### 1. Is it bad now, or was it a spike?
 
@@ -248,7 +248,7 @@ Dump a wider incident window with psql:
 ) to '/tmp/ash-incident.csv' csv header
 ```
 
-## Chart Rendering
+## Chart rendering
 
 `ash.chart()` is for humans. `ash.timeline()` is the typed-data companion.
 
@@ -285,7 +285,7 @@ Then run:
 select * from ash.chart(since => now() - interval '1 hour', color => true) :color
 ```
 
-## Machine Report
+## Machine report
 
 `ash.report()` returns one JSONB payload for monitoring and health-assessment
 systems.
@@ -365,7 +365,7 @@ alter system set cron.log_run = off;
 
 This requires a restart because `cron.log_run` is postmaster-context.
 
-## Retention And Storage
+## Retention and storage
 
 Raw samples use a PGQ-style ring of partitions. Defaults:
 
@@ -429,7 +429,7 @@ If `pg_stat_statements` is installed after pg_ash, or moved to another schema:
 select ash._apply_pgss_search_path();
 ```
 
-## Catalog Docs
+## Catalog docs
 
 pg_ash documents itself in the database:
 
@@ -456,7 +456,7 @@ alter system set compute_query_id = 'on';
 select pg_reload_conf();
 ```
 
-## Compared To Alternatives
+## Compared to alternatives
 
 | | pg_ash | pg_wait_sampling / pgsentinel | External sampling |
 |---|---|---|---|
@@ -471,7 +471,7 @@ pg_ash is not a replacement for in-process 10ms samplers when you control the
 server and need sub-second detail. It is for durable, portable ASH on real
 managed Postgres.
 
-## Known Limits
+## Known limits
 
 - Primary only: pg_ash writes sample and rollup rows.
 - It samples one database installation but sees activity from all databases.
