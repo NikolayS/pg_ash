@@ -35,14 +35,12 @@ Use pg_ash when you need:
 
 ## Quick Start
 
-The current `main` branch contains the 2.0 alpha under `devel/sql/`. The stable
-`sql/` directory is still v1.5 until the final 2.0 release stamp.
+The current `main` branch contains the 2.0 beta 1 SQL in `sql/`.
 
 ```sql
 create extension if not exists pg_stat_statements;
 
--- v2.0 alpha from main
-\i devel/sql/ash-install.sql
+\i sql/ash-install.sql
 
 select ash.start('1 second');
 
@@ -52,7 +50,7 @@ select * from ash.top('query_id');
 select * from ash.chart(since => now() - interval '5 minutes', color => true);
 ```
 
-For the current stable v1.5 release, use:
+For the latest stable v1.5 tag, check out `v1.5` first and use:
 
 ```sql
 \i sql/ash-install.sql
@@ -69,9 +67,7 @@ missing scripts in order.
 \i sql/ash-1.2-to-1.3.sql
 \i sql/ash-1.3-to-1.4.sql
 \i sql/ash-1.4-to-1.5.sql
-
--- v2.0 alpha from main; this moves to sql/ash-1.5-to-2.0.sql at release
-\i devel/sql/ash-1.5-to-2.0.sql
+\i sql/ash-1.5-to-2.0.sql
 
 select * from ash.status() where metric = 'version';
 ```
@@ -477,10 +473,11 @@ managed Postgres.
 
 ## Development
 
-The 2.0 SQL lives in `devel/sql/` until release:
+CI discovers install and upgrade paths from the repository:
 
 ```bash
-python3 devel/scripts/ash_sql_chain.py --check
+python3 devel/scripts/ash_sql_chain.py fresh-install-path
+python3 devel/scripts/ash_sql_chain.py full-upgrade-chain
 ```
 
 Regenerate the README demo GIF:

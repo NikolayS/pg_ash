@@ -1,3 +1,47 @@
+# pg_ash 2.0 beta 1 release notes
+
+2.0 beta 1 promotes the rewritten reader API from `devel/sql/` into the normal
+release SQL path. Fresh installs use `\i sql/ash-install.sql`; upgrades from
+1.5 use `\i sql/ash-1.5-to-2.0.sql` after applying any missing 1.x migrations.
+
+This is a breaking reader-API release. Sampling, storage, rollups, scheduler
+functions, and lifecycle/admin functions remain compatible, but the 1.x reader
+surface has been replaced by the AAS-oriented 2.0 API:
+
+| 1.x | 2.0 |
+|---|---|
+| `top_waits`, `top_by_type` | `top('wait_event')`, `top('wait_event_type')` |
+| `top_queries`, `top_queries_with_text` | `top('query_id')` |
+| `wait_timeline` | `timeline(...)` |
+| `timeline_chart` | `chart(...)` |
+| `activity_summary` | `summary(...)` |
+| `query_waits(q)` | `top('wait_event', query_id => q)` |
+| `event_queries(e)` | `top('query_id', wait_event => e)` |
+| `samples_by_database` | `top('database')` |
+
+## 2.0 highlights
+
+- **AAS-first readers.** `periods`, `aas`, `timeline`, `top`, `compare`,
+  `samples`, `report`, `chart`, and `summary` use consistent named filters and
+  report whether data came from raw samples, 1-minute rollups, or 1-hour rollups.
+- **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
+  incident automation, dashboards, and AI/database copilots. The 2.0 minor line
+  may add keys, but existing keys are not renamed or removed.
+- **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the finalized 2.0
+  installer, removes stale 1.x and earlier draft reader functions, and preserves
+  explicit reader grants where safe.
+- **Default monitoring access.** Fresh installs and upgrades best-effort grant
+  the reader bundle to `pg_monitor`; opt out with
+  `select ash.revoke_reader('pg_monitor');`.
+- **Docs and demos refreshed.** README examples and the generated GIF now use
+  the 2.0 named-argument API.
+
+Known security limitation: advisory-lock squat DoS remains possible for roles
+that can intentionally hold pg_ash advisory locks. See
+[SECURITY.md](SECURITY.md#advisory-lock-squat-dos).
+
+---
+
 # pg_ash 1.5 release notes
 
 This is a bug-fix release: no new user-facing feature set, just correctness,
