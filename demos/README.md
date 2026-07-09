@@ -50,7 +50,7 @@ tricks, no custom Postgres build.
 |------|--------|---------------------------|
 | Docker | any recent | [docker.com](https://docs.docker.com/get-docker/) |
 | tmux | 3.x | `brew install tmux` |
-| asciinema | **3.x** (v3 cast format) | `brew install asciinema` |
+| asciinema | 2.x or 3.x | `brew install asciinema` |
 | agg | 1.5+ (truecolor GIF renderer for asciinema casts) | `brew install agg` |
 | gifsicle | 1.90+ (optional, halves the output GIF size) | `brew install gifsicle` |
 | python3 | 3.8+ (post-processes the `.cast` to drop the blank initial frame) | ships with macOS 12+ / Linux |
@@ -60,7 +60,7 @@ Pinned versions used to produce the committed GIF:
 
 - Docker 29.0.1
 - tmux 3.6a
-- asciinema 3.1.0
+- asciinema 2.4.0
 - agg 1.7.0
 - gifsicle 1.96
 - python3 3.9+
@@ -88,8 +88,8 @@ Override via environment variables:
 
 | Var | Default | What it controls |
 |-----|---------|-----------------|
-| `COLS` / `ROWS` | 140 / 32 | Terminal geometry — wider so `Lock:transactionid` / `Client:ClientRead` rows don't wrap |
-| `AGG_FONT_SIZE` | 12 | Pixel font-size passed to `agg`; lower keeps the wider terminal under ~1100 px |
+| `COLS` / `ROWS` | 168 / 32 | Terminal geometry — wide enough for 2.0 `select *` output without wrapping |
+| `AGG_FONT_SIZE` | 10 | Pixel font-size passed to `agg`; lower keeps the wider terminal near 1000 px |
 | `TYPE_MIN_MS` / `TYPE_MAX_MS` | 30 / 120 | Per-character keystroke jitter range (ms) — see "Typing pacing" below |
 | `TYPE_PUNCT_MS` | 180 | Extra pause after `, ; . ( )` characters |
 | `WARMUP_SEC` | 330 | Seconds of workload before recording starts. Long (5.5 min) so the 2.0 readers' 5-minute windows sit inside raw retention — raw retention is data-limited (it starts at the oldest sample), and the leaf drills cross the wait↔query tie, which reads raw and raises if the window predates it |
@@ -112,8 +112,8 @@ The `.cast` file is the source of truth — once you have one you like, re-rende
 the GIF without touching Docker:
 
 ```bash
-agg --font-size 12 --theme monokai --speed 1.0 --fps-cap 15 \
-  demos/ash_demo.cast demos/ash_demo.gif
+agg --font-size 10 --theme monokai --speed 1.0 --fps-cap 15 \
+  ash_demo.cast ash_demo.gif
 ```
 
 ### Typing pacing
@@ -152,11 +152,10 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
   lags) and shaves the install + restart round-trip off every run.
   `record.sh` builds the image automatically when `Dockerfile` is present and
   falls back to the old runtime-install path if the build fails.
-- **Geometry (140 × 32):** wider than typical README embeds so long wait
+- **Geometry (168 × 32):** wider than typical README embeds so long wait
   event names like `Lock:transactionid` / `Client:ClientRead` and the colored
-  bar charts fit on a single line. Compensated by `agg --font-size 12` so the
-  rendered GIF stays under ~1100 px and remains readable at GitHub's ~800 px
-  embed width.
+  bar charts fit on a single line. Compensated by `agg --font-size 10` so the
+  rendered GIF stays near 1000 px and remains readable at GitHub's embed width.
 - **Theme:** `monokai` — dark background lets the pg_ash `_wait_color()` ANSI
   palette (cyan / red / yellow / pink / purple) pop.
 - **Colors on by default:** `set ash.color = on` is set in the demo's
@@ -211,4 +210,4 @@ FPS cap (`--fps-cap 10`) when invoking `agg`. The target for this repo is
 
 ---
 
-Copyright 2026 Postgres.ai
+Copyright 2026 PostgresAI
