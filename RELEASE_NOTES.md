@@ -37,8 +37,7 @@ surface has been replaced by the AAS-oriented 2.0 API:
   `select ash.revoke_reader('pg_monitor');`.
 - **Postgres 19 beta support.** CI now covers Postgres 14 through 19, using the
   official `postgres:19beta1` image until the GA `postgres:19` image exists.
-- **Docs and demos refreshed.** README examples and the generated GIF now use
-  the 2.0 named-argument API.
+- **Docs refreshed.** README examples now use the 2.0 named-argument API.
 
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
