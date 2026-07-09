@@ -14,7 +14,7 @@ CI via GitHub Actions:
 - Tests: fresh development install, discovered full upgrade chain up to the in-progress release, schema equivalence between fresh install and upgrade chain, idempotent re-apply of discovered re-apply-safe upgrade scripts, degraded mode (no pgss/pg_cron)
 - Version schema: `vMAJOR.MINOR` (e.g. `v1.3`). Tag on main after all PRs merged.
 
-After a release tag, keep `sql/` frozen at the latest released baseline until the next release-stamp PR. During a development cycle, SQL changes live under `devel/sql/`: the future final installer and the future upgrade script. CI must discover version chains from files via `devel/scripts/ash_sql_chain.py`, not hardcode concrete version numbers. At release stamp time, promote the development SQL into `sql/`, bump `ash.config.version`, and remove or recreate `devel/sql/` for the next cycle. See `docs/RELEASE_PROCESS.md`.
+After a release tag, keep `sql/` frozen at the latest released baseline until the next release-stamp PR. During a development cycle, SQL changes live under `devel/sql/`: the future final installer and the future upgrade script. CI must discover version chains from files via `devel/scripts/ash_sql_chain.py`, not hardcode concrete version numbers. At release stamp time, promote the development installer into `sql/ash-install.sql`, promote the upgrade script into `sql/migrations/`, keep a root-level compatibility wrapper, bump `ash.config.version`, and remove or recreate `devel/sql/` for the next cycle. See `docs/RELEASE_PROCESS.md`.
 
 ## Testing
 

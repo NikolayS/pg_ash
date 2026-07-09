@@ -1,4 +1,2 @@
--- pg_ash: upgrade from 1.0 to 1.1
--- ash-1.1.sql is safe to run on top of 1.0 (IF NOT EXISTS / CREATE OR REPLACE)
--- This file simply loads it.
-\ir ash-1.1.sql
+\set ON_ERROR_STOP on
+\ir migrations/ash-1.0-to-1.1.sql

@@ -2,12 +2,12 @@
  * pg_ash: Active Session History for Postgres
  * Version: 2.0 beta 1
  * Fresh install: \i sql/ash-install.sql
- * Upgrade from 1.0: \i sql/ash-1.0-to-1.1.sql, then \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql, then \i sql/ash-1.5-to-2.0.sql
- * Upgrade from 1.1: \i sql/ash-1.1-to-1.2.sql, then \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql, then \i sql/ash-1.5-to-2.0.sql
- * Upgrade from 1.2: \i sql/ash-1.2-to-1.3.sql, then \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql, then \i sql/ash-1.5-to-2.0.sql
- * Upgrade from 1.3: \i sql/ash-1.3-to-1.4.sql, then \i sql/ash-1.4-to-1.5.sql, then \i sql/ash-1.5-to-2.0.sql
- * Upgrade from 1.4: \i sql/ash-1.4-to-1.5.sql, then \i sql/ash-1.5-to-2.0.sql
- * Upgrade from 1.5: \i sql/ash-1.5-to-2.0.sql
+ * Upgrade from 1.0: \i sql/migrations/ash-1.0-to-1.1.sql, then \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
+ * Upgrade from 1.1: \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
+ * Upgrade from 1.2: \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
+ * Upgrade from 1.3: \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
+ * Upgrade from 1.4: \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
+ * Upgrade from 1.5: \i sql/migrations/ash-1.5-to-2.0.sql
  */
 
 

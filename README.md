@@ -62,16 +62,19 @@ For the latest stable v1.5 tag, check out `v1.5` first and use:
 missing scripts in order.
 
 ```sql
-\i sql/ash-1.0-to-1.1.sql
-\i sql/ash-1.1-to-1.2.sql
-\i sql/ash-1.2-to-1.3.sql
-\i sql/ash-1.3-to-1.4.sql
-\i sql/ash-1.4-to-1.5.sql
-\i sql/ash-1.5-to-2.0.sql
+\i sql/migrations/ash-1.0-to-1.1.sql
+\i sql/migrations/ash-1.1-to-1.2.sql
+\i sql/migrations/ash-1.2-to-1.3.sql
+\i sql/migrations/ash-1.3-to-1.4.sql
+\i sql/migrations/ash-1.4-to-1.5.sql
+\i sql/migrations/ash-1.5-to-2.0.sql
 
 select * from ash.status() where metric = 'version';
 -- version | 2.0-beta1
 ```
+
+The old root-level upgrade paths, such as `sql/ash-1.5-to-2.0.sql`, are kept as
+compatibility wrappers. New docs and scripts should use `sql/migrations/`.
 
 The old 1.x reader functions are gone in 2.0:
 
