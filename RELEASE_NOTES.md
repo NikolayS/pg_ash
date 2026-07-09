@@ -35,6 +35,8 @@ surface has been replaced by the AAS-oriented 2.0 API:
 - **Default monitoring access.** Fresh installs and upgrades best-effort grant
   the reader bundle to `pg_monitor`; opt out with
   `select ash.revoke_reader('pg_monitor');`.
+- **Postgres 19 beta support.** CI now covers Postgres 14 through 19, using the
+  official `postgres:19beta1` image until the GA `postgres:19` image exists.
 - **Docs and demos refreshed.** README examples and the generated GIF now use
   the 2.0 named-argument API.
 

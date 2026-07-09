@@ -10,7 +10,7 @@ SQL style guide: https://gitlab.com/postgres-ai/rules/-/blob/main/rules/developm
 
 CI via GitHub Actions:
 
-- **test.yml**: runs on push and PRs — tests across PostgreSQL 14, 15, 16, 17, 18
+- **test.yml**: runs on push and PRs — tests across PostgreSQL 14, 15, 16, 17, 18, 19 beta
 - Tests: fresh development install, discovered full upgrade chain up to the in-progress release, schema equivalence between fresh install and upgrade chain, idempotent re-apply of discovered re-apply-safe upgrade scripts, degraded mode (no pgss/pg_cron)
 - Version schema: `vMAJOR.MINOR` (e.g. `v1.3`). Tag on main after all PRs merged.
 
@@ -23,7 +23,7 @@ Red/green TDD: write failing tests first, then fix the code to make them pass.
 - **Bug fixes**: always write a test that reproduces the bug (RED), then fix (GREEN). This proves the fix works and prevents regressions.
 - **New features**: write tests for the expected behavior before or alongside the implementation. Run current development tests locally with `sudo -u postgres psql -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"` and DO blocks with assertions.
 - **CI tests** live in `.github/workflows/test.yml`. Each test section uses PL/pgSQL `DO $$ ... assert ... $$` blocks. Assert exact values, not just row existence — a test that only checks "row exists" can't distinguish correct aggregation from garbage.
-- **Test locally on available PG version** before pushing. CI covers PG 14–18.
+- **Test locally on available PG version** before pushing. CI covers PG 14–19.
 
 ## Code Review
 

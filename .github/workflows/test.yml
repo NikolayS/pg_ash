@@ -70,7 +70,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [14, 15, 16, 17, 18]
+        # PG19 is still beta, so the official image tag is 19beta1 until GA.
+        postgres: [14, 15, 16, 17, 18, 19beta1]
         # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
         # compares these as strings in the step-level `if`/conditionals.
         cron: ["on"]
@@ -129,7 +130,7 @@ jobs:
           fi
           # Install pg_cron inside the PostgreSQL container (not on host).
           # Allow apt failures to be non-fatal here — PGDG sometimes lags on
-          # new PG majors (e.g. PG18 right after release), and we want to
+          # new PG majors (e.g. PG19 while still in beta), and we want to
           # still exercise the no-cron branch rather than fail the whole job.
           # The follow-up "Verify pg_cron install matches expectation" step
           # enforces the expected state.
@@ -171,7 +172,7 @@ jobs:
             echo "matrix.cron=off — not creating pg_cron extension"
           else
             # pg_cron may legitimately be unavailable on new PG majors before
-            # PGDG catches up (e.g. PG18). Don't fail the job; downstream
+            # PGDG catches up (e.g. PG19 while still in beta). Don't fail the job; downstream
             # cron-gated tests check `pg_extension` and skip themselves.
             psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available (PGDG package missing for this PG major)"
 
@@ -1397,7 +1398,7 @@ jobs:
             v_schedule text;
             v_has_pgcron boolean;
           begin
-            -- Skip cron schedule tests if pg_cron not available (e.g., PG18)
+            -- Skip cron schedule tests if pg_cron not available (e.g., PG19 beta)
             select exists (select from pg_extension where extname = 'pg_cron') into v_has_pgcron;
             if not v_has_pgcron then
               -- Just verify start() works without pg_cron (no error)
@@ -5622,7 +5623,7 @@ jobs:
         run: |
           # Install pg_ash fresh without pg_cron.
           # `drop extension if exists` is a no-op when pg_cron isn't installed
-          # (e.g. PG18 where PGDG package may be missing, or matrix.cron=off).
+          # (e.g. PG19 beta where PGDG package may be missing, or matrix.cron=off).
           # Use ON_ERROR_STOP so unrelated failures don't get silenced.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "drop extension if exists pg_cron cascade"
