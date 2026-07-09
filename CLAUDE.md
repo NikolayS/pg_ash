@@ -29,7 +29,14 @@ Red/green TDD: write failing tests first, then fix the code to make them pass.
 
 All changes go through PRs. Before merging, run a REV review (https://gitlab.com/postgres-ai/rev/) and post the report as a PR comment. REV is designed for GitLab but works on GitHub PRs too.
 
-Never merge without explicit approval from the project owner.
+Never auto-merge PRs. A PR can be merged only after all of these are true:
+
+- CI is green, and the test shape is solid. Do not accept fake coverage, catalog-only smoke tests, or checks that can pass while behavior is broken.
+- REV or samorev review is done, posted to the PR, and passes.
+- Manual verification was done for the changed surface: functionality changes need actual manual testing; docs, screenshots, GIFs, and pictures need manual visual review for correctness and presentation.
+- The project owner gives explicit human approval to merge.
+
+If any item is missing, leave the PR open or draft. Green CI alone is not merge approval.
 
 ## Release gate
 

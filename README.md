@@ -12,11 +12,6 @@ database, and lets you answer "what was happening then?" after the problem is
 gone. It works on managed Postgres because it is not a C extension: no
 `shared_preload_libraries`, no provider approval, no restart.
 
-![pg_ash 2.0 investigation flow](https://raw.githubusercontent.com/NikolayS/pg_ash/main/demos/ash_demo.gif)
-
-The GIF is generated from [`demos/`](demos/) against a live Postgres 18 row-lock
-spike. It uses the pg_ash 2.0 API: `periods`, `chart`, `top`, and `samples`.
-
 ## Why
 
 Postgres has excellent current-state views, but almost no built-in memory. If a
@@ -49,6 +44,15 @@ select * from ash.top('wait_event_type');
 select * from ash.top('query_id');
 select * from ash.chart(since => now() - interval '5 minutes', color => true);
 ```
+
+## Color Output
+
+pg_ash can render compact terminal charts with ANSI colors when `color => true`
+or `set ash.color = on` is used.
+
+![pg_ash colored wait-event breakdown](assets/top_waits_color.jpg)
+
+![pg_ash colored AAS timeline chart](assets/timeline_chart_color.jpg)
 
 For the latest stable v1.5 tag, check out `v1.5` first and use:
 
@@ -484,7 +488,7 @@ python3 devel/scripts/ash_sql_chain.py fresh-install-path
 python3 devel/scripts/ash_sql_chain.py full-upgrade-chain
 ```
 
-Regenerate the README demo GIF:
+Run the experimental demo recorder:
 
 ```bash
 cd demos

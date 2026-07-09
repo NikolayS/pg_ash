@@ -1,12 +1,12 @@
 # pg_ash demo recording
 
-This directory produces the animated GIF embedded in the top-level README — a
-short walkthrough of the **LLM-assisted investigation** flow from the
-main README, driven against a live Postgres 18 container.
+This directory contains the experimental animated GIF recorder for pg_ash demos.
+The generated GIF is not embedded in the top-level README until its rendering is
+readable on GitHub desktop and mobile.
 
 | File | What it is |
 |------|-----------|
-| `ash_demo.gif` | The rendered GIF (committed; used by the top-level README) |
+| `ash_demo.gif` | The rendered GIF (committed for iteration; not embedded in the top-level README) |
 | `ash_demo.cast` | asciinema v3 cast file — source of truth for the GIF |
 | `record.sh` | End-to-end recorder: Docker → pg_ash install → workload → tmux/asciinema → agg |
 | `Dockerfile` | Pre-baked `postgres:${PG_MAJOR}` image with pg_cron + `shared_preload_libraries` compiled in — so the container boots preloaded, no runtime apt-get + restart |
