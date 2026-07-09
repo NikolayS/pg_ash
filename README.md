@@ -70,6 +70,7 @@ missing scripts in order.
 \i sql/ash-1.5-to-2.0.sql
 
 select * from ash.status() where metric = 'version';
+-- version | 2.0-beta1
 ```
 
 The old 1.x reader functions are gone in 2.0:
