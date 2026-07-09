@@ -5,7 +5,7 @@
 #   1. Start Postgres in Docker with pg_cron + pg_stat_statements preloaded
 #      (via the pre-baked demos/Dockerfile image; falls back to a runtime
 #      pg_cron install + restart on the plain postgres:${PG_MAJOR} base).
-#   2. Install pg_ash 2.0 via devel/sql/ash-install.sql, seed pgbench,
+#   2. Install pg_ash 2.0 via `\i sql/ash-install.sql`, seed pgbench,
 #      start sampling.
 #   3. Kick off a workload that transitions baseline -> row-lock spike -> tail.
 #   4. After the spike is well underway, start tmux + asciinema with psql
@@ -423,12 +423,11 @@ sleep "$POST_WAIT"
 log "cast written: $(du -h "$CAST" | cut -f1)"
 
 # --- 5. Shift the first cast event to t=0 ------------------------------------
-# asciinema records the command banner ~70 ms after the session starts; agg
-# renders frame 0 at t=0, which is before that banner, so the resulting GIF
-# opens with an empty terminal. That empty frame becomes GitHub's thumbnail
-# for the embedded GIF. To avoid it, we rewrite the first event's timestamp
-# from ~0.07 to 0.0 so the splash IS the first frame. Subsequent event
-# timings are unchanged (they are relative deltas from the previous event).
+# asciinema can record an ANSI color escape as the first event and the visible
+# command banner ~70 ms later; agg renders frame 0 at t=0, before that banner.
+# That empty frame becomes GitHub's thumbnail for the embedded GIF. To avoid it,
+# rewrite the first visible output event's timestamp to 0.0 so the splash IS the
+# first frame. Subsequent event timings are unchanged.
 python3 - "$CAST" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -436,8 +435,13 @@ with open(path) as f:
     lines = f.readlines()
 header = lines[0]
 events = [json.loads(line) for line in lines[1:] if line.strip()]
-if events:
-    events[0][0] = 0.0
+for e in events:
+    if len(e) >= 3 and e[1] == "o" and e[2].strip("\r\n"):
+        # Pure ANSI escape setup does not paint useful pixels; skip it.
+        if e[2].startswith("\x1b") and e[2].endswith("m"):
+            continue
+        e[0] = 0.0
+        break
 with open(path, 'w') as f:
     f.write(header)
     for e in events:

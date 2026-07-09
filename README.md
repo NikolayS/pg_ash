@@ -45,6 +45,8 @@ select * from ash.top('query_id');
 select * from ash.chart(since => now() - interval '5 minutes', color => true);
 ```
 
+![pg_ash animated investigation demo](demos/ash_demo.gif)
+
 ## Color Output
 
 pg_ash can render compact terminal charts with ANSI colors when `color => true`
@@ -488,7 +490,7 @@ python3 devel/scripts/ash_sql_chain.py fresh-install-path
 python3 devel/scripts/ash_sql_chain.py full-upgrade-chain
 ```
 
-Run the experimental demo recorder:
+Run the demo recorder:
 
 ```bash
 cd demos
