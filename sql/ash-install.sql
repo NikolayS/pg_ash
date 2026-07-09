@@ -204,7 +204,7 @@ begin
         'aas_queries', 'aas_queries_at'
       )
   loop
-    execute 'drop function if exists ' || func_row.sig;
+    execute format('drop function if exists %s', func_row.sig);
   end loop;
 end $$;
 
