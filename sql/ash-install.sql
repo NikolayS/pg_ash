@@ -3486,7 +3486,9 @@ $$;
  * the non-tie drills of top / chart). Raw and rollup_1m share per-minute
  * grain, so for anything wider than ~1 hour that rollup_1m fully covers we
  * prefer rollup_1m (a raw decode of a wide window spills hundreds of MB — the
- * last-24h read cost ~4.5s and ~500MB before this). Narrow windows still fall
+ * last-24h read cost ~4.5s and ~500MB before this). The rollup watermark must
+ * also reach the requested end whenever raw covers the window start; otherwise
+ * a stalled rollup worker would hide newer raw load. Narrow windows still fall
  * through to _pick_source (raw preferred) so the freshest partial minute is
  * captured, and windows rollup can't cover (or where rollup is
  * disabled/lagging) still fall to raw / rollup_1h. Leaf tie-drills
@@ -3505,7 +3507,19 @@ as $$
   select case
     when extract(epoch from (until - since)) > 3600
          and ash._rollup_1m_retention_start() is not null
-         and since >= ash._rollup_1m_retention_start() then 'rollup_1m'
+         and since >= ash._rollup_1m_retention_start()
+         and (
+           ash._raw_retention_start() is null
+           or since < ash._raw_retention_start()
+           or coalesce(
+                (
+                  select ash.ts_to_timestamptz(last_rollup_1m_ts) >= until
+                  from ash.config
+                  where singleton
+                ),
+                false
+              )
+         ) then 'rollup_1m'
     else ash._pick_source(since)
   end
 $$;
