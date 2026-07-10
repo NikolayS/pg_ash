@@ -5814,7 +5814,7 @@ comment on function ash.take_sample() is
 $$Admin/internal: take one wait-event sample of pg_stat_activity into the current slot (the every-second worker that ash.start() schedules). Returns the number of active backends captured. Call manually only for testing; continuous sampling belongs to ash.start().$$;
 
 comment on function ash.rotate() is
-$$Admin: rotate to the next partition slot, rolling up and truncating the oldest (the daily job scheduled by ash.start()). Controls raw retention: num_partitions x rotation_period of raw samples are kept. Safe to call manually to force a rotation.$$;
+$$Admin: rotate to the next partition slot, rolling up and truncating the oldest (the daily job scheduled by ash.start()). Readable raw retention is approximately (num_partitions - 2) * rotation_period. Safe to call manually to force a rotation.$$;
 
 comment on function ash.rollup_minute(int) is
 $$Admin: fold completed minutes of raw samples into ash.rollup_1m (the every-minute job scheduled by ash.start()); batch_limit caps catch-up minutes per call. Returns minutes processed. Readers pick rollups automatically — this only needs manual calls when pg_cron is absent.$$;
@@ -5826,7 +5826,7 @@ comment on function ash.rollup_cleanup() is
 $$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Returns a summary of rows deleted.$$;
 
 comment on function ash.rebuild_partitions(int, text) is
-$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions with num_partitions slots (3-32; raw retention = slots x rotation_period). Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Re-run ash.grant_reader() for every monitoring role afterwards — the new partitions carry no grants.$$;
+$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions with num_partitions slots (3-32). Readable raw retention is approximately (num_partitions - 2) * rotation_period. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Re-run ash.grant_reader() for every monitoring role afterwards — the new partitions carry no grants.$$;
 
 comment on function ash.set_debug_logging(bool) is
 $$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
