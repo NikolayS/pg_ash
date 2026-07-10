@@ -3712,6 +3712,159 @@ jobs:
           end $$;
           EOF
 
+      - name: "Issue #136: compacted query attribution stays honest"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_ts int4 := (
+              ash.ts_from_timestamptz(
+                date_trunc('minute', now() - interval '20 minutes')
+              ) / 60
+            ) * 60;
+            v_from timestamptz;
+            v_to timestamptz;
+            v_datid oid;
+            v_wait_id smallint;
+            v_q1 int4;
+            v_q2 int4;
+            v_q3 int4;
+            v_result int;
+            v_aas record;
+            v_named record;
+            v_residual record;
+            v_rows int;
+            v_total numeric;
+            v_pct numeric;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.query_map_0, ash.query_map_1, ash.query_map_2
+              restart identity;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set current_slot = 0,
+                sample_interval = interval '1 second',
+                rollup_min_backend_seconds = 3,
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            select oid into v_datid
+            from pg_database where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*')
+              into v_wait_id;
+
+            insert into ash.query_map_0 (query_id)
+            values (111), (222), (333);
+            select id into v_q1 from ash.query_map_0 where query_id = 111;
+            select id into v_q2 from ash.query_map_0 where query_id = 222;
+            select id into v_q3 from ash.query_map_0 where query_id = 333;
+
+            -- One real packed sample: total 26 appearances. Only q111 reaches
+            -- the minute rollup's threshold of three; q222/q333 and the 20
+            -- uncaptured appearances must survive as a NULL residual.
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values (
+              v_ts,
+              v_datid,
+              26,
+              array[-v_wait_id, 26, v_q1, v_q1, v_q1, v_q2, v_q2, v_q3]
+                || array_fill(0, array[20]),
+              0
+            );
+
+            select ash.rollup_minute() into v_result;
+            assert v_result = 1,
+              'rollup_minute should create exactly one database row, got '
+              || v_result;
+            assert (select query_counts from ash.rollup_1m where ts = v_ts)
+                     = array[111, 3]::int8[],
+              'fixture must exercise compacted query_counts';
+
+            v_from := ash.ts_to_timestamptz(v_ts);
+            v_to := ash.ts_to_timestamptz(v_ts + 60);
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+
+            select * into v_aas from ash.aas(v_from, v_to);
+            assert v_aas.source = 'rollup_1m'
+                   and v_aas.backend_seconds = 26.00,
+              format('fixture AAS mismatch: source=%s backend_seconds=%s',
+                     v_aas.source, v_aas.backend_seconds);
+
+            select * into v_named
+            from ash.top('query_id', v_from, v_to, n => 100)
+            where key = '111';
+            select * into v_residual
+            from ash.top('query_id', v_from, v_to, n => 100)
+            where key is null;
+            select count(*), sum(backend_seconds), sum(pct)
+              into v_rows, v_total, v_pct
+            from ash.top('query_id', v_from, v_to, n => 100);
+
+            assert v_named.backend_seconds = 3.00 and v_named.pct = 11.54,
+              format('named compacted query mismatch: seconds=%s pct=%s',
+                     v_named.backend_seconds, v_named.pct);
+            assert v_residual.backend_seconds = 23.00
+                   and v_residual.pct = 88.46,
+              format('NULL residual mismatch: seconds=%s pct=%s',
+                     v_residual.backend_seconds, v_residual.pct);
+            assert v_rows = 2 and v_total = v_aas.backend_seconds
+                   and v_pct = 100.00,
+              format('query breakdown does not reconcile: rows=%s total=%s pct=%s',
+                     v_rows, v_total, v_pct);
+
+            -- A concrete query filter cannot use compacted rollups: absence
+            -- there is not proof of zero. Every public aggregate path must
+            -- require exact raw attribution and compare must inherit the rule.
+            begin
+              perform * from ash.aas(v_from, v_to, query_id => 222);
+              raise exception 'ash.aas query_id filter should require raw';
+            exception when others then
+              assert sqlerrm like '%exact raw query attribution%'
+                     and sqlerrm like '%entirely outside raw retention%',
+                'ash.aas query_id retention error mismatch: ' || sqlerrm;
+            end;
+            begin
+              perform * from ash.timeline(v_from, v_to, query_id => 222);
+              raise exception 'ash.timeline query_id filter should require raw';
+            exception when others then
+              assert sqlerrm like '%exact raw query attribution%'
+                     and sqlerrm like '%entirely outside raw retention%',
+                'ash.timeline query_id retention error mismatch: ' || sqlerrm;
+            end;
+            begin
+              perform * from ash.top(
+                'database', v_from, v_to, query_id => 222
+              );
+              raise exception 'ash.top query_id filter should require raw';
+            exception when others then
+              assert sqlerrm like '%exact raw query attribution%'
+                     and sqlerrm like '%entirely outside raw retention%',
+                'ash.top query_id retention error mismatch: ' || sqlerrm;
+            end;
+            begin
+              perform * from ash.compare(
+                v_from, v_to, v_from, v_to, query_id => 222
+              );
+              raise exception 'ash.compare query_id filter should require raw';
+            exception when others then
+              assert sqlerrm like '%exact raw query attribution%'
+                     and sqlerrm like '%entirely outside raw retention%',
+                'ash.compare query_id retention error mismatch: ' || sqlerrm;
+            end;
+
+            truncate ash.rollup_1m, ash.rollup_1h;
+            truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+            update ash.config
+            set last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+            raise notice 'issue #136 compacted query attribution PASSED';
+          end $$;
+          EOF
+
       - name: "Test 2.0: minute-grain peak/p99 survive the rollup_1h seam"
         env:
           PGPASSWORD: postgres
