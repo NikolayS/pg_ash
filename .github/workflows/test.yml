@@ -2946,8 +2946,16 @@ jobs:
             from ash.start(interval '0.6 seconds');
             assert v_errors = 1,
               format('ash.start(0.6s): expected one error row, got %s', v_errors);
-            assert v_status like 'interval must be an exact whole number of seconds,%',
+            assert v_status like 'interval must be at least 1 second,%',
               format('ash.start(0.6s): unexpected status: %s', v_status);
+
+            select count(*) filter (where job_type = 'error'), min(status)
+            into v_errors, v_status
+            from ash.start(interval '1.4 seconds');
+            assert v_errors = 1,
+              format('ash.start(1.4s): expected one error row, got %s', v_errors);
+            assert v_status like 'interval must be an exact whole number of seconds,%',
+              format('ash.start(1.4s): unexpected status: %s', v_status);
 
             select count(*) filter (where job_type = 'error'), min(status)
             into v_errors, v_status

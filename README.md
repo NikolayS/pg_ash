@@ -307,7 +307,7 @@ renamed or removed.
 
 | Function | Purpose |
 |---|---|
-| `ash.start([every])` | Enable sampling and schedule jobs when pg_cron is available |
+| `ash.start([every])` | Enable sampling and schedule jobs when pg_cron is available (1–59 whole seconds, whole minutes, or whole hours up to 23h) |
 | `ash.stop()` | Disable sampling and unschedule pg_cron jobs |
 | `ash.status()` | Health, version, retention, partition, scheduler, and rollup state |
 | `ash.take_sample()` | Take one sample manually; normally called by the scheduler |
