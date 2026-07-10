@@ -5763,7 +5763,7 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
-      - name: "Dev workflow: re-apply migrations (idempotent)"
+      - name: "Dev workflow: re-apply in-progress migrations when present"
         env:
           PGPASSWORD: postgres
         run: |
@@ -5780,6 +5780,10 @@ jobs:
           # one-shot upgrade-chain tests above.
           python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
           python3 devel/scripts/ash_sql_chain.py reapply-chain > /tmp/ash_reapply_chain.sql
+          if [ ! -s /tmp/ash_reapply_chain.sql ]; then
+            echo "No in-progress migrations to re-apply; release-wrapper re-apply is tested by the pinned v1.5 upgrade step."
+            exit 0
+          fi
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
           select set_config('pg_ash.expected_version', :'expected_version', false);
@@ -5820,7 +5824,7 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
-      - name: "Issue #107: reader grants survive upgrade and installer re-apply"
+      - name: "Release upgrade: actual v1.5 to current preserves state and reader grants (#107)"
         env:
           PGPASSWORD: postgres
         run: |
@@ -5829,20 +5833,30 @@ jobs:
           # EXECUTE grants that CREATE OR REPLACE would have preserved. A
           # monitoring role configured with ash.grant_reader() before an
           # upgrade must keep its reader access after it — and after any
-          # re-apply of the installer.
+          # re-apply of the release upgrade wrapper.
           #
-          # Split the discovered chain into released vs in-development parts
-          # so the reader grant happens at the latest released version —
-          # exactly the state of a production database about to upgrade.
-          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
-          grep -v '^\\i devel/' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_released.sql
-          grep '^\\i devel/' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_devel.sql || true
-          python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          \i /tmp/ash_chain_released.sql
+          # Pin the actual previous release. The generic full chain cannot
+          # establish this precondition after a release stamp: the historical
+          # 1.3-to-1.4 shim intentionally replays the current installer, so it
+          # now jumps directly to 2.0 before the 1.5-to-2.0 wrapper is reached.
+          git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
+          select set_config('pg_ash.expected_version', :'expected_version', false);
+          \i /tmp/ash-v1.5-install.sql
 
           do $$
           begin
+            assert (select version from ash.config where singleton) = '1.5',
+              'precondition: pinned installer must be v1.5';
+            assert to_regprocedure(
+              'ash.top_waits(interval,integer,integer,boolean)'
+            ) is not null,
+              'precondition: v1.5 reader surface is missing ash.top_waits';
+            assert to_regprocedure(
+              'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,integer,interval,text)'
+            ) is null,
+              'precondition: 2.0 ash.top must not exist before the upgrade';
             if not exists (select from pg_roles where rolname = 'ash_b1_reader') then
               create role ash_b1_reader login password 'x';
             end if;
@@ -5850,11 +5864,45 @@ jobs:
 
           select ash.grant_reader('ash_b1_reader');
 
+          -- Representative production state that the release upgrade must
+          -- preserve: non-default config plus a decodable raw sample whose
+          -- wait and query-map dictionary rows predate 2.0.
+          update ash.config
+          set missed_samples = 42,
+              sample_interval = interval '7 seconds',
+              include_bg_workers = true
+          where singleton;
+
+          do $$
+          declare
+            v_wait_id smallint;
+            v_query_map_id int4;
+            v_slot smallint := ash.current_slot();
+            v_sample_ts int4 := ash.ts_from_timestamptz(
+              now() - interval '1 minute'
+            );
+          begin
+            select ash._register_wait('active', 'UpgradeProbe', 'Preserved')
+              into v_wait_id;
+            execute format(
+              'insert into ash.query_map_%s(query_id) values (424242) returning id',
+              v_slot
+            ) into v_query_map_id;
+            insert into ash.sample(sample_ts, datid, active_count, data, slot)
+            values (
+              v_sample_ts,
+              (select oid from pg_database where datname = current_database()),
+              1,
+              array[-v_wait_id, 1, v_query_map_id]::int4[],
+              v_slot
+            );
+          end $$;
+
           -- Snapshot which ash.* functions the reader can execute at the
           -- released version. Function names only: signatures may
           -- legitimately change across versions (that is exactly why the
           -- installer drops them).
-          create table public.b1_acl_before as
+          create table public.v15_acl_before as
           select distinct p.proname::text as proname
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -5864,11 +5912,73 @@ jobs:
 
           do $$
           begin
-            assert (select count(*) from public.b1_acl_before) > 10,
+            assert (select count(*) from public.v15_acl_before) > 10,
               'sanity: grant_reader should cover a non-trivial function set';
           end $$;
 
-          \i /tmp/ash_chain_devel.sql
+          \i sql/ash-1.5-to-2.0.sql
+
+          -- Release identity, surface convergence, and persisted state must
+          -- all be correct on the first real v1.5-to-current transition.
+          do $$
+          declare
+            v_default text;
+            v_expected text := current_setting('pg_ash.expected_version');
+            v_count int;
+          begin
+            assert (select version from ash.config where singleton) = v_expected,
+              'v1.5-to-current upgrade stamped the wrong ash.config.version';
+
+            select pg_get_expr(attr_default.adbin, attr_default.adrelid)
+              into v_default
+            from pg_attrdef as attr_default
+            join pg_attribute as attr
+              on attr.attrelid = attr_default.adrelid
+             and attr.attnum = attr_default.adnum
+            where attr_default.adrelid = 'ash.config'::regclass
+              and attr.attname = 'version';
+            assert v_default = format('%L::text', v_expected),
+              format('version column default is %s, expected %L::text',
+                     v_default, v_expected);
+
+            select count(distinct proc.proname) into v_count
+            from pg_proc as proc
+            join pg_namespace as nsp on nsp.oid = proc.pronamespace
+            where nsp.nspname = 'ash'
+              and proc.proname in (
+                'periods', 'aas', 'timeline', 'top', 'compare',
+                'samples', 'report', 'chart', 'summary'
+              );
+            assert v_count = 9,
+              format('2.0 reader surface incomplete after v1.5 upgrade: %s/9',
+                     v_count);
+
+            select count(*) into v_count
+            from pg_proc as proc
+            join pg_namespace as nsp on nsp.oid = proc.pronamespace
+            where nsp.nspname = 'ash'
+              and proc.proname in (
+                'top_waits', 'top_queries', 'wait_timeline',
+                'activity_summary', 'timeline_chart', 'query_waits',
+                'event_queries', 'samples_by_database'
+              );
+            assert v_count = 0,
+              format('v1.x readers remain after v1.5 upgrade: %s function(s)',
+                     v_count);
+
+            assert (select missed_samples from ash.config where singleton) = 42,
+              'missed_samples was not preserved across v1.5 upgrade';
+            assert (select sample_interval from ash.config where singleton)
+                     = interval '7 seconds',
+              'sample_interval was not preserved across v1.5 upgrade';
+            assert (select include_bg_workers from ash.config where singleton),
+              'include_bg_workers was not preserved across v1.5 upgrade';
+            assert exists (
+              select from ash.samples(now() - interval '5 minutes', now(), 100)
+              where wait_event = 'UpgradeProbe:Preserved'
+                and query_id = 424242
+            ), 'seeded v1.5 raw sample was not preserved/decodable after upgrade';
+          end $$;
 
           -- ACL equivalence sweep: every function name the reader could
           -- execute before the upgrade and that still exists must remain
@@ -5880,7 +5990,7 @@ jobs:
           begin
             select string_agg(distinct p.proname::text, ', ' order by p.proname::text)
               into v_lost
-            from public.b1_acl_before b
+            from public.v15_acl_before b
             join pg_proc p on p.proname::text = b.proname
             join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'ash'
@@ -5967,9 +6077,9 @@ jobs:
           end $$;
           reset role;
 
-          -- Re-apply scenario: re-running the development installer on an
-          -- already-installed database must also preserve the grants.
-          \i /tmp/ash_fresh_install.sql
+          -- Re-apply the public release wrapper, not merely the installer: the
+          -- documented v1.5-to-2.0 entrypoint promises to be re-apply-safe.
+          \i sql/ash-1.5-to-2.0.sql
 
           do $$
           declare
@@ -5977,7 +6087,7 @@ jobs:
           begin
             select string_agg(distinct p.proname::text, ', ' order by p.proname::text)
               into v_lost
-            from public.b1_acl_before b
+            from public.v15_acl_before b
             join pg_proc p on p.proname::text = b.proname
             join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'ash'
@@ -5989,14 +6099,30 @@ jobs:
             assert not has_function_privilege('ash_b1_reader', 'ash.take_sample()', 'EXECUTE'),
               '#107: ash.take_sample must remain admin-only after re-apply';
 
-            raise notice 'issue #107: reader grants preserved across installer re-apply';
+            assert (select version from ash.config where singleton)
+                     = current_setting('pg_ash.expected_version'),
+              'release-wrapper re-apply changed the version';
+            assert (select missed_samples from ash.config where singleton) = 42,
+              'release-wrapper re-apply lost missed_samples';
+            assert (select sample_interval from ash.config where singleton)
+                     = interval '7 seconds',
+              'release-wrapper re-apply lost sample_interval';
+            assert (select include_bg_workers from ash.config where singleton),
+              'release-wrapper re-apply lost include_bg_workers';
+            assert exists (
+              select from ash.samples(now() - interval '5 minutes', now(), 100)
+              where wait_event = 'UpgradeProbe:Preserved'
+                and query_id = 424242
+            ), 'release-wrapper re-apply lost the seeded v1.5 raw sample';
+
+            raise notice 'issue #107: state and reader grants preserved across release-wrapper re-apply';
           end $$;
 
           set role ash_b1_reader;
           select count(*) from ash.samples(now() - interval '1 hour', now());
           reset role;
 
-          drop table public.b1_acl_before;
+          drop table public.v15_acl_before;
           select ash.uninstall('yes');
           drop role ash_b1_reader;
           EOF
@@ -6145,6 +6271,7 @@ jobs:
           SNAPSQL
 
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
+          git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
 
           # 1) Fresh install → snapshot
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null 2>&1
@@ -6156,7 +6283,16 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
           psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
 
-          # 3) Compare
+          # 3) Actual previous release → current release wrapper → snapshot.
+          # This must remain separate from full-upgrade-chain: historical
+          # installer shims replay the current installer and therefore cannot
+          # prove the final v1.5-to-current edge after a release stamp.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash-v1.5-install.sql > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.5-to-2.0.sql > /dev/null 2>&1
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_v15_schema.txt
+          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
+
+          # 4) Compare fresh against both supported upgrade paths.
           if diff -u /tmp/fresh_schema.txt /tmp/upgraded_schema.txt; then
             echo "Schema equivalence test PASSED: fresh dev install and upgrade path produce identical schemas"
           else
@@ -6204,6 +6340,13 @@ jobs:
                 }
               ' /tmp/fresh_constraints.txt /tmp/upgraded_constraints.txt
             fi
+            exit 1
+          fi
+
+          if diff -u /tmp/fresh_schema.txt /tmp/upgraded_v15_schema.txt; then
+            echo "Schema equivalence test PASSED: fresh install and actual v1.5-to-current upgrade produce identical schemas"
+          else
+            echo "::error::Schema equivalence test FAILED: fresh install and actual v1.5-to-current upgrade differ"
             exit 1
           fi
 
