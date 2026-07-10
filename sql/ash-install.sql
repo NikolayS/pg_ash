@@ -3118,6 +3118,7 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_last_ts int4;
+  v_last_1m_ts int4;
   v_now_hour_ts int4;
   v_hour_start int4;
   v_hour_end int4;
@@ -3137,7 +3138,8 @@ begin
     return 0;
   end if;
 
-  select last_rollup_1h_ts into v_last_ts
+  select last_rollup_1h_ts, last_rollup_1m_ts
+  into v_last_ts, v_last_1m_ts
   from ash.config where singleton;
 
   v_now_hour_ts := ash.ts_from_timestamptz(date_trunc('hour', now()));
@@ -3154,6 +3156,18 @@ begin
 
   while v_hour_start < v_now_hour_ts and v_batch_limit > 0 loop
     v_hour_end := v_hour_start + 3600;
+
+    /*
+     * The minute and hourly jobs both fire at the top of the hour. If this
+     * worker wins the shared rollup lock before rollup_minute() has processed
+     * the just-completed final minute, aggregating now would seal a partial
+     * hour and advance last_rollup_1h_ts past data that arrives moments later.
+     * The minute watermark is the authoritative completion boundary: defer
+     * this hour without inserting or advancing until it reaches v_hour_end.
+     */
+    if v_last_1m_ts is null or v_last_1m_ts < v_hour_end then
+      exit;
+    end if;
 
     insert into ash.rollup_1h (
       ts, datid, samples, peak_backends, wait_counts, query_counts,

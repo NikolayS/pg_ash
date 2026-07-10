@@ -3291,7 +3291,10 @@ jobs:
                 (v_hour_ts + 60, 0::oid, 60, 3, array[v_wait_id, 100]::int4[], '{12345,40}'::int8[])
               on conflict (ts, datid) do nothing;
 
-              update ash.config set last_rollup_1h_ts = null where singleton;
+              update ash.config
+              set last_rollup_1m_ts = v_hour_ts + 3600,
+                  last_rollup_1h_ts = null
+              where singleton;
               select ash.rollup_hour() into v_result;
               assert v_result > 0,
                 'rollup_hour should process seeded data';
@@ -3471,7 +3474,10 @@ jobs:
               '{12345,40}'::int8[])
             on conflict (ts, datid) do nothing;
 
-            update ash.config set last_rollup_1h_ts = null where singleton;
+            update ash.config
+            set last_rollup_1m_ts = v_hour_ts + 3600,
+                last_rollup_1h_ts = null
+            where singleton;
             select ash.rollup_hour() into v_result;
             assert v_result > 0,
               'rollup_hour should handle different-length arrays';
@@ -3567,8 +3573,9 @@ jobs:
               'complete hour wait_counts mismatch: ' || v_row.wait_counts::text;
             assert cardinality(v_row.minute_counts) = 60,
               'complete hour must preserve all 60 minute slots';
-            assert v_row.minute_counts[60] = 60,
-              'last minute slot missing after retry';
+            assert v_row.minute_counts = array_fill(60, array[60]),
+              'complete hour minute_counts mismatch: '
+              || v_row.minute_counts::text;
             assert (select last_rollup_1h_ts from ash.config where singleton)
                      = v_hour_ts + 3600,
               'hourly watermark did not advance after complete aggregation';
@@ -3949,7 +3956,12 @@ jobs:
                       array[v_cpu, case when i = 30 then 618 else 40 end,
                             v_io,  case when i = 30 then 60  else 20 end]::int4[], '{}'::int8[]);
             end loop;
-            update ash.config set last_rollup_1h_ts = ash.ts_from_timestamptz(v_h) where singleton;
+            update ash.config
+            set last_rollup_1m_ts = ash.ts_from_timestamptz(
+                  v_h + interval '1 hour'
+                ),
+                last_rollup_1h_ts = ash.ts_from_timestamptz(v_h)
+            where singleton;
             perform ash.rollup_hour();
 
             -- rollup_hour() computes minute_counts exactly: 60 slots, storm at 31
