@@ -211,9 +211,16 @@ from ash.top(
 );
 ```
 
-Combining a query filter with a wait filter needs the raw wait-query tie. If
-the window is past raw retention, pg_ash raises with the raw-retention boundary
-instead of returning a fake empty result.
+Every explicit `query_id` filter needs exact raw attribution, even without a
+wait filter. A query breakdown combined with a wait filter also needs the raw
+wait-query tie. If the window is past raw retention, pg_ash raises with the
+raw-retention boundary instead of treating a compacted-away query as zero.
+
+An unfiltered `ash.top('query_id')` can use rollups efficiently. Rollup query
+IDs are compacted (low-volume IDs may be omitted, and hourly rows retain a top
+set), so named rows describe only preserved attribution. A `NULL` row carries
+everything not preserved—including uncaptured query IDs—and makes
+`backend_seconds` and `pct` reconcile to the window's total AAS.
 
 ### 5. Pull raw evidence
 
