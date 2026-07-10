@@ -1,4 +1,5 @@
 -- pg_ash: upgrade from 1.3 to 1.4
+\set ON_ERROR_STOP on
 -- NOTE: this script is a thin shim that runs `\ir ../ash-install.sql`, which
 -- always reflects the LATEST released version. Running it on a 1.3 install
 -- upgrades all the way to the current latest (currently 1.4). This is by

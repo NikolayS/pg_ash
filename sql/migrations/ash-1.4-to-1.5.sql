@@ -4,6 +4,4 @@
 -- upgrade path stays schema-equivalent with fresh 1.5 installs.
 
 \set ON_ERROR_STOP on
-begin;
 \ir ../ash-install.sql
-commit;

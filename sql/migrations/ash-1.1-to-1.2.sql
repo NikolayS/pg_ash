@@ -3,6 +3,8 @@
 -- Changes: bar column on query_waits/top_by_type, event_queries(),
 -- chart padding for psql alignment, version tracking.
 
+\set ON_ERROR_STOP on
+begin;
 
 -- Add version column if missing
 do $$
@@ -1464,3 +1466,5 @@ begin
   execute format('grant execute on function ash.rotate() to %I', v_owner);
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
 end $$;
+
+commit;

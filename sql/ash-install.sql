@@ -10,6 +10,8 @@
  * Upgrade from 1.5: \i sql/migrations/ash-1.5-to-2.0.sql
  */
 
+\set ON_ERROR_STOP on
+begin;
 
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
@@ -6404,3 +6406,5 @@ exception when others then
     'ignore to leave pg_monitor without access',
     sqlstate, sqlerrm;
 end $$;
+
+commit;

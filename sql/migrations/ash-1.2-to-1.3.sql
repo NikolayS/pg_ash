@@ -11,6 +11,9 @@
 --   - Version column DEFAULT fix for schema parity (#9)
 --   - Code style: != to <> (#7)
 
+\set ON_ERROR_STOP on
+begin;
+
 -- Add debug_logging column to config if missing
 do $$
 begin
@@ -2653,3 +2656,5 @@ begin
   execute format('grant execute on function ash.take_sample() to %I', v_owner);
   execute format('grant execute on function ash.set_debug_logging(bool) to %I', v_owner);
 end $$;
+
+commit;
