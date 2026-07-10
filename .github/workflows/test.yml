@@ -3491,6 +3491,96 @@ jobs:
           $$;
           EOF
 
+      - name: "Critical: rollup_hour waits for complete minute coverage"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_hour_ts int4 := (
+              ash.ts_from_timestamptz(
+                date_trunc('hour', now() - interval '2 hours')
+              ) / 3600
+            ) * 3600;
+            v_wait_id smallint;
+            v_result int;
+            v_row record;
+          begin
+            truncate ash.rollup_1m, ash.rollup_1h;
+            select ash._register_wait('active', 'CPU*', 'CPU*')
+              into v_wait_id;
+
+            -- Simulate the top-of-hour race: minute rollup has completed only
+            -- slots 0..58 when the hourly worker starts.
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            )
+            select
+              v_hour_ts + minute_idx * 60,
+              0::oid,
+              60,
+              1,
+              array[v_wait_id, 60]::int4[],
+              '{}'::int8[]
+            from generate_series(0, 58) as minute_idx;
+
+            update ash.config
+            set last_rollup_1m_ts = v_hour_ts + 3540,
+                last_rollup_1h_ts = v_hour_ts
+            where singleton;
+
+            select ash.rollup_hour() into v_result;
+            assert v_result = 0,
+              'rollup_hour must defer an hour not covered by the minute '
+              'watermark, got ' || v_result;
+            assert not exists (
+              select from ash.rollup_1h where ts = v_hour_ts
+            ), 'rollup_hour inserted a partial hour';
+            assert (select last_rollup_1h_ts from ash.config where singleton)
+                     = v_hour_ts,
+              'rollup_hour advanced its watermark past an incomplete hour';
+
+            -- The final minute arrives after the first hourly attempt. The
+            -- retry must now materialize the complete hour exactly once.
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              v_hour_ts + 3540, 0::oid, 60, 1,
+              array[v_wait_id, 60]::int4[], '{}'::int8[]
+            );
+            update ash.config
+            set last_rollup_1m_ts = v_hour_ts + 3600
+            where singleton;
+
+            select ash.rollup_hour() into v_result;
+            assert v_result = 1,
+              'rollup_hour should process the hour after minute coverage '
+              'completes, got ' || v_result;
+
+            select * into v_row
+            from ash.rollup_1h
+            where ts = v_hour_ts and datid = 0::oid;
+            assert v_row.samples = 3600,
+              'complete hour samples should be 3600, got ' || v_row.samples;
+            assert v_row.wait_counts = array[v_wait_id, 3600]::int4[],
+              'complete hour wait_counts mismatch: ' || v_row.wait_counts::text;
+            assert cardinality(v_row.minute_counts) = 60,
+              'complete hour must preserve all 60 minute slots';
+            assert v_row.minute_counts[60] = 60,
+              'last minute slot missing after retry';
+            assert (select last_rollup_1h_ts from ash.config where singleton)
+                     = v_hour_ts + 3600,
+              'hourly watermark did not advance after complete aggregation';
+
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+            raise notice 'rollup_hour completion barrier PASSED';
+          end $$;
+          EOF
+
       - name: "Critical bug #81: rollup and rotation must not lose raw samples"
         env:
           PGPASSWORD: postgres
