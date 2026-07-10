@@ -131,6 +131,12 @@ Filters are consistent where they apply:
 is usually the right first cut because it surfaces short spikes that averages
 hide.
 
+`rollup_1h` keeps minute totals but only hour-grain wait/query breakdowns.
+Unfiltered `ash.aas()` and `ash.timeline()` can therefore clip partial hours,
+but filtered/dimensional reads require hour-aligned `since` and `until`.
+Explicit `timeline`/`chart` buckets must be at least one hour on that source;
+omitting `bucket` selects the safe grain automatically.
+
 ## Investigation Flow
 
 ### 1. Is it bad now, or was it a spike?

@@ -3885,6 +3885,12 @@ begin
     v_read_source := 'rollup_1h_minutes';
     v_grain_secs := 60;
   end if;
+  if v_read_source = 'rollup_1h'
+     and (v_start_ts % 3600 <> 0 or v_end_ts % 3600 <> 0) then
+    raise exception
+      'ash.aas: filtered rollup_1h reads require hour-aligned since/until; '
+      'use whole-hour bounds or a window covered by raw/rollup_1m';
+  end if;
 
   /*
    * peak/p99 bucket cannot be finer than the source grain, and must be a
@@ -4042,14 +4048,22 @@ begin
        * sub-hour buckets work. The reported source stays 'rollup_1h'.
        */
       v_read_source := 'rollup_1h_minutes';
-    elsif v_source = 'rollup_1h' and v_bucket_secs < 3600 then
-      /*
-       * filtered sub-hour buckets need minute grain; the hour-grain arrays
-       * cannot supply it, so fall back to rollup_1m (older buckets simply
-       * show no data). 'none' (a truly empty window) is left as-is and
-       * reported honestly.
-       */
-      v_source := 'rollup_1m';
+    elsif v_source = 'rollup_1h' then
+      if v_start_ts % 3600 <> 0 or v_end_ts % 3600 <> 0 then
+        raise exception
+          'ash.timeline: filtered rollup_1h reads require hour-aligned '
+          'since/until; use whole-hour bounds or a window covered by '
+          'raw/rollup_1m';
+      end if;
+      if v_bucket_secs < 3600 then
+        if bucket is null then
+          v_bucket_secs := 3600;
+        else
+          raise exception
+            'ash.timeline: filtered rollup_1h buckets must be at least 1 hour; '
+            'omit bucket for automatic grain or use raw/rollup_1m coverage';
+        end if;
+      end if;
     end if;
     v_read_source := coalesce(v_read_source, v_source);
     v_grain_secs := case when v_read_source = 'rollup_1h' then 3600 else 60 end;
@@ -4469,6 +4483,12 @@ begin
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
                                      ash.ts_to_timestamptz(v_end_ts));
     v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
+  end if;
+  if v_source = 'rollup_1h'
+     and (v_start_ts % 3600 <> 0 or v_end_ts % 3600 <> 0) then
+    raise exception
+      'ash.top: rollup_1h dimensional reads require hour-aligned since/until; '
+      'use whole-hour bounds or a window covered by raw/rollup_1m';
   end if;
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
@@ -5519,8 +5539,22 @@ begin
   v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
                                    ash.ts_to_timestamptz(v_end_ts));
   if v_source = 'none' then v_source := 'rollup_1m'; end if;
-  if v_source = 'rollup_1h' and v_bucket_secs < 3600 then
-    v_source := 'rollup_1m';
+  if v_source = 'rollup_1h' then
+    if v_start_ts % 3600 <> 0 or v_end_ts % 3600 <> 0 then
+      raise exception
+        'ash.chart: rollup_1h dimensional reads require hour-aligned '
+        'since/until; use whole-hour bounds or a window covered by '
+        'raw/rollup_1m';
+    end if;
+    if v_bucket_secs < 3600 then
+      if bucket is null then
+        v_bucket_secs := 3600;
+      else
+        raise exception
+          'ash.chart: rollup_1h buckets must be at least 1 hour; omit bucket '
+          'for automatic grain or use raw/rollup_1m coverage';
+      end if;
+    end if;
   end if;
   v_grain_secs := case when v_source = 'rollup_1h' then 3600 else 60 end;
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
@@ -5752,16 +5786,16 @@ comment on function ash.periods(timestamptz) is
 $$START HERE (US-1 triage): AAS for six standard trailing windows (1m, 5m, 1h, 1d, 1w, 1mo) ending at until (default now()), one row each. Columns (period, period_start, period_end, source, bucket, buckets_with_data, avg_aas, peak_aas, p99_aas): peak/p99 vs avg distinguishes a spike from sustained load; buckets_with_data counts covered buckets at the grain named by bucket (always 1 minute here). Rollup-backed (source = rollup_1m|rollup_1h). Next: locate the spike in time with ash.timeline(), then drill with ash.top().$$;
 
 comment on function ash.aas(timestamptz, timestamptz, text, text, bigint, name, interval) is
-$$Scalar AAS summary for one window [since, until) (defaults: last 1 hour). Optional uniform filters wait_event_type/wait_event/query_id/database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-bucket AAS. Buckets are calendar-aligned (floored to bucket in UTC: an hour bucket starts on the hour, a day bucket on the UTC day) — the same absolute window always produces the same buckets. Also the US-4 leaf event summary: ash.aas(wait_event => 'IO:DataFileRead'). Combining a wait filter with query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h. Next: ash.top('query_id', wait_event => ...).$$;
+$$Scalar AAS summary for one window [since, until) (defaults: last 1 hour). Optional uniform filters wait_event_type/wait_event/query_id/database. Columns (period_start, period_end, source, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds); peak/p99 are over per-bucket AAS. Buckets are calendar-aligned (floored to bucket in UTC: an hour bucket starts on the hour, a day bucket on the UTC day) — the same absolute window always produces the same buckets. Also the US-4 leaf event summary: ash.aas(wait_event => 'IO:DataFileRead'). Combining a wait filter with query_id needs raw samples and raises past raw retention. On source=rollup_1h, wait/query-filtered reads require hour-aligned since/until because dimensional arrays have hour grain; unfiltered/database-only reads retain exact partial-hour support through minute_counts. source = raw|rollup_1m|rollup_1h. Next: ash.top('query_id', wait_event => ...).$$;
 
 comment on function ash.timeline(timestamptz, timestamptz, interval, text, text, bigint, name) is
-$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [since, until). bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). bucket_start is calendar-aligned (floored to bucket in UTC: hour buckets start on the hour, day buckets on the UTC day), so the same absolute window always returns identical bucket_start labels; the first bucket may start before since and edge buckets average over their in-window part only. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc nulls last to find the worst buckets (no-data buckets carry null peak_aas, which sorts first under a bare desc and would bury the real spike), then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts); p99_aas is null only for wait/query-filtered rollup_1h-backed buckets (hour grain).$$;
+$$AAS time series (US-2 locate / US-6 capacity): one row per bucket across [since, until). bucket => null auto-selects grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day). bucket_start is calendar-aligned (floored to bucket in UTC: hour buckets start on the hour, day buckets on the UTC day), so the same absolute window always returns identical bucket_start labels; the first bucket may start before since and edge buckets average over their in-window part only. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas): data_points = 0 with null AAS marks a no-data bucket (distinct from measured-zero). Order by peak_aas desc nulls last to find the worst buckets (no-data buckets carry null peak_aas, which sorts first under a bare desc and would bury the real spike), then drill that window with ash.top(). peak_aas/p99_aas are per-minute even on unfiltered rollup_1h-backed windows (per-minute totals are preserved in rollup_1h.minute_counts). Wait/query-filtered rollup_1h reads require hour-aligned since/until and buckets >= 1 hour; omit bucket to auto-select that safe grain. Their p99_aas is null because the surviving dimensional grain is the hour.$$;
 
 comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval, text) is
-$$The single vertical drill (US-3): AAS broken down by dimension in wait_event_type|wait_event|query_id|database over [since, until). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). order_by in avg|peak|p99 (default avg) picks the ranking metric BEFORE the top-n cut — use order_by => 'peak' during incident triage so a query that spiked for one minute outranks steady background rows. For the query_id dimension, a NULL key is the unattributed bucket (activity whose query_id was not captured: not run with a queryid-reporting client, truncated, or utility/idle-in-transaction work) — it is real load, not an error. Filters compose: ash.top('wait_event', wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present AND the caller can read other roles pg_stat_statements text — i.e. holds pg_read_all_stats (e.g. via membership in pg_monitor); a plain ash.grant_reader() role without it sees query_text NULL even though pgss is installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is NULL. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + query_id) reads raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h.$$;
+$$The single vertical drill (US-3): AAS broken down by dimension in wait_event_type|wait_event|query_id|database over [since, until). Every row carries avg_aas, peak_aas, p99_aas, backend_seconds, and pct (share of window total). order_by in avg|peak|p99 (default avg) picks the ranking metric BEFORE the top-n cut — use order_by => 'peak' during incident triage so a query that spiked for one minute outranks steady background rows. For the query_id dimension, a NULL key is the unattributed bucket (activity whose query_id was not captured: not run with a queryid-reporting client, truncated, or utility/idle-in-transaction work) — it is real load, not an error. Filters compose: ash.top('wait_event', wait_event_type => 'IO') is the level-2 drill; ash.top('query_id', wait_event => 'IO:DataFileRead') is the US-4 leaf. query_text is filled for the query_id dimension when pg_stat_statements is present AND the caller can read other roles pg_stat_statements text — i.e. holds pg_read_all_stats (e.g. via membership in pg_monitor); a plain ash.grant_reader() role without it sees query_text NULL even though pgss is installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is NULL. Crossing the wait<->query tie (query_id dimension + wait filter, or a wait dimension + query_id) reads raw samples and raises past raw retention. Because rollup_1h dimensional arrays have hour grain, source=rollup_1h requires hour-aligned since/until. source = raw|rollup_1m|rollup_1h.$$;
 
 comment on function ash.compare(timestamptz, timestamptz, timestamptz, timestamptz, text, int, text, text, bigint, name, interval) is
-$$Before/after comparison of two windows (US-7): window 1 = [since_1, until_1), window 2 = [since_2, until_2). dimension => null gives one overall row; a dimension gives the top n keys by abs(avg_delta) via a full outer join (a key present in only one window still appears). Columns (key, query_text, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2); avg_delta = window 2 minus window 1. A window with no data coverage (e.g. past retention) reports NULL on its side and a NULL avg_delta (plus a NOTICE) — never a fake zero baseline; within a covered window an absent key is a true zero. Use to tell whether a deploy regressed load and where.$$;
+$$Before/after comparison of two windows (US-7): window 1 = [since_1, until_1), window 2 = [since_2, until_2). dimension => null gives one overall row; a dimension gives the top n keys by abs(avg_delta) via a full outer join (a key present in only one window still appears). Columns (key, query_text, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2); avg_delta = window 2 minus window 1. A window with no data coverage (e.g. past retention) reports NULL on its side and a NULL avg_delta (plus a NOTICE) — never a fake zero baseline; within a covered window an absent key is a true zero. Dimensional comparisons inherit ash.top()'s hour-aligned-bound requirement when source=rollup_1h. Use to tell whether a deploy regressed load and where.$$;
 
 comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigint, name) is
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is null. Reads ash.sample directly (raw retention only).$$;
@@ -5770,7 +5804,7 @@ comment on function ash.report(timestamptz, timestamptz, int, int) is
 $$Machine-readable load report as one jsonb (US-8) for [since, until) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution. vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage; never raises. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
 
 comment on function ash.chart(timestamptz, timestamptz, interval, int, int, boolean) is
-$$Human render helper: stacked ASCII per-bucket AAS chart over [since, until) (default last 1 hour). Series/legend = the window-wide top n wait events PLUS any event that is top-1 in at least one bucket (so a single-bucket spike culprit is always visible), plus Other. bucket => null auto-selects grain by span; buckets are calendar-aligned like ash.timeline(). Presentation-only (columns bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with color => true or "set ash.color = on".$$;
+$$Human render helper: stacked ASCII per-bucket AAS chart over [since, until) (default last 1 hour). Series/legend = the window-wide top n wait events PLUS any event that is top-1 in at least one bucket (so a single-bucket spike culprit is always visible), plus Other. bucket => null auto-selects grain by span; buckets are calendar-aligned like ash.timeline(). On source=rollup_1h, since/until must be hour-aligned and an explicit bucket must be >= 1 hour; omit bucket to auto-select the safe grain. Presentation-only (columns bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with color => true or "set ash.color = on".$$;
 
 comment on function ash.summary(timestamptz, timestamptz) is
 $$Human render helper: key/value AAS overview for one window [since, until) (default last 1 hour) — the companion to ash.periods(). Returns (metric, value): period bounds, source, minutes_with_data, avg/peak/p99 AAS, backend_seconds, databases_active, and top waits/queries. Presentation-only; for typed data use ash.aas() and ash.top().$$;
