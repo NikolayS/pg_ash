@@ -2071,6 +2071,136 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test 2.0: report totals and formatting edges"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_ts int4 := ash.ts_from_timestamptz(
+              date_trunc('minute', now()) - interval '10 minutes');
+            v_cpu smallint;
+            v_io smallint;
+            v_ipc smallint;
+            v_lock smallint;
+            v_lwlock smallint;
+            v_client smallint;
+            v_cpu_map int4;
+            v_client_map int4;
+            v_large_map int4;
+            j jsonb;
+            v_text text[];
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set current_slot = 0, sample_interval = interval '1 second',
+                last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+            select ash._register_wait('active', 'IPC', 'ProcArrayGroupUpdate')
+            into v_ipc;
+            select ash._register_wait('active', 'Lock', 'transactionid')
+            into v_lock;
+            select ash._register_wait('active', 'LWLock', 'WALWrite')
+            into v_lwlock;
+            select ash._register_wait('active', 'Client', 'ClientRead')
+            into v_client;
+
+            insert into ash.query_map_0 (query_id)
+            values (900000000000001), (900000000000002), (900000000000003)
+            on conflict (query_id) do nothing;
+            select id into v_cpu_map from ash.query_map_0
+            where query_id = 900000000000001;
+            select id into v_client_map from ash.query_map_0
+            where query_id = 900000000000002;
+            select id into v_large_map from ash.query_map_0
+            where query_id = 900000000000003;
+
+            -- The report total excludes Client, so total query attribution
+            -- must not let a Client-dominant query explain that total.
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              v_ts, 0::oid, 1, 21,
+              array[v_cpu, 1, v_client, 20]::int4[], '{}'::int8[]
+            );
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values (
+              v_ts, 0::oid, 21,
+              array[-v_cpu, 1, v_cpu_map, -v_client, 20]::int4[]
+                || array_fill(v_client_map, array[20]),
+              0
+            );
+            j := ash.report(
+              ash.ts_to_timestamptz(v_ts),
+              ash.ts_to_timestamptz(v_ts + 60)
+            );
+            assert (j->'aas_worst1m'->>'total')::numeric = 0.02,
+              'report total fixture must include CPU only';
+            assert j->'top_queryids_worst1m'->'total'
+                     = '["900000000000001(0.0)"]'::jsonb,
+              'report total query attribution included an excluded wait class: '
+              || (j->'top_queryids_worst1m'->'total')::text;
+
+            -- Total average comes from the summed series, not the sum of five
+            -- independently rounded display fields: 5 / 60 rounds to 0.08.
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m;
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              v_ts, 0::oid, 1, 5,
+              array[
+                v_cpu, 1, v_io, 1, v_ipc, 1, v_lock, 1, v_lwlock, 1
+              ]::int4[],
+              '{}'::int8[]
+            );
+            j := ash.report(
+              ash.ts_to_timestamptz(v_ts),
+              ash.ts_to_timestamptz(v_ts + 60)
+            );
+            assert (j->'aas_avg'->>'total')::numeric = 0.08,
+              'report aas_avg.total must be 0.08, got '
+              || (j->'aas_avg'->>'total');
+            assert (j->'aas_avg'->>'total')::numeric
+                     <= (j->'aas_worst1m'->>'total')::numeric,
+              'report average total cannot exceed its worst minute';
+
+            -- Four-digit AAS must remain numeric text, not to_char hash
+            -- overflow. 30,000 appearances * 2 seconds / 60 = 1,000.0.
+            truncate ash.rollup_1m;
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              v_ts, 0::oid, 1, 30000,
+              array[v_io, 30000]::int4[], '{}'::int8[]
+            );
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values (
+              v_ts, 0::oid, 30000,
+              array[-v_io, 30000]::int4[]
+                || array_fill(v_large_map, array[30000]),
+              0
+            );
+            v_text := ash._hr_top_events('IO', array[v_ts], 1, 2);
+            assert v_text = array['DataFileRead(1000.0)'],
+              'large event AAS formatting mismatch: ' || v_text::text;
+            v_text := ash._hr_top_queryids('IO', array[v_ts], 1, 2);
+            assert v_text = array['900000000000003(1000.0)'],
+              'large query AAS formatting mismatch: ' || v_text::text;
+
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            raise notice 'ash.report totals and formatting edges PASSED';
+          end $$;
+          EOF
+
       - name: "Test 2.0: pg_stat_statements fan-out and reader edges"
         env:
           PGPASSWORD: postgres
