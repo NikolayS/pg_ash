@@ -270,6 +270,81 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: Test SQL entrypoints fail atomically
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql_base=(
+            psql
+            --no-psqlrc
+            --host=localhost
+            --username=postgres
+          )
+
+          "${psql_base[@]}" --dbname=postgres --set=ON_ERROR_STOP=1 << 'EOF'
+          drop database if exists ash_install_failure_test with (force);
+          create database ash_install_failure_test;
+          drop database if exists ash_migration_failure_test with (force);
+          create database ash_migration_failure_test;
+          EOF
+          "${psql_base[@]}" \
+            --dbname=ash_install_failure_test \
+            --set=ON_ERROR_STOP=1 << 'EOF'
+          create schema ash;
+          create view ash.config as select true as singleton;
+          EOF
+
+          set +e
+          "${psql_base[@]}" \
+            --dbname=ash_install_failure_test \
+            --file=sql/ash-install.sql \
+            >/tmp/ash_install_failure.log 2>&1
+          install_rc=$?
+          set -e
+          if (( install_rc == 0 )); then
+            cat /tmp/ash_install_failure.log >&2
+            echo "fresh installer masked an expected SQL failure" >&2
+            exit 1
+          fi
+
+          "${psql_base[@]}" \
+            --dbname=ash_install_failure_test \
+            --set=ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            assert to_regclass('ash.config') is not null,
+              'pre-existing failure fixture must survive rollback';
+            assert not exists (
+              select from pg_proc as proc
+              join pg_namespace as nsp on nsp.oid = proc.pronamespace
+              where nsp.nspname = 'ash'
+            ), 'failed installer left functions behind';
+            assert not exists (
+              select from pg_tables where schemaname = 'ash'
+            ), 'failed installer left tables behind';
+          end $$;
+          EOF
+
+          set +e
+          "${psql_base[@]}" \
+            --dbname=ash_migration_failure_test \
+            --file=sql/migrations/ash-1.1-to-1.2.sql \
+            >/tmp/ash_migration_failure.log 2>&1
+          migration_rc=$?
+          set -e
+          if (( migration_rc == 0 )); then
+            cat /tmp/ash_migration_failure.log >&2
+            echo "canonical migration masked an expected SQL failure" >&2
+            exit 1
+          fi
+
+          "${psql_base[@]}" \
+            --dbname=ash_migration_failure_test \
+            --tuples-only \
+            --no-align \
+            --command="select count(*) from pg_namespace where nspname = 'ash'" \
+            | grep -qx 0
+
       - name: Test schema and infrastructure
         env:
           PGPASSWORD: postgres
