@@ -62,6 +62,15 @@ jobs:
             fi
           done
 
+          if ! grep -Fq "Only \`ash.rebuild_partitions\` and \`ash.uninstall\` require the exact \`'yes'\` confirmation token." README.md; then
+            echo "README.md must limit the exact 'yes' confirmation contract to rebuild_partitions and uninstall." >&2
+            exit 1
+          fi
+          if grep -Fq "All destructive calls require" README.md; then
+            echo "README.md must not claim every destructive operation takes a confirmation token." >&2
+            exit 1
+          fi
+
           grep -q "ash.grant_reader" README.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" README.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" RELEASE_NOTES.md
@@ -4776,7 +4785,7 @@ jobs:
           end $$;
           EOF
 
-      - name: "Test v1.4: status output"
+      - name: "Test v1.4: status output and admin catalog contracts"
         env:
           PGPASSWORD: postgres
         run: |
@@ -4784,6 +4793,8 @@ jobs:
           do $$
           declare
             v_metrics text[];
+            v_rotate_description text;
+            v_rebuild_description text;
           begin
             -- Collect all metric names from status()
             select array_agg(metric) into v_metrics from ash.status();
@@ -4812,7 +4823,29 @@ jobs:
             assert 'current_slot' = any(v_metrics),
               'status should include current_slot';
 
-            raise notice 'Status output tests PASSED';
+            -- Issue #147: catalog documentation is a public contract for
+            -- humans and agents. It must use the same conservative readable
+            -- raw-retention formula surfaced by status() and README.
+            select obj_description('ash.rotate()'::regprocedure)
+              into v_rotate_description;
+            select obj_description(
+              'ash.rebuild_partitions(integer,text)'::regprocedure
+            ) into v_rebuild_description;
+
+            assert v_rotate_description like
+                     '%Readable raw retention is approximately (num_partitions - 2) * rotation_period.%',
+              'rotate description has the wrong raw-retention formula';
+            assert v_rebuild_description like
+                     '%Readable raw retention is approximately (num_partitions - 2) * rotation_period.%',
+              'rebuild_partitions description has the wrong raw-retention formula';
+            assert position(
+              'num_partitions x rotation_period' in v_rotate_description
+            ) = 0, 'rotate description retains the overstated formula';
+            assert position(
+              'raw retention = slots x rotation_period' in v_rebuild_description
+            ) = 0, 'rebuild_partitions description retains the overstated formula';
+
+            raise notice 'Status output and admin catalog contract tests PASSED';
           end;
           $$;
           EOF
