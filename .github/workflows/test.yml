@@ -3837,6 +3837,156 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test 2.0: reject partial-hour dimensional rollup reads"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_cpu smallint;
+            v_io smallint;
+            v_h timestamptz := date_trunc('hour', now()) - interval '2 hours';
+            a record;
+            v_raised boolean;
+            v_rows int;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            -- Hour 0 is entirely IO; hour 1 is entirely CPU. minute_counts
+            -- preserves exact unfiltered partial-hour totals, while the wait
+            -- arrays have only whole-hour resolution.
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values
+              (
+                ash.ts_from_timestamptz(v_h), 0::oid, 3600, 1,
+                array[v_io, 3600]::int4[], '{}'::int8[],
+                array_fill(60, array[60])
+              ),
+              (
+                ash.ts_from_timestamptz(v_h + interval '1 hour'),
+                0::oid, 3600, 1,
+                array[v_cpu, 3600]::int4[], '{}'::int8[],
+                array_fill(60, array[60])
+              );
+
+            -- Control: the minute_counts path supports exact half-hour reads.
+            select * into a from ash.aas(v_h, v_h + interval '30 minutes');
+            assert a.avg_aas = 1.00 and a.backend_seconds = 1800.00,
+              format('unfiltered partial hour avg=%s seconds=%s',
+                     a.avg_aas, a.backend_seconds);
+
+            v_raised := false;
+            begin
+              perform * from ash.aas(
+                v_h, v_h + interval '30 minutes', wait_event_type => 'IO'
+              );
+            exception when others then
+              if sqlerrm like 'ash.aas:%hour-aligned%' then
+                v_raised := true;
+              else
+                raise;
+              end if;
+            end;
+            assert v_raised,
+              'filtered aas must reject a partial rollup_1h boundary';
+
+            v_raised := false;
+            begin
+              perform * from ash.top(
+                'wait_event_type', v_h, v_h + interval '30 minutes'
+              );
+            exception when others then
+              if sqlerrm like 'ash.top:%hour-aligned%' then
+                v_raised := true;
+              else
+                raise;
+              end if;
+            end;
+            assert v_raised,
+              'top must reject a partial rollup_1h boundary';
+
+            v_raised := false;
+            begin
+              perform * from ash.timeline(
+                v_h, v_h + interval '2 hours', interval '30 minutes',
+                wait_event_type => 'IO'
+              );
+            exception when others then
+              if sqlerrm like 'ash.timeline:%at least 1 hour%' then
+                v_raised := true;
+              else
+                raise;
+              end if;
+            end;
+            assert v_raised,
+              'filtered timeline must reject an explicit sub-hour bucket';
+
+            v_raised := false;
+            begin
+              perform * from ash.chart(
+                v_h, v_h + interval '2 hours', interval '30 minutes'
+              );
+            exception when others then
+              if sqlerrm like 'ash.chart:%at least 1 hour%' then
+                v_raised := true;
+              else
+                raise;
+              end if;
+            end;
+            assert v_raised,
+              'chart must reject an explicit sub-hour rollup_1h bucket';
+
+            v_raised := false;
+            begin
+              perform * from ash.compare(
+                v_h, v_h + interval '30 minutes',
+                v_h + interval '1 hour', v_h + interval '2 hours',
+                dimension => 'wait_event_type'
+              );
+            exception when others then
+              if sqlerrm like 'ash.top:%hour-aligned%' then
+                v_raised := true;
+              else
+                raise;
+              end if;
+            end;
+            assert v_raised,
+              'dimensional compare must reject a partial hourly side';
+
+            -- Whole-hour dimensional reads remain exact. Auto buckets widen to
+            -- one hour when hourly arrays are the only retained detail.
+            select * into a from ash.aas(
+              v_h, v_h + interval '1 hour', wait_event_type => 'IO'
+            );
+            assert a.avg_aas = 1.00 and a.backend_seconds = 3600.00,
+              'aligned IO hour must remain exact';
+            select count(*) into v_rows from ash.timeline(
+              v_h, v_h + interval '2 hours',
+              wait_event_type => 'IO'
+            );
+            assert v_rows = 2,
+              'auto timeline should emit two hourly buckets, got ' || v_rows;
+            select count(*) into v_rows from ash.chart(
+              v_h, v_h + interval '2 hours'
+            ) where bucket_start is not null;
+            assert v_rows = 2,
+              'auto chart should emit two hourly buckets, got ' || v_rows;
+
+            truncate ash.rollup_1m, ash.rollup_1h;
+            raise notice 'partial-hour dimensional rollup guards PASSED';
+          end $$;
+          EOF
+
       - name: "Test 2.0: calendar-aligned buckets + spike-first top ordering"
         env:
           PGPASSWORD: postgres
