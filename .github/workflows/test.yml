@@ -2674,6 +2674,42 @@ jobs:
           rollback;
           EOF
 
+      - name: "Release-gate: decode_sample rejects NULL packed-array elements (#143)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+
+          set +e
+          output="$(
+            psql -X -A -t -q -h localhost -U postgres -d postgres \
+              -v ON_ERROR_STOP=1 2>&1 << 'EOF'
+          select 'marker_rows=' || count(*)
+          from ash.decode_sample(array[null, 1, 0]::int4[], null::smallint);
+
+          select 'count_rows=' || count(*)
+          from ash.decode_sample(array[-1, null, 0]::int4[], null::smallint);
+
+          select 'query_map_rows=' || count(*)
+          from ash.decode_sample(array[-1, 1, null]::int4[], null::smallint);
+          EOF
+          )"
+          psql_status=$?
+          set -e
+          printf '%s\n' "$output"
+
+          test "$psql_status" -eq 0
+          test "$(printf '%s\n' "$output" | grep -Fc 'WARNING:  ash.decode_sample:')" -eq 3
+          printf '%s\n' "$output" | grep -Fxq 'marker_rows=0'
+          printf '%s\n' "$output" | grep -Fxq 'count_rows=0'
+          printf '%s\n' "$output" | grep -Fxq 'query_map_rows=0'
+          printf '%s\n' "$output" | grep -Fq \
+            'ash.decode_sample: expected negative wait_id at position 1'
+          printf '%s\n' "$output" | grep -Fq \
+            'ash.decode_sample: non-positive count <NULL> at position 2'
+          printf '%s\n' "$output" | grep -Fq \
+            'ash.decode_sample: expected non-negative query_id at position 3'
+
       - name: "Release-gate fixes: negative interval, width clamp, decode_sample size cap"
         env:
           PGPASSWORD: postgres
