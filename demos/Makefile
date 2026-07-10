@@ -2,6 +2,7 @@
 #
 #   make record    Full pipeline: docker up → pg_ash install → workload →
 #                  tmux/asciinema capture → agg render → demos/ash_demo.gif
+#   make smoke     Short Docker-only install/sampling validation
 #   make clean     Tear down the container, remove .cast + .gif
 #   make open      Open the produced GIF (macOS + Linux best-effort)
 #
@@ -11,10 +12,13 @@ HERE := $(shell cd "$(dir $(lastword $(MAKEFILE_LIST)))" && pwd)
 GIF  := $(HERE)/ash_demo.gif
 CAST := $(HERE)/ash_demo.cast
 
-.PHONY: record clean open check
+.PHONY: record smoke clean open check
 
 record: check
 	bash $(HERE)/record.sh
+
+smoke:
+	bash $(HERE)/smoke.sh
 
 clean:
 	bash $(HERE)/record.sh clean

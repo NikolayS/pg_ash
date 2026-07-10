@@ -65,6 +65,16 @@ jobs:
           grep -q "ash.grant_reader" README.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" README.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" RELEASE_NOTES.md
+
+  demo-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Smoke-test demo install and sampling
+        run: make -C demos smoke
+
   test:
     runs-on: ubuntu-latest
     strategy:

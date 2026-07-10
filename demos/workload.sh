@@ -50,7 +50,6 @@ log "phase 2: row-lock spike on aid=${HOT_ROW_AID} (${SPIKE_SEC}s, ${LOCK_WORKER
 # (a few pgbench SELECTs for ClientRead/CPU* sprinkles).
 pgbench -U postgres -d demo -S -c 2 -j 1 -T "$SPIKE_SEC" -n \
   >/dev/null 2>&1 &
-PGBENCH2=$!
 
 # The "holder" loop: acquires the row, sleeps LOCK_SLEEP_SEC, commits, repeat.
 # Each iteration holds the row for LOCK_SLEEP_SEC; contenders queue on it.
@@ -69,7 +68,7 @@ SQL
 # N contender loops: each hammers the same row. With the holder occupying the
 # row for LOCK_SLEEP_SEC at a time, every contender always finds a locked row
 # and enters the wait queue → Lock:tuple + Lock:transactionid.
-for i in $(seq 1 "$LOCK_WORKERS"); do
+for _ in $(seq 1 "$LOCK_WORKERS"); do
   (
     end=$(( $(date +%s) + SPIKE_SEC ))
     while [ "$(date +%s)" -lt "$end" ]; do

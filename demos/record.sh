@@ -5,8 +5,8 @@
 #   1. Start Postgres in Docker with pg_cron + pg_stat_statements preloaded
 #      (via the pre-baked demos/Dockerfile image; falls back to a runtime
 #      pg_cron install + restart on the plain postgres:${PG_MAJOR} base).
-#   2. Install pg_ash 2.0 via devel/sql/ash-install.sql, seed pgbench,
-#      start sampling.
+#   2. Resolve the current installer via ash_sql_chain.py, install pg_ash,
+#      seed pgbench, and start sampling.
 #   3. Kick off a workload that transitions baseline -> row-lock spike -> tail.
 #   4. After the spike is well underway, start tmux + asciinema with psql
 #      attached to the demo DB in the container.
@@ -34,6 +34,10 @@ BAKED_IMAGE="pg_ash_demo:${PG_MAJOR}"
 SESSION="ash-demo"
 CAST="$HERE/ash_demo.cast"
 GIF="$HERE/ash_demo.gif"
+READY_FILE="/tmp/pg_ash_demo.ready"
+ENTRYPOINT_LOG="/tmp/pg_ash_demo-entrypoint.log"
+ENTRYPOINT_STATUS="/tmp/pg_ash_demo-entrypoint.status"
+SETUP_TIMEOUT_SEC="${SETUP_TIMEOUT_SEC:-120}"
 
 # Terminal geometry: wide (168 cols) so the demo can use `select *` on every
 # reader without wrapping. The widest row is `select * from ash.top('query_id',
@@ -91,6 +95,15 @@ die()  { printf '\033[31m[record %s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*" >&2; 
 
 require() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
 
+show_setup_diagnostics() {
+  log "demo entrypoint log:"
+  $DOCKER exec "$CONTAINER" sh -c \
+    "if [ -f '$ENTRYPOINT_LOG' ]; then cat '$ENTRYPOINT_LOG'; else echo '(entrypoint log missing)'; fi" \
+    >&2 || true
+  log "Postgres container log (last 100 lines):"
+  $DOCKER logs --tail 100 "$CONTAINER" >&2 || true
+}
+
 cleanup() {
   local rc=$?
   tmux kill-session -t "$SESSION" 2>/dev/null || true
@@ -113,7 +126,11 @@ if [ "${1:-}" = "clean" ]; then
   exit 0
 fi
 
-for t in docker tmux asciinema agg; do require "$t"; done
+for t in docker tmux asciinema agg python3; do require "$t"; done
+[[ "$SETUP_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] \
+  || die "SETUP_TIMEOUT_SEC must be a positive integer, got: $SETUP_TIMEOUT_SEC"
+INSTALL_REL="$(python3 "$REPO/devel/scripts/ash_sql_chain.py" fresh-install-path)"
+INSTALL_SQL="${ASH_INSTALL_SQL:-/repo/$INSTALL_REL}"
 
 # --- 1. Start container ------------------------------------------------------
 # Prefer the pre-baked image (demos/Dockerfile): pg_cron and the
@@ -152,6 +169,9 @@ if [ "$BAKED" -eq 1 ]; then
   log "pre-baked image already preloads pg_cron + pg_stat_statements — no runtime install/restart"
 else
   log "installing pg_cron package + configuring shared_preload_libraries"
+  # PG_MAJOR and PGDATA are provided by the Postgres image and expand inside
+  # the container, not in this host-side recorder shell.
+  # shellcheck disable=SC2016
   $DOCKER exec "$CONTAINER" bash -c '
     set -e
     apt-get update -qq >/dev/null 2>&1
@@ -172,12 +192,49 @@ fi
 
 # --- 2. Install pg_ash + seed + start sampling + workload --------------------
 log "installing pg_ash, seeding pgbench, starting sampling, kicking off workload"
+log "  installer: $INSTALL_SQL"
 log "  workload phases: baseline=${BASELINE_SEC}s spike=${SPIKE_SEC}s tail=${TAIL_SEC}s"
-$DOCKER exec -d \
+$DOCKER exec "$CONTAINER" rm -f \
+  "$READY_FILE" "$ENTRYPOINT_LOG" "$ENTRYPOINT_STATUS"
+# The detached wrapper records an early entrypoint exit. On success the
+# entrypoint keeps running, writes READY_FILE after setup, and never reaches
+# the status write until the container is stopped.
+# rc/status expansion belongs inside the container.
+# shellcheck disable=SC2016
+if ! $DOCKER exec -d \
   -e BASELINE_SEC="$BASELINE_SEC" \
   -e SPIKE_SEC="$SPIKE_SEC" \
   -e TAIL_SEC="$TAIL_SEC" \
-  "$CONTAINER" bash /repo/demos/container-entrypoint.sh
+  -e ASH_INSTALL_SQL="$INSTALL_SQL" \
+  -e ASH_DEMO_READY_FILE="$READY_FILE" \
+  "$CONTAINER" bash -c \
+  'bash /repo/demos/container-entrypoint.sh > /tmp/pg_ash_demo-entrypoint.log 2>&1; rc=$?; printf "%s\n" "$rc" > /tmp/pg_ash_demo-entrypoint.status; exit "$rc"'; then
+  show_setup_diagnostics
+  die "could not launch demo setup in container"
+fi
+
+log "waiting for demo setup readiness (timeout=${SETUP_TIMEOUT_SEC}s)"
+setup_deadline=$(( SECONDS + SETUP_TIMEOUT_SEC ))
+while ! $DOCKER exec "$CONTAINER" test -f "$READY_FILE" 2>/dev/null; do
+  if $DOCKER exec "$CONTAINER" test -f "$ENTRYPOINT_STATUS" 2>/dev/null; then
+    setup_rc="$($DOCKER exec "$CONTAINER" cat "$ENTRYPOINT_STATUS" 2>/dev/null || echo unknown)"
+    show_setup_diagnostics
+    die "demo setup exited before readiness (rc=$setup_rc)"
+  fi
+
+  container_running="$($DOCKER inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
+  if [ "$container_running" != "true" ]; then
+    show_setup_diagnostics
+    die "demo container stopped before setup completed"
+  fi
+
+  if [ "$SECONDS" -ge "$setup_deadline" ]; then
+    show_setup_diagnostics
+    die "demo setup did not become ready within ${SETUP_TIMEOUT_SEC}s"
+  fi
+  sleep 0.5
+done
+log "demo setup ready"
 
 # --- 3. Warm up --------------------------------------------------------------
 log "warming up (${WARMUP_SEC}s — baseline + spike accumulate)"

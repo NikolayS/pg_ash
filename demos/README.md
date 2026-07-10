@@ -9,10 +9,11 @@ readable on GitHub desktop and mobile.
 | `ash_demo.gif` | The rendered GIF (committed for iteration; not embedded in the top-level README) |
 | `ash_demo.cast` | asciinema v3 cast file — source of truth for the GIF |
 | `record.sh` | End-to-end recorder: Docker → pg_ash install → workload → tmux/asciinema → agg |
+| `smoke.sh` | Short Docker-only check: install → sampler job → live sample |
 | `Dockerfile` | Pre-baked `postgres:${PG_MAJOR}` image with pg_cron + `shared_preload_libraries` compiled in — so the container boots preloaded, no runtime apt-get + restart |
 | `container-entrypoint.sh` | Runs inside the container — creates DB, installs pg_ash, starts sampling, launches workload |
 | `workload.sh` | Three-phase mixed workload: baseline pgbench → row-lock spike → tail |
-| `Makefile` | Thin wrapper: `make record`, `make clean`, `make open` |
+| `Makefile` | Thin wrapper: `make smoke`, `make record`, `make clean`, `make open` |
 
 ## What it shows
 
@@ -20,7 +21,7 @@ The demo reproduces the investigation sequence from the README's **LLM-assisted
 investigation** section on the 2.0 reader API, against a real spike (not canned
 output). Every reader answers in AAS (average active sessions):
 
-1. `ash.status()` — sampling active, version 2.0, pg_cron wired up
+1. `ash.status()` — sampling active, current release version, pg_cron wired up
 2. `ash.periods()` — triage: last-minute `peak_aas` >> `avg_aas` = a spike, not sustained
 3. `ash.chart(since => now() - interval '5 minutes', bucket => '1 minute', color => true)` — colored stacked timeline: when it landed + which wait class (`Lock` in red)
 4. `ash.top('wait_event', ...)` — drill: `Lock:tuple` dominates (AAS + peak + p99 per row)
@@ -73,6 +74,7 @@ install asciinema`, release tarball for
 
 ```bash
 cd demos
+make smoke      # short Docker-only setup/sampling check; no recording tools
 make record     # ~8 minutes end-to-end (5.5 min warmup so the AAS windows have
                 # enough history — see WARMUP_SEC below — plus a one-time build
                 # of the pre-baked demos/Dockerfile image on first run)
@@ -99,6 +101,7 @@ Override via environment variables:
 | `LOCK_WORKERS` | 5 | Contender count — more = more lock waits |
 | `KEEP_CONTAINER` | 0 | Set `1` to leave the container running after recording (for re-takes) |
 | `PG_MAJOR` | 18 | Postgres major version — sets both the base image (`postgres:$PG_MAJOR`) and the pre-baked image tag/build arg |
+| `SETUP_TIMEOUT_SEC` | 120 | Maximum wait for install, pgbench initialization, sampler start, and workload launch |
 
 Example — slower pacing and a larger spike:
 
@@ -191,10 +194,9 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
 start of a run. If that mirror is unreachable the build fails and the recorder
 logs a warning and falls back to the plain `postgres:$PG_MAJOR` base with the
 old runtime install + restart — so recording still proceeds. If the runtime
-fallback also can't fetch the package, temporarily set `ASH_CRON_OPTIONAL=1`
-(pg_ash supports a no-cron mode; the demo will skip `ash.start()` and rely on
-manual `ash.take_sample()` calls). Remove `demos/Dockerfile` to force the
-fallback path directly.
+fallback cannot fetch the package either, the recorder exits; retry when the
+PGDG mirror is available or choose a Postgres major with a published pg_cron
+package. Remove `demos/Dockerfile` to force the fallback path directly.
 
 **`agg: unknown option --last-frame-duration`** — upgrade to `agg` 1.7+
 (`brew upgrade agg`).
