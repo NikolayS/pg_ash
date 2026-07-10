@@ -2217,18 +2217,23 @@ $$;
 -- STEP 5: Reader and diagnostic functions
 --------------------------------------------------------------------------------
 
--- Helper to get active slots (current and previous).
+-- Helper to get every raw slot retained by the configured partition ring.
 create or replace function ash._active_slots()
 returns smallint[]
 language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  select array[
-    current_slot,
-    ((current_slot - 1 + num_partitions) % num_partitions)::smallint
-  ]
-  from ash.config
+  select array(
+    select
+      ((config_row.current_slot - slot_offset.i
+        + config_row.num_partitions) % config_row.num_partitions)::smallint
+    from generate_series(
+      0, config_row.num_partitions - 2
+    ) as slot_offset(i)
+    order by slot_offset.i
+  )
+  from ash.config as config_row
   where singleton
 $$;
 
@@ -3445,7 +3450,9 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  select ash.ts_to_timestamptz(min(sample_ts)) from ash.sample
+  select ash.ts_to_timestamptz(min(sample_ts))
+  from ash.sample
+  where slot = any(ash._active_slots())
 $$;
 
 create or replace function ash._rollup_1m_retention_start()
