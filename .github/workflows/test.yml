@@ -156,18 +156,25 @@ jobs:
           docker restart "$CONTAINER_ID"
           sleep 5
 
-      - name: Wait for PostgreSQL
+      - name: Wait for Postgres
         run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
           postgres_ready=false
           for _ in {1..30}; do
-            if pg_isready -h localhost -p 5432 -U postgres; then
+            if pg_isready \
+              --host=localhost \
+              --port=5432 \
+              --username=postgres; then
               postgres_ready=true
               break
             fi
             sleep 1
           done
-          if [ "$postgres_ready" != true ]; then
-            echo "PostgreSQL did not become ready within 30 seconds" >&2
+          if [[ "$postgres_ready" != true ]]; then
+            printf '%s\n' \
+              "Postgres did not become ready after 30 probes" >&2
             exit 1
           fi
 
@@ -1167,7 +1174,16 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
+          psql \
+            --no-psqlrc \
+            --host=localhost \
+            --username=postgres \
+            --dbname=postgres \
+            --set=ON_ERROR_STOP=1 << 'EOF'
           do $$
           declare
             v_slot_before smallint;
