@@ -3289,17 +3289,37 @@ jobs:
             declare
               v_active_cr_id smallint;
               v_idle_cr_id smallint;
+              v_seed_wait_id smallint;
               v_cr_minute_ts int4;
               v_row record;
               v_i int;
               v_total_count int4;
             begin
-              -- Register the same (type, event) under two different states
+              /*
+               * Force [active wait_id, count] = [2, 3] while the excluded
+               * idle wait_id is also 3. Pair-array assertions must inspect
+               * odd ID positions only; scanning every element confuses the
+               * count with an idle wait ID.
+               */
+              truncate ash.sample;
+              truncate ash.rollup_1m;
+              truncate ash.wait_event_map restart identity cascade;
+              select ash._register_wait('active', 'Test', 'PairCollisionSeed')
+                into v_seed_wait_id;
               select ash._register_wait('active', 'Client', 'ClientRead')
                 into v_active_cr_id;
               select ash._register_wait('idle in transaction', 'Client', 'ClientRead')
                 into v_idle_cr_id;
 
+              assert v_seed_wait_id = 1
+                     and v_active_cr_id = 2
+                     and v_idle_cr_id = 3,
+                format(
+                  'pair-collision fixture IDs mismatch: seed=%s active=%s idle=%s',
+                  v_seed_wait_id,
+                  v_active_cr_id,
+                  v_idle_cr_id
+                );
               assert v_active_cr_id <> v_idle_cr_id,
                 'active/ClientRead and idle/ClientRead must have distinct wait_ids';
 
