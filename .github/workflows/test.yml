@@ -5947,9 +5947,8 @@ jobs:
             v_data_points bigint;
             v_positive_rows bigint;
             v_legend_rows bigint;
-            v_since timestamptz := date_trunc('minute', now())
-              - interval '5 minutes';
-            v_until timestamptz := date_trunc('minute', now());
+            v_since timestamptz;
+            v_until timestamptz;
             v_aas record;
             v_compare record;
             v_top record;
@@ -6002,14 +6001,25 @@ jobs:
               'sample_interval was not preserved across v1.5 upgrade';
             assert (select include_bg_workers from ash.config where singleton),
               'include_bg_workers was not preserved across v1.5 upgrade';
-            assert exists (
-              select from ash.samples(now() - interval '5 minutes', now(), 100)
-              where wait_event = 'UpgradeProbe:Preserved'
-                and query_id = 424242
-            ), 'seeded v1.5 raw sample was not preserved/decodable after upgrade';
+            select date_trunc('minute', sample_row.sample_time)
+                   + interval '1 minute'
+              into v_until
+            from ash.samples(
+              now() - interval '5 minutes',
+              now(),
+              100
+            ) as sample_row
+            where sample_row.wait_event = 'UpgradeProbe:Preserved'
+              and sample_row.query_id = 424242
+            limit 1;
+            assert v_until is not null,
+              'seeded v1.5 raw sample was not preserved/decodable after upgrade';
+            v_since := v_until - interval '5 minutes';
 
             -- Exercise every 2.0 reader on the upgraded state. Catalog checks
             -- above prove surface convergence; these assertions prove behavior.
+            -- Anchor the window to the seeded sample so a wall-clock minute
+            -- rollover during the upgrade cannot move it outside the 1m case.
             select count(*),
                    max(buckets_with_data) filter (where period = '1m')
               into v_count, v_data_points
@@ -6176,6 +6186,7 @@ jobs:
             v_call text;
             v_cnt bigint;
             v_failed text[] := '{}';
+            v_admin_denied boolean := false;
           begin
             foreach v_call in array v_calls loop
               begin
@@ -6187,6 +6198,15 @@ jobs:
             end loop;
             assert cardinality(v_failed) = 0,
               '#107: preserved reader cannot use the 2.0 surface: ' || array_to_string(v_failed, '; ');
+
+            begin
+              perform ash.take_sample();
+            exception
+              when insufficient_privilege then
+                v_admin_denied := true;
+            end;
+            assert v_admin_denied,
+              '#107: preserved reader unexpectedly executed ash.take_sample';
             raise notice 'issue #107: preserved reader can call the full 2.0 surface';
           end $$;
           reset role;
