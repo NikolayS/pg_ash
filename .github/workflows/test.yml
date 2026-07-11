@@ -3367,6 +3367,9 @@ jobs:
               assert v_total_count = 3,
                 'wait_counts total should be 3 (not double-counted across states), got '
                   || v_total_count || ' — wait_counts=' || v_row.wait_counts::text;
+              assert v_row.wait_counts = array[v_active_cr_id::int4, 3],
+                'wait_counts should preserve the exact ID/count collision {2,3}, got '
+                  || v_row.wait_counts::text;
 
               -- Only the 'active' wait_id should appear, never the 'idle' one
               -- (no sample referenced idle in transaction/ClientRead).
