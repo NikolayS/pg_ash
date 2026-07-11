@@ -3370,10 +3370,24 @@ jobs:
 
               -- Only the 'active' wait_id should appear, never the 'idle' one
               -- (no sample referenced idle in transaction/ClientRead).
-              assert not (v_idle_cr_id::int4 = any(v_row.wait_counts)),
+              assert not exists (
+                select 1
+                from generate_subscripts(
+                  v_row.wait_counts, 1
+                ) as pair_position(pos)
+                where pair_position.pos % 2 = 1
+                  and v_row.wait_counts[pair_position.pos] = v_idle_cr_id
+              ),
                 'idle-state ClientRead wait_id must not appear in wait_counts: '
                   || v_row.wait_counts::text;
-              assert v_active_cr_id::int4 = any(v_row.wait_counts),
+              assert exists (
+                select 1
+                from generate_subscripts(
+                  v_row.wait_counts, 1
+                ) as pair_position(pos)
+                where pair_position.pos % 2 = 1
+                  and v_row.wait_counts[pair_position.pos] = v_active_cr_id
+              ),
                 'active-state ClientRead wait_id must appear in wait_counts';
 
               raise notice 'ClientRead state-disambiguation regression test PASSED';
