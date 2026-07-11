@@ -5767,6 +5767,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
           # Idempotency scope (issue #50, blueprints/SPEC.md "Legacy
           # upgrade-script idempotency"): finalized legacy upgrade scripts
           # are immutable and idempotent only on the version just below —
@@ -5780,12 +5784,18 @@ jobs:
           # one-shot upgrade-chain tests above.
           python3 devel/scripts/ash_sql_chain.py fresh-install-path | sed 's#^#\\i #' > /tmp/ash_fresh_install.sql
           python3 devel/scripts/ash_sql_chain.py reapply-chain > /tmp/ash_reapply_chain.sql
-          if [ ! -s /tmp/ash_reapply_chain.sql ]; then
-            echo "No in-progress migrations to re-apply; release-wrapper re-apply is tested by the pinned v1.5 upgrade step."
+          if [[ ! -s /tmp/ash_reapply_chain.sql ]]; then
+            printf '%s\n' \
+              "No in-progress migrations to re-apply; the pinned v1.5 upgrade step tests release-wrapper re-apply."
             exit 0
           fi
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
+          psql \
+            --no-psqlrc \
+            --host=localhost \
+            --username=postgres \
+            --dbname=postgres \
+            --set=ON_ERROR_STOP=1 \
+            --set=expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
           select set_config('pg_ash.expected_version', :'expected_version', false);
 
           \i /tmp/ash_fresh_install.sql
@@ -5828,6 +5838,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
           # Issue #107 (B1): the installer drops and recreates functions whose
           # signatures changed across versions, and DROP FUNCTION destroys
           # EXECUTE grants that CREATE OR REPLACE would have preserved. A
@@ -5840,8 +5854,13 @@ jobs:
           # 1.3-to-1.4 shim intentionally replays the current installer, so it
           # now jumps directly to 2.0 before the 1.5-to-2.0 wrapper is reached.
           git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
+          psql \
+            --no-psqlrc \
+            --host=localhost \
+            --username=postgres \
+            --dbname=postgres \
+            --set=ON_ERROR_STOP=1 \
+            --set=expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" << 'EOF'
           select set_config('pg_ash.expected_version', :'expected_version', false);
           \i /tmp/ash-v1.5-install.sql
 
@@ -5925,6 +5944,16 @@ jobs:
             v_default text;
             v_expected text := current_setting('pg_ash.expected_version');
             v_count int;
+            v_data_points bigint;
+            v_positive_rows bigint;
+            v_legend_rows bigint;
+            v_since timestamptz := date_trunc('minute', now())
+              - interval '5 minutes';
+            v_until timestamptz := date_trunc('minute', now());
+            v_aas record;
+            v_compare record;
+            v_top record;
+            v_report jsonb;
           begin
             assert (select version from ash.config where singleton) = v_expected,
               'v1.5-to-current upgrade stamped the wrong ash.config.version';
@@ -5978,6 +6007,91 @@ jobs:
               where wait_event = 'UpgradeProbe:Preserved'
                 and query_id = 424242
             ), 'seeded v1.5 raw sample was not preserved/decodable after upgrade';
+
+            -- Exercise every 2.0 reader on the upgraded state. Catalog checks
+            -- above prove surface convergence; these assertions prove behavior.
+            select count(*),
+                   max(buckets_with_data) filter (where period = '1m')
+              into v_count, v_data_points
+            from ash.periods(v_until);
+            assert v_count = 6,
+              format('ash.periods expected 6 standard windows, got %s', v_count);
+            assert v_data_points = 1,
+              format('ash.periods 1m expected 1 data bucket, got %s',
+                     v_data_points);
+
+            select * into v_aas from ash.aas(v_since, v_until);
+            assert v_aas.buckets_with_data = 1,
+              format('ash.aas expected 1 data bucket, got %s',
+                     v_aas.buckets_with_data);
+            assert v_aas.backend_seconds = 7.00,
+              format('ash.aas expected 7 backend-seconds, got %s',
+                     v_aas.backend_seconds);
+
+            select count(*), sum(data_points)
+              into v_count, v_data_points
+            from ash.timeline(v_since, v_until, interval '1 minute');
+            assert v_count = 5,
+              format('ash.timeline expected 5 buckets, got %s', v_count);
+            assert v_data_points = 1,
+              format('ash.timeline expected 1 data point, got %s',
+                     v_data_points);
+
+            select * into v_top
+            from ash.top('wait_event', v_since, v_until, n => 10);
+            assert v_top.key = 'UpgradeProbe:Preserved',
+              format('ash.top returned unexpected key: %s', v_top.key);
+            assert v_top.backend_seconds = 7.00 and v_top.pct = 100.00,
+              format('ash.top expected 7 backend-seconds at 100%%, got %s at %s%%',
+                     v_top.backend_seconds, v_top.pct);
+
+            select * into v_compare
+            from ash.compare(v_since, v_until, v_since, v_until);
+            assert v_compare.key = 'overall' and v_compare.avg_delta = 0.00,
+              format('ash.compare identical windows expected zero delta, got %s',
+                     v_compare.avg_delta);
+
+            select count(*) into v_count
+            from ash.samples(v_since, v_until, 100)
+            where wait_event = 'UpgradeProbe:Preserved'
+              and query_id = 424242
+              and active_backends = 1;
+            assert v_count = 1,
+              format('ash.samples expected exactly 1 seeded row, got %s', v_count);
+
+            perform ash.rollup_minute();
+            v_report := ash.report(v_since, v_until);
+            assert (v_report #>> '{coverage,minutes_with_data}')::int = 1,
+              format('ash.report expected 1 covered minute, got %s',
+                     v_report #>> '{coverage,minutes_with_data}');
+
+            select count(*),
+                   count(*) filter (where bucket_start is null),
+                   count(*) filter (where aas > 0)
+              into v_count, v_legend_rows, v_positive_rows
+            from ash.chart(
+              v_since,
+              v_until,
+              interval '1 minute',
+              3,
+              40,
+              false
+            );
+            assert v_count = 6 and v_legend_rows = 1 and v_positive_rows = 1,
+              format(
+                'ash.chart expected 6 rows/1 legend/1 active, got %s/%s/%s',
+                v_count,
+                v_legend_rows,
+                v_positive_rows
+              );
+
+            select count(*) into v_count
+            from ash.summary(v_since, v_until)
+            where metric = 'top_wait_1'
+              and value like 'UpgradeProbe:Preserved%';
+            assert v_count = 1,
+              format('ash.summary expected the seeded top wait, got %s row(s)',
+                     v_count);
           end $$;
 
           -- ACL equivalence sweep: every function name the reader could
@@ -6209,6 +6323,18 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
+          psql_base=(
+            psql
+            --no-psqlrc
+            --host=localhost
+            --username=postgres
+            --dbname=postgres
+          )
+
           cat > /tmp/ash_schema_snapshot.sql << 'SNAPSQL'
           \pset tuples_only on
           \pset format unaligned
@@ -6274,23 +6400,50 @@ jobs:
           git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
 
           # 1) Fresh install → snapshot
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/fresh_schema.txt
-          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
+          "${psql_base[@]}" \
+            --set=ON_ERROR_STOP=1 \
+            --file="$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" \
+            > /dev/null 2>&1
+          "${psql_base[@]}" \
+            --set=ON_ERROR_STOP=1 \
+            --file=/tmp/ash_schema_snapshot.sql \
+            > /tmp/fresh_schema.txt
+          "${psql_base[@]}" \
+            --command="select ash.uninstall('yes')" \
+            > /dev/null 2>&1
 
           # 2) Full upgrade path → snapshot
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_full_upgrade_chain.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_schema.txt
-          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
+          "${psql_base[@]}" \
+            --set=ON_ERROR_STOP=1 \
+            --file=/tmp/ash_full_upgrade_chain.sql \
+            > /dev/null 2>&1
+          "${psql_base[@]}" \
+            --set=ON_ERROR_STOP=1 \
+            --file=/tmp/ash_schema_snapshot.sql \
+            > /tmp/upgraded_schema.txt
+          "${psql_base[@]}" \
+            --command="select ash.uninstall('yes')" \
+            > /dev/null 2>&1
 
           # 3) Actual previous release → current release wrapper → snapshot.
           # This must remain separate from full-upgrade-chain: historical
           # installer shims replay the current installer and therefore cannot
           # prove the final v1.5-to-current edge after a release stamp.
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash-v1.5-install.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f sql/ash-1.5-to-2.0.sql > /dev/null 2>&1
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/ash_schema_snapshot.sql > /tmp/upgraded_v15_schema.txt
-          psql -h localhost -U postgres -d postgres -c "select ash.uninstall('yes')" > /dev/null 2>&1
+          "${psql_base[@]}" \
+            --set=ON_ERROR_STOP=1 \
+            --file=/tmp/ash-v1.5-install.sql \
+            > /dev/null 2>&1
+          "${psql_base[@]}" \
+            --set=ON_ERROR_STOP=1 \
+            --file=sql/ash-1.5-to-2.0.sql \
+            > /dev/null 2>&1
+          "${psql_base[@]}" \
+            --set=ON_ERROR_STOP=1 \
+            --file=/tmp/ash_schema_snapshot.sql \
+            > /tmp/upgraded_v15_schema.txt
+          "${psql_base[@]}" \
+            --command="select ash.uninstall('yes')" \
+            > /dev/null 2>&1
 
           # 4) Compare fresh against both supported upgrade paths.
           if diff -u /tmp/fresh_schema.txt /tmp/upgraded_schema.txt; then
