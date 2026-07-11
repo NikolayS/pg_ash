@@ -36,14 +36,19 @@ HOT_ROW_AID="${HOT_ROW_AID:-42}"
 log() { printf '[workload %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM
   # Kill everything this script launched, but don't noisily report failures —
   # the container keeps running and we just want a clean exit.
   jobs -p | xargs -r kill -TERM 2>/dev/null || true
   sleep 0.3
   jobs -p | xargs -r kill -KILL 2>/dev/null || true
   wait 2>/dev/null || true
+  exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---- Phase 1: baseline ------------------------------------------------------
 log "phase 1: baseline pgbench (${BASELINE_SEC}s, ${PGBENCH_CLIENTS} clients, SELECT-only)"
