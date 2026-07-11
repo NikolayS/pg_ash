@@ -11,10 +11,20 @@
 # The workload runs inside the container, talks to PG via the local UNIX socket,
 # and writes only phase markers to stdout (not visible in the recorded pane).
 
-set -euo pipefail
+set -Eeuo pipefail
+IFS=$'\n\t'
+export PAGER=cat
 
 PSQL_BIN=psql
-PSQL_ARGS=(-X -qAt -U postgres -d demo)
+PSQL_ARGS=(
+  --no-psqlrc
+  --quiet
+  --no-align
+  --tuples-only
+  --set=ON_ERROR_STOP=1
+  --username=postgres
+  --dbname=demo
+)
 BASELINE_SEC="${BASELINE_SEC:-15}"
 SPIKE_SEC="${SPIKE_SEC:-30}"
 TAIL_SEC="${TAIL_SEC:-45}"
@@ -55,7 +65,7 @@ pgbench -U postgres -d demo -S -c 2 -j 1 -T "$SPIKE_SEC" -n \
 # Each iteration holds the row for LOCK_SLEEP_SEC; contenders queue on it.
 (
   end=$(( $(date +%s) + SPIKE_SEC ))
-  while [ "$(date +%s)" -lt "$end" ]; do
+  while (( $(date +%s) < end )); do
     "$PSQL_BIN" "${PSQL_ARGS[@]}" <<SQL >/dev/null 2>&1 || true
 begin;
 update pgbench_accounts set abalance = abalance + 1 where aid = ${HOT_ROW_AID};
@@ -68,11 +78,11 @@ SQL
 # N contender loops: each hammers the same row. With the holder occupying the
 # row for LOCK_SLEEP_SEC at a time, every contender always finds a locked row
 # and enters the wait queue → Lock:tuple + Lock:transactionid.
-for _ in $(seq 1 "$LOCK_WORKERS"); do
+for (( worker = 0; worker < LOCK_WORKERS; worker++ )); do
   (
     end=$(( $(date +%s) + SPIKE_SEC ))
-    while [ "$(date +%s)" -lt "$end" ]; do
-      "$PSQL_BIN" "${PSQL_ARGS[@]}" -c \
+    while (( $(date +%s) < end )); do
+      "$PSQL_BIN" "${PSQL_ARGS[@]}" --command \
         "update pgbench_accounts set abalance = abalance - 1 where aid = ${HOT_ROW_AID};" \
         >/dev/null 2>&1 || true
     done

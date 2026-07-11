@@ -19,6 +19,8 @@
 # Clean:  ./demos/record.sh clean
 
 set -Eeuo pipefail
+IFS=$'\n\t'
+export PAGER=cat
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -97,36 +99,42 @@ require() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"
 
 show_setup_diagnostics() {
   log "demo entrypoint log:"
-  $DOCKER exec "$CONTAINER" sh -c \
+  "$DOCKER" exec "$CONTAINER" sh -c \
     "if [ -f '$ENTRYPOINT_LOG' ]; then cat '$ENTRYPOINT_LOG'; else echo '(entrypoint log missing)'; fi" \
     >&2 || true
   log "Postgres container log (last 100 lines):"
-  $DOCKER logs --tail 100 "$CONTAINER" >&2 || true
+  "$DOCKER" logs --tail 100 "$CONTAINER" >&2 || true
 }
 
 cleanup() {
   local rc=$?
+  trap - EXIT INT TERM
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  if [ "${KEEP_CONTAINER:-0}" != "1" ]; then
+  if [[ "${KEEP_CONTAINER:-0}" != "1" ]]; then
     log "stopping container $CONTAINER"
-    $DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    "$DOCKER" rm -f "$CONTAINER" >/dev/null 2>&1 || true
   else
     log "KEEP_CONTAINER=1 — leaving $CONTAINER running"
   fi
-  return $rc
+  exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-if [ "${1:-}" = "clean" ]; then
+if [[ "${1:-}" == "clean" ]]; then
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  $DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  "$DOCKER" rm -f "$CONTAINER" >/dev/null 2>&1 || true
   rm -f "$CAST" "$GIF"
   log "cleaned container, cast, gif"
   trap - EXIT
   exit 0
 fi
 
-for t in docker tmux asciinema agg python3; do require "$t"; done
+require "$DOCKER"
+for tool in tmux asciinema agg python3; do
+  require "$tool"
+done
 [[ "$SETUP_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] \
   || die "SETUP_TIMEOUT_SEC must be a positive integer, got: $SETUP_TIMEOUT_SEC"
 INSTALL_REL="$(python3 "$REPO/devel/scripts/ash_sql_chain.py" fresh-install-path)"
@@ -139,9 +147,13 @@ INSTALL_SQL="${ASH_INSTALL_SQL:-/repo/$INSTALL_REL}"
 # base image + runtime install if the Dockerfile is absent or the build fails.
 RUN_IMAGE="$IMAGE"
 BAKED=0
-if [ -f "$DOCKERFILE" ]; then
+if [[ -f "$DOCKERFILE" ]]; then
   log "building pre-baked image $BAKED_IMAGE (PG_MAJOR=$PG_MAJOR)"
-  if $DOCKER build --build-arg "PG_MAJOR=$PG_MAJOR" -t "$BAKED_IMAGE" "$HERE" >/dev/null 2>&1; then
+  if "$DOCKER" build \
+    --build-arg "PG_MAJOR=$PG_MAJOR" \
+    --tag "$BAKED_IMAGE" \
+    "$HERE" \
+    >/dev/null 2>&1; then
     RUN_IMAGE="$BAKED_IMAGE"
     BAKED=1
     log "using pre-baked image $BAKED_IMAGE"
@@ -150,10 +162,10 @@ if [ -f "$DOCKERFILE" ]; then
   fi
 fi
 
-$DOCKER rm -f "$CONTAINER" >/dev/null 2>&1 || true
+"$DOCKER" rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 log "starting $RUN_IMAGE as $CONTAINER"
-$DOCKER run -d --name "$CONTAINER" \
+"$DOCKER" run --detach --name "$CONTAINER" \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=postgres \
   -v "$REPO":/repo:ro \
@@ -162,17 +174,21 @@ $DOCKER run -d --name "$CONTAINER" \
   -c log_min_messages=warning \
   >/dev/null
 
-log "waiting for first-boot PostgreSQL"
-until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+log "waiting for first-boot Postgres"
+until "$DOCKER" exec "$CONTAINER" \
+  pg_isready --username=postgres --quiet \
+  >/dev/null 2>&1; do
+  sleep 0.5
+done
 
-if [ "$BAKED" -eq 1 ]; then
+if (( BAKED == 1 )); then
   log "pre-baked image already preloads pg_cron + pg_stat_statements — no runtime install/restart"
 else
   log "installing pg_cron package + configuring shared_preload_libraries"
   # PG_MAJOR and PGDATA are provided by the Postgres image and expand inside
   # the container, not in this host-side recorder shell.
   # shellcheck disable=SC2016
-  $DOCKER exec "$CONTAINER" bash -c '
+  "$DOCKER" exec "$CONTAINER" bash -c '
     set -e
     apt-get update -qq >/dev/null 2>&1
     apt-get install -y -qq "postgresql-${PG_MAJOR}-cron" >/dev/null 2>&1
@@ -186,22 +202,26 @@ CONF
   ' >/dev/null 2>&1
 
   log "restarting container so pg_cron + pg_stat_statements load"
-  $DOCKER restart "$CONTAINER" >/dev/null
-  until $DOCKER exec "$CONTAINER" pg_isready -U postgres -q >/dev/null 2>&1; do sleep 0.5; done
+  "$DOCKER" restart "$CONTAINER" >/dev/null
+  until "$DOCKER" exec "$CONTAINER" \
+    pg_isready --username=postgres --quiet \
+    >/dev/null 2>&1; do
+    sleep 0.5
+  done
 fi
 
 # --- 2. Install pg_ash + seed + start sampling + workload --------------------
 log "installing pg_ash, seeding pgbench, starting sampling, kicking off workload"
 log "  installer: $INSTALL_SQL"
 log "  workload phases: baseline=${BASELINE_SEC}s spike=${SPIKE_SEC}s tail=${TAIL_SEC}s"
-$DOCKER exec "$CONTAINER" rm -f \
+"$DOCKER" exec "$CONTAINER" rm -f \
   "$READY_FILE" "$ENTRYPOINT_LOG" "$ENTRYPOINT_STATUS"
 # The detached wrapper records an early entrypoint exit. On success the
 # entrypoint keeps running, writes READY_FILE after setup, and never reaches
 # the status write until the container is stopped.
 # rc/status expansion belongs inside the container.
 # shellcheck disable=SC2016
-if ! $DOCKER exec -d \
+if ! "$DOCKER" exec --detach \
   -e BASELINE_SEC="$BASELINE_SEC" \
   -e SPIKE_SEC="$SPIKE_SEC" \
   -e TAIL_SEC="$TAIL_SEC" \
@@ -215,20 +235,26 @@ fi
 
 log "waiting for demo setup readiness (timeout=${SETUP_TIMEOUT_SEC}s)"
 setup_deadline=$(( SECONDS + SETUP_TIMEOUT_SEC ))
-while ! $DOCKER exec "$CONTAINER" test -f "$READY_FILE" 2>/dev/null; do
-  if $DOCKER exec "$CONTAINER" test -f "$ENTRYPOINT_STATUS" 2>/dev/null; then
-    setup_rc="$($DOCKER exec "$CONTAINER" cat "$ENTRYPOINT_STATUS" 2>/dev/null || echo unknown)"
+while ! "$DOCKER" exec "$CONTAINER" test -f "$READY_FILE" 2>/dev/null; do
+  if "$DOCKER" exec "$CONTAINER" test -f "$ENTRYPOINT_STATUS" 2>/dev/null; then
+    setup_rc="$(
+      "$DOCKER" exec "$CONTAINER" cat "$ENTRYPOINT_STATUS" 2>/dev/null \
+        || printf '%s\n' unknown
+    )"
     show_setup_diagnostics
     die "demo setup exited before readiness (rc=$setup_rc)"
   fi
 
-  container_running="$($DOCKER inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
-  if [ "$container_running" != "true" ]; then
+  container_running="$(
+    "$DOCKER" inspect --format '{{.State.Running}}' "$CONTAINER" \
+      2>/dev/null || true
+  )"
+  if [[ "$container_running" != "true" ]]; then
     show_setup_diagnostics
     die "demo container stopped before setup completed"
   fi
 
-  if [ "$SECONDS" -ge "$setup_deadline" ]; then
+  if (( SECONDS >= setup_deadline )); then
     show_setup_diagnostics
     die "demo setup did not become ready within ${SETUP_TIMEOUT_SEC}s"
   fi
@@ -256,7 +282,7 @@ sleep "$WARMUP_SEC"
 #     terminal renders the colored bars. Mirrors the README pattern but
 #     skips `less -R` so the output is non-interactive (the recorder cannot
 #     drive an interactive pager).
-$DOCKER exec "$CONTAINER" bash -c "cat >/root/.psqlrc <<'PSQLRC'
+"$DOCKER" exec "$CONTAINER" bash -c "cat >/root/.psqlrc <<'PSQLRC'
 \\set QUIET on
 \\pset pager off
 \\pset border 2
@@ -286,7 +312,7 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 # the recorder works on both. (agg + the t=0 post-process below handle the v3
 # asciicast-v3 output format as well as v2.)
 ASCIINEMA_MAJOR="$(asciinema --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
-if [ "${ASCIINEMA_MAJOR:-2}" -ge 3 ]; then
+if (( ${ASCIINEMA_MAJOR:-2} >= 3 )); then
   ASCIINEMA_GEO="--window-size ${COLS}x${ROWS}"
   ASCIINEMA_ENV="--capture-env TERM,SHELL"
 else
@@ -297,14 +323,17 @@ log "asciinema major version ${ASCIINEMA_MAJOR:-unknown} — geometry flags: ${A
 
 # Ship a tiny splash script into the container. It prints a coloured banner
 # (that becomes the GIF's first frame / GitHub thumbnail) and then execs psql.
-# Banner is sized for the wider 140-col terminal (138-char inner box).
-$DOCKER exec "$CONTAINER" bash -c 'cat >/tmp/ash_splash.sh <<"SPLASH"
-#!/bin/bash
+# The fixed banner fits inside the wider 168-column recording terminal.
+"$DOCKER" exec "$CONTAINER" bash -c 'cat >/tmp/ash_splash.sh <<"SPLASH"
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'"'"'\\n\\t'"'"'
+export PAGER=cat
 printf "\033[38;2;080;250;123m"
 cat <<BANNER
 ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                                                        ║
-║   pg_ash v2.0   —   Active Session History for Postgres                                                                                ║
+║   pg_ash 2.0 reader API   —   Active Session History for Postgres                                                                      ║
 ║                                                                                                                                        ║
 ║   Pure SQL. No extension. Installs via \i on RDS / Cloud SQL / Supabase / Neon.                                                        ║
 ║                                                                                                                                        ║
@@ -313,7 +342,9 @@ cat <<BANNER
 ╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
 BANNER
 printf "\033[0m\n"
-exec psql -U postgres -d demo
+# This interactive recorder intentionally loads the generated /root/.psqlrc;
+# non-interactive demo commands use --no-psqlrc.
+exec psql --username=postgres --dbname=demo
 SPLASH
 chmod +x /tmp/ash_splash.sh
 '
@@ -348,7 +379,7 @@ human_type_and_send() {
   for (( i=0; i<n; i++ )); do
     ch="${text:$i:1}"
     # Random delay in [TYPE_MIN_MS, TYPE_MAX_MS] inclusive.
-    if [ "$span" -gt 0 ]; then
+    if (( span > 0 )); then
       ms=$(( TYPE_MIN_MS + ( RANDOM % (span + 1) ) ))
     else
       ms=$TYPE_MIN_MS
@@ -369,7 +400,7 @@ human_type_and_send() {
     # space along with the semicolon to keep it from being eaten. That extra
     # space is a no-op everywhere in psql syntax.
     send_str="$ch"
-    if [ "$ch" = ";" ]; then
+    if [[ "$ch" == ";" ]]; then
       send_str="; "
     fi
     tmux send-keys -t "$SESSION" -l -- "$send_str"
@@ -476,7 +507,7 @@ sleep 0.6
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 sleep "$POST_WAIT"
 
-[ -s "$CAST" ] || die "asciinema did not produce $CAST"
+[[ -s "$CAST" ]] || die "asciinema did not produce $CAST"
 log "cast written: $(du -h "$CAST" | cut -f1)"
 
 # --- 5. Shift the first cast event to t=0 ------------------------------------
@@ -487,7 +518,8 @@ log "cast written: $(du -h "$CAST" | cut -f1)"
 # from ~0.07 to 0.0 so the splash IS the first frame. Subsequent event
 # timings are unchanged (they are relative deltas from the previous event).
 python3 - "$CAST" <<'PY'
-import json, sys
+import json
+import sys
 path = sys.argv[1]
 with open(path) as f:
     lines = f.readlines()
@@ -517,7 +549,8 @@ log "gif (pre-optim): $(du -h "$GIF" | cut -f1)"
 # --- 7. Optional optimisation pass -------------------------------------------
 # gifsicle halves the file size with no visible quality loss (palette merge +
 # transparency optimisation). Skip gracefully if it's not installed.
-if command -v gifsicle >/dev/null 2>&1 && [ "${SKIP_GIFSICLE:-0}" != "1" ]; then
+if command -v gifsicle >/dev/null 2>&1 \
+  && [[ "${SKIP_GIFSICLE:-0}" != "1" ]]; then
   log "optimizing with gifsicle"
   gifsicle -O3 --lossy=40 --colors 128 "$GIF" -o "$GIF.opt" && mv "$GIF.opt" "$GIF"
   log "gif (final): $(du -h "$GIF" | cut -f1)"

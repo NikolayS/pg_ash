@@ -73,7 +73,42 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Smoke-test demo install and sampling
-        run: make -C demos smoke
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          make -C demos smoke
+
+      - name: Demo smoke surfaces installer failure promptly
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          started_at=$SECONDS
+          set +e
+          output="$(
+            ASH_INSTALL_SQL=/repo/does-not-exist.sql \
+              make -C demos smoke 2>&1
+          )"
+          smoke_rc=$?
+          set -e
+          elapsed=$(( SECONDS - started_at ))
+          printf '%s\n' "$output"
+
+          if (( smoke_rc == 0 )); then
+            printf '%s\n' \
+              "demo smoke unexpectedly accepted a missing installer" >&2
+            exit 1
+          fi
+          if (( elapsed >= 60 )); then
+            printf 'demo smoke took %s seconds to surface setup failure\n' \
+              "$elapsed" >&2
+            exit 1
+          fi
+          printf '%s\n' "$output" \
+            | grep -Fq 'pg_ash installer not readable'
+          printf '%s\n' "$output" \
+            | grep -Fq 'demo setup exited before readiness'
 
   test:
     runs-on: ubuntu-latest

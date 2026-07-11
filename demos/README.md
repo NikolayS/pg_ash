@@ -101,7 +101,7 @@ Override via environment variables:
 | `LOCK_WORKERS` | 5 | Contender count — more = more lock waits |
 | `KEEP_CONTAINER` | 0 | Set `1` to leave the container running after recording (for re-takes) |
 | `PG_MAJOR` | 18 | Postgres major version — sets both the base image (`postgres:$PG_MAJOR`) and the pre-baked image tag/build arg |
-| `SETUP_TIMEOUT_SEC` | 120 | Maximum wait for install, pgbench initialization, sampler start, and workload launch |
+| `SETUP_TIMEOUT_SEC` | 120 | Maximum wait, in seconds, for install, pgbench initialization, sampler start, and workload launch |
 
 Example — slower pacing and a larger spike:
 
@@ -208,7 +208,7 @@ pg_ash palette.
 
 **GIF too large for README** — drop the font size (`--font-size 14`) or the
 FPS cap (`--fps-cap 10`) when invoking `agg`. The target for this repo is
-≤ 3 MB.
+≤ 3 MiB.
 
 ---
 
