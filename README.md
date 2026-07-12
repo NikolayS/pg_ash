@@ -1,18 +1,18 @@
-# pg_ash
+# pg_ash: Active Session History for Postgres
 
 [![CI](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml/badge.svg)](https://github.com/NikolayS/pg_ash/actions/workflows/test.yml)
 [![Postgres 14-19](https://img.shields.io/badge/Postgres-14--19-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/pg_ash)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Pure SQL](https://img.shields.io/badge/Pure_SQL-no_C_extension-green)](https://github.com/NikolayS/pg_ash)
 
-Active Session History for Postgres, implemented in plain SQL and PL/pgSQL.
+pg_ash is Active Session History (ASH) for Postgres, implemented in plain SQL and PL/pgSQL.
 
 pg_ash samples `pg_stat_activity`, stores compact wait-event history in the
 database, and lets you answer "what was happening then?" after the problem is
 gone. It works on managed Postgres because it is not a C extension: no
 `shared_preload_libraries`, no provider approval, no restart.
 
-## Why
+## Why pg_ash
 
 Postgres has excellent current-state views, but almost no built-in memory. If a
 lock storm ended ten minutes ago, `pg_stat_activity` cannot tell you who waited,
@@ -28,7 +28,7 @@ Use pg_ash when you need:
 - a tool that can run on RDS, Cloud SQL, AlloyDB, Supabase, Neon, and similar
   managed platforms
 
-## Quick Start
+## Quick start
 
 The current `main` branch contains the 2.0 beta 1 SQL in `sql/`.
 
@@ -45,7 +45,7 @@ select * from ash.top('query_id');
 select * from ash.chart(since => now() - interval '5 minutes', color => true);
 ```
 
-## Color Output
+## Color output
 
 pg_ash can render compact terminal charts with ANSI colors when `color => true`
 or `set ash.color = on` is used.
@@ -60,7 +60,7 @@ For the latest stable v1.5 tag, check out `v1.5` first and use:
 \i sql/ash-install.sql
 ```
 
-## Upgrade To 2.0
+## Upgrade to 2.0
 
 2.0 is a breaking reader-API release. Upgrade scripts are cumulative; run the
 missing scripts in order.
@@ -97,7 +97,7 @@ Full mapping: [`blueprints/AAS_EXAMPLES.md`](blueprints/AAS_EXAMPLES.md).
 
 ## Reader API
 
-Start with `ash.periods()`, then drill with `ash.timeline()` and `ash.top()`.
+Start with `ash.periods()`, then drill down with `ash.timeline()` and `ash.top()`.
 Every reader reports its data source: `raw`, `rollup_1m`, `rollup_1h`, or
 `none`.
 
@@ -131,7 +131,7 @@ Filters are consistent where they apply:
 is usually the right first cut because it surfaces short spikes that averages
 hide.
 
-## Investigation Flow
+## Investigation flow
 
 ### 1. Is it bad now, or was it a spike?
 
@@ -200,7 +200,7 @@ from ash.top(
 );
 ```
 
-Then flip the drill around:
+Then reverse the drill-down:
 
 ```sql
 select *
@@ -211,7 +211,7 @@ from ash.top(
 );
 ```
 
-Combining a query filter with a wait filter needs the raw wait-query tie. If
+Combining a query filter with a wait filter requires the raw wait-to-query link. If
 the window is past raw retention, pg_ash raises with the raw-retention boundary
 instead of returning a fake empty result.
 
@@ -238,7 +238,7 @@ Dump a wider incident window with psql:
 ) to '/tmp/ash-incident.csv' csv header
 ```
 
-## Chart Rendering
+## Chart rendering
 
 `ash.chart()` is for humans. `ash.timeline()` is the typed-data companion.
 
@@ -275,7 +275,7 @@ Then run:
 select * from ash.chart(since => now() - interval '1 hour', color => true) :color
 ```
 
-## Machine Report
+## Machine report
 
 `ash.report()` returns one JSONB payload for monitoring and health-assessment
 systems.
@@ -355,7 +355,7 @@ alter system set cron.log_run = off;
 
 This requires a restart because `cron.log_run` is postmaster-context.
 
-## Retention And Storage
+## Retention and storage
 
 Raw samples use a PGQ-style ring of partitions. Defaults:
 
@@ -374,7 +374,7 @@ select ash.start();
 ```
 
 `rebuild_partitions()` drops all raw samples and query-map partitions. Rollups
-survive. Re-run `ash.grant_reader()` for monitoring roles afterwards because
+survive. Re-run `ash.grant_reader()` for monitoring roles afterward because
 new partitions need fresh grants.
 
 Typical storage at 1-second sampling:
@@ -419,7 +419,7 @@ If `pg_stat_statements` is installed after pg_ash, or moved to another schema:
 select ash._apply_pgss_search_path();
 ```
 
-## Catalog Docs
+## Catalog docs
 
 pg_ash documents itself in the database:
 
@@ -446,7 +446,7 @@ alter system set compute_query_id = 'on';
 select pg_reload_conf();
 ```
 
-## Compared To Alternatives
+## Compared to alternatives
 
 | | pg_ash | pg_wait_sampling / pgsentinel | External sampling |
 |---|---|---|---|
@@ -458,10 +458,10 @@ select pg_reload_conf();
 | Sampling frequency | Usually 1s | Usually 10ms | Usually 15-60s |
 
 pg_ash is not a replacement for in-process 10ms samplers when you control the
-server and need sub-second detail. It is for durable, portable ASH on real
-managed Postgres.
+server and need sub-second detail. It is for durable, portable ASH on managed
+Postgres.
 
-## Known Limits
+## Known limits
 
 - Primary only: pg_ash writes sample and rollup rows.
 - It samples one database installation but sees activity from all databases.

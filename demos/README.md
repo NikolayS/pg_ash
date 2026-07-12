@@ -1,8 +1,8 @@
 # pg_ash demo recording
 
 This directory contains the experimental animated GIF recorder for pg_ash demos.
-The generated GIF is not embedded in the top-level README until its rendering is
-readable on GitHub desktop and mobile.
+The generated GIF is not embedded in the top-level README until it renders
+readably on GitHub on both desktop and mobile.
 
 | File | What it is |
 |------|-----------|
@@ -17,8 +17,8 @@ readable on GitHub desktop and mobile.
 ## What it shows
 
 The demo reproduces the investigation sequence from the README's **LLM-assisted
-investigation** section on the 2.0 reader API, against a real spike (not canned
-output). Every reader answers in AAS (average active sessions):
+investigation** section using the 2.0 reader API, against a real spike (not
+canned output). Every reader reports in AAS (average active sessions):
 
 1. `ash.status()` — sampling active, version 2.0, pg_cron wired up
 2. `ash.periods()` — triage: last-minute `peak_aas` >> `avg_aas` = a spike, not sustained
@@ -28,10 +28,10 @@ output). Every reader answers in AAS (average active sessions):
 6. `ash.top('wait_event', query_id => <top_query_id>, ...)` — full wait profile of that query, closing the loop
 7. Closing frame (held ~3s) so the GIF loops gracefully in the README
 
-`ash.chart` is the only step that colors: in 2.0 the data readers (`periods`,
-`top`, `timeline`) return typed columns only. `ash.chart` is the sole reader
-that emits ANSI color; `ash.summary` is a render helper too but returns plain
-key/value text.
+`ash.chart` is the only colored step: in 2.0 the data readers (`periods`,
+`top`, `timeline`) return typed columns only, and `ash.chart` is the sole
+reader that emits ANSI color. `ash.summary` is also a render helper but
+returns plain key/value text.
 
 ## The spike
 
@@ -41,8 +41,8 @@ three seconds at a time. Every contender queues on `Lock:tuple` (with a smaller
 `Lock:transactionid` tail) behind the holder — guaranteed, reproducible, no
 host-level privileges required.
 
-Runs inside a plain `postgres:18` container; no kernel tweaks, no cgroup
-tricks, no custom Postgres build.
+Everything runs inside a plain `postgres:18` container; no kernel tweaks, no
+cgroup tricks, no custom Postgres build.
 
 ## Prerequisites
 
@@ -121,7 +121,7 @@ agg --font-size 10 --theme monokai --speed 1.0 --fps-cap 15 \
 The recorder simulates a human at the keyboard rather than pasting commands
 instantly. The `human_type_and_send` helper in `record.sh` walks each command
 string one character at a time, calling `tmux send-keys -l` per character and
-sleeping a randomised interval between keystrokes.
+sleeping a randomized interval between keystrokes.
 
 | Region | Delay |
 |--------|-------|
@@ -162,8 +162,8 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
   `~/.psqlrc`, *and* the one colored step — `ash.chart(...)` — passes
   `color => true` so its `chart` column comes back with ANSI codes. (In 2.0
   the data readers `periods` / `top` / `timeline` are presentation-free;
-  `ash.chart` is the only reader that emits color, and `ash.summary` — a render
-  helper too — returns plain key/value text.) The `:color` psql
+  `ash.chart` is the only reader that emits color, and `ash.summary` — also a
+  render helper — returns plain key/value text.) The `:color` psql
   variable (mirroring the README pattern) re-runs the previous query through
   `sed` to convert psql's literalised `\x1B` back into real ESC bytes — without
   this step psql's aligned formatter would mangle the codes. We omit `less -R`
@@ -188,7 +188,7 @@ TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezie
 
 **pre-baked build failed** — `record.sh` builds `demos/Dockerfile` (which
 `apt`-installs `postgresql-$PG_MAJOR-cron` from the PGDG mirror) once at the
-start of a run. If that mirror is unreachable the build fails and the recorder
+start of a run. If that mirror is unreachable, the build fails and the recorder
 logs a warning and falls back to the plain `postgres:$PG_MAJOR` base with the
 old runtime install + restart — so recording still proceeds. If the runtime
 fallback also can't fetch the package, temporarily set `ASH_CRON_OPTIONAL=1`

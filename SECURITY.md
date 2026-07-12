@@ -1,6 +1,6 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+## Supported versions
 
 | Version | Supported |
 | ------- | --------- |
@@ -22,7 +22,7 @@ pg_ash is a pure-SQL extension that samples `pg_stat_activity`. Relevant securit
 
 pg_ash uses session-known advisory-lock keys for sampler / rotate / rebuild / rollup coordination. The keys are derived deterministically from string literals in `ash-install.sql` (`hashtext('pg_ash')::int4`, `hashtext('pg_ash_<kind>')::int4`), so any user with `LOGIN` and `EXECUTE` on `pg_advisory_xact_lock` can compute and squat them, halting `take_sample`, `rotate`, `rollup_*`, or `rebuild_partitions` for the duration of their transaction. This is equivalent to the prior literal `(0, …)` / `(1, …)` design — choosing a hashed, ash-scoped namespace improves accidental cross-extension collision hygiene but does not stop a hostile session.
 
-Mitigation: revoke EXECUTE on the entire advisory-lock builtin family from `PUBLIC` (Postgres default grants the whole family broadly, and they all share the same lock namespace — so revoking only one variant is insufficient):
+Mitigation: revoke EXECUTE on the entire advisory-lock builtin family from `PUBLIC` (Postgres grants the whole family broadly by default, and they all share the same lock namespace — so revoking only one variant is insufficient):
 
 ```sql
 revoke execute on function
@@ -47,7 +47,7 @@ from public;
 
 Or run pg_ash in a dedicated database where untrusted roles cannot connect.
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
 Use GitHub's [private vulnerability reporting](https://github.com/NikolayS/pg_ash/security/advisories/new) to report security issues privately.
 
