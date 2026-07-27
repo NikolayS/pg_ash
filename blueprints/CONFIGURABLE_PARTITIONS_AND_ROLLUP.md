@@ -1325,7 +1325,7 @@ These were open in v0.1. All reviewers converged on the same answers:
 | 6 | Dynamic SQL for partition routing | `execute format(...)` in `take_sample()` and `rotate()`. ~0.1ms overhead at 1s interval. Eliminates duplicated code. |
 | 7 | `rebuild_partitions()` disable/lock/restart | Destructive operation requires explicit disable, advisory lock, brief drain, and manual restart. Prevents races with in-flight operations and external schedulers. |
 | 8 | Minimum 3 partitions | Ring buffer needs: current + previous + truncate target. |
-| 9 | Maximum 32 partitions | Implementation ceiling for UNION ALL view planning overhead. CI-benchmarked, not arbitrary. Fallback to real partitioned parent if exceeded. |
+| 9 | Maximum 32 partitions | Implementation ceiling chosen to contain UNION ALL view planning overhead; it is not currently performance-validated by CI. Revisit with a maintained N=16/N=32 benchmark and fall back to a real partitioned parent if exceeded. |
 | 10 | Config column for `num_partitions` | Singleton row design, consistent with existing `ash.config`. |
 | 11 | Watermark-based rollup execution | Catch-up capable, deterministic gap detection, idempotent replay. Fire-and-forget is too fragile for long-term storage. |
 | 12 | `rotate()` calls rollup before truncate | Belt-and-suspenders safeguard. Rollup is idempotent, so double-processing is safe. The forced rollup and subsequent truncate are **not** a single atomic unit — correctness depends on idempotent watermark advancement and the fact that missed minutes will be retried (either by the next scheduled cron call or the next rotation). |

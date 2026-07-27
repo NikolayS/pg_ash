@@ -382,7 +382,9 @@ select ash.start();
 survive. Re-run `ash.grant_reader()` for monitoring roles afterward because
 new partitions need fresh grants.
 
-Typical storage at 1-second sampling:
+Historical 1.x sizing estimates at 1-second sampling are shown below. Treat
+them as rough planning inputs and measure the 2.0 payload on the target
+workload:
 
 | Active backends | Raw storage/day | Default raw on disk |
 |---:|---:|---:|
@@ -391,7 +393,8 @@ Typical storage at 1-second sampling:
 | 100 | 50 MiB | 100 MiB |
 | 500 | 245 MiB | 490 MiB |
 
-Rollups add about 120 MiB per database for 5 years of trend data.
+The corresponding historical rollup estimate was about 120 MiB per database
+for 5 years of trend data.
 
 ## Privileges
 
@@ -476,8 +479,9 @@ Postgres.
   exhaust it faster on older Postgres versions.
 - Parallel workers share the leader query ID and count as separate active
   backends.
-- 1-second sampling generates WAL, roughly 29 KiB/sample in the current
-  benchmark.
+- Sampling generates WAL, but pg_ash does not currently ship a maintained 2.0
+  benchmark for a portable per-sample estimate. Measure WAL on the target
+  workload.
 - `sample_ts` is `int4` seconds since 2026-01-01 UTC; the horizon is around
   2094. `ash.status()` exposes remaining epoch seconds.
 - Advisory-lock squat DoS is possible for roles that can intentionally hold
