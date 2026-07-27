@@ -7110,6 +7110,7 @@ jobs:
                 num_partitions = 3,
                 sample_interval = interval '1 second',
                 rotation_period = interval '1 day',
+                rollup_1m_retention_days = 30,
                 rotated_at = v_end,
                 last_rollup_1m_ts = ash.ts_from_timestamptz(
                   v_start + interval '1 minute'
