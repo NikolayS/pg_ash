@@ -78,7 +78,8 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
   1. Returns one row per time bucket (bucket size configurable).
   2. Includes `peak_aas` per bucket (not just `avg_aas`), so short spikes are not averaged away; orderable by peak to surface the worst buckets.
   3. Auto-selects rollup granularity by span — per-minute for short spans, per-hour for long spans — and reaches back across the relevant rollup retention.
-  4. Distinguishes "no data" buckets from "zero load" buckets.
+  4. Marks buckets with no stored observation; sampled-idle and uncovered
+     time remain indistinguishable until issue #137 persists cadence/coverage.
 - **Primary API:** `ash.timeline(since, until, bucket)`.
 - **Coverage:** ✅ Covered by design ([AAS_API.md §2.3](AAS_API.md)); adds per-bucket `p99_aas` and explicit no-data rows.
 
@@ -131,7 +132,11 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
   4. Self-describing catalog comments (`obj_description`) covering the term, the columns, and the recommended next call.
   5. Callable by the least-privilege reader role, and degrades gracefully when pg_stat_statements is absent.
 - **Primary API:** cross-cutting across the whole family.
-- **Coverage:** ✅ Covered by design — `source` column on every reader, retention rows in `ash.status()`, and the raise-don't-return-empty rule for unanswerable drills ([AAS_API.md §5–§6](AAS_API.md)).
+- **Coverage:** ✅ Covered by design — typed aggregate readers expose `source`
+  fields, while `report` uses JSON coverage, `summary` a metric, `chart` a
+  planning `NOTICE`, and `samples` is raw-only; retention rows live in
+  `ash.status()`, with a raise-don't-return-empty rule for unanswerable drills
+  ([AAS_API.md §5–§6](AAS_API.md)).
 - **Drivable from the catalog alone.** pg_ash self-documents in-DB, which is what
   lets an agent navigate it without external docs: `COMMENT ON SCHEMA ash` names
   the reader entry points and the reader-vs-ops split, and **every** function —
@@ -154,7 +159,10 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
   2. Per-bucket `peak_aas` (and ideally `p99_aas`) preserved at hour/day grain.
   3. Works to the limit of `rollup_1h` retention and signals that horizon.
 - **Primary API:** `ash.timeline` over long spans.
-- **Coverage:** ✅ Covered — auto `rollup_1h` selection; `rollup_1h.minute_counts` preserves per-minute totals, so unfiltered/database-filtered long windows report exact minute-grain `peak_aas` and non-null `p99_aas` (seam-consistent with `rollup_1m`); `p99_aas` is null only for wait/query-filtered `rollup_1h`-backed buckets (hour grain).
+- **Coverage:** ✅ Covered — auto `rollup_1h` selection; valid
+  `rollup_1h.minute_counts` preserves unfiltered/database-only minute totals.
+  Wait/query dimensions and legacy/incomplete `rollup_1h_flat` data retain
+  hour grain and NULL extrema requested below that grain.
 
 ### US-7 — Before/after comparison
 
@@ -196,7 +204,7 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 | US-2 Locate | `timeline` | ✅ | — |
 | US-3 Drill | `top(dimension, filters…)` | ✅ | — |
 | US-4 Leaf | `aas(event…)` + `top('query_id', event…)` | ✅ | — |
-| US-5 Programmatic | whole family (`source` column, retention in `status()`) | ✅ | — |
+| US-5 Programmatic | whole family (explicit provenance, retention in `status()`) | ✅ | — |
 | US-6 Capacity | `timeline` (long span) | ✅ | — |
 | US-7 Before/after | `compare` | ✅ | — |
 | US-8 Load report | `report` | ✅ | — |
@@ -210,7 +218,10 @@ These apply to every story above.
 
 - **Unit consistency.** AAS is the primary unit (`avg_aas` / `peak_aas` / `p99_aas`); `backend_seconds` may appear as a secondary column. No third unit.
 - **Percentile definition.** `p99_aas` = the 99th percentile of per-sub-bucket AAS. The sub-bucket grain is a parameter (default `'1 minute'`). `peak_aas` is the max over the same sub-buckets.
-- **Raw-vs-rollup honesty (trust property).** Any reader auto-selects its source by window; when a requested drill or window cannot be answered (rollup can't tie event→query; window exceeds retention), it signals this explicitly rather than returning a silent empty/partial result.
+- **Raw-vs-rollup honesty (trust property).** Aggregate readers select or
+  declare their source by window; when a requested drill or window cannot be
+  answered (rollup can't tie event→query; window exceeds retention), it signals
+  this explicitly rather than returning a silent empty/partial result.
 - **Time addressing convention (2.0).** Every reader takes `since timestamptz default null` (→ `now() - '1 hour'`) and `until timestamptz default null` (→ `now()`). The v1.x `f(p_interval)` / `f_at(p_start, p_end)` twin convention is dropped — 2.0 breaks compat, and the single convention halves the surface. ([AAS_API.md §1](AAS_API.md))
 - **Naming.** Function and column names use full domain terms — no abbreviations in user-facing names. Drill dimensions and filters spell out `wait_event_type` / `wait_event` / `query_id` / `database`, as the `dimension` values and parameter names of `top`. The on-CPU class is spelled `CPU*` — the asterisk marks "on CPU *or* uninstrumented wait" and must not be dropped.
 - **Dual audience.** Data functions are typed and presentation-free; ASCII bars/charts live only in dedicated rendering helpers.
