@@ -103,8 +103,14 @@ Full mapping: [`blueprints/AAS_EXAMPLES.md`](blueprints/AAS_EXAMPLES.md).
 ## Reader API
 
 Start with `ash.periods()`, then drill down with `ash.timeline()` and `ash.top()`.
-Every reader reports its data source: `raw`, `rollup_1m`, `rollup_1h`, or
-`none`.
+Typed aggregate readers report `raw`, `rollup_1m`, `rollup_1h`,
+`rollup_1h_flat`, or `none`; `ash.compare()` reports `source_1` / `source_2`,
+`ash.report()` embeds provenance in JSON coverage, and `ash.summary()` includes
+separate headline and wait/query drill source/bounds metrics. `ash.samples()`
+is raw-only, and `ash.chart()` emits a planning `NOTICE` when hour grain widens
+the request. `rollup_1h_flat` means a
+minute-capable plan encountered legacy/incomplete detail and degraded honestly
+to hour grain.
 
 | Function | Use it for |
 |---|---|
@@ -134,14 +140,19 @@ Filters are consistent where they apply:
 
 `order_by` is `avg`, `peak`, or `p99`. During incidents, `order_by => 'peak'`
 is usually the right first cut because it surfaces short spikes that averages
-hide.
+hide. When retained grain is coarser than the requested bucket, peak/p99 are
+NULL instead of being filled with an hour average. Hour-only partial-window
+drills snap outward and disclose effective bounds/bucket; plain
+`top('database')` keeps minute precision through per-database `minute_counts`.
 
 ## Investigation flow
 
 ### 1. Is it bad now, or was it a spike?
 
 ```sql
-select * from ash.periods();
+select period, source, bucket, buckets_with_data,
+       avg_aas, peak_aas, p99_aas
+from ash.periods();
 ```
 
 Typical output:
@@ -160,7 +171,8 @@ load.
 ### 2. What kind of wait dominated?
 
 ```sql
-select *
+select key, query_text, source, avg_aas, peak_aas, p99_aas,
+       backend_seconds, pct
 from ash.top(
   'wait_event_type',
   since => now() - interval '5 minutes',

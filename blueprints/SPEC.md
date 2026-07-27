@@ -466,8 +466,9 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Respect config flag: `include_bg_workers`
 - Store `active_count` per row — total sampled backends for this datid+tick
 - **No row for zero activity:** If a database has zero matching backends in a
-  tick, no row is emitted. Gaps in the time series for a specific `datid` mean
-  "no active or idle-in-transaction sessions during those ticks" — not data loss.
+  tick, no row is emitted. The stored state therefore cannot distinguish an
+  observed idle tick from missing sampler coverage; issue #137 tracks
+  persistent cadence/coverage.
 - Performance: select only needed columns, filter early on `state` and
   `backend_type` to minimize shared memory reads
 - **Error handling:** Per-row `BEGIN ... EXCEPTION WHEN OTHERS` around
