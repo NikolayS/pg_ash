@@ -74,6 +74,30 @@ jobs:
           grep -q "ash.grant_reader" README.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" README.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" RELEASE_NOTES.md
+
+          # Release-stamped operator wording is two-sided: require the corrected
+          # contract and forbid the precise overclaim/misstatement it replaced.
+          grep -Fq \
+            "To opt out, run this after installation and after every installer re-apply" \
+            sql/ash-install.sql
+          if grep -Fq "Opt out at any time" sql/ash-install.sql; then
+            echo "pg_monitor opt-out wording must disclose installer re-apply" >&2
+            exit 1
+          fi
+          grep -Fq "operator-narrowed table privileges" RELEASE_NOTES.md
+          if grep -Fq "preserves explicit reader grants" RELEASE_NOTES.md; then
+            echo "Release notes must not claim narrowed reader grants are preserved" >&2
+            exit 1
+          fi
+          grep -Fq \
+            'named by `cron.database_name`; it still observes activity from every database.' \
+            README.md
+          grep -Fq "function signatures are unchanged; parameter" RELEASE_NOTES.md
+          grep -Fq "names were de-prefixed." RELEASE_NOTES.md
+          if grep -Fq "lifecycle/admin functions remain compatible" RELEASE_NOTES.md; then
+            echo "Release notes must disclose de-prefixed parameter names" >&2
+            exit 1
+          fi
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -3861,6 +3885,240 @@ jobs:
             raise notice 'B5 #63 cross-horizon clamp PASSED';
            end $$;
            rollback;
+          EOF
+
+      - name: "Test 2.0: release-stamped diagnostics and privilege disclosures"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+
+          # Catalog/function text is user-visible. Assert both sides so the
+          # corrected wording cannot coexist with the old false statement.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_start_def text :=
+              pg_get_functiondef('ash.start(interval)'::regprocedure);
+            v_report_comment text :=
+              obj_description(
+                'ash.report(timestamptz,timestamptz,integer,integer)'::regprocedure);
+          begin
+            assert position(
+              'pg_cron is not available in this database.' in v_start_def
+            ) > 0, 'ash.start must say pg_cron is unavailable in this database';
+            assert position(
+              'current_setting(''cron.database_name'', true)' in v_start_def
+            ) > 0, 'ash.start must hint cron.database_name';
+            assert position('pg_cron is not installed' in v_start_def) = 0,
+              'ash.start must not claim pg_cron is absent from the cluster';
+
+            assert position(
+              'Reads ash.rollup_1m only.' in v_report_comment
+            ) > 0, 'ash.report catalog comment must disclose rollup_1m-only input';
+            assert position(
+              'raw or rollup_1h has coverage' in v_report_comment
+            ) > 0, 'ash.report comment must distinguish alternate coverage';
+            assert position(
+              'Returns null when the window has no coverage' in v_report_comment
+            ) = 0, 'ash.report comment must remove the ambiguous old NULL wording';
+            raise notice 'release-stamped catalog wording PASSED';
+          end $$;
+          EOF
+
+          # N5 / C1: report remains SQL NULL and never reads another source,
+          # while its NOTICE names raw and rollup_1h coverage exactly.
+          n5_out="$(
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 2>&1 << 'EOF'
+          begin;
+          update ash.config
+            set current_slot = 0, sample_interval = '1 second'
+            where singleton;
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          truncate ash.rollup_1m, ash.rollup_1h;
+
+          do $$
+          declare
+            v_cpu smallint;
+            v_datid oid;
+            v_raw_min timestamptz :=
+              date_trunc('minute', now() - interval '20 minutes');
+            v_hour timestamptz :=
+              date_trunc('hour', now() - interval '2 hours');
+            a record;
+          begin
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select oid into v_datid
+            from pg_database where datname = current_database();
+
+            -- Raw-only coverage.
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values (
+              ash.ts_from_timestamptz(v_raw_min), v_datid, 3,
+              array[-v_cpu::int, 3, 0, 0, 0], 0
+            );
+            select * into a
+            from ash.aas(v_raw_min, v_raw_min + interval '1 minute');
+            assert a.source = 'raw' and a.buckets_expected = 1
+               and a.buckets_with_data = 1 and a.avg_aas = 0.05
+               and a.peak_aas = 0.05 and a.p99_aas = 0.05
+               and a.backend_seconds = 3.00,
+              format('raw-only setup mismatch: %s/%s/%s/%s/%s/%s/%s',
+                     a.source, a.buckets_expected, a.buckets_with_data,
+                     a.avg_aas, a.peak_aas, a.p99_aas, a.backend_seconds);
+            assert ash.report(
+              v_raw_min, v_raw_min + interval '1 minute'
+            ) is null, 'raw-only report must remain SQL NULL';
+
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+
+            -- rollup_1h-only coverage, with real per-minute totals.
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends, wait_counts, query_counts,
+              minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_hour), v_datid, 60, 60,
+              array[v_cpu::int, 3600], array[]::bigint[],
+              pg_catalog.array_fill(60, array[60])
+            );
+            select * into a
+            from ash.aas(v_hour, v_hour + interval '1 hour');
+            assert a.source = 'rollup_1h' and a.buckets_expected = 60
+               and a.buckets_with_data = 60 and a.avg_aas = 1.00
+               and a.peak_aas = 1.00 and a.p99_aas = 1.00
+               and a.backend_seconds = 3600.00,
+              format('rollup_1h-only setup mismatch: %s/%s/%s/%s/%s/%s/%s',
+                     a.source, a.buckets_expected, a.buckets_with_data,
+                     a.avg_aas, a.peak_aas, a.p99_aas, a.backend_seconds);
+            assert ash.report(v_hour, v_hour + interval '1 hour') is null,
+              'rollup_1h-only report must remain SQL NULL';
+
+            -- An overlapping hour row is not coverage when minute_counts has
+            -- no value for the requested minute. This must stay silent.
+            truncate ash.rollup_1h;
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends, wait_counts, query_counts,
+              minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_hour), v_datid, 1, 1,
+              array[v_cpu::int, 1], array[]::bigint[],
+              array[60] || pg_catalog.array_fill(null::int, array[59])
+            );
+            select * into a
+            from ash.aas(
+              v_hour + interval '1 minute',
+              v_hour + interval '2 minutes'
+            );
+            assert a.source = 'rollup_1h' and a.buckets_with_data = 0,
+              'sparse rollup_1h setup must have no requested-minute coverage';
+            assert ash.report(
+              v_hour + interval '1 minute',
+              v_hour + interval '2 minutes'
+            ) is null, 'sparse rollup_1h report must remain silent SQL NULL';
+
+            -- With no source at all, NULL remains silent and non-raising.
+            truncate ash.rollup_1h;
+            assert ash.report(v_hour, v_hour + interval '1 hour') is null,
+              'uncovered report must remain SQL NULL';
+            raise notice 'ash.report alternate-source NULL behavior PASSED';
+          end $$;
+          rollback;
+          EOF
+          )"
+          printf '%s\n' "$n5_out"
+          if ! printf '%s\n' "$n5_out" | grep -Fq \
+              "raw has coverage, but report reads rollup_1m only and returns NULL"; then
+            echo "FAIL: ash.report raw-only NOTICE missing" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$n5_out" | grep -Fc \
+              "raw has coverage, but report reads rollup_1m only and returns NULL")" \
+              -ne 1 ]; then
+            echo "FAIL: ash.report raw-only NOTICE must occur exactly once" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$n5_out" | grep -Fq \
+              "rollup_1h has coverage, but report reads rollup_1m only and returns NULL"; then
+            echo "FAIL: ash.report rollup_1h-only NOTICE missing" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$n5_out" | grep -Fc \
+              "rollup_1h has coverage, but report reads rollup_1m only and returns NULL")" \
+              -ne 1 ]; then
+            echo "FAIL: ash.report must not claim sparse rollup_1h coverage" >&2
+            exit 1
+          fi
+
+          # N3/N4: a full-function reader with narrowed table ACLs is restored
+          # to the complete bundle on re-apply, and the WARNING names it.
+          # Revoke pg_monitor first so the warning's affected-role list is
+          # deterministic; the default grant must return after re-apply.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            if exists (
+              select from pg_roles where rolname = 'ash_n4_reader'
+            ) then
+              perform ash.revoke_reader('ash_n4_reader');
+              execute 'drop role ash_n4_reader';
+            end if;
+            create role ash_n4_reader;
+          end $$;
+          select ash.grant_reader('ash_n4_reader');
+          select ash.revoke_reader('pg_monitor');
+          revoke select on ash.sample, ash.config from ash_n4_reader;
+          do $$
+          begin
+            assert has_function_privilege(
+              'ash_n4_reader',
+              'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)',
+              'EXECUTE'
+            ), 'N4 setup: full reader-function bundle must remain';
+            assert not has_table_privilege(
+              'ash_n4_reader', 'ash.sample', 'SELECT'
+            ), 'N4 setup: sample SELECT must be narrowed';
+            assert not has_table_privilege(
+              'ash_n4_reader', 'ash.config', 'SELECT'
+            ), 'N4 setup: config SELECT must be narrowed';
+            assert not has_schema_privilege('pg_monitor', 'ash', 'USAGE'),
+              'N3 setup: pg_monitor must be opted out before re-apply';
+          end $$;
+          EOF
+
+          reapply_out="$(
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" 2>&1
+          )"
+          printf '%s\n' "$reapply_out"
+          if ! printf '%s\n' "$reapply_out" \
+              | grep -F \
+                  "WARNING:  pg_ash installer: restoring the full reader bundle for role(s)" \
+              | grep -Fq "ash_n4_reader"; then
+            echo "FAIL: installer WARNING did not list ash_n4_reader" >&2
+            exit 1
+          fi
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            assert has_table_privilege(
+              'ash_n4_reader', 'ash.sample', 'SELECT'
+            ), 'N4 documented behavior: sample SELECT must be re-granted';
+            assert has_table_privilege(
+              'ash_n4_reader', 'ash.config', 'SELECT'
+            ), 'N4 documented behavior: config SELECT must be re-granted';
+            assert has_schema_privilege('pg_monitor', 'ash', 'USAGE'),
+              'N3 documented behavior: re-apply must restore pg_monitor';
+            assert has_function_privilege(
+              'pg_monitor',
+              'ash.aas(timestamptz,timestamptz,text,text,bigint,name,interval)',
+              'EXECUTE'
+            ), 'N3 documented behavior: pg_monitor reader bundle must return';
+            raise notice 'installer re-grant disclosure behavior PASSED';
+          end $$;
+          select ash.revoke_reader('ash_n4_reader');
+          drop role ash_n4_reader;
           EOF
 
       - name: "Test 2.0: pg_stat_statements fan-out and reader edges"
@@ -10697,7 +10955,8 @@ jobs:
             -c "drop extension if exists pg_cron cascade"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          cronless_out="$(
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 2>&1 << 'EOF'
           do $$
           declare
             v_rec record;
@@ -10739,6 +10998,23 @@ jobs:
 
           select ash.uninstall('yes');
           EOF
+          )"
+          printf '%s\n' "$cronless_out"
+          if ! printf '%s\n' "$cronless_out" | grep -Fq \
+              "pg_cron is not available in this database."; then
+            echo "FAIL: ash.start database-scoped pg_cron NOTICE missing" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$cronless_out" | grep -Fq \
+              "current_setting('cron.database_name', true)"; then
+            echo "FAIL: ash.start cron.database_name hint missing" >&2
+            exit 1
+          fi
+          if printf '%s\n' "$cronless_out" | grep -Fq \
+              "pg_cron is not installed"; then
+            echo "FAIL: ash.start emitted the old cluster-wide pg_cron claim" >&2
+            exit 1
+          fi
 
       - name: Final summary
         env:
