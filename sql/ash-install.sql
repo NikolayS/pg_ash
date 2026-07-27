@@ -1799,7 +1799,7 @@ begin
     job_id := null;
     status :=
       'schedule ash.rollup_minute() every minute, ash.rollup_hour() '
-      'every hour, ash.rollup_cleanup() daily';
+      'at minute 1 every hour, ash.rollup_cleanup() daily';
     return next;
 
     raise notice
@@ -1817,7 +1817,8 @@ begin
       '(default: daily).';
     raise notice
       'Schedule rollup: ash.rollup_minute() every minute, '
-      'ash.rollup_hour() every hour, ash.rollup_cleanup() daily.';
+      'ash.rollup_hour() at minute 1 every hour, '
+      'ash.rollup_cleanup() daily.';
 
     return;
   end if;
@@ -1982,7 +1983,8 @@ begin
   status := 'created';
   return next;
 
-  -- rollup_hour: every hour at minute 0
+  -- rollup_hour: every hour at minute 1; its blocking shared lock sequences it
+  -- after any in-flight minute rollup before it checks the minute watermark.
   begin
     perform cron.unschedule('ash_rollup_1h');
   exception when others then
@@ -1991,7 +1993,7 @@ begin
 
   select cron.schedule(
     'ash_rollup_1h',
-    '0 * * * *',
+    '1 * * * *',
     'select ash.rollup_hour()'
   ) into v_rotation_job;
 
@@ -3118,6 +3120,7 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_last_ts int4;
+  v_last_1m_ts int4;
   v_now_hour_ts int4;
   v_hour_start int4;
   v_hour_end int4;
@@ -3126,18 +3129,17 @@ declare
   v_count int;
 begin
   /*
-   * Acquire rollup lock (xact-level). Same kind as rollup_minute /
-   * rollup_cleanup so they serialize among themselves; distinct from
-   * the sampler lock.
+   * Wait for the shared rollup lock instead of skipping. The hourly pg_cron
+   * job runs at minute 1, when the every-minute worker also fires; a try-lock
+   * here could lose that race every hour and starve hourly aggregation.
    */
-  if not pg_try_advisory_xact_lock(
-       hashtext('pg_ash')::int4,
-       hashtext('pg_ash_rollup')::int4
-     ) then
-    return 0;
-  end if;
+  perform pg_advisory_xact_lock(
+    hashtext('pg_ash')::int4,
+    hashtext('pg_ash_rollup')::int4
+  );
 
-  select last_rollup_1h_ts into v_last_ts
+  select last_rollup_1h_ts, last_rollup_1m_ts
+  into v_last_ts, v_last_1m_ts
   from ash.config where singleton;
 
   v_now_hour_ts := ash.ts_from_timestamptz(date_trunc('hour', now()));
@@ -3154,6 +3156,16 @@ begin
 
   while v_hour_start < v_now_hour_ts and v_batch_limit > 0 loop
     v_hour_end := v_hour_start + 3600;
+
+    /*
+     * The minute watermark is the authoritative completion boundary. The
+     * blocking lock above observes a completed in-flight minute rollup, while
+     * this guard also protects manual/external calls and missing coverage:
+     * defer without inserting or advancing rather than seal a partial hour.
+     */
+    if v_last_1m_ts is null or v_last_1m_ts < v_hour_end then
+      exit;
+    end if;
 
     insert into ash.rollup_1h (
       ts, datid, samples, peak_backends, wait_counts, query_counts,
@@ -6403,4 +6415,37 @@ exception when others then
     '(%: %); run "select ash.grant_reader(''pg_monitor'')" manually, or '
     'ignore to leave pg_monitor without access',
     sqlstate, sqlerrm;
+end $$;
+
+/*
+ * Installer re-apply migration for running installations. Defining the new
+ * ash.start() body is not enough: an existing pg_cron job keeps its old
+ * minute-0 schedule until start() is called again.
+ */
+do $$
+declare
+  v_hourly_job record;
+begin
+  if ash._pg_cron_available() then
+    for v_hourly_job in
+      select jobname, command
+      from cron.job
+      where jobname = 'ash_rollup_1h'
+        and database = current_database()
+        and username = current_user
+        and schedule = '0 * * * *'
+    loop
+      /*
+       * Named cron.schedule() updates the caller's existing job in place and
+       * is available to ordinary pg_cron job owners. cron.alter_job() is not:
+       * pg_cron revokes it from PUBLIC by default. Reusing the stored command
+       * also preserves custom command text; pg_cron keeps jobid/active state.
+       */
+      perform cron.schedule(
+        v_hourly_job.jobname,
+        '1 * * * *',
+        v_hourly_job.command
+      );
+    end loop;
+  end if;
 end $$;

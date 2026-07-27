@@ -347,7 +347,7 @@ Also schedule maintenance:
 ```bash
 0 0 * * * psql -qAtX -d mydb -c "select ash.rotate();"
 * * * * * psql -qAtX -d mydb -c "select ash.rollup_minute();"
-0 * * * * psql -qAtX -d mydb -c "select ash.rollup_hour();"
+1 * * * * psql -qAtX -d mydb -c "select ash.rollup_hour();"
 0 3 * * * psql -qAtX -d mydb -c "select ash.rollup_cleanup();"
 ```
 
