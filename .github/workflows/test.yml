@@ -10411,6 +10411,8 @@ jobs:
           # 1.3-to-1.4 shim intentionally replays the current installer, so it
           # now jumps directly to 2.0 before the 1.5-to-2.0 wrapper is reached.
           git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
+          python3 devel/scripts/ash_sql_chain.py pinned-upgrade-chain 1.5 \
+            > /tmp/ash-v1.5-upgrade-chain.sql
           psql \
             --no-psqlrc \
             --host=localhost \
@@ -10531,7 +10533,7 @@ jobs:
               'sanity: grant_reader should cover a non-trivial function set';
           end $$;
 
-          \i sql/ash-1.5-to-2.0.sql
+          \i /tmp/ash-v1.5-upgrade-chain.sql
 
           -- Release identity, surface convergence, and persisted state must
           -- all be correct on the first real v1.5-to-current transition.
@@ -10811,9 +10813,9 @@ jobs:
           end $$;
           reset role;
 
-          -- Re-apply the public release wrapper, not merely the installer: the
-          -- documented v1.5-to-2.0 entrypoint promises to be re-apply-safe.
-          \i sql/ash-1.5-to-2.0.sql
+          -- Re-apply the helper-generated public-wrapper + candidate-overlay
+          -- chain: both layers promise to be re-apply-safe.
+          \i /tmp/ash-v1.5-upgrade-chain.sql
 
           do $$
           declare
@@ -10972,6 +10974,8 @@ jobs:
 
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
           git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
+          python3 devel/scripts/ash_sql_chain.py pinned-upgrade-chain 1.5 \
+            > /tmp/ash-v1.5-upgrade-chain.sql
 
           # 1) Fresh install → snapshot
           "${psql_base[@]}" \
@@ -10999,17 +11003,18 @@ jobs:
             --command="select ash.uninstall('yes')" \
             > /dev/null 2>&1
 
-          # 3) Actual previous release → current release wrapper → snapshot.
-          # This must remain separate from full-upgrade-chain: historical
-          # installer shims replay the current installer and therefore cannot
-          # prove the final v1.5-to-current edge after a release stamp.
+          # 3) Actual previous release → public wrapper + candidate overlay →
+          # snapshot. This must remain separate from full-upgrade-chain:
+          # historical installer shims replay the current installer and
+          # therefore cannot prove the final v1.5-to-current edge after a
+          # release stamp.
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
             --file=/tmp/ash-v1.5-install.sql \
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
-            --file=sql/ash-1.5-to-2.0.sql \
+            --file=/tmp/ash-v1.5-upgrade-chain.sql \
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \

@@ -157,6 +157,17 @@ class ReleaseStampTest(unittest.TestCase):
 
 
 class SQLChainOverlayTest(unittest.TestCase):
+    @staticmethod
+    def write_stamped_installer(path: Path, version: str) -> None:
+        path.write_text(
+            "create table ash.config (\n"
+            f"  version text not null default '{version}'\n"
+            ");\n"
+            f"update ash.config set version = '{version}' where singleton;\n"
+            "alter table ash.config alter column version "
+            f"set default '{version}';\n"
+        )
+
     def test_prerelease_development_installer_extends_upgrade_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -243,6 +254,142 @@ class SQLChainOverlayTest(unittest.TestCase):
             reapply_output.getvalue().splitlines(),
             [r"\i devel/sql/ash-1.1-to-1.2.sql"],
         )
+
+    def test_pinned_upgrade_chain_applies_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            released_migrations = root / "sql" / "migrations"
+            development_sql = root / "devel" / "sql"
+            released_migrations.mkdir(parents=True)
+            development_sql.mkdir(parents=True)
+            (root / "sql" / "ash-1.5.sql").write_text(
+                "-- released installer\n"
+            )
+            released_installer = root / "sql" / "ash-install.sql"
+            self.write_stamped_installer(released_installer, "2.0-beta1")
+            (released_migrations / "ash-1.5-to-2.0.sql").write_text(
+                "-- released migration\n"
+            )
+            (root / "sql" / "ash-1.5-to-2.0.sql").write_text(
+                r"\ir migrations/ash-1.5-to-2.0.sql" "\n"
+            )
+            development_installer = development_sql / "ash-install.sql"
+            self.write_stamped_installer(development_installer, "2.0")
+
+            pinned_output = io.StringIO()
+            with (
+                mock.patch.object(ash_sql_chain, "ROOT", root),
+                mock.patch.object(
+                    ash_sql_chain,
+                    "UPGRADE_DIRS",
+                    (released_migrations, development_sql),
+                ),
+            ):
+                released_version = ash_sql_chain.install_version(
+                    released_installer
+                )
+                fresh_version = ash_sql_chain.fresh_install_version()
+                with contextlib.redirect_stdout(pinned_output):
+                    ash_sql_chain.emit_pinned_upgrade_chain("1.5")
+                pinned_paths = [
+                    root / line.removeprefix(r"\i ")
+                    for line in pinned_output.getvalue().splitlines()
+                ]
+                pinned_version = ash_sql_chain.install_version(pinned_paths[-1])
+
+        self.assertEqual(released_version, "2.0-beta1")
+        self.assertEqual(fresh_version, "2.0")
+        self.assertEqual(
+            pinned_output.getvalue().splitlines(),
+            [
+                r"\i sql/ash-1.5-to-2.0.sql",
+                r"\i devel/sql/ash-install.sql",
+            ],
+        )
+        self.assertEqual(pinned_version, fresh_version)
+
+    def test_disconnected_released_chain_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            released_migrations = root / "sql" / "migrations"
+            development_sql = root / "devel" / "sql"
+            released_migrations.mkdir(parents=True)
+            development_sql.mkdir(parents=True)
+            (root / "sql" / "ash-1.0.sql").write_text(
+                "-- released installer\n"
+            )
+            (released_migrations / "ash-1.0-to-1.1.sql").write_text(
+                "-- released migration\n"
+            )
+            (released_migrations / "ash-1.2-to-1.3.sql").write_text(
+                "-- detached released migration\n"
+            )
+            (development_sql / "ash-install.sql").write_text(
+                "-- development installer\n"
+            )
+
+            full_output = io.StringIO()
+            with (
+                mock.patch.object(ash_sql_chain, "ROOT", root),
+                mock.patch.object(
+                    ash_sql_chain,
+                    "UPGRADE_DIRS",
+                    (released_migrations, development_sql),
+                ),
+                contextlib.redirect_stdout(full_output),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    (
+                        r"^disconnected released upgrade chain from 1\.0: "
+                        r"stopped at 1\.1, expected to reach 1\.3$"
+                    ),
+                ):
+                    ash_sql_chain.emit_full_upgrade_chain("1.0")
+
+        self.assertEqual(full_output.getvalue(), "")
+
+    def test_detached_released_edge_below_head_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            released_migrations = root / "sql" / "migrations"
+            development_sql = root / "devel" / "sql"
+            released_migrations.mkdir(parents=True)
+            development_sql.mkdir(parents=True)
+            (root / "sql" / "ash-1.0.sql").write_text(
+                "-- released installer\n"
+            )
+            (released_migrations / "ash-1.0-to-2.0.sql").write_text(
+                "-- released migration\n"
+            )
+            (released_migrations / "ash-1.2-to-1.3.sql").write_text(
+                "-- detached released migration below the head\n"
+            )
+            (development_sql / "ash-install.sql").write_text(
+                "-- development installer\n"
+            )
+
+            full_output = io.StringIO()
+            with (
+                mock.patch.object(ash_sql_chain, "ROOT", root),
+                mock.patch.object(
+                    ash_sql_chain,
+                    "UPGRADE_DIRS",
+                    (released_migrations, development_sql),
+                ),
+                contextlib.redirect_stdout(full_output),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    (
+                        r"^disconnected released upgrade graph: not reachable "
+                        r"from a released installer: "
+                        r"sql/migrations/ash-1\.2-to-1\.3\.sql$"
+                    ),
+                ):
+                    ash_sql_chain.emit_full_upgrade_chain("1.0")
+
+        self.assertEqual(full_output.getvalue(), "")
 
 
 if __name__ == "__main__":

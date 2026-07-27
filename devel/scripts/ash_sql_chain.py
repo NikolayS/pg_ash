@@ -143,31 +143,147 @@ def emit_development_overlay(*, development_migration_seen: bool) -> None:
         emit_psql_include(dev_install)
 
 
-def emit_upgrade_chain(start: str) -> None:
+def trace_upgrade_chain(
+    start: str,
+    by_source: dict[str, tuple[str, Path]],
+    *,
+    label: str,
+) -> tuple[list[Path], str]:
     current = start
     seen: set[str] = set()
-    by_source = upgrades()
-    development_migration_seen = False
+    paths: list[Path] = []
     while current in by_source:
         if current in seen:
-            raise SystemExit(f"cycle in upgrade chain at {current}")
+            raise SystemExit(f"cycle in {label} chain at {current}")
         seen.add(current)
         nxt, path = by_source[current]
-        emit_psql_include(path)
-        if path.parent == ROOT / "devel" / "sql":
-            development_migration_seen = True
+        paths.append(path)
         current = nxt
-    emit_development_overlay(
-        development_migration_seen=development_migration_seen
+
+    return paths, current
+
+
+def upgrade_graph_head(
+    by_source: dict[str, tuple[str, Path]],
+    installer_versions: set[str],
+) -> str:
+    versions = set(installer_versions)
+    for src, (dst, _path) in by_source.items():
+        versions.add(src)
+        versions.add(dst)
+    return max(versions, key=version_key)
+
+
+def validate_upgrade_graph(
+    by_source: dict[str, tuple[str, Path]],
+    *,
+    label: str,
+) -> str:
+    installer_versions = set(installers())
+    graph_head = upgrade_graph_head(by_source, installer_versions)
+    reachable_paths: set[Path] = set()
+    for start in sorted(installer_versions, key=version_key):
+        paths, current = trace_upgrade_chain(start, by_source, label=label)
+        reachable_paths.update(paths)
+        if current != graph_head:
+            raise SystemExit(
+                f"disconnected {label} chain from {start}: stopped at "
+                f"{current}, expected to reach {graph_head}"
+            )
+
+    unreachable_paths = sorted(
+        (
+            path
+            for _src, (_dst, path) in by_source.items()
+            if path not in reachable_paths
+        ),
+        key=rel,
     )
+    if unreachable_paths:
+        details = ", ".join(rel(path) for path in unreachable_paths)
+        raise SystemExit(
+            f"disconnected {label} graph: not reachable from a released "
+            f"installer: {details}"
+        )
+
+    return graph_head
+
+
+def upgrade_chain_paths(start: str, *, label: str = "upgrade") -> list[Path]:
+    released_by_source = upgrades(include_devel=False, required=False)
+    released_head = validate_upgrade_graph(
+        released_by_source,
+        label="released upgrade",
+    )
+    _released_paths, released_end = trace_upgrade_chain(
+        start,
+        released_by_source,
+        label=f"released {label}",
+    )
+    if (
+        version_key(start) <= version_key(released_head)
+        and released_end != released_head
+    ):
+        raise SystemExit(
+            f"disconnected released upgrade chain from {start}: stopped at "
+            f"{released_end}, expected to reach {released_head}"
+        )
+
+    by_source = upgrades()
+    graph_head = validate_upgrade_graph(by_source, label=label)
+    paths, current = trace_upgrade_chain(start, by_source, label=label)
+    if current != graph_head:
+        raise SystemExit(
+            f"disconnected upgrade chain from {start}: stopped at {current}, "
+            f"expected to reach {graph_head}"
+        )
+
+    return paths
+
+
+def emit_upgrade_paths(paths: list[Path]) -> None:
+    for path in paths:
+        emit_psql_include(path)
+    emit_development_overlay(
+        development_migration_seen=any(
+            path.parent == development_install_path().parent for path in paths
+        )
+    )
+
+
+def emit_upgrade_chain(start: str) -> None:
+    emit_upgrade_paths(upgrade_chain_paths(start))
+
+
+def emit_pinned_upgrade_chain(start: str) -> None:
+    paths = upgrade_chain_paths(start, label="pinned upgrade")
+    if not paths:
+        raise SystemExit(f"no released upgrade from {start}")
+
+    released_migration_dir = ROOT / "sql" / "migrations"
+    first_path = paths[0]
+    if first_path.parent != released_migration_dir:
+        raise SystemExit(
+            f"pinned upgrade from {start} must begin with a released migration, "
+            f"found {rel(first_path)}"
+        )
+
+    public_wrapper = ROOT / "sql" / first_path.name
+    if not public_wrapper.exists():
+        raise SystemExit(
+            f"no public upgrade wrapper for {start}: {rel(public_wrapper)}"
+        )
+
+    emit_upgrade_paths([public_wrapper, *paths[1:]])
 
 
 def emit_full_upgrade_chain(start: str) -> None:
     install = installers().get(start)
     if install is None:
         raise SystemExit(f"no released installer for {start}")
+    paths = upgrade_chain_paths(start)
     emit_psql_include(install)
-    emit_upgrade_chain(start)
+    emit_upgrade_paths(paths)
 
 
 def emit_reapply_chain() -> None:
@@ -177,22 +293,8 @@ def emit_reapply_chain() -> None:
     # the version just below: once a later release removes the surface they
     # recreate (e.g. 2.0 drops the 1.x readers and ash._to_sample_ts),
     # re-applying them on a current install fails by design.
-    by_source = upgrades()
     current = latest_released_version()
-    seen: set[str] = set()
-    development_migration_seen = False
-    while current in by_source:
-        if current in seen:
-            raise SystemExit(f"cycle in reapply chain at {current}")
-        seen.add(current)
-        nxt, path = by_source[current]
-        emit_psql_include(path)
-        if path.parent == ROOT / "devel" / "sql":
-            development_migration_seen = True
-        current = nxt
-    emit_development_overlay(
-        development_migration_seen=development_migration_seen
-    )
+    emit_upgrade_paths(upgrade_chain_paths(current, label="reapply"))
 
 
 def main() -> None:
@@ -205,6 +307,8 @@ def main() -> None:
     sub.add_parser("latest-released-version")
     sub.add_parser("upgrade-chain-from-oldest")
     sub.add_parser("upgrade-chain-from-second-oldest")
+    pinned_upgrade = sub.add_parser("pinned-upgrade-chain")
+    pinned_upgrade.add_argument("start")
     sub.add_parser("full-upgrade-chain")
     sub.add_parser("reapply-chain")
     args = parser.parse_args()
@@ -223,6 +327,8 @@ def main() -> None:
         emit_upgrade_chain(oldest_version())
     elif args.command == "upgrade-chain-from-second-oldest":
         emit_upgrade_chain(second_oldest_version())
+    elif args.command == "pinned-upgrade-chain":
+        emit_pinned_upgrade_chain(args.start)
     elif args.command == "full-upgrade-chain":
         emit_full_upgrade_chain(oldest_version())
     elif args.command == "reapply-chain":

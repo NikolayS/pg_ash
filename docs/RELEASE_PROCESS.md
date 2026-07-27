@@ -60,18 +60,21 @@ CI must not hardcode concrete version chains. It uses
 upgrade scripts under `sql/migrations/`, and in-progress `devel/sql/` upgrade
 scripts from the files present in the checkout.
 
-CI must test both supported development paths discovered by that helper:
+CI must test all supported development paths discovered by that helper:
 
 - fresh development install: the helper's `fresh-install-path`
 - fresh development install version: the helper's `fresh-install-version`
 - upgrade path: the helper's `full-upgrade-chain`
+- pinned previous-release path: the helper's `pinned-upgrade-chain X.Y`
 
 After a prerelease, when a candidate development installer exists without a
-new current-line migration, the helper appends that installer to the full
-upgrade and re-apply chains as a re-apply-safe overlay. This makes the beta to
-final path exercise the same candidate as a fresh install without inventing a
-prerelease-specific migration filename. Schema-equivalence CI must compare
-those two paths.
+new current-line migration, the helper first verifies that the released
+migrations connect the requested starting version to the released head. It
+then appends that installer to the full-upgrade, pinned public-wrapper, and
+re-apply chains as a re-apply-safe overlay. This makes the beta-to-final path
+exercise the same candidate as a fresh install without allowing the overlay to
+hide a missing released migration or inventing a prerelease-specific migration
+filename. Schema-equivalence CI must compare those paths.
 
 ## CI guard
 
