@@ -9592,8 +9592,10 @@ jobs:
             v_wait_id smallint;
             v_query_map_id int4;
             v_slot smallint := ash.current_slot();
+            -- Use an exact completed-minute boundary: ts_from_timestamptz()
+            -- rounds fractional seconds to int4.
             v_sample_ts int4 := ash.ts_from_timestamptz(
-              now() - interval '1 minute'
+              date_trunc('minute', now()) - interval '1 minute'
             );
           begin
             select ash._register_wait('active', 'UpgradeProbe', 'Preserved')
