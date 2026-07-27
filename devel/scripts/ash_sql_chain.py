@@ -12,7 +12,19 @@ ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_DIRS = (ROOT / "sql" / "migrations", ROOT / "devel" / "sql")
 INSTALL_RE = re.compile(r"ash-(\d+)\.(\d+)\.sql$")
 UPGRADE_RE = re.compile(r"ash-(\d+\.\d+)-to-(\d+\.\d+)\.sql$")
-VERSION_DEFAULT_RE = re.compile(r"version\s+text\s+not\s+null\s+default\s+'([^']+)'")
+VERSION_DEFAULT_RE = re.compile(
+    r"^\s*version\s+text\s+not\s+null\s+default\s+'([^']+)'",
+    re.IGNORECASE | re.MULTILINE,
+)
+VERSION_UPDATE_RE = re.compile(
+    r"^\s*update\s+ash\.config\s+set\s+version\s*=\s*'([^']+)'",
+    re.IGNORECASE | re.MULTILINE,
+)
+VERSION_ALTER_DEFAULT_RE = re.compile(
+    r"^\s*alter\s+table\s+ash\.config\s+alter\s+column\s+version\s+"
+    r"set\s+default\s+'([^']+)'",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def version_key(version: str) -> tuple[int, int]:
@@ -78,36 +90,76 @@ def latest_released_version() -> str:
 
 
 def fresh_install_path() -> str:
-    dev_install = ROOT / "devel" / "sql" / "ash-install.sql"
+    dev_install = development_install_path()
     if dev_install.exists():
         return rel(dev_install)
     return rel(ROOT / "sql" / "ash-install.sql")
 
 
-def fresh_install_version() -> str:
-    path = ROOT / fresh_install_path()
+def development_install_path() -> Path:
+    return ROOT / "devel" / "sql" / "ash-install.sql"
+
+
+def install_version(path: Path) -> str:
     text = path.read_text()
-    match = VERSION_DEFAULT_RE.search(text)
-    if not match:
-        raise SystemExit(f"could not find ash.config version default in {rel(path)}")
-    return match.group(1)
+    stamp_patterns = {
+        "column default": VERSION_DEFAULT_RE,
+        "singleton update": VERSION_UPDATE_RE,
+        "altered default": VERSION_ALTER_DEFAULT_RE,
+    }
+    stamps: dict[str, str] = {}
+    for label, pattern in stamp_patterns.items():
+        matches = pattern.findall(text)
+        if len(matches) != 1:
+            raise SystemExit(
+                f"expected one ash.config {label} version stamp in "
+                f"{path.as_posix()}, found {len(matches)}"
+            )
+        stamps[label] = matches[0]
+
+    versions = set(stamps.values())
+    if len(versions) != 1:
+        details = ", ".join(
+            f"{label}={version!r}" for label, version in stamps.items()
+        )
+        raise SystemExit(
+            f"inconsistent ash.config version stamps in {path.as_posix()}: "
+            f"{details}"
+        )
+    return versions.pop()
+
+
+def fresh_install_version() -> str:
+    return install_version(ROOT / fresh_install_path())
 
 
 def emit_psql_include(path: Path) -> None:
     print(rf"\i {rel(path)}")
 
 
+def emit_development_overlay(*, development_migration_seen: bool) -> None:
+    dev_install = development_install_path()
+    if dev_install.exists() and not development_migration_seen:
+        emit_psql_include(dev_install)
+
+
 def emit_upgrade_chain(start: str) -> None:
     current = start
     seen: set[str] = set()
     by_source = upgrades()
+    development_migration_seen = False
     while current in by_source:
         if current in seen:
             raise SystemExit(f"cycle in upgrade chain at {current}")
         seen.add(current)
         nxt, path = by_source[current]
         emit_psql_include(path)
+        if path.parent == ROOT / "devel" / "sql":
+            development_migration_seen = True
         current = nxt
+    emit_development_overlay(
+        development_migration_seen=development_migration_seen
+    )
 
 
 def emit_full_upgrade_chain(start: str) -> None:
@@ -128,13 +180,19 @@ def emit_reapply_chain() -> None:
     by_source = upgrades()
     current = latest_released_version()
     seen: set[str] = set()
+    development_migration_seen = False
     while current in by_source:
         if current in seen:
             raise SystemExit(f"cycle in reapply chain at {current}")
         seen.add(current)
         nxt, path = by_source[current]
         emit_psql_include(path)
+        if path.parent == ROOT / "devel" / "sql":
+            development_migration_seen = True
         current = nxt
+    emit_development_overlay(
+        development_migration_seen=development_migration_seen
+    )
 
 
 def main() -> None:
