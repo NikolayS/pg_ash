@@ -294,6 +294,186 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: Test SQL entrypoints fail atomically
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          psql_base=(
+            psql
+            --no-psqlrc
+            --host=localhost
+            --username=postgres
+          )
+          install_path="$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
+          failure_log_dir="$(mktemp -d)"
+          trap 'rm -rf -- "${failure_log_dir}"' EXIT
+
+          "${psql_base[@]}" --dbname=postgres --set=ON_ERROR_STOP=1 << 'EOF'
+          drop database if exists ash_install_failure_test with (force);
+          create database ash_install_failure_test;
+          drop database if exists ash_atomic_failure_test with (force);
+          create database ash_atomic_failure_test;
+          EOF
+
+          "${psql_base[@]}" \
+            --dbname=ash_install_failure_test \
+            --set=ON_ERROR_STOP=1 << 'EOF'
+          create schema ash;
+          create view ash.config as select true as singleton;
+          EOF
+
+          set +e
+          "${psql_base[@]}" \
+            --dbname=ash_install_failure_test \
+            --file="${install_path}" \
+            >"${failure_log_dir}/install.log" 2>&1
+          install_rc=$?
+          set -e
+          if (( install_rc != 3 )); then
+            cat "${failure_log_dir}/install.log" >&2
+            echo "fresh installer exit code: expected 3, got ${install_rc}" >&2
+            exit 1
+          fi
+
+          "${psql_base[@]}" \
+            --dbname=ash_install_failure_test \
+            --set=ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            assert to_regclass('ash.config') is not null,
+              'pre-existing failure fixture must survive rollback';
+            assert not exists (
+              select from pg_proc as proc
+              join pg_namespace as nsp on nsp.oid = proc.pronamespace
+              where nsp.nspname = 'ash'
+            ), 'failed installer left functions behind';
+            assert not exists (
+              select from pg_tables where schemaname = 'ash'
+            ), 'failed installer left tables behind';
+          end $$;
+          EOF
+
+          expected_function_count="$(
+            "${psql_base[@]}" \
+              --dbname=postgres \
+              --tuples-only \
+              --no-align \
+              --command="
+                select count(*)
+                from pg_proc as proc
+                join pg_namespace as nsp on nsp.oid = proc.pronamespace
+                where nsp.nspname = 'ash'
+              "
+          )"
+          echo "complete installer function count: ${expected_function_count}"
+
+          "${psql_base[@]}" \
+            --dbname=ash_atomic_failure_test \
+            --set=ON_ERROR_STOP=1 << 'EOF'
+          create function public.fail_ash_rollup_1m()
+          returns event_trigger
+          language plpgsql
+          as $$
+          declare
+            command record;
+          begin
+            for command in
+              select * from pg_event_trigger_ddl_commands()
+            loop
+              if command.object_type = 'table'
+                 and command.schema_name = 'ash'
+                 and command.object_identity = 'ash.rollup_1m' then
+                raise exception 'forced mid-install failure at ash.rollup_1m';
+              end if;
+            end loop;
+          end $$;
+
+          create event trigger fail_ash_rollup_1m
+            on ddl_command_end
+            when tag in ('CREATE TABLE')
+            execute function public.fail_ash_rollup_1m();
+          EOF
+
+          set +e
+          "${psql_base[@]}" \
+            --dbname=ash_atomic_failure_test \
+            --set=ON_ERROR_STOP=1 \
+            --file="${install_path}" \
+            >"${failure_log_dir}/atomic.log" 2>&1
+          atomic_rc=$?
+          set -e
+          if (( atomic_rc != 3 )); then
+            cat "${failure_log_dir}/atomic.log" >&2
+            echo "forced failure exit code: expected 3, got ${atomic_rc}" >&2
+            exit 1
+          fi
+          if ! grep -Fq \
+              "forced mid-install failure at ash.rollup_1m" \
+              "${failure_log_dir}/atomic.log"; then
+            cat "${failure_log_dir}/atomic.log" >&2
+            echo "installer did not reach the forced mid-install failure" >&2
+            exit 1
+          fi
+
+          "${psql_base[@]}" \
+            --dbname=ash_atomic_failure_test \
+            --set=ON_ERROR_STOP=1 \
+            --set=expected_function_count="${expected_function_count}" << 'EOF'
+          select set_config(
+            'pg_ash.expected_function_count',
+            :'expected_function_count',
+            false
+          );
+
+          do $$
+          declare
+            surviving_function_count int;
+          begin
+            select count(*)
+            into surviving_function_count
+            from pg_proc as proc
+            join pg_namespace as nsp on nsp.oid = proc.pronamespace
+            where nsp.nspname = 'ash';
+
+            assert to_regnamespace('ash') is null, format(
+              'failed installer left a partial ash schema (%s of %s functions survive)',
+              surviving_function_count,
+              current_setting('pg_ash.expected_function_count')
+            );
+          end $$;
+          EOF
+
+          # A caller's interactive psql configuration must not turn each
+          # installer statement into a savepoint and make a partial install
+          # committable after the first error.
+          printf '\\set ON_ERROR_ROLLBACK on\n\\i %s\ncommit;\n\\q\n' \
+            "${install_path}" |
+            script --quiet --return \
+              --command \
+              "psql --no-psqlrc --host=localhost --username=postgres --dbname=ash_atomic_failure_test" \
+              /dev/null \
+              >"${failure_log_dir}/on-error-rollback.log" 2>&1
+          if ! grep -Fq \
+              "forced mid-install failure at ash.rollup_1m" \
+              "${failure_log_dir}/on-error-rollback.log"; then
+            cat "${failure_log_dir}/on-error-rollback.log" >&2
+            echo "interactive installer did not reach the forced failure" >&2
+            exit 1
+          fi
+
+          "${psql_base[@]}" \
+            --dbname=ash_atomic_failure_test \
+            --set=ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            assert to_regnamespace('ash') is null,
+              'ON_ERROR_ROLLBACK allowed a partial installer commit';
+          end $$;
+          EOF
+
       - name: Test schema and infrastructure
         env:
           PGPASSWORD: postgres

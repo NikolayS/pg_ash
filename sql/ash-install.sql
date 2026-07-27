@@ -8,8 +8,17 @@
  * Upgrade from 1.3: \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.4: \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.5: \i sql/migrations/ash-1.5-to-2.0.sql
+ *
+ * Transaction behavior: this entrypoint disables ON_ERROR_ROLLBACK, enables
+ * ON_ERROR_STOP, and owns its transaction. ON_ERROR_ROLLBACK would reduce
+ * statement failures to savepoint rollbacks and permit a partial install to
+ * be committed. When invoked with \i inside an existing transaction, the
+ * final COMMIT also commits the caller's outer work.
  */
 
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on
+begin;
 
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
@@ -6472,3 +6481,5 @@ begin
     end loop;
   end if;
 end $$;
+
+commit;
