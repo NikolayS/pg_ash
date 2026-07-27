@@ -47,6 +47,14 @@ surface has been replaced by the AAS-oriented 2.0 API:
   storage validator instead of emitting a fabricated row or raising an
   internal PL/pgSQL error. (issue #143)
 
+## Retired tooling
+
+- **The unmaintained pre-2.0 benchmark suite has been removed.** Several
+  entrypoints referenced a 1.0 installer path absent from the 2.0 tree, queried
+  obsolete storage objects and readers absent from 2.0, and could report
+  completion after SQL errors. No maintained 2.0 performance harness replaces
+  it yet; validate capacity and WAL on the target workload. (issue #139)
+
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
 [SECURITY.md](SECURITY.md#advisory-lock-squat-dos).
