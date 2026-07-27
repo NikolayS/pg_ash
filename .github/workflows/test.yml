@@ -954,6 +954,432 @@ jobs:
           drop role ash_pgmon_outsider;
           EOF
 
+      - name: "Issue #164: rebuild_partitions preserves reader ACLs"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            if not exists (
+              select from pg_roles where rolname = 'ash_b4_reader'
+            ) then
+              create role ash_b4_reader login password 'x';
+            end if;
+            if not exists (
+              select from pg_roles where rolname = 'ash_b4_pgmon_member'
+            ) then
+              create role ash_b4_pgmon_member login password 'x';
+            end if;
+          end $$;
+
+          grant pg_monitor to ash_b4_pgmon_member;
+          select ash.grant_reader('ash_b4_reader');
+
+          -- Seed one exact query-map-backed row before the rebuild. This proves
+          -- both a configured reader and a plain pg_monitor member can traverse
+          -- query_map_all; the member itself has no direct ash ACL.
+          do $$
+          declare
+            v_wait_id smallint;
+            v_map_id int4;
+            v_datid oid;
+          begin
+            truncate ash.sample, ash.query_map_0, ash.query_map_1, ash.query_map_2
+              restart identity;
+            update ash.config
+            set current_slot = 0,
+              sampling_enabled = true
+            where singleton;
+
+            select ash._register_wait('active', 'B4Test', 'B4Wait')
+              into v_wait_id;
+            insert into ash.query_map_0 (query_id)
+            values (164000000001)
+            returning id into v_map_id;
+            select oid into v_datid
+            from pg_database
+            where datname = current_database();
+            insert into ash.sample (
+              sample_ts,
+              datid,
+              active_count,
+              data,
+              slot
+            )
+            values (
+              ash.ts_from_timestamptz(
+                date_trunc('minute', now()) - interval '2 minutes'
+              ),
+              v_datid,
+              1,
+              array[-v_wait_id, 1, v_map_id]::integer[],
+              0
+            );
+          end $$;
+
+          select
+            'before rebuild' as phase,
+            rel.relname,
+            rel.relacl,
+            aclcontains(
+              rel.relacl,
+              makeaclitem(reader_role.oid, rel.relowner, 'SELECT', false)
+            ) as custom_direct,
+            aclcontains(
+              rel.relacl,
+              makeaclitem(pg_monitor.oid, rel.relowner, 'SELECT', false)
+            ) as pg_monitor_direct,
+            coalesce(
+              aclcontains(
+                rel.relacl,
+                makeaclitem(member_role.oid, rel.relowner, 'SELECT', false)
+              ),
+              false
+            ) as member_direct
+          from pg_class as rel
+          join pg_namespace as nsp on nsp.oid = rel.relnamespace
+          cross join pg_roles as reader_role
+          cross join pg_roles as pg_monitor
+          cross join pg_roles as member_role
+          where nsp.nspname = 'ash'
+            and rel.relname in ('query_map_all', 'query_map_0', 'sample_0')
+            and reader_role.rolname = 'ash_b4_reader'
+            and pg_monitor.rolname = 'pg_monitor'
+            and member_role.rolname = 'ash_b4_pgmon_member'
+          order by rel.relname;
+
+          do $$
+          declare
+            v_direct_acl_count int;
+            v_member_acl_count int;
+          begin
+            select count(*) into v_direct_acl_count
+            from pg_class as rel
+            join pg_namespace as nsp on nsp.oid = rel.relnamespace
+            cross join pg_roles as grantee_role
+            where nsp.nspname = 'ash'
+              and rel.relname in ('query_map_all', 'query_map_0', 'sample_0')
+              and grantee_role.rolname in ('ash_b4_reader', 'pg_monitor')
+              and coalesce(
+                aclcontains(
+                  rel.relacl,
+                  makeaclitem(
+                    grantee_role.oid,
+                    rel.relowner,
+                    'SELECT',
+                    false
+                  )
+                ),
+                false
+              );
+            assert v_direct_acl_count = 6,
+              format(
+                '#164: expected 6 direct reader ACLs before rebuild, got %s',
+                v_direct_acl_count
+              );
+
+            select count(*) into v_member_acl_count
+            from pg_class as rel
+            join pg_namespace as nsp on nsp.oid = rel.relnamespace
+            cross join pg_roles as member_role
+            where nsp.nspname = 'ash'
+              and rel.relname in ('query_map_all', 'query_map_0', 'sample_0')
+              and member_role.rolname = 'ash_b4_pgmon_member'
+              and coalesce(
+                aclcontains(
+                  rel.relacl,
+                  makeaclitem(
+                    member_role.oid,
+                    rel.relowner,
+                    'SELECT',
+                    false
+                  )
+                ),
+                false
+              );
+            assert v_member_acl_count = 0,
+              format(
+                '#164: pg_monitor member must have 0 direct ACLs, got %s',
+                v_member_acl_count
+              );
+          end $$;
+
+          set role ash_b4_reader;
+          do $$
+          declare
+            v_keys text[];
+          begin
+            select coalesce(array_agg(key order by key), '{}'::text[])
+              into v_keys
+            from ash.top(
+              'query_id',
+              now() - interval '10 minutes',
+              now() + interval '1 minute'
+            );
+            assert v_keys = array['164000000001'],
+              format(
+                '#164: custom reader pre-rebuild keys expected {164000000001}, got %s',
+                v_keys
+              );
+          end $$;
+          reset role;
+
+          set role ash_b4_pgmon_member;
+          do $$
+          declare
+            v_keys text[];
+          begin
+            select coalesce(array_agg(key order by key), '{}'::text[])
+              into v_keys
+            from ash.top(
+              'query_id',
+              now() - interval '10 minutes',
+              now() + interval '1 minute'
+            );
+            assert v_keys = array['164000000001'],
+              format(
+                '#164: pg_monitor member pre-rebuild keys expected {164000000001}, got %s',
+                v_keys
+              );
+          end $$;
+          reset role;
+
+          select ash.rebuild_partitions(6, 'yes');
+
+          -- The broken implementation passes this empty-storage smoke test.
+          -- The permission failure is delayed until a query-map-backed sample
+          -- makes the reader traverse the recreated query_map_all view.
+          set role ash_b4_reader;
+          do $$
+          declare
+            v_keys text[];
+          begin
+            select coalesce(array_agg(key order by key), '{}'::text[])
+              into v_keys
+            from ash.top(
+              'query_id',
+              now() - interval '10 minutes',
+              now() + interval '1 minute'
+            );
+            assert v_keys = '{}'::text[],
+              format(
+                '#164: immediate custom-reader keys expected {}, got %s',
+                v_keys
+              );
+          end $$;
+          reset role;
+
+          set role ash_b4_pgmon_member;
+          do $$
+          declare
+            v_keys text[];
+          begin
+            select coalesce(array_agg(key order by key), '{}'::text[])
+              into v_keys
+            from ash.top(
+              'query_id',
+              now() - interval '10 minutes',
+              now() + interval '1 minute'
+            );
+            assert v_keys = '{}'::text[],
+              format(
+                '#164: immediate pg_monitor-member keys expected {}, got %s',
+                v_keys
+              );
+          end $$;
+          reset role;
+
+          do $$
+          declare
+            v_wait_id smallint;
+            v_map_id int4;
+            v_datid oid;
+          begin
+            select ash._register_wait('active', 'B4Test', 'B4Wait')
+              into v_wait_id;
+            insert into ash.query_map_0 (query_id)
+            values (164000000002)
+            returning id into v_map_id;
+            select oid into v_datid
+            from pg_database
+            where datname = current_database();
+            insert into ash.sample (
+              sample_ts,
+              datid,
+              active_count,
+              data,
+              slot
+            )
+            values (
+              ash.ts_from_timestamptz(
+                date_trunc('minute', now()) - interval '2 minutes'
+              ),
+              v_datid,
+              1,
+              array[-v_wait_id, 1, v_map_id]::integer[],
+              0
+            );
+          end $$;
+
+          select
+            'after rebuild' as phase,
+            rel.relname,
+            rel.relacl,
+            coalesce(
+              aclcontains(
+                rel.relacl,
+                makeaclitem(reader_role.oid, rel.relowner, 'SELECT', false)
+              ),
+              false
+            ) as custom_direct,
+            coalesce(
+              aclcontains(
+                rel.relacl,
+                makeaclitem(pg_monitor.oid, rel.relowner, 'SELECT', false)
+              ),
+              false
+            ) as pg_monitor_direct,
+            coalesce(
+              aclcontains(
+                rel.relacl,
+                makeaclitem(member_role.oid, rel.relowner, 'SELECT', false)
+              ),
+              false
+            ) as member_direct
+          from pg_class as rel
+          join pg_namespace as nsp on nsp.oid = rel.relnamespace
+          cross join pg_roles as reader_role
+          cross join pg_roles as pg_monitor
+          cross join pg_roles as member_role
+          where nsp.nspname = 'ash'
+            and rel.relname in ('query_map_all', 'query_map_0', 'sample_0')
+            and reader_role.rolname = 'ash_b4_reader'
+            and pg_monitor.rolname = 'pg_monitor'
+            and member_role.rolname = 'ash_b4_pgmon_member'
+          order by rel.relname;
+
+          create temp table b4_probe_results (
+            role_name name primary key,
+            keys text[],
+            error_message text
+          );
+          grant insert on b4_probe_results
+            to ash_b4_reader, ash_b4_pgmon_member;
+
+          set role ash_b4_reader;
+          do $$
+          declare
+            v_keys text[];
+          begin
+            begin
+              select coalesce(array_agg(key order by key), '{}'::text[])
+                into v_keys
+              from ash.top(
+                'query_id',
+                now() - interval '10 minutes',
+                now() + interval '1 minute'
+              );
+              insert into b4_probe_results (role_name, keys, error_message)
+              values (current_user, v_keys, null);
+            exception when insufficient_privilege then
+              insert into b4_probe_results (role_name, keys, error_message)
+              values (current_user, null, sqlerrm);
+            end;
+          end $$;
+          reset role;
+
+          set role ash_b4_pgmon_member;
+          do $$
+          declare
+            v_keys text[];
+          begin
+            begin
+              select coalesce(array_agg(key order by key), '{}'::text[])
+                into v_keys
+              from ash.top(
+                'query_id',
+                now() - interval '10 minutes',
+                now() + interval '1 minute'
+              );
+              insert into b4_probe_results (role_name, keys, error_message)
+              values (current_user, v_keys, null);
+            exception when insufficient_privilege then
+              insert into b4_probe_results (role_name, keys, error_message)
+              values (current_user, null, sqlerrm);
+            end;
+          end $$;
+          reset role;
+
+          table b4_probe_results;
+
+          do $$
+          declare
+            v_acl_count int;
+            v_error_count int;
+            v_errors text;
+            v_exact_key_count int;
+          begin
+            select count(*) into v_acl_count
+            from pg_class as rel
+            join pg_namespace as nsp on nsp.oid = rel.relnamespace
+            cross join pg_roles as grantee_role
+            where nsp.nspname = 'ash'
+              and rel.relname in ('query_map_all', 'query_map_0', 'sample_0')
+              and grantee_role.rolname in ('ash_b4_reader', 'pg_monitor')
+              and coalesce(
+                aclcontains(
+                  rel.relacl,
+                  makeaclitem(
+                    grantee_role.oid,
+                    rel.relowner,
+                    'SELECT',
+                    false
+                  )
+                ),
+                false
+              );
+            assert v_acl_count = 6,
+              format(
+                '#164: expected 6 direct reader ACLs after rebuild, got %s',
+                v_acl_count
+              );
+
+            select
+              count(*) filter (where error_message is not null),
+              string_agg(
+                format('%s -> %s', role_name, error_message),
+                '; '
+                order by role_name
+              ),
+              count(*) filter (
+                where keys = array['164000000002']
+                  and error_message is null
+              )
+            into v_error_count, v_errors, v_exact_key_count
+            from b4_probe_results;
+            assert v_error_count = 0,
+              format('#164: post-rebuild reader errors: %s', v_errors);
+            assert v_exact_key_count = 2,
+              format(
+                '#164: expected exact keys for 2 readers after rebuild, got %s',
+                v_exact_key_count
+              );
+          end $$;
+
+          drop table b4_probe_results;
+          select ash.rebuild_partitions(3, 'yes');
+          update ash.config set sampling_enabled = true where singleton;
+          delete from ash.wait_event_map
+          where state = 'active'
+            and type = 'B4Test'
+            and event = 'B4Wait';
+          select ash.revoke_reader('ash_b4_reader');
+          revoke pg_monitor from ash_b4_pgmon_member;
+          drop role ash_b4_reader;
+          drop role ash_b4_pgmon_member;
+          EOF
+
       - name: "Test 2.0: grant_reader NOTICEs missing pg_read_all_stats; query_text needs it (final re-test papercut)"
         env:
           PGPASSWORD: postgres

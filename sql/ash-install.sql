@@ -1492,6 +1492,7 @@ as $$
 declare
   v_old_n int;
   v_new_n int;
+  v_rec record;
 begin
   /*
    * Destructive: drops all raw sample partitions. Require explicit
@@ -1580,6 +1581,47 @@ begin
     end if;
   end;
 
+  /*
+   * Reuse the installer's #107 reader-bundle snapshot/replay mechanism
+   * around this second drop/recreate path. Detect only complete, explicit
+   * per-overload EXECUTE bundles: inherited privileges (including members of
+   * pg_monitor) and superuser bypass must not be widened into direct grants.
+   * Replaying pg_monitor itself restores access for all of its members.
+   */
+  drop table if exists pg_temp._ash_install_reader_roles;
+  create temp table _ash_install_reader_roles (
+    rolname name primary key
+  );
+  insert into pg_temp._ash_install_reader_roles (rolname)
+  select grantee_role.rolname
+  from pg_catalog.pg_roles as grantee_role
+  where exists (
+    select
+    from pg_catalog.pg_proc as proc
+    join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
+    cross join lateral aclexplode(proc.proacl) as acl
+    where nsp.nspname = 'ash'
+      and proc.prokind = 'f'
+      and acl.privilege_type = 'EXECUTE'
+      and acl.grantee = grantee_role.oid
+      and acl.grantee <> proc.proowner
+  )
+    and not exists (
+      select
+      from pg_catalog.pg_proc as proc
+      join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
+      where nsp.nspname = 'ash'
+        and proc.prokind = 'f'
+        and proc.proname::text <> all (ash._admin_funcs())
+        and not exists (
+          select
+          from aclexplode(proc.proacl) as acl
+          where acl.privilege_type = 'EXECUTE'
+            and acl.grantee = grantee_role.oid
+            and acl.grantee <> proc.proowner
+        )
+    );
+
   -- Step 5: drop the query_map_all view first (depends on query_map tables).
   drop view if exists ash.query_map_all;
 
@@ -1620,6 +1662,21 @@ begin
 
   -- Step 8: rebuild the query_map_all view.
   perform ash._rebuild_query_map_view();
+
+  /*
+   * Restore each complete reader bundle only after the view and every child
+   * table exist, so grant_reader() covers the entire replacement object set.
+   */
+  for v_rec in
+    select reader_role.rolname
+    from pg_temp._ash_install_reader_roles as reader_role
+    join pg_catalog.pg_roles as role_row
+      on role_row.rolname = reader_role.rolname
+    order by reader_role.rolname
+  loop
+    perform ash.grant_reader(v_rec.rolname);
+  end loop;
+  drop table pg_temp._ash_install_reader_roles;
 
   /*
    * Step 9: leave sampling DISABLED. User must explicitly call ash.start() to
@@ -5855,7 +5912,7 @@ comment on function ash.rollup_cleanup() is
 $$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Returns a summary of rows deleted.$$;
 
 comment on function ash.rebuild_partitions(int, text) is
-$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions with num_partitions slots (3-32). Readable raw retention is approximately (num_partitions - 2) * rotation_period. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Re-run ash.grant_reader() for every monitoring role afterwards — the new partitions carry no grants.$$;
+$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Readable raw retention is approximately (num_partitions - 2) * rotation_period. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
 
 comment on function ash.set_debug_logging(bool) is
 $$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
@@ -6234,7 +6291,7 @@ end;
 $$;
 
 comment on function ash.grant_reader(name) is
-  'Grants the minimum privileges (USAGE on schema ash, EXECUTE on all reader functions AND the internal helpers they depend on, SELECT on reader tables incl. partitions) to a monitoring role. This is the supported way to grant reader access: reader functions are SECURITY INVOKER and call shared internal helpers (also revoked from PUBLIC), so granting EXECUTE on an individual reader function alone is not sufficient. Idempotent. Inverse: ash.revoke_reader(name). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
+  'Grants the minimum privileges (USAGE on schema ash, EXECUTE on all reader functions AND the internal helpers they depend on, SELECT on reader tables incl. partitions) to a monitoring role. This is the supported way to grant reader access: reader functions are SECURITY INVOKER and call shared internal helpers (also revoked from PUBLIC), so granting EXECUTE on an individual reader function alone is not sufficient. Idempotent. Inverse: ash.revoke_reader(name). Complete reader bundles are preserved automatically by ash.rebuild_partitions(N, ''yes'').';
 
 create or replace function ash.revoke_reader(role name)
 returns void
@@ -6307,7 +6364,7 @@ end;
 $$;
 
 comment on function ash.revoke_reader(name) is
-  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
+  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name).';
 
 -- Lock down the helpers themselves: only the schema owner may hand out
 -- (or take back) privileges. PUBLIC must not be able to call them.
