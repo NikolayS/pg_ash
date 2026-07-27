@@ -53,16 +53,18 @@ ASH_SEED_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # top four and the flagship chart draws the five-minute incident as an anonymous
 # column of "Other" dots. Measured here: baseline at 4 clients gave a 3.7 AAS
 # calm floor and CPU* outranked Lock:transactionid over the 24-minute window.
-# At 3/3 clients the calm floor stays below 2 AAS on faster Linux hosts and the
-# storm owns the chart without relying on a platform-specific scheduler shape.
+# At 2/2 clients the calm floor stays near 1 AAS on both local and Docker
+# Linux hosts, leaving enough full-window weight for Lock:transactionid AND
+# Lock:tuple to survive into the chart's top four. 3/3 passed most runs but
+# failed this exact gate on a hosted PG16 runner when Lock:tuple ranked fifth.
 # lib/shape.sql assertion 7 fails the seed if this balance ever slips again.
-: "${ASH_LOAD_BASELINE_CLIENTS:=3}"
+: "${ASH_LOAD_BASELINE_CLIENTS:=2}"
 : "${ASH_LOAD_BASELINE_JOBS:=2}"
 : "${ASH_LOAD_STORM_CLIENTS:=12}"
 : "${ASH_LOAD_STORM_JOBS:=4}"
 : "${ASH_LOAD_STORM_BG_CLIENTS:=3}"
 : "${ASH_LOAD_RECOVERY_CLIENTS:=4}"
-: "${ASH_LOAD_READIO_CLIENTS:=3}"
+: "${ASH_LOAD_READIO_CLIENTS:=2}"
 : "${ASH_LOAD_READIO_JOBS:=2}"
 # Rows scanned per read transaction. See lib/workload_read.sql for why the read
 # phases are range aggregates rather than `-b select-only`.
