@@ -7385,9 +7385,10 @@ jobs:
           end $$;
 
           -- ACL equivalence sweep: every function name the reader could
-          -- execute before the upgrade and that still exists must remain
-          -- executable on every current overload. Nothing is enumerated, so
-          -- any future drop/recreate that loses reader grants fails here.
+          -- execute before the upgrade, that still exists, and that remains
+          -- in the current dynamic reader bundle must stay executable on
+          -- every current overload. Helpers promoted into _admin_funcs()
+          -- must instead lose their legacy reader grant.
           do $$
           declare
             v_lost text;
@@ -7399,6 +7400,7 @@ jobs:
             join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'ash'
               and p.prokind = 'f'
+              and p.proname::text <> all (ash._admin_funcs())
               and not has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
             assert v_lost is null,
               format('reader EXECUTE grants lost across upgrade on: %s', v_lost);
@@ -7436,6 +7438,8 @@ jobs:
               '#107: ash.grant_reader must remain admin-only after upgrade';
             assert not has_function_privilege('ash_b1_reader', 'ash.revoke_reader(name)', 'EXECUTE'),
               '#107: ash.revoke_reader must remain admin-only after upgrade';
+            assert not has_function_privilege('ash_b1_reader', 'ash._admin_funcs()', 'EXECUTE'),
+              '#166: legacy ash._admin_funcs reader EXECUTE must be scrubbed during upgrade';
             assert not has_function_privilege('public', 'ash.samples(timestamptz,timestamptz,int,text,text,bigint,name)', 'EXECUTE'),
               '#107: PUBLIC must not gain EXECUTE on ash.samples';
 
@@ -7506,12 +7510,15 @@ jobs:
             join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'ash'
               and p.prokind = 'f'
+              and p.proname::text <> all (ash._admin_funcs())
               and not has_function_privilege('ash_b1_reader', p.oid, 'EXECUTE');
             assert v_lost is null,
               format('reader EXECUTE grants lost across installer re-apply on: %s', v_lost);
 
             assert not has_function_privilege('ash_b1_reader', 'ash.take_sample()', 'EXECUTE'),
               '#107: ash.take_sample must remain admin-only after re-apply';
+            assert not has_function_privilege('ash_b1_reader', 'ash._admin_funcs()', 'EXECUTE'),
+              '#166: legacy ash._admin_funcs reader EXECUTE survived re-apply';
 
             assert (select version from ash.config where singleton)
                      = current_setting('pg_ash.expected_version'),
