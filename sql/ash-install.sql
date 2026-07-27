@@ -1586,9 +1586,11 @@ begin
   /*
    * Reuse the installer's #107 reader-bundle snapshot/replay mechanism
    * around this second drop/recreate path. Detect only complete, explicit
-   * per-overload EXECUTE bundles: inherited privileges (including members of
-   * pg_monitor) and superuser bypass must not be widened into direct grants.
-   * Replaying pg_monitor itself restores access for all of its members.
+   * bundles: schema USAGE, per-overload EXECUTE, and SELECT on every reader
+   * relation. Inherited privileges (including members of pg_monitor),
+   * function-only manual grants, and superuser bypass must not be widened
+   * into direct grants. Replaying pg_monitor itself restores access for all
+   * of its members.
    */
   drop table if exists pg_temp._ash_install_reader_roles;
   create temp table _ash_install_reader_roles (
@@ -1608,6 +1610,15 @@ begin
       and acl.grantee = grantee_role.oid
       and acl.grantee <> proc.proowner
   )
+    and exists (
+      select
+      from pg_catalog.pg_namespace as nsp
+      cross join lateral aclexplode(nsp.nspacl) as acl
+      where nsp.nspname = 'ash'
+        and acl.privilege_type = 'USAGE'
+        and acl.grantee = grantee_role.oid
+        and acl.grantee <> nsp.nspowner
+    )
     and not exists (
       select
       from pg_catalog.pg_proc as proc
@@ -1621,6 +1632,27 @@ begin
           where acl.privilege_type = 'EXECUTE'
             and acl.grantee = grantee_role.oid
             and acl.grantee <> proc.proowner
+        )
+    )
+    and not exists (
+      select
+      from pg_catalog.pg_class as rel
+      join pg_catalog.pg_namespace as nsp on rel.relnamespace = nsp.oid
+      where nsp.nspname = 'ash'
+        and (
+          rel.relname in (
+            'sample', 'query_map_all', 'config', 'wait_event_map',
+            'rollup_1m', 'rollup_1h'
+          )
+          or rel.relname ~ '^query_map_[0-9]+$'
+          or rel.relname ~ '^sample_[0-9]+$'
+        )
+        and not exists (
+          select
+          from aclexplode(rel.relacl) as acl
+          where acl.privilege_type = 'SELECT'
+            and acl.grantee = grantee_role.oid
+            and acl.grantee <> rel.relowner
         )
     );
 
@@ -6490,7 +6522,7 @@ begin
       on role_row.rolname = reader_role.rolname
   loop
     execute format(
-      'revoke execute on function ash._admin_funcs() from %I',
+      'revoke execute on function ash._admin_funcs() from %I cascade',
       v_rec.rolname
     );
     perform ash.grant_reader(v_rec.rolname);

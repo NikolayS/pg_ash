@@ -971,10 +971,48 @@ jobs:
             ) then
               create role ash_b4_pgmon_member login password 'x';
             end if;
+            if not exists (
+              select from pg_roles where rolname = 'ash_b4_function_only'
+            ) then
+              create role ash_b4_function_only nologin;
+            end if;
           end $$;
 
           grant pg_monitor to ash_b4_pgmon_member;
           select ash.grant_reader('ash_b4_reader');
+
+          /*
+           * A manual function-only grant is not a complete reader bundle.
+           * Rebuild must not promote it to schema/table access.
+           */
+          do $$
+          declare
+            v_rec record;
+            v_admin_funcs constant text[] := ash._admin_funcs();
+          begin
+            for v_rec in
+              select proc.proname,
+                     pg_get_function_identity_arguments(proc.oid) as args
+              from pg_proc as proc
+              join pg_namespace as nsp on nsp.oid = proc.pronamespace
+              where nsp.nspname = 'ash'
+                and proc.prokind = 'f'
+                and proc.proname::text <> all (v_admin_funcs)
+            loop
+              execute format(
+                'grant execute on function ash.%I(%s) to ash_b4_function_only',
+                v_rec.proname,
+                v_rec.args
+              );
+            end loop;
+
+            assert not has_schema_privilege(
+              'ash_b4_function_only', 'ash', 'USAGE'
+            ), '#164: function-only precondition unexpectedly has schema USAGE';
+            assert not has_table_privilege(
+              'ash_b4_function_only', 'ash.query_map_all', 'SELECT'
+            ), '#164: function-only precondition unexpectedly has table SELECT';
+          end $$;
 
           -- Seed one exact query-map-backed row before the rebuild. This proves
           -- both a configured reader and a plain pg_monitor member can traverse
@@ -1146,6 +1184,16 @@ jobs:
           reset role;
 
           select ash.rebuild_partitions(6, 'yes');
+
+          do $$
+          begin
+            assert not has_schema_privilege(
+              'ash_b4_function_only', 'ash', 'USAGE'
+            ), '#164: rebuild widened function-only role to schema USAGE';
+            assert not has_table_privilege(
+              'ash_b4_function_only', 'ash.query_map_all', 'SELECT'
+            ), '#164: rebuild widened function-only role to table SELECT';
+          end $$;
 
           -- The broken implementation passes this empty-storage smoke test.
           -- The permission failure is delayed until a query-map-backed sample
@@ -1376,8 +1424,10 @@ jobs:
             and event = 'B4Wait';
           select ash.revoke_reader('ash_b4_reader');
           revoke pg_monitor from ash_b4_pgmon_member;
+          drop owned by ash_b4_function_only;
           drop role ash_b4_reader;
           drop role ash_b4_pgmon_member;
+          drop role ash_b4_function_only;
           EOF
 
       - name: "Issue #166: revoke_reader refuses protected roles"
@@ -1388,7 +1438,7 @@ jobs:
             psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
               -c "drop database if exists ash_b6_owner_test with (force);"
             psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
-              -c "drop role if exists ash_b6_reader, ash_b6_current, ash_b6_owner;"
+              -c "drop role if exists ash_b6_delegated, ash_b6_reader, ash_b6_current, ash_b6_owner;"
           }
           trap cleanup_b6 EXIT
           cleanup_b6
@@ -1398,7 +1448,9 @@ jobs:
             login password 'b6'
             nosuperuser nocreatedb nocreaterole;
           create role ash_b6_reader nologin;
+          create role ash_b6_delegated nologin;
           create role ash_b6_current nologin;
+          grant ash_b6_reader to ash_b6_owner;
           grant ash_b6_current to ash_b6_owner;
           create database ash_b6_owner_test
             owner ash_b6_owner
@@ -1557,7 +1609,13 @@ jobs:
            * legacy bundle grant rather than merely stop issuing new ones.
            */
           grant execute on function ash._admin_funcs()
-            to ash_b6_reader, pg_monitor;
+            to ash_b6_reader with grant option;
+          grant execute on function ash._admin_funcs()
+            to pg_monitor;
+          set role ash_b6_reader;
+          grant execute on function ash._admin_funcs()
+            to ash_b6_delegated;
+          reset role;
           do $$
           begin
             assert has_function_privilege(
@@ -1572,6 +1630,12 @@ jobs:
               'EXECUTE'
             ) = true,
               '#166: legacy pg_monitor precondition must hold _admin_funcs EXECUTE';
+            assert has_function_privilege(
+              'ash_b6_delegated',
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = true,
+              '#166: delegated legacy precondition must hold _admin_funcs EXECUTE';
           end $$;
           \i :install_path
           do $$
@@ -1588,6 +1652,12 @@ jobs:
               'EXECUTE'
             ) = false,
               '#166: re-apply must scrub legacy pg_monitor _admin_funcs EXECUTE';
+            assert has_function_privilege(
+              'ash_b6_delegated',
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = false,
+              '#166: re-apply must cascade legacy delegated _admin_funcs EXECUTE';
             raise notice '#166 legacy reader ACL scrub PASSED';
           end $$;
           select ash.revoke_reader('ash_b6_reader');
