@@ -81,10 +81,10 @@ begin
       'ash',
       'USAGE'
     )
-    and v_direct_functions = 43
+    and v_direct_functions = 44
     and v_direct_tables = 12,
     format(
-      '[%s] ash.grant_reader ACLs: expected schema USAGE, 43 direct function EXECUTEs, and 12 direct table SELECTs; got usage=%s functions=%s tables=%s',
+      '[%s] ash.grant_reader ACLs: expected schema USAGE, 44 direct function EXECUTEs, and 12 direct table SELECTs; got usage=%s functions=%s tables=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       pg_catalog.has_schema_privilege(
         'ash_feature_reader',
@@ -93,6 +93,15 @@ begin
       ),
       v_direct_functions,
       v_direct_tables
+    );
+  assert pg_catalog.has_function_privilege(
+      'ash_feature_reader',
+      'ash._exact_query_uses_coarser(integer,integer,name)',
+      'EXECUTE'
+    ),
+    format(
+      '[%s] ash.grant_reader helper bundle: _exact_query_uses_coarser() is not executable',
+      pg_catalog.current_setting('ash.feature_mode')
     );
   assert not pg_catalog.has_function_privilege(
       'ash_feature_reader',
@@ -366,7 +375,7 @@ begin
     and acl.privilege_type = 'SELECT';
 
   assert pg_catalog.has_schema_privilege('pg_monitor', 'ash', 'USAGE')
-    and v_direct_functions = 43
+    and v_direct_functions = 44
     and v_direct_tables = 12
     and not pg_catalog.has_function_privilege(
       'pg_monitor',
@@ -379,7 +388,7 @@ begin
       'EXECUTE'
     ),
     format(
-      '[%s] default pg_monitor ACLs: expected USAGE/43 reader functions/12 tables/no start() or _admin_funcs(), got usage=%s functions=%s tables=%s start=%s admin_list=%s',
+      '[%s] default pg_monitor ACLs: expected USAGE/44 reader functions/12 tables/no start() or _admin_funcs(), got usage=%s functions=%s tables=%s start=%s admin_list=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       pg_catalog.has_schema_privilege('pg_monitor', 'ash', 'USAGE'),
       v_direct_functions,
@@ -394,6 +403,15 @@ begin
         'ash._admin_funcs()',
         'EXECUTE'
       )
+    );
+  assert pg_catalog.has_function_privilege(
+      'pg_monitor',
+      'ash._exact_query_uses_coarser(integer,integer,name)',
+      'EXECUTE'
+    ),
+    format(
+      '[%s] default pg_monitor helper bundle: _exact_query_uses_coarser() is not executable',
+      pg_catalog.current_setting('ash.feature_mode')
     );
 
   execute 'set local role pg_monitor';
