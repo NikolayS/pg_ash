@@ -5428,10 +5428,6 @@ declare
   v_aas2 record;
   v_cov1 boolean;
   v_cov2 boolean;
-  v_from1 timestamptz := coalesce(since_1, now() - interval '1 hour');
-  v_to1 timestamptz := coalesce(until_1, now());
-  v_from2 timestamptz := coalesce(since_2, now() - interval '1 hour');
-  v_to2 timestamptz := coalesce(until_2, now());
   v_start1 int4;
   v_end1 int4;
   v_start2 int4;
@@ -6070,7 +6066,6 @@ declare
   v_t99_thr numeric;
   v_t999_thr numeric;
   v_available_source text;
-  v_active_slots smallint[];
   v_raw_retention_start timestamptz;
 begin
   if v_from > v_to then
@@ -6097,26 +6092,20 @@ begin
      * "another reader source holds this window" before returning the same
      * SQL NULL as before.
      */
-    select
-      array(
-        select (
-          (config.current_slot - slot_offset.i + config.num_partitions)
-          % config.num_partitions
-        )::smallint
-        from generate_series(0, config.num_partitions - 2) as slot_offset(i)
-        order by slot_offset.i
-      ),
-      now() - (config.num_partitions - 2) * config.rotation_period
-    into v_active_slots, v_raw_retention_start
-    from ash.config as config
-    where config.singleton;
+    /*
+     * Reuse the B3 boundary split: _raw_retention_start() is the logical
+     * planning boundary, while the row probe below proves physical coverage.
+     * _active_slots() excludes the ring slot that readers must not expose.
+     */
+    v_raw_retention_start := ash._raw_retention_start();
 
-    if ash.ts_to_timestamptz(v_end_ts) > v_raw_retention_start
+    if v_raw_retention_start is not null
+       and ash.ts_to_timestamptz(v_end_ts) > v_raw_retention_start
        and ash.ts_to_timestamptz(v_start_ts) <= now()
        and exists (
          select
          from ash.sample as sample_row
-         where sample_row.slot = any(v_active_slots)
+         where sample_row.slot = any(ash._active_slots())
            and sample_row.sample_ts >= v_start_ts
            and sample_row.sample_ts < v_end_ts
        ) then

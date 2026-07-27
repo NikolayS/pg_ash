@@ -3883,8 +3883,8 @@ jobs:
               'cross-horizon compare must preserve uncovered NULL semantics';
 
             raise notice 'B5 #63 cross-horizon clamp PASSED';
-           end $$;
-           rollback;
+          end $$;
+          rollback;
           EOF
 
       - name: "Test 2.0: release-stamped diagnostics and privilege disclosures"
@@ -3994,8 +3994,10 @@ jobs:
             assert ash.report(v_hour, v_hour + interval '1 hour') is null,
               'rollup_1h-only report must remain SQL NULL';
 
-            -- An overlapping hour row is not coverage when minute_counts has
-            -- no value for the requested minute. This must stay silent.
+            -- Invalid/partial minute_counts is honestly disclosed as one flat
+            -- hour-grain datum by the aggregate readers. It is still not
+            -- per-minute coverage for report's requested minute, so report
+            -- must stay silent.
             truncate ash.rollup_1h;
             insert into ash.rollup_1h (
               ts, datid, samples, peak_backends, wait_counts, query_counts,
@@ -4010,8 +4012,17 @@ jobs:
               v_hour + interval '1 minute',
               v_hour + interval '2 minutes'
             );
-            assert a.source = 'rollup_1h' and a.buckets_with_data = 0,
-              'sparse rollup_1h setup must have no requested-minute coverage';
+            assert a.source = 'rollup_1h_flat'
+               and a.period_start = v_hour
+               and a.period_end = v_hour + interval '1 hour'
+               and a.effective_bucket = interval '1 hour'
+               and a.buckets_expected = 1
+               and a.buckets_with_data = 1,
+              format(
+                'partial hour must disclose flat hour plan, got %s/[%,%)/%s/%s/%s',
+                a.source, a.period_start, a.period_end, a.effective_bucket,
+                a.buckets_expected, a.buckets_with_data
+              );
             assert ash.report(
               v_hour + interval '1 minute',
               v_hour + interval '2 minutes'
