@@ -4225,6 +4225,10 @@ jobs:
             v_cpu smallint; v_io smallint;
             v_h timestamptz;
             v_mc int4[];
+            v_wait_counts int4[];
+            v_minute_sum bigint;
+            v_hour_sum bigint;
+            v_null_slots bigint;
             n int; v_peak numeric; v_p99 numeric;
           begin
             truncate ash.sample_0, ash.sample_1, ash.sample_2;
@@ -4254,10 +4258,29 @@ jobs:
             perform ash.rollup_hour();
 
             -- rollup_hour() computes minute_counts exactly: 60 slots, storm at 31
-            select minute_counts into v_mc from ash.rollup_1h;
+            select minute_counts, wait_counts into v_mc, v_wait_counts
+            from ash.rollup_1h;
             assert cardinality(v_mc) = 60, 'minute_counts 60 slots, got ' || cardinality(v_mc);
             assert v_mc[31] = 678, 'storm slot 678, got ' || v_mc[31];
             assert (select count(*) from unnest(v_mc) m where m = 60) = 59, '59 quiet slots of 60';
+            select
+              coalesce(sum(minute_count), 0),
+              count(*) filter (where minute_count is null)
+              into v_minute_sum, v_null_slots
+            from unnest(v_mc) as minute_count;
+            select coalesce(sum(v_wait_counts[pos + 1]), 0)
+              into v_hour_sum
+            from generate_subscripts(v_wait_counts, 1) as pos
+            where pos % 2 = 1;
+            assert v_minute_sum = 4218
+               and v_hour_sum = 4218
+               and v_null_slots = 0,
+              format(
+                'rollup_hour invariant minute_sum=%s hour_sum=%s null_slots=%s',
+                v_minute_sum,
+                v_hour_sum,
+                v_null_slots
+              );
 
             -- seam consistency: short window (rollup_1m) vs long window (rollup_1h)
             -- containing the same spike report IDENTICAL minute-grain peak and p99
@@ -4330,6 +4353,511 @@ jobs:
               where singleton;
 
             raise notice 'rollup_1h seam minute-grain peak/p99 PASSED';
+          end $$;
+          EOF
+
+      - name: "Test 2.0: rollup_1h grain honesty and partial-hour degradation (#161, #130)"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- B1a: top() must not present an hour average as a minute peak.
+          do $$
+          declare
+            v_cpu smallint;
+            v_io smallint;
+            v_h timestamptz := date_trunc('hour', now()) - interval '45 days';
+            v_aas record;
+            v_wait record;
+            v_database record;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_h),
+              0::oid,
+              3600,
+              10,
+              array[v_io, 2760, v_cpu, 1380]::int4[],
+              '{}'::int8[],
+              array[600]::int4[] || array_fill(60, array[59])
+            );
+
+            select * into v_aas
+            from ash.aas(v_h, v_h + interval '1 hour');
+            select * into v_wait
+            from ash.top(
+              'wait_event',
+              v_h,
+              v_h + interval '1 hour',
+              n => 10,
+              bucket => interval '1 minute'
+            )
+            where key = 'IO:DataFileRead';
+            select * into v_database
+            from ash.top(
+              'database',
+              v_h,
+              v_h + interval '1 hour',
+              n => 10,
+              bucket => interval '1 minute'
+            );
+
+            assert v_aas.avg_aas = 1.15
+               and v_aas.peak_aas = 10.00
+               and v_aas.p99_aas = 4.69
+               and v_wait.avg_aas = 0.77
+               and v_wait.peak_aas is null
+               and v_wait.p99_aas is null
+               and v_database.avg_aas = 1.15
+               and v_database.peak_aas = 10.00
+               and v_database.p99_aas = 4.69,
+              format(
+                'B1a aas avg=%s peak=%s p99=%s; top wait avg=%s peak=%s p99=%s; database avg=%s peak=%s p99=%s',
+                v_aas.avg_aas,
+                v_aas.peak_aas,
+                v_aas.p99_aas,
+                v_wait.avg_aas,
+                v_wait.peak_aas,
+                v_wait.p99_aas,
+                v_database.avg_aas,
+                v_database.peak_aas,
+                v_database.p99_aas
+              );
+          end $$;
+
+          -- B1b: adding a filter must disclose the surviving hour grain by
+          -- keeping exact totals while NULLing unsupported minute extremes.
+          do $$
+          declare
+            v_cpu smallint;
+            v_io smallint;
+            v_h timestamptz := date_trunc('hour', now()) - interval '45 days';
+            v_all record;
+            v_io_minute record;
+            v_io_hour record;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_h),
+              0::oid,
+              3600,
+              21,
+              array[v_io, 8280, v_cpu, 60]::int4[],
+              '{}'::int8[],
+              array[1260]::int4[] || array_fill(120, array[59])
+            );
+
+            select * into v_all
+            from ash.aas(v_h, v_h + interval '1 hour');
+            select * into v_io_minute
+            from ash.aas(
+              v_h,
+              v_h + interval '1 hour',
+              wait_event_type => 'IO',
+              bucket => interval '1 minute'
+            );
+            select * into v_io_hour
+            from ash.aas(
+              v_h,
+              v_h + interval '1 hour',
+              wait_event_type => 'IO',
+              bucket => interval '1 hour'
+            );
+
+            assert v_all.avg_aas = 2.32
+               and v_all.peak_aas = 21.00
+               and v_all.p99_aas = 9.79
+               and v_io_minute.avg_aas = 2.30
+               and v_io_minute.backend_seconds = 8280.00
+               and v_io_minute.peak_aas is null
+               and v_io_minute.p99_aas is null
+               and v_io_hour.peak_aas = 2.30
+               and v_io_hour.p99_aas = 2.30,
+              format(
+                'B1b unfiltered avg=%s peak=%s p99=%s; IO minute avg=%s seconds=%s peak=%s p99=%s; IO hour peak=%s p99=%s',
+                v_all.avg_aas,
+                v_all.peak_aas,
+                v_all.p99_aas,
+                v_io_minute.avg_aas,
+                v_io_minute.backend_seconds,
+                v_io_minute.peak_aas,
+                v_io_minute.p99_aas,
+                v_io_hour.peak_aas,
+                v_io_hour.p99_aas
+              );
+          end $$;
+
+          -- B1c: byte-identical windows across retention tiers keep their
+          -- honest averages. Overall minute-detail extremes remain comparable;
+          -- dimensional hour-vs-minute extremes are suppressed as a pair.
+          do $$
+          declare
+            v_io smallint;
+            v_old_h timestamptz := date_trunc('hour', now()) - interval '45 days';
+            v_new_h timestamptz := date_trunc('hour', now()) - interval '2 hours';
+            v_overall record;
+            v_dimension record;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_old_h),
+              0::oid,
+              3600,
+              600,
+              array[v_io, 39540]::int4[],
+              '{}'::int8[],
+              array[36000]::int4[] || array_fill(60, array[59])
+            );
+
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            )
+            select
+              ash.ts_from_timestamptz(
+                v_new_h + minute_idx * interval '1 minute'
+              ),
+              0::oid,
+              60,
+              case when minute_idx = 0 then 600 else 1 end,
+              array[
+                v_io,
+                case when minute_idx = 0 then 36000 else 60 end
+              ]::int4[],
+              '{}'::int8[]
+            from generate_series(0, 59) as minute_idx;
+
+            select * into v_overall
+            from ash.compare(
+              v_old_h,
+              v_old_h + interval '1 hour',
+              v_new_h,
+              v_new_h + interval '1 hour'
+            );
+            select * into v_dimension
+            from ash.compare(
+              v_old_h,
+              v_old_h + interval '1 hour',
+              v_new_h,
+              v_new_h + interval '1 hour',
+              dimension => 'wait_event'
+            );
+
+            assert to_jsonb(v_overall) ->> 'source_1' = 'rollup_1h'
+               and to_jsonb(v_overall) ->> 'source_2' = 'rollup_1m'
+               and v_overall.avg_aas_1 = 10.98
+               and v_overall.avg_aas_2 = 10.98
+               and v_overall.avg_delta = 0.00
+               and v_overall.peak_aas_1 = 600.00
+               and v_overall.peak_aas_2 = 600.00
+               and v_overall.p99_aas_1 = 246.59
+               and v_overall.p99_aas_2 = 246.59
+               and to_jsonb(v_dimension) ->> 'source_1' = 'rollup_1h'
+               and to_jsonb(v_dimension) ->> 'source_2' = 'rollup_1m'
+               and v_dimension.avg_aas_1 = 10.98
+               and v_dimension.avg_aas_2 = 10.98
+               and v_dimension.avg_delta = 0.00
+               and v_dimension.peak_aas_1 is null
+               and v_dimension.peak_aas_2 is null
+               and v_dimension.p99_aas_1 is null
+               and v_dimension.p99_aas_2 is null,
+              format(
+                'B1c overall source=%s/%s avg=%s/%s delta=%s peak=%s/%s p99=%s/%s; dimension source=%s/%s avg=%s/%s delta=%s peak=%s/%s p99=%s/%s',
+                coalesce(to_jsonb(v_overall) ->> 'source_1', '<missing>'),
+                coalesce(to_jsonb(v_overall) ->> 'source_2', '<missing>'),
+                v_overall.avg_aas_1,
+                v_overall.avg_aas_2,
+                v_overall.avg_delta,
+                v_overall.peak_aas_1,
+                v_overall.peak_aas_2,
+                v_overall.p99_aas_1,
+                v_overall.p99_aas_2,
+                coalesce(to_jsonb(v_dimension) ->> 'source_1', '<missing>'),
+                coalesce(to_jsonb(v_dimension) ->> 'source_2', '<missing>'),
+                v_dimension.avg_aas_1,
+                v_dimension.avg_aas_2,
+                v_dimension.avg_delta,
+                v_dimension.peak_aas_1,
+                v_dimension.peak_aas_2,
+                v_dimension.p99_aas_1,
+                v_dimension.p99_aas_2
+              );
+          end $$;
+
+          -- #130: hour-only dimensions snap partial bounds outward and expose
+          -- the effective window; the database dimension keeps minute precision.
+          do $$
+          declare
+            v_cpu smallint;
+            v_io smallint;
+            v_h timestamptz := date_trunc('hour', now()) - interval '45 days';
+            v_aas record;
+            v_wait record;
+            v_database record;
+            v_rows bigint;
+            v_min_aas numeric;
+            v_max_aas numeric;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values
+              (
+                ash.ts_from_timestamptz(v_h),
+                0::oid,
+                3600,
+                1,
+                array[v_io, 3600]::int4[],
+                '{}'::int8[],
+                array_fill(60, array[60])
+              ),
+              (
+                ash.ts_from_timestamptz(v_h + interval '1 hour'),
+                0::oid,
+                3600,
+                1,
+                array[v_cpu, 3600]::int4[],
+                '{}'::int8[],
+                array_fill(60, array[60])
+              );
+
+            select * into v_aas
+            from ash.aas(
+              v_h,
+              v_h + interval '30 minutes',
+              wait_event_type => 'IO'
+            );
+            select * into v_wait
+            from ash.top(
+              'wait_event_type',
+              v_h + interval '30 minutes',
+              v_h + interval '90 minutes',
+              n => 10
+            )
+            where key = 'IO';
+            select * into v_database
+            from ash.top(
+              'database',
+              v_h,
+              v_h + interval '30 minutes',
+              n => 10
+            );
+
+            assert v_aas.period_start = v_h
+               and v_aas.period_end = v_h + interval '1 hour'
+               and v_aas.avg_aas = 1.00
+               and v_aas.backend_seconds = 3600.00
+               and v_aas.peak_aas is null
+               and v_aas.p99_aas is null
+               and (to_jsonb(v_wait) ->> 'period_start')::timestamptz = v_h
+               and (to_jsonb(v_wait) ->> 'period_end')::timestamptz
+                     = v_h + interval '2 hours'
+               and v_wait.avg_aas = 0.50
+               and v_wait.backend_seconds = 3600.00
+               and v_wait.peak_aas is null
+               and v_wait.p99_aas is null
+               and (to_jsonb(v_database) ->> 'period_start')::timestamptz = v_h
+               and (to_jsonb(v_database) ->> 'period_end')::timestamptz
+                     = v_h + interval '30 minutes'
+               and v_database.avg_aas = 1.00
+               and v_database.backend_seconds = 1800.00
+               and v_database.peak_aas = 1.00
+               and v_database.p99_aas = 1.00,
+              format(
+                '#130 aas period=%s..%s avg=%s seconds=%s peak=%s p99=%s; wait period=%s..%s avg=%s seconds=%s peak=%s p99=%s; database period=%s..%s avg=%s seconds=%s peak=%s p99=%s',
+                v_aas.period_start,
+                v_aas.period_end,
+                v_aas.avg_aas,
+                v_aas.backend_seconds,
+                v_aas.peak_aas,
+                v_aas.p99_aas,
+                coalesce(to_jsonb(v_wait) ->> 'period_start', '<missing>'),
+                coalesce(to_jsonb(v_wait) ->> 'period_end', '<missing>'),
+                v_wait.avg_aas,
+                v_wait.backend_seconds,
+                v_wait.peak_aas,
+                v_wait.p99_aas,
+                coalesce(to_jsonb(v_database) ->> 'period_start', '<missing>'),
+                coalesce(to_jsonb(v_database) ->> 'period_end', '<missing>'),
+                v_database.avg_aas,
+                v_database.backend_seconds,
+                v_database.peak_aas,
+                v_database.p99_aas
+              );
+
+            select
+              count(*) filter (where bucket_start is not null),
+              min(aas) filter (where bucket_start is not null),
+              max(aas) filter (where bucket_start is not null)
+              into v_rows, v_min_aas, v_max_aas
+            from ash.chart(
+              v_h + interval '30 minutes',
+              v_h + interval '90 minutes',
+              interval '30 minutes'
+            );
+            assert v_rows = 2 and v_min_aas = 1.00 and v_max_aas = 1.00,
+              format(
+                '#130 chart snapped rows=%s aas=%s..%s',
+                v_rows,
+                v_min_aas,
+                v_max_aas
+              );
+          end $$;
+
+          -- #131 regression controls: defaults and now()-relative calls remain
+          -- usable when rollup_1h is the only retained source.
+          do $$
+          declare
+            v_io smallint;
+            v_requested_start int4;
+            v_requested_end int4;
+            v_effective_start int4;
+            v_effective_end int4;
+            v_expected_hours int;
+            v_summary_rows bigint;
+            v_summary_avg text;
+            v_chart_rows bigint;
+            v_chart_min numeric;
+            v_chart_max numeric;
+            v_top record;
+            v_aas record;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            v_requested_start :=
+              (ash.ts_from_timestamptz(now() - interval '1 hour') / 60) * 60;
+            v_requested_end :=
+              (ash.ts_from_timestamptz(now()) / 60) * 60;
+            v_effective_start := (v_requested_start / 3600) * 3600;
+            v_effective_end :=
+              ((v_requested_end::bigint + 3599) / 3600 * 3600)::int4;
+            v_expected_hours := (v_effective_end - v_effective_start) / 3600;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            )
+            select
+              hour_ts::int4,
+              0::oid,
+              3600,
+              1,
+              array[v_io, 3600]::int4[],
+              array[111::bigint, 3600]::int8[],
+              array_fill(60, array[60])
+            from generate_series(
+              v_effective_start::bigint,
+              (v_effective_end - 3600)::bigint,
+              3600
+            ) as hour_ts;
+
+            select count(*), max(value) filter (where metric = 'avg_aas')
+              into v_summary_rows, v_summary_avg
+            from ash.summary();
+            select
+              count(*) filter (where bucket_start is not null),
+              min(aas) filter (where bucket_start is not null),
+              max(aas) filter (where bucket_start is not null)
+              into v_chart_rows, v_chart_min, v_chart_max
+            from ash.chart();
+            select * into v_top from ash.top('wait_event_type')
+            where key = 'IO';
+            select * into v_aas from ash.aas(wait_event_type => 'IO');
+
+            assert v_summary_rows = 11
+               and v_summary_avg = '1.00'
+               and v_chart_rows = v_expected_hours
+               and v_chart_min = 1.00
+               and v_chart_max = 1.00
+               and v_top.avg_aas = 1.00
+               and v_top.peak_aas is null
+               and v_top.p99_aas is null
+               and v_aas.avg_aas = 1.00
+               and v_aas.backend_seconds
+                     = (v_effective_end - v_effective_start)::numeric
+               and v_aas.peak_aas is null
+               and v_aas.p99_aas is null,
+              format(
+                '#131 defaults summary rows=%s avg=%s; chart rows=%s expected=%s aas=%s..%s; top avg=%s peak=%s p99=%s; filtered aas avg=%s seconds=%s peak=%s p99=%s',
+                v_summary_rows,
+                v_summary_avg,
+                v_chart_rows,
+                v_expected_hours,
+                v_chart_min,
+                v_chart_max,
+                v_top.avg_aas,
+                v_top.peak_aas,
+                v_top.p99_aas,
+                v_aas.avg_aas,
+                v_aas.backend_seconds,
+                v_aas.peak_aas,
+                v_aas.p99_aas
+              );
+
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            raise notice
+              'rollup_1h grain honesty, partial-hour, and default-call tests PASSED';
           end $$;
           EOF
 
@@ -5422,6 +5950,324 @@ jobs:
             ), 'direct v1.4 -> v1.5 upgrade did not honor rebuilt retained raw slots';
 
             raise notice 'direct v1.4 -> v1.5 release upgrade regression PASSED';
+          end $$;
+
+          select ash.uninstall('yes');
+          EOF
+
+      - name: "Release upgrade path: v1.5 rollup_1h backfill honesty (#161, #168)"
+        if: matrix.postgres == 17 && matrix.cron == 'on'
+        env:
+          PGPASSWORD: postgres
+        run: |
+          released_version="$(python3 devel/scripts/ash_sql_chain.py latest-released-version)"
+          git show "v${released_version}:sql/ash-install.sql" \
+            > /tmp/ash-released-install.sql
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          \i /tmp/ash-released-install.sql
+
+          create temporary table upgrade_rollup_probe (
+            label text primary key,
+            hour_ts int4 not null
+          );
+
+          do $$
+          declare
+            v_wait_id smallint;
+            v_flat_h int4 := (
+              ash.ts_from_timestamptz(
+                date_trunc('hour', now()) - interval '60 days'
+              ) / 3600
+            ) * 3600;
+            v_partial_h int4 := (
+              ash.ts_from_timestamptz(
+                date_trunc('hour', now()) - interval '29 days'
+              ) / 3600
+            ) * 3600;
+            v_complete_h int4 := (
+              ash.ts_from_timestamptz(
+                date_trunc('hour', now()) - interval '28 days'
+              ) / 3600
+            ) * 3600;
+          begin
+            assert (
+              select version from ash.config where singleton
+            ) = '1.5',
+              'precondition: real v1.5 installer required';
+            assert not exists (
+              select
+              from information_schema.columns
+              where table_schema = 'ash'
+                and table_name = 'rollup_1h'
+                and column_name = 'minute_counts'
+            ), 'precondition: v1.5 unexpectedly has minute_counts';
+
+            select ash._register_wait('active', 'IO', 'DataFileRead')
+              into v_wait_id;
+
+            insert into upgrade_rollup_probe values
+              ('legacy_flat', v_flat_h),
+              ('partial_backfill', v_partial_h),
+              ('complete_backfill', v_complete_h);
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values
+              (
+                v_flat_h,
+                0::oid,
+                60,
+                10,
+                array[v_wait_id, 600]::int4[],
+                '{}'::int8[]
+              ),
+              (
+                v_partial_h,
+                0::oid,
+                3600,
+                1,
+                array[v_wait_id, 3600]::int4[],
+                '{}'::int8[]
+              ),
+              (
+                v_complete_h,
+                0::oid,
+                3600,
+                10,
+                array[v_wait_id, 4140]::int4[],
+                '{}'::int8[]
+              );
+
+            -- N1: only half of this hour's minute detail survives.
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            )
+            select
+              v_partial_h + minute_idx * 60,
+              0::oid,
+              60,
+              1,
+              array[v_wait_id, 60]::int4[],
+              '{}'::int8[]
+            from generate_series(0, 29) as minute_idx;
+
+            -- Positive control: complete detail with one 600-count spike and
+            -- 59 quiet minutes of 60 counts.
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            )
+            select
+              v_complete_h + minute_idx * 60,
+              0::oid,
+              60,
+              case when minute_idx = 0 then 10 else 1 end,
+              array[
+                v_wait_id,
+                case when minute_idx = 0 then 600 else 60 end
+              ]::int4[],
+              '{}'::int8[]
+            from generate_series(0, 59) as minute_idx;
+          end $$;
+
+          \i sql/migrations/ash-1.5-to-2.0.sql
+
+          -- B1d: a genuine legacy hour is one disclosed hour-grain datum, not
+          -- 60 synthesized observations that claim minute precision.
+          do $$
+          declare
+            v_h int4;
+            v_rows bigint;
+            v_min_source text;
+            v_max_source text;
+            v_points numeric;
+            v_min_avg numeric;
+            v_max_avg numeric;
+            v_peaks bigint;
+            v_p99s bigint;
+            v_aas record;
+          begin
+            select hour_ts into v_h
+            from upgrade_rollup_probe
+            where label = 'legacy_flat';
+
+            select
+              count(*),
+              min(source),
+              max(source),
+              sum(data_points),
+              min(avg_aas),
+              max(avg_aas),
+              count(peak_aas),
+              count(p99_aas)
+              into
+                v_rows,
+                v_min_source,
+                v_max_source,
+                v_points,
+                v_min_avg,
+                v_max_avg,
+                v_peaks,
+                v_p99s
+            from ash.timeline(
+              ash.ts_to_timestamptz(v_h),
+              ash.ts_to_timestamptz(v_h + 3600),
+              interval '1 minute'
+            );
+
+            select * into v_aas
+            from ash.aas(
+              ash.ts_to_timestamptz(v_h),
+              ash.ts_to_timestamptz(v_h + 3600),
+              bucket => interval '1 minute'
+            );
+
+            assert v_rows = 1
+               and v_min_source = 'rollup_1h_flat'
+               and v_max_source = 'rollup_1h_flat'
+               and v_points = 1
+               and v_min_avg = 0.17
+               and v_max_avg = 0.17
+               and v_peaks = 0
+               and v_p99s = 0
+               and v_aas.source = 'rollup_1h_flat'
+               and v_aas.buckets_expected = 1
+               and v_aas.buckets_with_data = 1
+               and v_aas.avg_aas = 0.17
+               and v_aas.peak_aas is null
+               and v_aas.p99_aas is null
+               and v_aas.backend_seconds = 600.00,
+              format(
+                'B1d legacy timeline rows=%s source=%s..%s points=%s avg=%s..%s nonnull_peak=%s nonnull_p99=%s; aas source=%s buckets=%s/%s avg=%s peak=%s p99=%s seconds=%s',
+                v_rows,
+                v_min_source,
+                v_max_source,
+                v_points,
+                v_min_avg,
+                v_max_avg,
+                v_peaks,
+                v_p99s,
+                v_aas.source,
+                v_aas.buckets_with_data,
+                v_aas.buckets_expected,
+                v_aas.avg_aas,
+                v_aas.peak_aas,
+                v_aas.p99_aas,
+                v_aas.backend_seconds
+              );
+          end $$;
+
+          -- N1: a partial candidate is worse than the exact hourly fallback,
+          -- so the migration must leave minute_counts NULL.
+          do $$
+          declare
+            v_mc int4[];
+            v_wait_counts int4[];
+            v_minute_sum bigint;
+            v_hour_sum bigint;
+            v_null_slots bigint;
+          begin
+            select hourly.minute_counts, hourly.wait_counts
+              into v_mc, v_wait_counts
+            from ash.rollup_1h as hourly
+            join upgrade_rollup_probe as probe
+              on probe.hour_ts = hourly.ts
+            where probe.label = 'partial_backfill'
+              and hourly.datid = 0::oid;
+
+            select
+              sum(minute_count),
+              count(*) filter (where minute_count is null)
+              into v_minute_sum, v_null_slots
+            from unnest(v_mc) as minute_count;
+
+            select sum(v_wait_counts[pos + 1])
+              into v_hour_sum
+            from generate_subscripts(v_wait_counts, 1) as pos
+            where pos % 2 = 1;
+
+            assert v_mc is null,
+              format(
+                'N1 partial backfill minute_counts cardinality=%s null_slots=%s minute_sum=%s hour_sum=%s',
+                cardinality(v_mc),
+                v_null_slots,
+                v_minute_sum,
+                v_hour_sum
+              );
+          end $$;
+
+          -- Complete coverage is retained and satisfies the stored invariant.
+          do $$
+          declare
+            v_mc int4[];
+            v_wait_counts int4[];
+            v_minute_sum bigint;
+            v_hour_sum bigint;
+            v_null_slots bigint;
+            v_quiet_slots bigint;
+          begin
+            select hourly.minute_counts, hourly.wait_counts
+              into v_mc, v_wait_counts
+            from ash.rollup_1h as hourly
+            join upgrade_rollup_probe as probe
+              on probe.hour_ts = hourly.ts
+            where probe.label = 'complete_backfill'
+              and hourly.datid = 0::oid;
+
+            select
+              coalesce(sum(minute_count), 0),
+              count(*) filter (where minute_count is null),
+              count(*) filter (where minute_count = 60)
+              into v_minute_sum, v_null_slots, v_quiet_slots
+            from unnest(v_mc) as minute_count;
+
+            select coalesce(sum(v_wait_counts[pos + 1]), 0)
+              into v_hour_sum
+            from generate_subscripts(v_wait_counts, 1) as pos
+            where pos % 2 = 1;
+
+            assert cardinality(v_mc) = 60
+               and v_null_slots = 0
+               and v_mc[1] = 600
+               and v_quiet_slots = 59
+               and v_minute_sum = 4140
+               and v_hour_sum = 4140,
+              format(
+                'complete backfill invariant cardinality=%s null_slots=%s first=%s quiet_slots=%s minute_sum=%s hour_sum=%s',
+                cardinality(v_mc),
+                v_null_slots,
+                v_mc[1],
+                v_quiet_slots,
+                v_minute_sum,
+                v_hour_sum
+              );
+          end $$;
+
+          -- Re-apply repairs a partial array already written by an earlier
+          -- 2.0 beta installer instead of preserving permanent undercounting.
+          update ash.rollup_1h as hourly
+          set minute_counts =
+            array_fill(60, array[30]) || array_fill(null::int4, array[30])
+          from upgrade_rollup_probe as probe
+          where probe.label = 'partial_backfill'
+            and hourly.ts = probe.hour_ts
+            and hourly.datid = 0::oid;
+
+          \i sql/migrations/ash-1.5-to-2.0.sql
+
+          do $$
+          begin
+            assert (
+              select hourly.minute_counts is null
+              from ash.rollup_1h as hourly
+              join upgrade_rollup_probe as probe
+                on probe.hour_ts = hourly.ts
+              where probe.label = 'partial_backfill'
+                and hourly.datid = 0::oid
+            ), 'N1 installer re-apply must NULL a pre-existing partial array';
+
+            raise notice
+              'real v1.5 rollup_1h legacy and backfill honesty PASSED';
           end $$;
 
           select ash.uninstall('yes');
