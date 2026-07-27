@@ -201,7 +201,8 @@ begin
         '_merge_wait_counts', '_merge_query_counts', '_truncate_pairs',
         'rollup_minute',
         '_color_on', '_wait_color', '_reset', '_bar',
-        '_pick_source', '_pick_source_agg', '_raise_tie_retention',
+        '_pick_source', '_pick_source_agg', '_exact_query_uses_coarser',
+        '_raise_tie_retention',
         '_minute_counts_valid', '_rollup_1h_has_flat',
         '_grain_counts', '_grain_by',
         'timeline', 'compare', '_pgss_query_text',
@@ -3892,7 +3893,7 @@ $$;
  * readers auto-select raw -> rollup_1m -> rollup_1h; typed readers expose a
  * source column, compare exposes both sources, report embeds provenance in
  * JSON, and chart emits a planning NOTICE when hour grain widens its request.
- * Unanswerable wait<->query drills raise past raw retention. Internal
+ * Unanswerable exact-query drills raise past raw retention. Internal
  * workhorses (_grain_counts / _grain_by) and retention helpers back the family.
  */
 
@@ -4003,11 +4004,11 @@ $$;
 /*
  * Source auto-selection (the trust property, AAS_API.md §6): the finest
  * source whose retention reaches since. Raw is preferred within raw retention
- * (most accurate, and the only source that can tie wait<->query or answer
- * while rollups lag/are disabled); then rollup_1m, then rollup_1h. Returns
- * 'none' only when nothing holds data. Callers that need the tie force 'raw'
- * and raise past raw retention rather than falling back to a rollup that
- * cannot answer.
+ * (most accurate, and the only source that can provide exact query attribution
+ * or answer while rollups lag/are disabled); then rollup_1m, then rollup_1h.
+ * Returns 'none' only when nothing holds data. Callers that need exact query
+ * attribution force 'raw' and raise when falling back to a compacted rollup
+ * would discard retained history.
  */
 create or replace function ash._pick_source(since timestamptz)
 returns text
@@ -4036,15 +4037,16 @@ $$;
 
 /*
  * Source selection for the AGGREGATE readers (aas / timeline / periods, and
- * the non-tie drills of top / chart). Raw and rollup_1m share per-minute
- * grain, so for anything wider than ~1 hour that rollup_1m fully covers we
- * prefer rollup_1m (a raw decode of a wide window spills hundreds of MB — the
- * last-24h read cost ~4.5s and ~500MB before this). Narrow windows still fall
- * through to _pick_source (raw preferred) so the freshest partial minute is
- * captured, and windows rollup can't cover (or where rollup is
- * disabled/lagging) still fall to raw / rollup_1h. Leaf tie-drills
- * (top/samples) bypass this and force raw. The source column stays honest —
- * it names whatever was actually read.
+ * unfiltered breakdowns in top / chart). Raw and rollup_1m share per-minute
+ * grain, so for anything wider than ~1 hour whose requested start is within
+ * rollup_1m retention we prefer rollup_1m (a raw decode of a wide window spills
+ * hundreds of MB — the last-24h read cost ~4.5s and ~500MB before this).
+ * #122 tracks the separate end-watermark/completeness gap. Narrow windows
+ * still fall through to _pick_source (raw preferred) so the freshest partial
+ * minute is captured, and windows rollup can't cover (or where rollup is
+ * disabled/lagging) still fall to raw / rollup_1h. Exact-query drills and
+ * samples bypass this and force raw. The source column stays honest — it names
+ * whatever was actually read.
  */
 create or replace function ash._pick_source_agg(
   since timestamptz,
@@ -4064,12 +4066,99 @@ as $$
 $$;
 
 /*
- * Raw-retention guard for the wait<->query tie drills (aas / timeline / top
- * with both a wait filter and query_id). Returns silently when raw samples
- * cover the window start; otherwise raises, with guidance split by case:
- *   * window ENTIRELY past raw retention (or no raw samples at all): the tie
- *     is unrecoverable — narrowing the window cannot help, so point to the
- *     untied aggregate readers instead;
+ * True only when the source ordinary planning selects has retained rollup
+ * coverage in the requested pre-raw slice. _pick_source() deliberately falls
+ * back to any nonempty source when no source reaches since; that fallback
+ * label alone is not evidence that forcing raw discards history. In
+ * particular, a young install's first rollup can cover only the same retained
+ * minute as its oldest raw sample.
+ *
+ * Compare at reader grain: a rollup row in the same minute as raw_start does
+ * not prove older coverage. This composes with the landed #163/#189 split
+ * between the oldest physical sample and the usable logical raw boundary.
+ */
+create or replace function ash._exact_query_uses_coarser(
+  start_ts int4,
+  end_ts int4,
+  database name default null
+)
+returns boolean
+language plpgsql
+stable
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_source text := ash._pick_source(ash.ts_to_timestamptz(start_ts));
+  v_raw_start timestamptz := ash._raw_oldest_sample();
+  v_pre_raw_end int8 := case
+    when v_raw_start is null then end_ts::int8
+    else least(
+      end_ts::int8,
+      ash.ts_from_timestamptz(date_trunc('minute', v_raw_start))::int8
+    )
+  end;
+begin
+  if v_pre_raw_end <= start_ts::int8 then
+    return false;
+  end if;
+
+  if v_source = 'rollup_1m' then
+    return exists (
+      select
+      from ash.rollup_1m as rollup_minute
+      left join pg_database as db
+        on db.oid = rollup_minute.datid
+      where rollup_minute.ts::int8 < v_pre_raw_end
+        and rollup_minute.ts::int8 + 60 > start_ts::int8
+        and (
+          _exact_query_uses_coarser.database is null
+          or db.datname = _exact_query_uses_coarser.database
+        )
+    );
+  elsif v_source = 'rollup_1h' then
+    return exists (
+      select
+      from ash.rollup_1h as rollup_hour
+      left join pg_database as db
+        on db.oid = rollup_hour.datid
+      where rollup_hour.ts::int8 < v_pre_raw_end
+        and rollup_hour.ts::int8 + 3600 > start_ts::int8
+        and (
+          _exact_query_uses_coarser.database is null
+          or db.datname = _exact_query_uses_coarser.database
+        )
+        and (
+          not ash._minute_counts_valid(
+            rollup_hour.minute_counts,
+            rollup_hour.wait_counts
+          )
+          or exists (
+            select
+            from unnest(rollup_hour.minute_counts)
+              with ordinality as minute_count(cnt, idx)
+            where minute_count.cnt is not null
+              and rollup_hour.ts::int8
+                    + (minute_count.idx - 1) * 60 < v_pre_raw_end
+              and rollup_hour.ts::int8
+                    + minute_count.idx * 60 > start_ts::int8
+          )
+        )
+    );
+  end if;
+
+  return false;
+end;
+$$;
+
+/*
+ * Raw-retention guard for exact query attribution. Explicit query_id filters
+ * and wait<->query tie drills need raw samples because compacted rollups cannot
+ * distinguish a true zero from attribution that was not preserved. Returns
+ * silently when raw covers the window start; otherwise raises, with guidance
+ * split by case:
+ *   * window ENTIRELY past raw retention (or no raw samples at all): exact
+ *     attribution is unrecoverable — narrowing cannot help, so point to an
+ *     untied / unfiltered aggregate read instead;
  *   * PARTIAL overlap (window starts before raw retention but ends inside
  *     it): narrowing the window to the raw-covered part recovers the drill.
  * start_ts / end_ts are the reader's minute-FLOORED window bounds (the guard
@@ -4102,16 +4191,15 @@ begin
   end if;
 
   if v_raw_start_ts is not null and v_start_ts >= v_raw_start_ts then
-    return;  -- raw covers the window start: the tie drill can proceed
+    return;  -- raw covers the window start: exact attribution can proceed
   end if;
   if v_raw_start_ts is null or v_end_ts <= v_raw_start_ts then
     raise exception
-      'pg_ash: this drill needs the raw wait<->query tie, but the requested '
-      'window (% to %) is entirely outside raw retention (%). The tie is '
-      'unrecoverable for that window — narrowing it will not help. Use the '
-      'untied aggregate readers instead: drop either the wait filter or '
-      'query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of the '
-      'two).',
+      'pg_ash: this drill needs exact raw query attribution, but the requested '
+      'window (% to %) is entirely outside raw retention (%). Exact query '
+      'attribution is unrecoverable for that window — narrowing it will not '
+      'help. Use the untied aggregate readers instead: remove query_id (or '
+      'drop the wait filter when drilling queries by wait).',
       since,
       ash.ts_to_timestamptz(v_end_ts),
       coalesce(
@@ -4124,10 +4212,10 @@ begin
    * floor preserves a partial first minute; rounding up would discard it.
    */
   raise exception
-    'pg_ash: this drill needs raw samples; raw retention starts at % but the '
-    'requested window starts at %. Narrow the window to start at or after % '
-    '(the window end is still inside raw retention), or drill without the '
-    'query/event tie.',
+    'pg_ash: this drill needs exact raw query attribution; raw retention '
+    'starts at % but the requested window starts at %. Narrow the window '
+    'to start at or after % (the window end is still inside raw retention), '
+    'or remove query_id.',
     v_raw_boundary, since, v_raw_boundary;
 end;
 $$;
@@ -4137,10 +4225,11 @@ $$;
  * / rollup_1m, hour for rollup_1h) over [start_ts, end_ts), with uniform
  * filters. One row per grain timestamp that EXISTS in the source (cnt may be 0
  * when nothing matched) so callers can distinguish measured-zero from no-data.
- * 'raw' supports the wait<->query tie (both a wait filter and query_id);
- * the rollup sources cannot and must not be asked for it (caller routes such
- * requests to 'raw'). grain_secs is 60 (raw / rollup_1m / rollup_1h_minutes)
- * or 3600 (rollup_1h and legacy/incomplete rollup_1h detail).
+ * 'raw' supports exact query_id filters (including wait<->query ties); rollup
+ * query_counts are compacted and must not be used to prove an exact match or
+ * zero (callers route those requests to 'raw'). grain_secs is 60 (raw /
+ * rollup_1m / rollup_1h_minutes) or 3600 (rollup_1h and legacy/incomplete
+ * rollup_1h detail).
  * 'rollup_1h_minutes' is the internal minute-capable view used for
  * unfiltered/database-only totals; invalid detail emits one hourly row.
  */
@@ -4236,10 +4325,10 @@ begin
      * Internal minute-grain view of rollup_1h via the preserved minute_counts
      * arrays, so peak_aas / p99_aas survive the rollup_1m -> rollup_1h seam
      * (same values a rollup_1m read of the window would produce). Totals only:
-     * wait/query filters need the hour-grain arrays, so callers route filtered
-     * reads to 'rollup_1h'. Legacy/incomplete arrays emit one exact hourly
-     * datum: callers detect that case up front, normalize the whole window to
-     * hour grain, and publish source = rollup_1h_flat.
+     * wait filters need hour-grain arrays, while exact query filters are routed
+     * to raw. Legacy/incomplete arrays emit one exact hourly datum: callers
+     * detect that case up front, normalize the whole window to hour grain, and
+     * publish source = rollup_1h_flat.
      */
     if wait_event_type is not null or wait_event is not null
        or query_id is not null then
@@ -4364,8 +4453,8 @@ $$;
  * window average; peak_aas / p99_aas are the max and 99th percentile of per
  * bucket AAS (zero-filled within data coverage) so a short spike is not hidden
  * by the average. backend_seconds is the absolute secondary. The window is
- * snapped to minute boundaries. Combining a wait filter with query_id needs
- * the raw wait<->query tie and raises past raw retention.
+ * snapped to minute boundaries. Every explicit query_id filter needs exact
+ * raw attribution and raises when only compacted history covers the window.
  */
 create or replace function ash.aas(
   since timestamptz default null,
@@ -4406,6 +4495,8 @@ declare
   v_source text;
   v_read_source text;
   v_tie boolean;
+  v_exact_query boolean;
+  v_coarser_query_history boolean;
   v_extrema_supported boolean;
   v_raw_start timestamptz;
 begin
@@ -4433,11 +4524,41 @@ begin
 
   v_tie := query_id is not null
            and (wait_event_type is not null or wait_event is not null);
+  v_exact_query := query_id is not null;
 
-  if v_tie then
+  if v_exact_query then
     v_source := 'raw';
-    v_raw_start := ash._raw_retention_start();
-    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
+    /*
+     * Preserve the existing tie guard. For the broader query_id-only case,
+     * raise only when ordinary source selection names a coarser source AND it
+     * has retained coverage in the requested pre-raw slice. A young install's
+     * first rollup can cover only raw's first retained minute, so forcing raw
+     * loses no attribution and must not raise even though _pick_source()'s
+     * fallback names the rollup.
+     */
+    v_coarser_query_history := ash._exact_query_uses_coarser(
+      v_start_ts,
+      v_end_ts,
+      database
+    );
+    if v_tie or v_coarser_query_history then
+      /*
+       * The landed #163/#189 split gives the existing tie guard a logical ring
+       * boundary. When a selected rollup proves a physical raw-coverage gap,
+       * pass the physical oldest sample instead so the guard cannot approve
+       * silent data loss.
+       */
+      v_raw_start := case
+        when v_coarser_query_history then ash._raw_oldest_sample()
+        else ash._raw_retention_start()
+      end;
+      perform ash._raise_tie_retention(
+        v_raw_start,
+        v_start_ts,
+        v_end_ts,
+        v_from
+      );
+    end if;
     v_grain_secs := 60;
   else
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
@@ -4450,7 +4571,7 @@ begin
    * Genuine minute_counts keep unfiltered/database-only reads at minute
    * grain. If any contributing hour has legacy/incomplete detail, disclose
    * rollup_1h_flat and conservatively plan the whole window at hour grain.
-   * Wait/query filters always need the hour-grain arrays.
+   * Wait filters use hour-grain arrays; exact query filters already forced raw.
    */
   if v_source = 'rollup_1h' and wait_event_type is null
      and wait_event is null and query_id is null then
@@ -4553,7 +4674,9 @@ $$;
  * p99_aas is the 99th percentile of the per-grain AAS. Genuine rollup_1h
  * minute_counts preserve minute grain for unfiltered/database-only reads.
  * Hour-grain reads widen partial bounds and buckets; peak/p99 are NULL when
- * that retained grain exceeds the bucket the caller requested.
+ * that retained grain exceeds the bucket the caller requested. Explicit
+ * query_id filters force raw and raise only when coarser retained history
+ * would otherwise be discarded (apart from the existing wait-query tie guard).
  */
 create or replace function ash.timeline(
   since timestamptz default null,
@@ -4591,6 +4714,8 @@ declare
   v_source text;
   v_read_source text;
   v_tie boolean;
+  v_exact_query boolean;
+  v_coarser_query_history boolean;
   v_extrema_supported boolean;
   v_raw_start timestamptz;
 begin
@@ -4625,10 +4750,26 @@ begin
 
   v_tie := query_id is not null
            and (wait_event_type is not null or wait_event is not null);
-  if v_tie then
+  v_exact_query := query_id is not null;
+  if v_exact_query then
     v_source := 'raw';
-    v_raw_start := ash._raw_retention_start();
-    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
+    v_coarser_query_history := ash._exact_query_uses_coarser(
+      v_start_ts,
+      v_end_ts,
+      database
+    );
+    if v_tie or v_coarser_query_history then
+      v_raw_start := case
+        when v_coarser_query_history then ash._raw_oldest_sample()
+        else ash._raw_retention_start()
+      end;
+      perform ash._raise_tie_retention(
+        v_raw_start,
+        v_start_ts,
+        v_end_ts,
+        v_from
+      );
+    end if;
     v_grain_secs := 60;
   else
     v_source := ash._pick_source_agg(ash.ts_to_timestamptz(v_start_ts),
@@ -4807,8 +4948,10 @@ $$;
  * Per-key backend-count per grain row for a breakdown dimension, with uniform
  * filters. Companion to _grain_counts. key is the dimension value (text);
  * key_num carries the numeric query_id for the 'query_id' dimension (null
- * otherwise) so the caller can join query text. 'raw' supports the
- * wait<->query tie; rollup sources must not be asked for it.
+ * otherwise) so the caller can join query text. 'raw' supports exact query
+ * filters and wait<->query ties. An unfiltered rollup query breakdown returns
+ * retained query IDs plus a NULL residual for uncaptured / compacted-away
+ * attribution, keeping its total consistent with the source's wait counts.
  */
 create or replace function ash._grain_by(
   start_ts int4,
@@ -5018,15 +5161,75 @@ begin
 
   elsif dimension = 'query_id' then
     return query execute format($q$
-      select rollup.ts, rollup.query_counts[pos]::text as key,
-             rollup.query_counts[pos]::bigint as key_num,
-             sum(rollup.query_counts[pos + 1])::numeric as cnt
+      /*
+       * Per source row, one grouped query-array pass emits every named query
+       * plus a grand-total grouping set. The grand total becomes the
+       * non-negative wait-total difference: query_counts intentionally omits
+       * below-threshold IDs and an hourly row retains only its top 100.
+       *
+       * Writer-produced arrays are one-based pairs whose non-negative query
+       * totals do not exceed their wait totals. This keeps the residual in the
+       * same stream as named rows without the former second query_counts scan
+       * or a window-wide materialized expansion. Explicit query_id filters
+       * never reach this public rollup path; the residual predicate also keeps
+       * direct helper calls honest.
+       */
+      select
+        rollup.ts,
+        keyed.query_id::text as key,
+        keyed.query_id::bigint as key_num,
+        sum(keyed.cnt)::numeric as cnt
       from %s as rollup
-      cross join generate_subscripts(rollup.query_counts, 1) as pos
-      where pos %% 2 = 1 and rollup.ts >= $1 and rollup.ts < $2
+      cross join lateral (
+        select coalesce(
+          sum(rollup.wait_counts[pair_pos + 1]),
+          0
+        )::numeric as cnt
+        from generate_series(
+          1,
+          coalesce(cardinality(rollup.wait_counts), 0),
+          2
+        ) as pair_pos
+      ) as wait_total
+      cross join lateral (
+        select
+          case
+            when grouping(query_pair.query_id) = 0
+              then query_pair.query_id
+          end as query_id,
+          case
+            when grouping(query_pair.query_id) = 0
+              then sum(query_pair.cnt)
+            else greatest(
+              wait_total.cnt - coalesce(sum(query_pair.cnt), 0),
+              0
+            )
+          end::numeric as cnt,
+          grouping(query_pair.query_id) = 1 as is_residual
+        from (
+          select
+            rollup.query_counts[pair_pos] as query_id,
+            rollup.query_counts[pair_pos + 1]::numeric as cnt
+          from generate_series(
+            1,
+            coalesce(cardinality(rollup.query_counts), 0),
+            2
+          ) as pair_pos
+        ) as query_pair
+        group by grouping sets ((query_pair.query_id), ())
+      ) as keyed
+      where rollup.ts >= $1
+        and rollup.ts < $2
         and ($3 is null or rollup.datid = $3)
-        and ($4 is null or rollup.query_counts[pos] = $4)
-      group by rollup.ts, rollup.query_counts[pos]
+        and keyed.cnt > 0
+        and (
+          (keyed.is_residual and $4 is null)
+          or (
+            not keyed.is_residual
+            and ($4 is null or keyed.query_id = $4)
+          )
+        )
+      group by rollup.ts, keyed.query_id
     $q$, v_tbl)
     using start_ts, end_ts, v_datid, query_id;
 
@@ -5075,10 +5278,10 @@ $$;
 /*
  * The single vertical drill: AAS broken down by one dimension, every row
  * carrying avg/peak/p99 plus its share (pct) of the window total. Filters
- * compose with the dimension. Crossing the wait<->query tie (query_id
- * dimension with a wait filter, or a wait dimension with query_id) needs raw
- * samples and raises past raw retention. query_text is filled only for the
- * query_id dimension with pg_stat_statements present. order_by picks the
+ * compose with the dimension. Every explicit query_id filter needs exact raw
+ * attribution. An unfiltered rollup query breakdown carries unpreserved
+ * attribution in its NULL key. query_text is filled only for the query_id
+ * dimension with pg_stat_statements present. order_by picks the
  * ranking metric BEFORE the top-n cut: 'avg' (default; sustained load),
  * 'peak' or 'p99' (spike-first — a query dominant for one minute of an
  * incident ranks above cosmetic baseline rows that beat it on average).
@@ -5129,6 +5332,8 @@ declare
   v_source text;
   v_read_source text;
   v_tie boolean;
+  v_exact_query boolean;
+  v_coarser_query_history boolean;
   v_extrema_supported boolean;
   v_raw_start timestamptz;
   v_has_pgss boolean := false;
@@ -5170,11 +5375,34 @@ begin
             and (wait_event_type is not null or wait_event is not null))
         or (dimension = 'database' and query_id is not null
             and (wait_event_type is not null or wait_event is not null));
+  v_exact_query := query_id is not null
+                   or (
+                     dimension = 'query_id'
+                     and (
+                       wait_event_type is not null
+                       or wait_event is not null
+                     )
+                   );
 
-  if v_tie then
+  if v_exact_query then
     v_source := 'raw';
-    v_raw_start := ash._raw_retention_start();
-    perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
+    v_coarser_query_history := ash._exact_query_uses_coarser(
+      v_start_ts,
+      v_end_ts,
+      database
+    );
+    if v_tie or v_coarser_query_history then
+      v_raw_start := case
+        when v_coarser_query_history then ash._raw_oldest_sample()
+        else ash._raw_retention_start()
+      end;
+      perform ash._raise_tie_retention(
+        v_raw_start,
+        v_start_ts,
+        v_end_ts,
+        v_from
+      );
+    end if;
     v_grain_secs := 60;
   else
     -- non-tie breakdown is an aggregate read: prefer rollup for wide windows.
@@ -5456,7 +5684,7 @@ declare
   v_grain2 int4;
   v_source1 text;
   v_source2 text;
-  v_top_tie boolean;
+  v_exact_query boolean;
   v_extrema_mismatch boolean;
 begin
   -- validate here, in compare's own frame, so the error names ash.compare
@@ -5581,19 +5809,16 @@ begin
     v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
   end if;
 
-  v_top_tie := (
-    dimension in ('wait_event_type', 'wait_event')
-    and query_id is not null
-  ) or (
-    dimension = 'query_id'
-    and (wait_event_type is not null or wait_event is not null)
-  ) or (
-    dimension = 'database'
-    and query_id is not null
-    and (wait_event_type is not null or wait_event is not null)
-  );
+  v_exact_query := query_id is not null
+                   or (
+                     dimension = 'query_id'
+                     and (
+                       wait_event_type is not null
+                       or wait_event is not null
+                     )
+                   );
 
-  if v_top_tie then
+  if v_exact_query then
     v_source1 := 'raw';
     v_source2 := 'raw';
   else
@@ -5699,10 +5924,10 @@ begin
     window1.pct, window2.pct
   from window1
   /*
-   * NULL-safe: the unattributed-query bucket keeps a NULL key in both windows
-   * and must pair up like any other key. (FULL JOIN cannot use IS NOT
-   * DISTINCT FROM, so NULL is folded to an out-of-band sentinel for the join
-   * only.)
+   * NULL-safe: raw uncaptured attribution and the broader rollup residual both
+   * keep a NULL key and must pair like any named query. (FULL JOIN cannot use
+   * IS NOT DISTINCT FROM, so NULL is folded to an out-of-band sentinel for the
+   * join only.)
    */
   full outer join window2
     on coalesce(window1.key, chr(1)) = coalesce(window2.key, chr(1))
@@ -6822,9 +7047,9 @@ begin
     from ash.top('query_id', v_from, v_to, n => 3) as top_row
   loop
     v_rank := v_rank + 1;
-    -- a NULL key is the unattributed bucket (no query_id captured).
+    -- NULL is uncaptured attribution on raw or the broader residual on rollup.
     return query select 'top_query_' || v_rank,
-      coalesce(v_rec.key, '(unattributed)')
+      coalesce(v_rec.key, '(other / unattributed)')
       || coalesce(' — ' || left(v_rec.query_text, 60), '')
       || ' (avg_aas ' || v_rec.avg_aas || ', ' || v_rec.pct || '%)';
   end loop;
@@ -6843,16 +7068,16 @@ comment on function ash.periods(timestamptz) is
 $$START HERE (US-1 triage): AAS for six standard trailing windows (1m, 5m, 1h, 1d, 1w, 1mo) requested to end at until (default now()), one row each. Columns (period, period_start, period_end, source, bucket, buckets_with_data, avg_aas, peak_aas, p99_aas): period bounds are effective and may snap outward for hour-only reads; peak/p99 vs avg distinguishes a spike from sustained load; buckets_with_data counts covered buckets at the effective grain named by bucket. Genuine rollup_1h.minute_counts keeps minute grain; legacy/incomplete detail on a minute-capable plan reports source = rollup_1h_flat, bucket = 1 hour, and NULL sub-hour peak/p99 instead of fabricated minute extremes. Next: locate the spike in time with ash.timeline(), then drill with ash.top().$$;
 
 comment on function ash.aas(timestamptz, timestamptz, text, text, bigint, name, interval) is
-$$Scalar AAS summary for one requested window [since, until) (defaults: last 1 hour). Optional uniform filters wait_event_type/wait_event/query_id/database. Columns (period_start, period_end, source, effective_bucket, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds). period_start/period_end are effective bounds: hour-only rollup_1h reads snap partial bounds outward, and avg/backend_seconds are exact for those disclosed bounds. peak/p99 are NULL when retained grain exceeds the requested bucket, never hour averages presented as minute extremes. Genuine minute_counts preserves minute grain for unfiltered/database-only reads; legacy/incomplete detail on that minute-capable plan reports source = rollup_1h_flat. Combining a wait filter with query_id needs raw samples and raises past raw retention. source = raw|rollup_1m|rollup_1h|rollup_1h_flat|none. Next: ash.top('query_id', wait_event => ...).$$;
+$$Scalar AAS summary for one requested window [since, until) (defaults: last 1 hour). Optional uniform filters wait_event_type/wait_event/query_id/database. Columns (period_start, period_end, source, effective_bucket, buckets_expected, buckets_with_data, avg_aas, peak_aas, p99_aas, backend_seconds). period_start/period_end are effective bounds: hour-only rollup_1h reads snap partial bounds outward, and avg/backend_seconds are exact for those disclosed bounds. peak/p99 are NULL when retained grain exceeds the requested bucket, never hour averages presented as minute extremes. Genuine minute_counts preserves minute grain for unfiltered/database-only reads; legacy/incomplete detail on that minute-capable plan reports source = rollup_1h_flat. Every explicit query_id filter forces raw; it raises only when ordinary planning selects a rollup with coverage in the requested pre-raw slice, while a young query filter reads available raw rows when the first rollup covers only raw's first retained minute. source = raw|rollup_1m|rollup_1h|rollup_1h_flat|none. Next: ash.top('query_id', wait_event => ...).$$;
 
 comment on function ash.timeline(timestamptz, timestamptz, interval, text, text, bigint, name) is
-$$AAS time series (US-2 locate / US-6 capacity): one row per effective bucket. bucket => null auto-selects requested grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day); hour-only rollup_1h reads widen partial bounds/buckets instead of falling through to missing rollup_1m data. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas). data_points counts retained-grain rows, not one-second samples; 0 with NULL AAS means no stored observation. take_sample() also writes no row for a sampled idle tick, so idle and uncovered time remain indistinguishable until #137. Genuine minute_counts preserves minute extremes; legacy/incomplete detail on a minute-capable plan reports source = rollup_1h_flat. peak/p99 are NULL whenever retained grain exceeds the requested bucket. Order by peak_aas desc nulls last, then drill with ash.top().$$;
+$$AAS time series (US-2 locate / US-6 capacity): one row per effective bucket. bucket => null auto-selects requested grain by span (<= 6h: 1 minute, <= 7d: 1 hour, else 1 day); hour-only rollup_1h reads widen partial bounds/buckets instead of falling through to missing rollup_1m data. Columns (bucket_start, source, data_points, avg_aas, peak_aas, p99_aas). data_points counts retained-grain rows, not one-second samples; 0 with NULL AAS means no stored observation. take_sample() also writes no row for a sampled idle tick, so idle and uncovered time remain indistinguishable until #137. Genuine minute_counts preserves minute extremes; legacy/incomplete detail on a minute-capable plan reports source = rollup_1h_flat. peak/p99 are NULL whenever retained grain exceeds the requested bucket. Every explicit query_id filter follows aas()'s exact-raw/coarser-history rule. Order by peak_aas desc nulls last, then drill with ash.top().$$;
 
 comment on function ash.top(text, timestamptz, timestamptz, text, text, bigint, name, int, interval, text) is
-$$The single vertical drill (US-3): AAS broken down by wait_event_type|wait_event|query_id|database. Columns (key, query_text, source, period_start, period_end, effective_bucket, avg_aas, peak_aas, p99_aas, backend_seconds, pct). Hour-only rollup_1h dimensions snap partial bounds outward; the effective bounds/bucket disclose that degradation and peak/p99 are NULL when retained grain exceeds the requested bucket. Plain database breakdowns retain minute precision through per-(hour,datid) minute_counts; database plus wait/query filters remains hour-grain. order_by in avg|peak|p99 applies before n; when the requested extreme is unavailable it falls back to avg ordering. A NULL query_id key is real unattributed load. The wait<->query tie reads raw and raises past raw retention. source = raw|rollup_1m|rollup_1h|rollup_1h_flat|none.$$;
+$$The single vertical drill (US-3): AAS broken down by wait_event_type|wait_event|query_id|database. Columns (key, query_text, source, period_start, period_end, effective_bucket, avg_aas, peak_aas, p99_aas, backend_seconds, pct). Hour-only rollup_1h dimensions snap partial bounds outward; the effective bounds/bucket disclose that degradation and peak/p99 are NULL when retained grain exceeds the requested bucket. Plain database breakdowns retain minute precision through per-(hour,datid) minute_counts; database plus a wait filter remains hour-grain. order_by in avg|peak|p99 applies before n; when the requested extreme is unavailable it falls back to avg ordering. For query_id, raw NULL means uncaptured attribution; rollup NULL is the exact uncaptured/compacted-away residual and competes for n. Every explicit query_id filter forces raw and uses the coarser-history retention guard; a query breakdown plus wait filter needs the raw tie. source = raw|rollup_1m|rollup_1h|rollup_1h_flat|none.$$;
 
 comment on function ash.compare(timestamptz, timestamptz, timestamptz, timestamptz, text, int, text, text, bigint, name, interval) is
-$$Before/after comparison of two windows (US-7). dimension => null gives one overall row; a dimension gives top keys by abs(avg_delta). Columns (key, query_text, source_1, source_2, period_start_1, period_end_1, period_start_2, period_end_2, effective_bucket_1, effective_bucket_2, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2). Sources and effective plans are disclosed per window. If retained read grains differ, both peak values and both p99 values are NULL as incomparable even when explicit effective buckets match; honest averages/delta remain. No-coverage sides and avg_delta are NULL plus a NOTICE; within a covered window an absent key is a true zero.$$;
+$$Before/after comparison of two windows (US-7). dimension => null gives one overall row; a dimension gives top keys by abs(avg_delta). Columns (key, query_text, source_1, source_2, period_start_1, period_end_1, period_start_2, period_end_2, effective_bucket_1, effective_bucket_2, avg_aas_1, avg_aas_2, avg_delta, peak_aas_1, peak_aas_2, p99_aas_1, p99_aas_2, pct_1, pct_2). Sources and effective plans are disclosed per window. If retained read grains differ, both peak values and both p99 values are NULL as incomparable even when explicit effective buckets match; honest averages/delta remain. No-coverage sides and avg_delta are NULL plus a NOTICE; within a covered window an absent key is a true zero. Explicit query_id filters force raw on both sides; unfiltered rollup query comparisons include and NULL-safe-pair each side's compacted-attribution residual.$$;
 
 comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigint, name) is
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is null. Reads ash.sample directly (raw retention only).$$;

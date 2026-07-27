@@ -50,9 +50,11 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
    `samples` is raw-only by definition, while `summary` includes separate
    headline and wait/query drill provenance metrics. `rollup_1h_flat` marks
    legacy/incomplete detail only when a minute-capable plan must degrade to
-   hour grain. When a request *cannot* be answered (the event↔query tie needs
-   raw samples but the window exceeds raw retention), the reader raises a
-   clear exception naming the boundary — never a silent empty result.
+   hour grain. When a request *cannot* be answered exactly (an explicit
+   `query_id` filter or an event↔query tie needs raw samples, while a coarser
+   source holds earlier history), the reader raises a clear exception naming
+   the boundary — never a silent empty result or an omitted query reported as
+   zero.
 6. **Self-describing.** Every function carries a catalog `comment` stating the
    unit, the column contract, and the recommended next call, so an AI agent
    can navigate via `\df+` / `obj_description()` alone.
@@ -135,13 +137,21 @@ The per-`bucket` peak/p99 buckets are **calendar-aligned** (§2.3): floored to
 reports the bucket actually used after retained-grain widening. A bucket that
 is not a whole multiple of retained grain is rounded **up** to the next
 multiple, so the effective bucket is never finer than the request. On
-`rollup_1h`, wait/query-filtered reads have only hour arrays; partial bounds
-snap outward to complete hours and are disclosed by `period_start` /
+`rollup_1h`, wait-filtered reads have only hour arrays; partial bounds snap
+outward to complete hours and are disclosed by `period_start` /
 `period_end`. Their average/backend seconds are exact for that disclosed
 effective window, while
 peak/p99 requested below one hour are NULL. Unfiltered/database-only reads use
 per-`(ts, datid)` `minute_counts` when valid. Legacy/incomplete detail reports
 `rollup_1h_flat` and follows the honest hour-grain behavior.
+
+Every explicit `query_id` filter forces raw samples because compacted
+`query_counts` cannot prove an exact count or zero. A query-only filter raises
+only when ordinary planning selects a rollup that has retained coverage in the
+requested pre-raw slice. If a young/post-reset installation has only raw data,
+or its first rollup covers only raw's first retained minute, the request reads
+its available raw rows even when the requested left edge predates the first
+sample. A wait+query tie keeps the raw-retention guard described in §2.4.
 
 ### 2.3 `ash.timeline(since, until, bucket interval default null, filters…)`
 
@@ -175,13 +185,15 @@ Returns:
 avg_aas numeric, peak_aas numeric, p99_aas numeric)`
 
 `peak_aas` and `p99_aas` stay per-minute on a `rollup_1h`-backed window only
-when valid `minute_counts` preserves that detail. Wait/query-filtered reads and
+when valid `minute_counts` preserves that detail. Wait-filtered reads and
 legacy/incomplete `rollup_1h_flat` reads have hour grain. Their partial bounds
 and sub-hour buckets widen outward to complete hours instead of falling
 through to unavailable `rollup_1m`; both extrema are NULL when the requested
 bucket is finer than that retained grain. `data_points` counts retained-grain
 rows contributing to the effective bucket (for example, about 60 minute rows
 in a covered one-hour bucket), not one-second samples.
+
+Explicit `query_id` filters follow the exact-raw rule from §2.2.
 
 ### 2.4 `ash.top(dimension text, since, until, filters…, n int default 10, bucket, order_by text default 'avg')`
 
@@ -220,33 +232,44 @@ backend_seconds numeric, pct numeric)`
   membership). A plain `grant_reader` role without it sees null even with
   pgss installed, because pgss restricts query text to the owning role.
   Degrades to null, never errors.
-- For `dimension = 'query_id'`, the unattributed bucket is a **NULL `key`**
-  (not the literal string `'unknown'`): activity whose `query_id` was not
-  captured (client not reporting a queryid, truncated, or utility /
-  idle-in-transaction work). It is real load, not an error; `compare()` pairs
-  NULL keys and `summary()` renders it as `(unattributed)`.
-- Combinations requiring the event↔query association
-  (`'query_id'` + `wait_event`/`wait_event_type`, or `'wait_event'` +
-  `query_id`) are answerable **only from raw samples**. Past raw retention the
-  function raises, and the message now splits by how the window sits against the
-  boundary:
-  - **Window entirely past raw retention** — the tie is unrecoverable and
-    narrowing cannot help; the message says so and points at the untied
-    aggregate readers: *"…is entirely outside raw retention (raw retention
-    starts at `<ts>`). The tie is unrecoverable for that window — narrowing it
-    will not help. Use the untied aggregate readers instead: drop either the
-    wait filter or query_id (e.g. ash.aas(), ash.timeline(), ash.top() with
-    one of the two)."*
+- For `dimension = 'query_id'`, unattributed load has a **NULL `key`** (not the
+  literal string `'unknown'`). On raw reads it is activity whose `query_id`
+  was not captured (client not reporting a queryid, truncated, or utility /
+  idle-in-transaction work). On rollup reads, `query_counts` is deliberately
+  compacted: low-volume query IDs may be omitted and hourly rows retain only a
+  top set. The NULL row is therefore the exact non-negative residual between
+  total wait counts and preserved named-query attribution. It combines
+  uncaptured and compacted-away attribution so `backend_seconds` and the
+  percentage denominator reconcile to total load. It enters ranking before
+  the `n` cut, `compare()` pairs it across windows, and `summary()` renders it
+  as `(other / unattributed)`.
+- Every explicit `query_id` filter is answerable **only from raw samples**;
+  compacted rollups cannot prove either its exact count or its absence. A
+  `query_id` breakdown combined with `wait_event`/`wait_event_type` likewise
+  needs the raw event↔query association. When coarser retained history would
+  be lost, the function raises and the message splits by how the window sits
+  against the boundary:
+  - **Window entirely past raw retention** — exact attribution is
+    unrecoverable and narrowing cannot help; the message points at an
+    unfiltered aggregate read: *"…needs exact raw query attribution … is
+    entirely outside raw retention … narrowing it will not help. Use the
+    untied aggregate readers instead: remove query_id …"*
   - **Partial overlap** (window end still inside retention) — the message names
     the exact boundary to move to: *"…raw retention starts at `<ts>` but the
     requested window starts at `<ts>`. Narrow the window to start at or after
-    `<ts>` … or drill without the query/event tie."*
+    `<ts>` … or remove query_id."*
+  - **No coarser history** — a query-only filter on a young install reads
+    available raw rows without raising merely because the requested left edge
+    predates its first sample, including when the first rollup covers only the
+    same retained minute as raw. The event↔query tie uses the landed
+    logical/physical boundary split from #163/#189.
 - On a `rollup_1h`-backed window, wait/query dimensions and any database
-  breakdown carrying a wait/query filter have hour grain. Partial bounds snap
+  breakdown carrying a wait filter have hour grain. Partial bounds snap
   outward, and minute-requested extrema are NULL. Plain
   `dimension = 'database'` is the exception: `minute_counts` is stored per
   `(ts, datid)`, so it retains minute precision. Legacy/incomplete database
-  detail reports `rollup_1h_flat`.
+  detail reports `rollup_1h_flat`. Explicit query filters never use this path;
+  they force raw.
 
 ### 2.5 `ash.compare(since_1, until_1, since_2, until_2, dimension text default null, n int default 10, filters…, bucket)`
 
@@ -281,6 +304,11 @@ pct_1 numeric, pct_2 numeric)`
   bucket labels equal. Exact averages and `avg_delta` remain available.
   Different physical sources can still be comparable — for example valid
   `rollup_1h.minute_counts` and `rollup_1m` are both minute grain.
+- **Query attribution.** An explicit `query_id` filter makes both sides raw
+  and inherits the same coarser-history guard as `aas` / `top`. An unfiltered
+  `dimension => 'query_id'` comparison may use rollups; each side includes its
+  compacted-attribution NULL residual, and the full outer join pairs those
+  NULL keys safely.
 - **Validation from `compare`'s own frame.** An unknown `dimension` raises
   `ash.compare: unknown dimension <v>; use wait_event_type|wait_event|query_id|database (or null for one overall row)` —
   named `ash.compare`, not `ash.top`.
@@ -464,18 +492,23 @@ function does any of that.
 
 ## 6. Source selection & retention metadata
 
-- **Aggregate readers** (`aas`, `timeline`, `periods`, and non-tie `top` /
+- **Aggregate readers** (`aas`, `timeline`, `periods`, and unfiltered `top` /
   `chart`) prefer `rollup_1m` for any window wider than ~1 hour that
-  `rollup_1m` fully covers — even when that window is still within raw
-  retention. Rollups are far cheaper for wide windows and just as accurate at
-  minute grain, so triage never pays the cost of decoding raw samples. `raw`
-  is used only for narrow (≤ ~1 h) windows, where it is both cheap and
-  freshest, and for windows rollups cannot cover.
-- **Leaf tie-drills** — any drill that needs the `wait_event ↔ query_id`
-  association (`top('query_id', wait_event/​wait_event_type => …)`,
-  `top('wait_event', query_id => …)`) and `samples` — force `raw`, because
-  rollups don't preserve that association; past raw retention they raise (§1
-  rule 5) rather than return empty.
+  starts at or after the earliest `rollup_1m` row — even when that window is
+  still within raw retention. Rollups are far cheaper for wide windows and
+  just as accurate at minute grain, so triage never pays the cost of decoding
+  raw samples. The separate end-watermark/completeness gap remains tracked by
+  #122. `raw` is used for narrow (≤ ~1 h) windows, where it is both cheap and
+  freshest, and for windows whose start rollups cannot reach.
+- **Exact query drills** — every explicit `query_id` filter, any query
+  breakdown that also filters `wait_event`/`wait_event_type`, and `samples`
+  force `raw`. Rollups compact query attribution and do not preserve the
+  event↔query association. When ordinary planning selects a rollup with
+  coverage in the requested pre-raw slice, these calls raise (§1 rule 5)
+  rather than return a false zero. A young query filter remains usable when
+  the first rollup covers only raw's first retained minute. Unfiltered
+  `top('query_id')` stays a fast rollup read and exposes unpreserved
+  attribution in its NULL residual.
 - Typed aggregate readers report `source`
   (`raw` | `rollup_1m` | `rollup_1h` | `rollup_1h_flat` | `none`);
   `compare` reports `source_1` / `source_2`, `report` uses JSON coverage,

@@ -245,6 +245,20 @@ from ash.top(
 (pg_stat_statements execution metrics no longer ride along — join on
 `query_id` yourself when you want them.)
 
+For rollup-backed windows, named rows are compacted query attribution: minute
+thresholds can omit low-volume IDs and hourly rows retain a top set. A
+NULL-key row carries the uncaptured plus compacted-away residual, so the query
+breakdown still reconciles to total load. The residual participates in the
+`n` cut; request enough rows when you need every preserved ID plus the
+residual.
+
+Filtering for one concrete `query_id` always uses raw samples, because a
+missing rollup entry cannot distinguish zero from an omitted ID. If a coarser
+source holds earlier history, the filter raises rather than discard it. A
+young install with no older rollup history still reads its available raw rows
+even when the default window begins before the first sample, including after
+the first rollup covers only the same retained minute as raw.
+
 ## 4. Leaf (the drill v1.x could only half-do)
 
 ### `query_waits(query_id, …)` → `ash.top('wait_event', query_id => …)`
@@ -311,29 +325,28 @@ And if you ask for a window whose raw samples are gone, you get an error, not
 an empty table — and the message differs by how the window sits against the
 raw-retention boundary.
 
-**Window entirely past raw retention** — the tie is gone for good; narrowing
-cannot recover it, so the error says so and redirects to the untied aggregate
-readers:
+**Window entirely past raw retention** — exact query attribution is gone for
+good; narrowing cannot recover it, so the error says so and redirects to an
+unfiltered aggregate read:
 
 ```
-ERROR:  pg_ash: this drill needs the raw wait<->query tie, but the requested
+ERROR:  pg_ash: this drill needs exact raw query attribution, but the requested
         window (2026-06-28 00:00:00+00 to 2026-06-28 01:00:00+00) is entirely
         outside raw retention (raw retention starts at 2026-07-03 00:00:00+00).
-        The tie is unrecoverable for that window — narrowing it will not help.
-        Use the untied aggregate readers instead: drop either the wait filter
-        or query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of
-        the two).
+        Exact query attribution is unrecoverable for that window — narrowing
+        it will not help. Use the untied aggregate readers instead: remove
+        query_id (or drop the wait filter when drilling queries by wait).
 ```
 
 **Partial overlap** — the window end is still inside retention, so the error
 names the exact boundary to move the start to:
 
 ```
-ERROR:  pg_ash: this drill needs raw samples; raw retention starts at
-        2026-07-03 00:00:00+00 but the requested window starts at
+ERROR:  pg_ash: this drill needs exact raw query attribution; raw retention
+        starts at 2026-07-03 00:00:00+00 but the requested window starts at
         2026-07-02 23:00:00+00. Narrow the window to start at or after
         2026-07-03 00:00:00+00 (the window end is still inside raw retention),
-        or drill without the query/event tie.
+        or remove query_id.
 ```
 
 ## 5. Long windows (rollup readers)

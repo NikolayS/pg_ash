@@ -7075,6 +7075,12 @@ jobs:
           end $$;
           EOF
 
+      - name: "Issue #136: compacted query attribution stays honest"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/query_attribution_assert.sql
+
       - name: "Test 2.0: minute-grain peak/p99 survive the rollup_1h seam"
         env:
           PGPASSWORD: postgres

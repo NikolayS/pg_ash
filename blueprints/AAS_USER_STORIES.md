@@ -104,7 +104,10 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 - **Acceptance criteria:**
   1. Breakdown by `wait_event_type` over an absolute window, with each member's `pct` of total activity.
   2. Breakdown by `wait_event`, filterable to a single `wait_event_type` (the drill-in from level 1).
-  3. Breakdown by `query_id`, with `query_text` when pg_stat_statements is present (and degrading to `query_id` only otherwise).
+  3. Breakdown by `query_id`, with `query_text` when pg_stat_statements is
+     present (and degrading to `query_id` only otherwise). Unfiltered rollup
+     reads expose compacted-away attribution as a NULL residual; filtering an
+     exact `query_id` forces raw.
   4. **Every breakdown row carries `avg_aas`, `peak_aas`, AND `p99_aas`** — not avg alone — so a spiky member is distinguishable from a steadily-busy one.
   5. The doc/comment is explicit that the deeper event→query tie is NOT recoverable from rollups (see US-4).
 - **Primary API:** `ash.top(dimension, …)` — one function; the drill levels are `top('wait_event_type')` → `top('wait_event', wait_event_type => …)` → `top('query_id', …)`.
@@ -177,8 +180,9 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 - **Coverage:** 🟡 Partial. Auto `rollup_1h` selection and valid
   `rollup_1h.minute_counts` preserve unfiltered/database-only minute totals.
   Wait/query dimensions and legacy/incomplete `rollup_1h_flat` data retain
-  hour grain and NULL extrema requested below that grain. Long-term AAS still
-  assumes one current cadence for all retained history (issue #137).
+  hour grain and NULL extrema requested below that grain. Explicit query
+  filters force raw samples for exact attribution. Long-term AAS still assumes
+  one current cadence for all retained history (issue #137).
 
 ### US-7 — Before/after comparison
 
@@ -239,9 +243,11 @@ These apply to every story above.
 - **Unit consistency.** AAS is the primary unit (`avg_aas` / `peak_aas` / `p99_aas`); `backend_seconds` may appear as a secondary column. No third unit.
 - **Percentile definition.** `p99_aas` = the 99th percentile of per-sub-bucket AAS. The sub-bucket grain is a parameter (default `'1 minute'`). `peak_aas` is the max over the same sub-buckets.
 - **Raw-vs-rollup honesty (trust property).** Aggregate readers select or
-  declare their source by window; when a requested drill or window cannot be
-  answered (rollup can't tie event→query; window exceeds retention), it signals
-  this explicitly rather than returning a silent empty/partial result.
+  declare their source by window. Rollup query breakdowns expose
+  compacted-away attribution as a NULL residual, while exact `query_id`
+  filters and event→query ties force raw. When coarser retained history makes
+  an exact drill impossible, or a window exceeds all retention, the reader
+  signals this explicitly rather than returning a silent empty/partial result.
 - **Time addressing convention (2.0).** Reader windows are `[since, until)`.
   No bounds means the last hour (`report`: last day); `until` alone means its
   preceding hour; explicit inversion raises. The v1.x `f(p_interval)` /
