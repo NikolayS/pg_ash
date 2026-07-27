@@ -3956,8 +3956,13 @@ as $$
     from ash.rollup_1h as rollup_hour
     left join pg_database as db
       on db.oid = rollup_hour.datid
-    where rollup_hour.ts::bigint < end_ts::bigint
-      and rollup_hour.ts::bigint + 3600 > start_ts::bigint
+    /*
+     * Keep the primary-key ts range indexable. Moving the arithmetic to the
+     * bigint parameter side avoids int4 overflow without casting the column.
+     */
+    where rollup_hour.ts < _rollup_1h_has_flat.end_ts::bigint
+      and rollup_hour.ts
+            > _rollup_1h_has_flat.start_ts::bigint - 3600
       and (
         _rollup_1h_has_flat.database is null
         or db.datname = _rollup_1h_has_flat.database
