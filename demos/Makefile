@@ -131,8 +131,12 @@ down:
 
 ## open: look at the result (macOS convenience, kept from the original harness)
 open:
-	@if [ -f ../assets/ash_demo.gif ]; then \
-	  open ../assets/ash_demo.gif; \
-	else \
-	  echo 'no ../assets/ash_demo.gif yet — run `make demo`'; exit 1; \
-	fi
+	@os=$$(uname -s); \
+	if [ "$$os" != "Darwin" ]; then \
+	  echo "make open is macOS-only (detected $$os)" >&2; \
+	  exit 1; \
+	elif [ ! -f ../assets/ash_demo.gif ]; then \
+	  echo 'no ../assets/ash_demo.gif yet — run `make demo`' >&2; \
+	  exit 1; \
+	fi; \
+	open ../assets/ash_demo.gif

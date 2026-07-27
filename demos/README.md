@@ -112,7 +112,7 @@ No Docker. No browser. No `ALTER SYSTEM`. No restart. **No pg_cron** — see the
 section above.
 
 **Tier 2 — PNG.** Any SVG rasteriser: `resvg` (`cargo install resvg`, or a
-release binary) or any Chromium-family browser, including
+release binary), `rsvg-convert`, or any Chromium-family browser, including
 `/Applications/Google Chrome.app`, which `make doctor` finds by absolute path.
 Set `ASH_CHROME=/path/to/binary` to pin one. `ASH_SVG_ONLY=1` skips this tier
 entirely — the SVG is the primary artifact and loses nothing.

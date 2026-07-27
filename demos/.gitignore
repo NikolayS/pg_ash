@@ -9,3 +9,6 @@ env.local
 
 # Left behind by `make check` when the renderer drifts, for eyeballing.
 *.drift.svg
+
+# Renderer imports during `make check`.
+__pycache__/

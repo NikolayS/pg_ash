@@ -156,28 +156,37 @@ CAPTIONS="$DEMO_DIR/scenes/captions.tsv"
 
 # ---------------------------------------------------------------------------
 # Rasteriser selection. SVG is the primary artifact; PNG is a convenience for
-# places that will not render SVG. Chromium-family and resvg both produce the
-# exact palette; we prefer whichever is present rather than requiring one.
+# places that will not render SVG. resvg, rsvg-convert and Chromium-family
+# renderers all preserve the exact palette. Prefer a native SVG rasteriser: a
+# browser can be installed but unusable under a headless Linux sandbox.
 # ---------------------------------------------------------------------------
 RASTER=""
 if [ "${ASH_SVG_ONLY:-}" != "1" ] && [ "$CAPTURE_ONLY" != "1" ]; then
-  for cand in \
-    "${ASH_CHROME:-}" \
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-    "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-    chromium chromium-browser google-chrome google-chrome-stable
-  do
-    [ -n "$cand" ] || continue
-    if [ -x "$cand" ] || command -v "$cand" >/dev/null 2>&1; then
-      RASTER="chrome:$cand"; break
-    fi
-  done
-  if [ -z "$RASTER" ] && command -v resvg >/dev/null 2>&1; then
+  if [ -n "${ASH_CHROME:-}" ] \
+     && { [ -x "$ASH_CHROME" ] || command -v "$ASH_CHROME" >/dev/null 2>&1; }
+  then
+    RASTER="chrome:$ASH_CHROME"
+  elif command -v resvg >/dev/null 2>&1; then
     RASTER="resvg:resvg"
+  elif command -v rsvg-convert >/dev/null 2>&1; then
+    RASTER="rsvg-convert:rsvg-convert"
+  else
+    for cand in \
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+      chromium chromium-browser google-chrome google-chrome-stable
+    do
+      if [ -x "$cand" ] || command -v "$cand" >/dev/null 2>&1; then
+        RASTER="chrome:$cand"
+        break
+      fi
+    done
   fi
   if [ -z "$RASTER" ]; then
-    ash_warn "no Chromium-family binary and no resvg: emitting SVG only."
-    ash_warn "  (set ASH_SVG_ONLY=1 to silence, or install resvg for PNG.)"
+    ash_warn "no SVG rasteriser: emitting SVG only."
+    ash_warn "  (set ASH_SVG_ONLY=1 to silence, or install resvg/rsvg-convert.)"
+  else
+    ash_log "rasteriser=${RASTER%%:*}"
   fi
 fi
 
@@ -188,6 +197,9 @@ rasterise() {
     "") return 0 ;;
     resvg:*)
       resvg --zoom "$ASH_SCALE" "$svg" "$png" >/dev/null 2>&1 </dev/null ;;
+    rsvg-convert:*)
+      rsvg-convert --zoom "$ASH_SCALE" --output "$png" "$svg" \
+        >/dev/null 2>&1 </dev/null ;;
     chrome:*)
       local bin=${RASTER#chrome:}
       local html="$ASH_OUT/.shot.html"
@@ -203,11 +215,38 @@ sys.stdout.write(
   'img{display:block}</style>'
   '<img src="file://%s" width="%s" height="%s">' % (os.path.abspath(svg), w, h))
 PY
-      "$bin" --headless --disable-gpu --no-sandbox --hide-scrollbars \
-             --default-background-color=00000000 \
-             --force-device-scale-factor="$ASH_SCALE" \
-             --window-size="$w,$h" --screenshot="$png" "$html" \
-             >/dev/null 2>&1 </dev/null
+      python3 - "$bin" "$ASH_SCALE" "$w" "$h" "$png" "$html" <<'PY'
+import subprocess
+import sys
+
+binary, scale, width, height, output, html = sys.argv[1:]
+command = [
+    binary,
+    "--headless",
+    "--disable-gpu",
+    "--no-sandbox",
+    "--hide-scrollbars",
+    "--default-background-color=00000000",
+    f"--force-device-scale-factor={scale}",
+    f"--window-size={width},{height}",
+    f"--screenshot={output}",
+    html,
+]
+try:
+    subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=60,
+    )
+except subprocess.TimeoutExpired:
+    sys.stderr.write("capture-stills: Chrome rasteriser timed out after 60s\n")
+    raise SystemExit(1)
+except subprocess.CalledProcessError as error:
+    raise SystemExit(error.returncode)
+PY
       rm -f "$html" ;;
   esac
   [ -s "$png" ]

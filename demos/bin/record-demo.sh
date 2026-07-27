@@ -59,7 +59,7 @@ for arg in "$@"; do
   esac
 done
 
-SESSION="${ASH_DEMO_SESSION:-ash-demo}"
+SESSION_PREFIX="${ASH_DEMO_SESSION:-ash-demo}"
 CAST="$ASH_OUT/ash_demo.cast"
 TERM_GIF="$ASH_OUT/term.gif"
 PLATE="$ASH_OUT/chrome_plate.png"
@@ -70,11 +70,17 @@ STDERR_LOG="$ASH_OUT/stderr.log"
 GIF_BUDGET_BYTES="${ASH_GIF_BUDGET:-716800}"   # 700 KB
 
 cleanup() {
-  local rc=$?
+  local rc=$? kill_rc
+  set +e
   drv_kill
-  return $rc
+  kill_rc=$?
+  set -e
+  [ "$rc" -ne 0 ] && return "$rc"
+  return "$kill_rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ===========================================================================
 # 1. Dependencies
@@ -533,9 +539,8 @@ rm -f "$ASH_OUT/shots"/*.ansi 2>/dev/null || true
 
 ash_step "recording (${ASH_COLS}x${REEL_ROWS}, asciinema $ASCIINEMA_MAJOR)"
 T_REC0="$(ash_now_ms)"
-DRV_SESSION="$SESSION"
 DRV_SHOT_DIR="$ASH_OUT/shots"
-drv_start "$SESSION" "$ASH_COLS" "$REEL_ROWS" \
+drv_start "$SESSION_PREFIX" "$ASH_COLS" "$REEL_ROWS" \
   "asciinema rec --overwrite --idle-time-limit 3 $REC_GEO \
      --command '$LAUNCH 2> $STDERR_LOG' '$CAST'"
 

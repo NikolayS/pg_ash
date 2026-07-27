@@ -46,9 +46,20 @@
 if [ -n "${ASH_DRIVER_SH_LOADED:-}" ]; then return 0 2>/dev/null || true; fi
 ASH_DRIVER_SH_LOADED=1
 
-DRV_SESSION="${DRV_SESSION:-ash-demo}"
 DRV_TIMEOUT_MS="${DRV_TIMEOUT_MS:-60000}"
 DRV_POLL="${DRV_POLL:-0.02}"
+
+# A private tmux server is the structural guard that makes this driver safe
+# when its caller is already inside tmux. Even a malformed target can only
+# address this run's private socket, never the caller's server. The session
+# still has its own unique name and ownership token: the private socket narrows
+# the blast radius, while the identity checks prove what we are killing.
+DRV_TMUX_SOCKET="pg-ash-demo-$$-${RANDOM}-${RANDOM}"
+DRV_SESSION=""
+DRV_SESSION_ID=""
+DRV_SESSION_OWNER=""
+DRV_SESSION_CREATED=0
+DRV_SESSION_SEQUENCE=0
 
 # Human-typing pacing (ms/char). The bursty-not-metronomic feel is the single
 # best thing about the original record.sh and is preserved; the absolute values
@@ -68,7 +79,12 @@ DRV_SHOT_DIR="${DRV_SHOT_DIR:-${ASH_OUT:-.}/shots}"
 # tiny helpers
 # ---------------------------------------------------------------------------
 drv_now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
-drv_title()  { tmux display-message -p -t "$DRV_SESSION" '#{pane_title}' 2>/dev/null || printf ''; }
+drv_tmux()   { TMUX= TMUX_PANE= tmux -L "$DRV_TMUX_SOCKET" "$@"; }
+drv_title()  {
+  [ "$DRV_SESSION_CREATED" = "1" ] || { printf ''; return 0; }
+  drv_tmux display-message -p -t "$DRV_SESSION_ID" \
+    '#{pane_title}' 2>/dev/null || printf ''
+}
 drv_log()    { printf '\033[38;2;98;114;164m[driver]\033[0m %s\n' "$*" >&2; }
 
 # drv_die <msg> — exit 7 (animation sync failure) in the theme's Lock red so a
@@ -78,24 +94,131 @@ drv_die() {
   exit 7
 }
 
-drv_alive() { tmux has-session -t "$DRV_SESSION" 2>/dev/null; }
+drv_identity() {
+  drv_tmux display-message -p -t "$DRV_SESSION_ID" \
+    '#{session_name}:#{session_id}:#{@pg_ash_driver_owner}' 2>/dev/null
+}
+
+drv_alive() {
+  local identity
+  [ "$DRV_SESSION_CREATED" = "1" ] || return 1
+  identity="$(drv_identity)" || return 1
+  [ "$identity" = "$DRV_SESSION:$DRV_SESSION_ID:$DRV_SESSION_OWNER" ]
+}
+
+# Roll back the narrow interval after new-session returned an ID but before its
+# ownership option was stamped. The unique name plus captured ID on this run's
+# private socket are the provisional proof; never target it if either changed.
+drv_rollback_provisional() {
+  local identity
+  if [ -z "$DRV_TMUX_SOCKET" ] || [ -z "$DRV_SESSION" ] \
+     || [ -z "$DRV_SESSION_ID" ]; then
+    drv_log "FATAL: refusing provisional cleanup with an incomplete identity"
+    return 7
+  fi
+  if ! drv_tmux has-session -t "$DRV_SESSION_ID" 2>/dev/null; then
+    DRV_SESSION_CREATED=0
+    return 0
+  fi
+  identity="$(drv_tmux display-message -p -t "$DRV_SESSION_ID" \
+    '#{session_name}:#{session_id}' 2>/dev/null)" || {
+    drv_log "FATAL: cannot read provisional driver identity"
+    return 7
+  }
+  if [ "$identity" != "$DRV_SESSION:$DRV_SESSION_ID" ]; then
+    drv_log "FATAL: refusing provisional cleanup: driver identity changed"
+    return 7
+  fi
+  if ! drv_tmux kill-session -t "$DRV_SESSION_ID" 2>/dev/null; then
+    drv_log "FATAL: could not roll back provisional driver $DRV_SESSION_ID"
+    return 7
+  fi
+  DRV_SESSION_CREATED=0
+}
 
 # ---------------------------------------------------------------------------
-# drv_start <session> <cols> <rows> <command>
+# drv_start <session-prefix> <cols> <rows> <command>
 # Detached tmux session with an EXACT geometry, running <command>. The geometry
 # must be pinned here: tmux otherwise inherits the controlling terminal's size
 # and the 100-column budget silently becomes 80 in CI.
 # ---------------------------------------------------------------------------
 drv_start() {
-  DRV_SESSION="$1"; local cols="$2" rows="$3" cmd="$4"
-  tmux kill-session -t "$DRV_SESSION" 2>/dev/null || true
-  tmux new-session -d -s "$DRV_SESSION" -x "$cols" -y "$rows" "$cmd"
+  local prefix="$1" cols="$2" rows="$3" cmd="$4"
+  local attempt candidate session_id
+
+  [ "$DRV_SESSION_CREATED" = "0" ] \
+    || drv_die "refusing to start a second driver session before cleanup"
+  case "$prefix" in
+    "") drv_die "driver session prefix is empty" ;;
+    *[!A-Za-z0-9_-]*)
+      drv_die "driver session prefix has unsafe characters: $prefix" ;;
+  esac
+
+  DRV_SESSION_SEQUENCE=$((DRV_SESSION_SEQUENCE + 1))
+  attempt=0
+  session_id=""
+  while [ "$attempt" -lt 5 ]; do
+    attempt=$((attempt + 1))
+    candidate="$prefix-$$-$DRV_SESSION_SEQUENCE-$RANDOM"
+    if session_id="$(drv_tmux new-session -d -P -F '#{session_id}' \
+        -s "$candidate" -x "$cols" -y "$rows" "$cmd" 2>/dev/null)"; then
+      break
+    fi
+    session_id=""
+  done
+  [ -n "$session_id" ] \
+    || drv_die "could not create a unique private tmux session"
+
+  DRV_SESSION="$candidate"
+  DRV_SESSION_ID="$session_id"
+  DRV_SESSION_OWNER="pg-ash-demo-$$-${RANDOM}-${RANDOM}"
+  DRV_SESSION_CREATED=1
+  if ! drv_tmux set-option -t "$DRV_SESSION_ID" \
+      @pg_ash_driver_owner "$DRV_SESSION_OWNER" 2>/dev/null; then
+    drv_rollback_provisional \
+      || drv_die "could not safely roll back driver session $DRV_SESSION"
+    drv_die "could not stamp ownership on driver session $DRV_SESSION"
+  fi
   # Do not let tmux rewrite the pane title from anything but OSC 2.
-  tmux set-option -t "$DRV_SESSION" -p allow-rename on 2>/dev/null || true
+  drv_tmux set-option -t "$DRV_SESSION_ID" -p allow-rename on \
+    2>/dev/null || true
   mkdir -p "$DRV_SHOT_DIR"
 }
 
-drv_kill() { tmux kill-session -t "$DRV_SESSION" 2>/dev/null || true; }
+drv_kill() {
+  local identity
+
+  # The EXIT trap runs on dependency/preflight failures and in --render-only
+  # mode, before drv_start. With no creation record there is nothing to clean.
+  [ "$DRV_SESSION_CREATED" = "1" ] || return 0
+
+  if [ -z "$DRV_TMUX_SOCKET" ] || [ -z "$DRV_SESSION" ] \
+     || [ -z "$DRV_SESSION_ID" ] || [ -z "$DRV_SESSION_OWNER" ]; then
+    drv_log "FATAL: refusing tmux cleanup with an incomplete ownership record"
+    return 7
+  fi
+
+  # psql/asciinema may have exited naturally after \q. An absent private
+  # session needs no kill; clear the ledger so cleanup stays idempotent.
+  if ! drv_tmux has-session -t "$DRV_SESSION_ID" 2>/dev/null; then
+    DRV_SESSION_CREATED=0
+    return 0
+  fi
+
+  identity="$(drv_identity)" || {
+    drv_log "FATAL: refusing tmux cleanup: cannot read the target identity"
+    return 7
+  }
+  if [ "$identity" != "$DRV_SESSION:$DRV_SESSION_ID:$DRV_SESSION_OWNER" ]; then
+    drv_log "FATAL: refusing tmux cleanup: ownership identity changed"
+    return 7
+  fi
+  if ! drv_tmux kill-session -t "$DRV_SESSION_ID" 2>/dev/null; then
+    drv_log "FATAL: could not kill owned driver session $DRV_SESSION_ID"
+    return 7
+  fi
+  DRV_SESSION_CREATED=0
+}
 
 # ---------------------------------------------------------------------------
 # drv_wait_prompt <previous-title> [timeout-ms]
@@ -151,12 +274,12 @@ drv_type() {
     esac
     send="$ch"
     [ "$ch" = ";" ] && send="; "
-    tmux send-keys -t "$DRV_SESSION" -l -- "$send"
+    drv_tmux send-keys -t "$DRV_SESSION_ID" -l -- "$send"
     sleep "$(printf '0.%03d' "$ms")"
   done
 }
 
-drv_enter() { tmux send-keys -t "$DRV_SESSION" Enter; }
+drv_enter() { drv_tmux send-keys -t "$DRV_SESSION_ID" Enter; }
 
 # ---------------------------------------------------------------------------
 # drv_wrap <text> <width> — split SQL into typed display lines.
@@ -264,7 +387,7 @@ drv_submit() {
 # ---------------------------------------------------------------------------
 drv_shot() {
   mkdir -p "$(dirname "$1")"
-  tmux capture-pane -e -p -t "$DRV_SESSION" > "$1"
+  drv_tmux capture-pane -e -p -t "$DRV_SESSION_ID" > "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -330,7 +453,7 @@ drv_note() {
   else
     # Trailing space: tmux eats a terminal ';' even in literal mode, and a
     # trailing space is a no-op inside a comment.
-    tmux send-keys -t "$DRV_SESSION" -l -- "$text "
+    drv_tmux send-keys -t "$DRV_SESSION_ID" -l -- "$text "
   fi
   drv_enter
   set +e; drv_wait_prompt "$prev" 15000 >/dev/null; rc=$?; set -e

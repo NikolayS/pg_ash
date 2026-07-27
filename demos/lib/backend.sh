@@ -53,6 +53,13 @@ _bk_assert_container_glob() {
   esac
 }
 
+# The official postgres images declare PGDATA as an anonymous volume. `-v` is
+# therefore part of correctness here, not an optional space-saving flag:
+# removing only the container leaks roughly 600 MiB for every matrix entry.
+_bk_remove_owned_container() {
+  docker rm -f -v "$1" >/dev/null 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # psql wrappers — every SQL call in the harness goes through one of these
 # ---------------------------------------------------------------------------
@@ -187,7 +194,7 @@ _bk_up_docker() {
     # pg_stat_statements must be preloaded to exist at all. pg_cron is NOT
     # requested here: the stock postgres image does not ship it, and the whole
     # point of this harness is that the no-cron path is first class. A cluster
-    # with real pg_cron needs demos/Dockerfile and an explicit image tag.
+    # with real pg_cron needs a purpose-built image and an explicit image tag.
     docker run -d \
       --name "$ASH_DEMO_CONTAINER" \
       -e POSTGRES_PASSWORD=ash_demo \
@@ -360,7 +367,8 @@ backend_down() {
       _bk_assert_container_glob "${ASH_STATE_CONTAINER:-$ASH_DEMO_CONTAINER}"
       if [ "$state_own" = "created" ]; then
         ash_log "removing container ${ASH_STATE_CONTAINER:-$ASH_DEMO_CONTAINER}"
-        docker rm -f "${ASH_STATE_CONTAINER:-$ASH_DEMO_CONTAINER}" >/dev/null 2>&1 || true
+        _bk_remove_owned_container "${ASH_STATE_CONTAINER:-$ASH_DEMO_CONTAINER}" \
+          || ash_die 3 "could not remove owned container ${ASH_STATE_CONTAINER:-$ASH_DEMO_CONTAINER} and its anonymous volumes"
       else
         ash_warn "container ${ASH_STATE_CONTAINER:-$ASH_DEMO_CONTAINER} was not created by this harness; leaving it alone"
       fi

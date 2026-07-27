@@ -39,4 +39,6 @@ top_event	3.5	4	ash.top('wait_event') — the exact wait	Lock:transactionid	sele
 top_query	4.0	5	ash.top('query_id') — which statement?	pgbench_accounts	select key, left(query_text, 52) as query_text, avg_aas, pct from ash.top('query_id', since => $STORM_SINCE, until => $STORM_UNTIL, n => 3);
 compare	3.5	6	ash.compare() — incident vs baseline	avg_delta,Lock:transactionid	select key, avg_aas_1, avg_aas_2, avg_delta, pct_2 from ash.compare($BASE_SINCE, $BASE_UNTIL, $STORM_SINCE, $STORM_UNTIL, dimension => 'wait_event', n => 5);
 summary	0.0	0	ash.summary() — the one-paragraph verdict	peak_aas,Lock:transactionid,pgbench_accounts	select metric, value from ash.summary(since => $STORM_SINCE, until => $STORM_UNTIL);
-report	0.0	0	ash.report() — hand this to an LLM	transactionid,coverage,aas_p99	select jsonb_pretty(ash.report(since => $STORM_SINCE, until => $STORM_UNTIL, n => 2) - array['aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m', 'top_queryids_p999', 'top_queryids_worst1m']) as report;
+# cluster_name is a host setting and its key is absent when unset; omit it so
+# the scene and its contract fingerprint do not depend on local configuration.
+report	0.0	0	ash.report() — hand this to an LLM	transactionid,coverage,aas_p99	select jsonb_pretty(ash.report(since => $STORM_SINCE, until => $STORM_UNTIL, n => 2) - array['cluster_name', 'aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m', 'top_queryids_p999', 'top_queryids_worst1m']) as report;

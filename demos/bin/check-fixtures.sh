@@ -51,6 +51,226 @@ BOLD="$ASH_FONT_DIR/JetBrainsMono-Bold.ttf"
 fail=0
 n=0
 
+# A chart can contain more than n named series because ash.chart() also keeps
+# every per-bucket leader. The legend must fold when that makes it wider than
+# the screen, while a bar remains a single visual bucket.
+python3 - "$DEMO_DIR/render" "$ASH_COLS" <<'PY' || fail=1
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from ansitable import fold, render
+from dwidth import width
+
+cols = int(sys.argv[2])
+sep = "\x1f"
+legend = (
+    "█ Lock:transactionid  ▓ CPU*  ░ Client:ClientRead  "
+    "▒ Lock:tuple  ▒ LWLock:WALWrite  · Other"
+)
+bar = "█" * 40
+screen = render(
+    [
+        sep.join(("bucket", "aas", "chart")),
+        sep.join(("", "", legend)),
+        sep.join(("00:00", "1.00", bar)),
+    ],
+    sep,
+    "",
+    max_width=cols,
+)
+widest = max(width(line) for line in screen.splitlines())
+if widest > cols:
+    sys.stderr.write(
+        f"check: dynamic chart legend is {widest} columns (limit {cols})\n"
+    )
+    raise SystemExit(1)
+if fold("█" * (cols + 1), cols) != ["█" * (cols + 1)]:
+    sys.stderr.write("check: chart bar folded into a false second bucket\n")
+    raise SystemExit(1)
+PY
+
+# Driver session ownership is tested with a shell-level tmux fake so this stays
+# in the tier-1 job: `make check` must not gain a real tmux dependency. The fake
+# models an owned detached session and rejects an identity that was tampered
+# with after creation.
+if ! (
+  fake_root="$TMP/tmux-driver"
+  mkdir -p "$fake_root"
+  printf '%s\n' '$901' > "$fake_root/id"
+  : > "$fake_root/calls"
+  : > "$fake_root/name"
+  : > "$fake_root/owner"
+  printf '0\n' > "$fake_root/alive"
+
+  tmux() {
+    local command_name
+    if [ "${1:-}" != "-L" ] || [ -z "${2:-}" ]; then
+      printf 'bad-socket\n' >> "$fake_root/calls"
+      return 90
+    fi
+    shift 2
+    command_name="${1:-}"
+    shift || true
+    case "$command_name" in
+      display-message)
+        case "$*" in
+          *'#{session_name}:#{session_id}:#{@pg_ash_driver_owner}'*)
+            printf '%s:%s:%s\n' \
+              "$(<"$fake_root/name")" "$(<"$fake_root/id")" \
+              "$(<"$fake_root/owner")" ;;
+          *'#{session_name}:#{session_id}'*)
+            printf '%s:%s\n' \
+              "$(<"$fake_root/name")" "$(<"$fake_root/id")" ;;
+          *'#{session_id}'*)
+            printf '%s\n' "$(<"$fake_root/id")" ;;
+        esac
+        ;;
+      new-session)
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "-s" ]; then
+            shift
+            printf '%s\n' "$1" > "$fake_root/name"
+          fi
+          shift
+        done
+        printf '1\n' > "$fake_root/alive"
+        printf 'new\n' >> "$fake_root/calls"
+        printf '%s\n' "$(<"$fake_root/id")"
+        ;;
+      has-session)
+        [ "$(<"$fake_root/alive")" = "1" ]
+        ;;
+      kill-session)
+        [ "${1:-}" = "-t" ] || return 91
+        printf '%s\n' "${2:-}" > "$fake_root/kill-target"
+        printf 'kill\n' >> "$fake_root/calls"
+        printf '0\n' > "$fake_root/alive"
+        ;;
+      set-option)
+        case "$*" in
+          *'@pg_ash_driver_owner'*)
+            [ "${fake_fail_owner:-0}" = "0" ] || return 93
+            printf '%s\n' "${4:-}" > "$fake_root/owner" ;;
+        esac
+        ;;
+      *) return 92 ;;
+    esac
+  }
+
+  # shellcheck source=../lib/driver.sh
+  . "$DEMO_DIR/lib/driver.sh"
+
+  drv_start "ash-check" 100 20 "sleep 30"
+  case "$DRV_SESSION" in
+    ash-check-*-*) : ;;
+    *) echo "check: driver session name is not collision-resistant: $DRV_SESSION" >&2
+       exit 1 ;;
+  esac
+  [ "$(grep -c '^new$' "$fake_root/calls" || true)" -eq 1 ] || exit 1
+  [ "$(grep -c '^bad-socket$' "$fake_root/calls" || true)" -eq 0 ] || {
+    echo "check: driver escaped its private tmux socket" >&2
+    exit 1
+  }
+  [ "$(grep -c '^kill$' "$fake_root/calls" || true)" -eq 0 ] || {
+    echo "check: drv_start tried to kill a pre-existing session" >&2
+    exit 1
+  }
+
+  drv_kill
+  [ "$(grep -c '^kill$' "$fake_root/calls" || true)" -eq 1 ] || exit 1
+  [ "$(<"$fake_root/kill-target")" = "$(<"$fake_root/id")" ] || {
+    echo "check: drv_kill did not target the created session id" >&2
+    exit 1
+  }
+
+  # Cleanup is idempotent, and a forged ownership record must fail without
+  # issuing another kill.
+  drv_kill
+  [ "$(grep -c '^kill$' "$fake_root/calls" || true)" -eq 1 ] || exit 1
+  DRV_SESSION_CREATED=1
+  printf '1\n' > "$fake_root/alive"
+  DRV_SESSION="ash-check-forged"
+  DRV_SESSION_ID="$(<"$fake_root/id")"
+  DRV_SESSION_OWNER="expected-owner"
+  printf '%s\n' "$DRV_SESSION" > "$fake_root/name"
+  printf 'foreign-owner\n' > "$fake_root/owner"
+  if (drv_kill >/dev/null 2>&1); then
+    echo "check: driver accepted an unowned cleanup target" >&2
+    exit 1
+  fi
+  [ "$(grep -c '^kill$' "$fake_root/calls" || true)" -eq 1 ] || exit 1
+
+  # An empty prefix is a configuration error, never a request for tmux's
+  # implicit current-session target.
+  DRV_SESSION_CREATED=0
+  if (drv_start "" 100 20 "sleep 30" >/dev/null 2>&1); then
+    echo "check: driver accepted an empty session prefix" >&2
+    exit 1
+  fi
+  [ "$(grep -c '^new$' "$fake_root/calls" || true)" -eq 1 ] || exit 1
+
+  # If stamping the ownership option fails after new-session succeeds, the
+  # captured name+ID on the private socket are a provisional ownership proof.
+  # Startup must roll that session back rather than leaking it.
+  DRV_SESSION_CREATED=0
+  fake_fail_owner=1
+  kills_before=$(grep -c '^kill$' "$fake_root/calls" || true)
+  if (drv_start "ash-stamp" 100 20 "sleep 30" >/dev/null 2>&1); then
+    echo "check: driver ignored an ownership-stamp failure" >&2
+    exit 1
+  fi
+  fake_fail_owner=0
+  kills_after=$(grep -c '^kill$' "$fake_root/calls" || true)
+  [ "$kills_after" -eq $((kills_before + 1)) ] || {
+    echo "check: driver leaked a session after ownership-stamp failure" >&2
+    exit 1
+  }
+  [ "$(<"$fake_root/alive")" = "0" ] || exit 1
+) then
+  echo "check: tmux driver ownership regression" >&2
+  fail=1
+fi
+
+# INT and TERM must turn into conventional non-zero exits. EXIT is the sole
+# cleanup owner; trapping all three signals with cleanup makes Bash resume the
+# interrupted script and can turn Ctrl-C into a successful build.
+python3 - "$DEMO_DIR/bin/record-demo.sh" <<'PY' || fail=1
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text()
+required = (
+    "trap cleanup EXIT",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+)
+if any(line not in source for line in required):
+    sys.stderr.write("check: record-demo signal traps do not preserve interruption status\n")
+    raise SystemExit(1)
+if "trap cleanup EXIT INT TERM" in source:
+    sys.stderr.write("check: cleanup still swallows INT/TERM\n")
+    raise SystemExit(1)
+PY
+
+# The stock postgres images declare PGDATA as an anonymous volume. Removing a
+# harness-owned container without `docker rm -v` leaks that volume (and several
+# hundred MiB per matrix entry), so exercise the exact cleanup argv without
+# requiring a Docker daemon in the tier-1 check.
+if ! (
+  fake_docker_log="$TMP/docker-cleanup.args"
+  docker() {
+    printf '%s\n' "$@" >"$fake_docker_log"
+  }
+  # shellcheck source=../lib/backend.sh
+  . "$DEMO_DIR/lib/backend.sh"
+  _bk_remove_owned_container ash_demo_fixture
+  expected=$(printf '%s\n' rm -f -v ash_demo_fixture)
+  [ "$(<"$fake_docker_log")" = "$expected" ]
+) then
+  echo "check: docker cleanup must remove anonymous volumes" >&2
+  fail=1
+fi
+
 # fd 3, not stdin: see the note in bin/capture-stills.sh -- children inherit
 # stdin and at least one of them reads it.
 while IFS=$'\t' read -r name sha title <&3; do

@@ -87,8 +87,18 @@ def sgr_state(s):
     return state
 
 
-# Block-drawing glyphs. A cell containing these is a BAR, not prose.
+# Block-drawing glyphs used by chart bars and legends.
 BLOCK_GLYPHS = "\u2588\u2593\u2592\u2591"
+BAR_GLYPHS = BLOCK_GLYPHS + "\u00b7"
+
+
+def is_bar_cell(s):
+    """Return True only for chart data, not for a labelled chart legend."""
+    plain = strip_ansi(s)
+    return (
+        any(glyph in plain for glyph in BAR_GLYPHS)
+        and all(char.isspace() or char in BAR_GLYPHS for char in plain)
+    )
 
 
 def fold(s, budget):
@@ -98,16 +108,15 @@ def fold(s, budget):
     survive. Escapes are zero-width and always travel with the character that
     follows.
 
-    A cell containing block glyphs is returned UNFOLDED, deliberately. Wrapping
-    an ash.chart() bar onto a second line would turn a 160-column bar into two
-    stacked segments that read as two buckets -- a picture that is wrong rather
-    than merely ugly, and one that no automated check downstream could notice.
-    Leaving it over-budget means the width gate fires (exit 5) and a human
-    lowers `width =>` in the scene, which is the correct fix.
+    A chart data cell is returned UNFOLDED, deliberately. Wrapping a bar onto a
+    second line would turn one bucket into two stacked segments. A chart legend
+    can contain the same glyphs, but its labels make it prose and safe to fold.
+    This matters because ash.chart() keeps per-bucket leaders in addition to its
+    top-n series, so the legend's width is data-dependent.
     """
     if vis(s) <= budget:
         return [s]
-    if any(g in s for g in BLOCK_GLYPHS):
+    if is_bar_cell(s):
         return [s]
     out = []
     buf = ""
