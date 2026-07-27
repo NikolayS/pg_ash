@@ -31,6 +31,4 @@
  */
 
 \set ON_ERROR_STOP on
-begin;
 \ir ../ash-install.sql
-commit;
