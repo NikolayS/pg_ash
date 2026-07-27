@@ -1982,7 +1982,8 @@ begin
   status := 'created';
   return next;
 
-  -- rollup_hour: every hour at minute 1, after the minute-0 rollup finishes
+  -- rollup_hour: every hour at minute 1; its blocking shared lock sequences it
+  -- after any in-flight minute rollup before it checks the minute watermark.
   begin
     perform cron.unschedule('ash_rollup_1h');
   exception when others then
@@ -3127,16 +3128,14 @@ declare
   v_count int;
 begin
   /*
-   * Acquire rollup lock (xact-level). Same kind as rollup_minute /
-   * rollup_cleanup so they serialize among themselves; distinct from
-   * the sampler lock.
+   * Wait for the shared rollup lock instead of skipping. The hourly pg_cron
+   * job runs at minute 1, when the every-minute worker also fires; a try-lock
+   * here could lose that race every hour and starve hourly aggregation.
    */
-  if not pg_try_advisory_xact_lock(
-       hashtext('pg_ash')::int4,
-       hashtext('pg_ash_rollup')::int4
-     ) then
-    return 0;
-  end if;
+  perform pg_advisory_xact_lock(
+    hashtext('pg_ash')::int4,
+    hashtext('pg_ash_rollup')::int4
+  );
 
   select last_rollup_1h_ts, last_rollup_1m_ts
   into v_last_ts, v_last_1m_ts
@@ -3158,12 +3157,10 @@ begin
     v_hour_end := v_hour_start + 3600;
 
     /*
-     * The minute and hourly jobs both fire at the top of the hour. If this
-     * worker wins the shared rollup lock before rollup_minute() has processed
-     * the just-completed final minute, aggregating now would seal a partial
-     * hour and advance last_rollup_1h_ts past data that arrives moments later.
-     * The minute watermark is the authoritative completion boundary: defer
-     * this hour without inserting or advancing until it reaches v_hour_end.
+     * The minute watermark is the authoritative completion boundary. The
+     * blocking lock above observes a completed in-flight minute rollup, while
+     * this guard also protects manual/external calls and missing coverage:
+     * defer without inserting or advancing rather than seal a partial hour.
      */
     if v_last_1m_ts is null or v_last_1m_ts < v_hour_end then
       exit;
@@ -6417,4 +6414,29 @@ exception when others then
     '(%: %); run "select ash.grant_reader(''pg_monitor'')" manually, or '
     'ignore to leave pg_monitor without access',
     sqlstate, sqlerrm;
+end $$;
+
+/*
+ * Installer re-apply migration for running installations. Defining the new
+ * ash.start() body is not enough: an existing pg_cron job keeps its old
+ * minute-0 schedule until start() is called again.
+ */
+do $$
+declare
+  v_hourly_job record;
+begin
+  if ash._pg_cron_available() then
+    for v_hourly_job in
+      select jobid
+      from cron.job
+      where jobname = 'ash_rollup_1h'
+        and database = current_database()
+        and schedule = '0 * * * *'
+    loop
+      perform cron.alter_job(
+        job_id := v_hourly_job.jobid,
+        schedule := '1 * * * *'
+      );
+    end loop;
+  end if;
 end $$;

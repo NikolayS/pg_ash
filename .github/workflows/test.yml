@@ -1424,6 +1424,49 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          select case
+                   when exists (
+                     select from pg_extension where extname = 'pg_cron'
+                   ) then 'true'
+                   else 'false'
+                 end as has_pgcron \gset
+          \if :has_pgcron
+            -- Simulate an existing installation whose job still has the old
+            -- unsafe schedule, then prove installer re-apply migrates it.
+            create temp table _legacy_hourly_job (jobid bigint primary key);
+            insert into _legacy_hourly_job
+            select cron.schedule(
+              'ash_rollup_1h', '0 * * * *', 'select ash.rollup_hour()'
+            );
+            select cron.alter_job(
+              job_id := (select jobid from _legacy_hourly_job),
+              active := false
+            );
+            \i sql/ash-install.sql
+            do $migration$
+            declare
+              v_job_id bigint;
+              v_schedule text;
+              v_command text;
+              v_active bool;
+            begin
+              select jobid, schedule, command, active
+              into v_job_id, v_schedule, v_command, v_active
+              from cron.job
+              where jobname = 'ash_rollup_1h';
+              assert v_job_id = (select jobid from _legacy_hourly_job),
+                'installer re-apply replaced the existing hourly job';
+              assert v_schedule = '1 * * * *',
+                'installer re-apply must migrate hourly rollup to minute 1, '
+                'got: ' || v_schedule;
+              assert v_command = 'select ash.rollup_hour()',
+                'installer re-apply changed the hourly command';
+              assert not v_active,
+                'installer re-apply reactivated the disabled hourly job';
+            end
+            $migration$;
+          \endif
+
           do $$
           declare
             v_job_id bigint;
@@ -3506,6 +3549,8 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          set -euo pipefail
+
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           do $$
           declare
@@ -3592,6 +3637,106 @@ jobs:
             raise notice 'rollup_hour completion barrier PASSED';
           end $$;
           EOF
+
+          # Reproduce the pg_cron minute-1 collision. The simulated minute
+          # worker completes the watermark while holding the shared rollup
+          # lock; rollup_hour() must wait, then aggregate instead of returning
+          # 0 and deferring the hour until the next cron run.
+          psql_base=(psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1)
+          hour_ts="$("${psql_base[@]}" -tAc "
+            select (
+              ash.ts_from_timestamptz(
+                date_trunc('hour', now() - interval '1 hour')
+              ) / 3600
+            ) * 3600
+          ")"
+          wait_id="$("${psql_base[@]}" -tAc "
+            select ash._register_wait('active', 'CPU*', 'CPU*')
+          ")"
+
+          "${psql_base[@]}" << SQL
+          truncate ash.rollup_1m, ash.rollup_1h;
+          insert into ash.rollup_1m (
+            ts, datid, samples, peak_backends, wait_counts, query_counts
+          )
+          select
+            ${hour_ts} + minute_idx * 60,
+            0::oid,
+            60,
+            1,
+            array[${wait_id}, 60]::int4[],
+            '{}'::int8[]
+          from generate_series(0, 58) as minute_idx;
+          update ash.config
+          set last_rollup_1m_ts = ${hour_ts} + 3540,
+              last_rollup_1h_ts = ${hour_ts}
+          where singleton;
+          SQL
+
+          "${psql_base[@]}" -c "
+            begin;
+            select pg_advisory_xact_lock(
+              hashtext('pg_ash')::int4,
+              hashtext('pg_ash_rollup')::int4
+            );
+            select pg_sleep(1);
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              ${hour_ts} + 3540,
+              0::oid,
+              60,
+              1,
+              array[${wait_id}, 60]::int4[],
+              '{}'::int8[]
+            );
+            update ash.config
+            set last_rollup_1m_ts = ${hour_ts} + 3600
+            where singleton;
+            commit;
+          " >/tmp/ash-hourly-lock-holder.log &
+          lock_holder_pid=$!
+
+          lock_seen=false
+          for _ in {1..100}; do
+            if [ "$("${psql_base[@]}" -tAc "
+              select exists (
+                select from pg_locks
+                where locktype = 'advisory'
+                  and classid = hashtext('pg_ash')::int4::oid
+                  and objid = hashtext('pg_ash_rollup')::int4::oid
+                  and granted
+                  and pid <> pg_backend_pid()
+              )
+            ")" = "t" ]; then
+              lock_seen=true
+              break
+            fi
+            sleep 0.05
+          done
+          if [ "$lock_seen" != "true" ]; then
+            echo "::error::timed out waiting for simulated minute worker" >&2
+            wait "$lock_holder_pid"
+            exit 1
+          fi
+
+          hourly_result="$("${psql_base[@]}" -tAc "select ash.rollup_hour()")"
+          wait "$lock_holder_pid"
+          hourly_rows="$("${psql_base[@]}" -tAc "
+            select count(*) from ash.rollup_1h where ts = ${hour_ts}
+          ")"
+          if [ "$hourly_result" != "1" ] || [ "$hourly_rows" != "1" ]; then
+            echo "::error::rollup_hour did not wait for minute coverage (result=$hourly_result, rows=$hourly_rows)" >&2
+            exit 1
+          fi
+          echo "rollup_hour lock serialization PASSED"
+
+          "${psql_base[@]}" -c "
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+          "
 
       - name: "Critical bug #81: rollup and rotation must not lose raw samples"
         env:
