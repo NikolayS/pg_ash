@@ -321,7 +321,7 @@ renamed or removed.
 | `ash.revoke_reader(role)` | Revoke the monitoring-reader bundle |
 | `ash.uninstall('yes')` | Drop pg_ash and unschedule jobs |
 
-All destructive calls require the exact `'yes'` confirmation token.
+Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` confirmation token.
 
 ## Scheduling
 
