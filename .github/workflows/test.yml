@@ -5603,6 +5603,7 @@ jobs:
             echo "::error::expired-only recovery state mismatch: $expired_state" >&2
             exit 1
           fi
+          reset_issue_81_state
 
           echo "Critical bug #81 regression tests PASSED"
 
