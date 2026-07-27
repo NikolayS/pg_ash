@@ -4832,11 +4832,17 @@ jobs:
               'ash.rebuild_partitions(integer,text)'::regprocedure
             ) into v_rebuild_description;
 
-            assert v_rotate_description like
-                     '%Readable raw retention is approximately (num_partitions - 2) * rotation_period.%',
+            assert position(
+              'Readable raw retention is approximately '
+              '(num_partitions - 2) * rotation_period.'
+              in v_rotate_description
+            ) > 0,
               'rotate description has the wrong raw-retention formula';
-            assert v_rebuild_description like
-                     '%Readable raw retention is approximately (num_partitions - 2) * rotation_period.%',
+            assert position(
+              'Readable raw retention is approximately '
+              '(num_partitions - 2) * rotation_period.'
+              in v_rebuild_description
+            ) > 0,
               'rebuild_partitions description has the wrong raw-retention formula';
             assert position(
               'num_partitions x rotation_period' in v_rotate_description
