@@ -1380,6 +1380,337 @@ jobs:
           drop role ash_b4_pgmon_member;
           EOF
 
+      - name: "Issue #166: revoke_reader refuses protected roles"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          cleanup_b6() {
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "drop database if exists ash_b6_owner_test with (force);"
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "drop role if exists ash_b6_reader, ash_b6_current, ash_b6_owner;"
+          }
+          trap cleanup_b6 EXIT
+          cleanup_b6
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          create role ash_b6_owner
+            login password 'b6'
+            nosuperuser nocreatedb nocreaterole;
+          create role ash_b6_reader nologin;
+          create role ash_b6_current nologin;
+          grant ash_b6_current to ash_b6_owner;
+          create database ash_b6_owner_test
+            owner ash_b6_owner
+            template template0;
+          EOF
+
+          PGPASSWORD=b6 psql \
+            -h localhost \
+            -U ash_b6_owner \
+            -d ash_b6_owner_test \
+            -v ON_ERROR_STOP=1 \
+            -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
+
+          PGPASSWORD=b6 psql \
+            -h localhost \
+            -U ash_b6_owner \
+            -d ash_b6_owner_test \
+            -v ON_ERROR_STOP=1 \
+            -v install_path="$(
+              python3 devel/scripts/ash_sql_chain.py fresh-install-path
+            )" << 'EOF'
+          select
+            current_user,
+            owner_role.rolsuper,
+            nsp.nspowner::regrole as ash_owner,
+            has_schema_privilege(current_user, 'ash', 'USAGE') as ash_usage,
+            has_function_privilege(
+              current_user,
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) as admin_funcs_execute
+          from pg_roles as owner_role
+          join pg_namespace as nsp on nsp.nspname = 'ash'
+          where owner_role.rolname = current_user;
+
+          /*
+           * On broken code the revoke returns successfully. Capture the exact
+           * two-stage failure: schema USAGE blocks every documented entry
+           * point, then restoring USAGE alone exposes the stripped
+           * _admin_funcs() EXECUTE privilege underneath.
+           */
+          do $$
+          declare
+            v_expected_message constant text :=
+              'ash.revoke_reader: refusing protected role ash_b6_owner '
+              '(schema owner, current user, or superuser)';
+            v_grant_after_usage_message text;
+            v_grant_message text;
+            v_refused boolean := false;
+            v_refusal_message text;
+            v_status_message text;
+            v_take_sample_message text;
+          begin
+            begin
+              perform ash.revoke_reader(current_user::name);
+            exception when others then
+              v_refused := true;
+              v_refusal_message := sqlerrm;
+            end;
+
+            if not v_refused then
+              begin
+                perform ash.take_sample();
+              exception when insufficient_privilege then
+                v_take_sample_message := sqlerrm;
+              end;
+
+              begin
+                perform * from ash.status();
+              exception when insufficient_privilege then
+                v_status_message := sqlerrm;
+              end;
+
+              begin
+                perform ash.grant_reader(current_user::name);
+              exception when insufficient_privilege then
+                v_grant_message := sqlerrm;
+              end;
+
+              execute format(
+                'grant usage on schema ash to %I',
+                current_user
+              );
+              begin
+                perform ash.grant_reader(current_user::name);
+              exception when insufficient_privilege then
+                v_grant_after_usage_message := sqlerrm;
+              end;
+
+              raise notice
+                '#166 RED: take_sample=[%], status=[%], grant_reader=[%], '
+                'USAGE + grant_reader=[%]',
+                v_take_sample_message,
+                v_status_message,
+                v_grant_message,
+                v_grant_after_usage_message;
+            end if;
+
+            assert v_refused,
+              format(
+                '#166: revoke_reader returned successfully; '
+                'take_sample=[%s], status=[%s], grant_reader=[%s], '
+                'USAGE + grant_reader=[%s]',
+                v_take_sample_message,
+                v_status_message,
+                v_grant_message,
+                v_grant_after_usage_message
+              );
+            assert v_refusal_message = v_expected_message,
+              format(
+                '#166: refusal expected [%s], got [%s]',
+                v_expected_message,
+                v_refusal_message
+              );
+            assert has_schema_privilege(current_user, 'ash', 'USAGE') = true,
+              '#166: refused call must preserve owner schema USAGE';
+            assert has_function_privilege(
+              current_user,
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = true,
+              '#166: refused call must preserve owner _admin_funcs EXECUTE';
+            assert has_function_privilege(
+              current_user,
+              'ash.grant_reader(name)',
+              'EXECUTE'
+            ) = true,
+              '#166: refused call must preserve owner grant_reader EXECUTE';
+            assert '_admin_funcs' = any(ash._admin_funcs()),
+              '#166: _admin_funcs must be in its own admin exclusion set';
+            assert ash.take_sample() = 0,
+              '#166: take_sample should return exactly 0 in the isolated DB';
+            perform * from ash.status();
+            raise notice '#166 non-superuser owner refusal PASSED: %',
+              v_refusal_message;
+          end $$;
+
+          -- _admin_funcs is an administrative implementation detail. A normal
+          -- reader neither needs nor receives EXECUTE on it, and revoking that
+          -- reader remains an allowed operation.
+          select ash.grant_reader('ash_b6_reader');
+          do $$
+          begin
+            assert has_function_privilege(
+              'ash_b6_reader',
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = false,
+              '#166: grant_reader must not grant _admin_funcs EXECUTE';
+          end $$;
+
+          /*
+           * Simulate a reader bundle created by the previous installer, when
+           * _admin_funcs still belonged to the reader set. CREATE OR REPLACE
+           * preserves function ACLs, so re-apply must explicitly scrub this
+           * legacy bundle grant rather than merely stop issuing new ones.
+           */
+          grant execute on function ash._admin_funcs()
+            to ash_b6_reader, pg_monitor;
+          do $$
+          begin
+            assert has_function_privilege(
+              'ash_b6_reader',
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = true,
+              '#166: legacy reader precondition must hold _admin_funcs EXECUTE';
+            assert has_function_privilege(
+              'pg_monitor',
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = true,
+              '#166: legacy pg_monitor precondition must hold _admin_funcs EXECUTE';
+          end $$;
+          \i :install_path
+          do $$
+          begin
+            assert has_function_privilege(
+              'ash_b6_reader',
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = false,
+              '#166: installer re-apply must scrub legacy _admin_funcs EXECUTE';
+            assert has_function_privilege(
+              'pg_monitor',
+              'ash._admin_funcs()',
+              'EXECUTE'
+            ) = false,
+              '#166: re-apply must scrub legacy pg_monitor _admin_funcs EXECUTE';
+            raise notice '#166 legacy reader ACL scrub PASSED';
+          end $$;
+          select ash.revoke_reader('ash_b6_reader');
+
+          -- Exercise current_user independently: this target is neither the
+          -- schema owner nor a superuser. The temporary grants only make the
+          -- owner-only helper callable far enough to reach its early guard.
+          grant usage on schema ash to ash_b6_current;
+          grant execute on function ash._admin_funcs() to ash_b6_current;
+          grant execute on function ash.revoke_reader(name) to ash_b6_current;
+          set role ash_b6_current;
+          do $$
+          declare
+            v_expected_message constant text :=
+              'ash.revoke_reader: refusing protected role ash_b6_current '
+              '(schema owner, current user, or superuser)';
+            v_message text;
+          begin
+            assert current_user = 'ash_b6_current',
+              format('#166: current_user precondition got %s', current_user);
+            assert (
+              select rolsuper from pg_roles where rolname = current_user
+            ) = false,
+              '#166: current_user branch requires a non-superuser';
+            assert (
+              select nspowner::regrole::text
+              from pg_namespace
+              where nspname = 'ash'
+            ) <> current_user,
+              '#166: current_user branch must not be the schema-owner branch';
+
+            begin
+              perform ash.revoke_reader(current_user::name);
+            exception when others then
+              v_message := sqlerrm;
+            end;
+            assert v_message = v_expected_message,
+              format(
+                '#166: current_user refusal expected [%s], got [%s]',
+                v_expected_message,
+                v_message
+              );
+          end $$;
+          reset role;
+
+          -- Exercise the superuser target independently from current_user and
+          -- schema ownership.
+          do $$
+          declare
+            v_expected_message constant text :=
+              'ash.revoke_reader: refusing protected role postgres '
+              '(schema owner, current user, or superuser)';
+            v_message text;
+          begin
+            assert current_user = 'ash_b6_owner',
+              format('#166: owner session precondition got %s', current_user);
+            assert (
+              select rolsuper from pg_roles where rolname = 'postgres'
+            ) = true,
+              '#166: postgres must be a superuser for this branch';
+            assert (
+              select nspowner::regrole::text
+              from pg_namespace
+              where nspname = 'ash'
+            ) <> 'postgres',
+              '#166: superuser target must not be the schema-owner branch';
+
+            begin
+              perform ash.revoke_reader('postgres');
+            exception when others then
+              v_message := sqlerrm;
+            end;
+            assert v_message = v_expected_message,
+              format(
+                '#166: superuser refusal expected [%s], got [%s]',
+                v_expected_message,
+                v_message
+              );
+          end $$;
+          EOF
+
+          # Exercise schema ownership independently: postgres is the invoker,
+          # while the protected non-superuser target owns schema ash.
+          psql \
+            -h localhost \
+            -U postgres \
+            -d ash_b6_owner_test \
+            -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_expected_message constant text :=
+              'ash.revoke_reader: refusing protected role ash_b6_owner '
+              '(schema owner, current user, or superuser)';
+            v_message text;
+          begin
+            assert current_user = 'postgres',
+              format('#166: superuser invoker precondition got %s', current_user);
+            assert (
+              select rolsuper from pg_roles where rolname = 'ash_b6_owner'
+            ) = false,
+              '#166: schema-owner target must be a non-superuser';
+            assert (
+              select nspowner::regrole::text
+              from pg_namespace
+              where nspname = 'ash'
+            ) = 'ash_b6_owner',
+              '#166: ash_b6_owner must own schema ash';
+
+            begin
+              perform ash.revoke_reader('ash_b6_owner');
+            exception when others then
+              v_message := sqlerrm;
+            end;
+            assert v_message = v_expected_message,
+              format(
+                '#166: schema-owner refusal expected [%s], got [%s]',
+                v_expected_message,
+                v_message
+              );
+            raise notice '#166 protected-target guards PASSED';
+          end $$;
+          EOF
+
       - name: "Test 2.0: grant_reader NOTICEs missing pg_read_all_stats; query_text needs it (final re-test papercut)"
         env:
           PGPASSWORD: postgres

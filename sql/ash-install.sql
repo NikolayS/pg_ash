@@ -6043,10 +6043,13 @@ as $$
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
     '_register_wait',
     /*
-     * the helpers themselves: granting them to a reader role would let
-     * that role hand out privileges. keep them admin-only.
+     * The privilege helpers and their canonical exclusion-list helper are
+     * administrative. Granting grant_reader/revoke_reader to a monitoring
+     * role would let it hand out privileges; keeping _admin_funcs itself in
+     * this set also prevents revoke_reader from stripping the schema owner's
+     * EXECUTE privilege on the helper both functions initialize from.
      */
-    'grant_reader', 'revoke_reader',
+    '_admin_funcs', 'grant_reader', 'revoke_reader',
     /*
      * _apply_pgss_search_path runs ALTER FUNCTION on every reader, which
      * requires owner privilege so a non-owner call would fail anyway, but
@@ -6177,9 +6180,9 @@ end $$;
  *     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
  *     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
  *     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg,
- *     _register_wait). Defining "reader" by exclusion (rather than
- *     enumeration) keeps the helpers correct as new readers and
- *     reader-internal helpers are added.
+ *     _register_wait, _admin_funcs). Defining "reader" by exclusion
+ *     (rather than enumeration) keeps the helpers correct as new readers
+ *     and reader-internal helpers are added.
  *   - SELECT on ash.sample (+ every sample_N partition), ash.query_map_all
  *     (+ every query_map_N partition), ash.config, ash.wait_event_map,
  *     ash.rollup_1m, ash.rollup_1h.
@@ -6315,6 +6318,32 @@ begin
       quote_literal(role);
   end if;
 
+  /*
+   * A non-superuser schema owner does not bypass ACL checks. Revoking its
+   * schema/function privileges bricks sampling, readers, and grant_reader()
+   * itself. Refuse every protected target before changing any ACL.
+   */
+  if exists (
+    select
+    from pg_catalog.pg_roles as target_role
+    where target_role.rolname = role
+      and (
+        target_role.rolname = current_user
+        or target_role.rolsuper
+        or exists (
+          select
+          from pg_catalog.pg_namespace as nsp
+          where nsp.nspname = 'ash'
+            and nsp.nspowner = target_role.oid
+        )
+      )
+  ) then
+    raise exception
+      'ash.revoke_reader: refusing protected role % '
+      '(schema owner, current user, or superuser)',
+      role;
+  end if;
+
   v_role := quote_ident(role);
 
   for v_rec in
@@ -6364,7 +6393,7 @@ end;
 $$;
 
 comment on function ash.revoke_reader(name) is
-  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name).';
+  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Refuses schema-owner, current-user, and superuser targets so an installation cannot revoke its own operating privileges. Idempotent. Inverse: ash.grant_reader(name).';
 
 -- Lock down the helpers themselves: only the schema owner may hand out
 -- (or take back) privileges. PUBLIC must not be able to call them.
@@ -6446,6 +6475,11 @@ begin
    * exact-signature loop above only replays pre-upgrade grants, so helpers
    * new in this version would stay denied for these roles. grant_reader()
    * excludes the admin set, so this never widens beyond reader access.
+   *
+   * _admin_funcs() moved from the reader set into the admin set in #166.
+   * CREATE OR REPLACE preserves its old ACL, so explicitly remove that one
+   * legacy bundle grant before replaying the current bundle. Partial/manual
+   * roles are untouched because they are not present in the reader snapshot.
    */
   for v_rec in
     select reader_role.rolname
@@ -6453,6 +6487,10 @@ begin
     join pg_catalog.pg_roles as role_row
       on role_row.rolname = reader_role.rolname
   loop
+    execute format(
+      'revoke execute on function ash._admin_funcs() from %I',
+      v_rec.rolname
+    );
     perform ash.grant_reader(v_rec.rolname);
   end loop;
 
