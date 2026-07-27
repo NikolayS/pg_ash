@@ -584,7 +584,7 @@ create or replace function ash.rollup_minute(
                                  -- rotate() call: rotation_period_seconds / 60
                                  -- e.g., 1-day rotation → pass 1440
 )
-returns int  -- total rollup rows upserted
+returns int  -- total minute grains processed
 language plpgsql
 as $$
 declare
@@ -594,7 +594,6 @@ declare
   v_minute_end int4;
   v_batch_limit int;
   v_total int := 0;
-  v_count int;
   v_min_samples smallint;
 begin
   v_batch_limit := p_batch_limit;
@@ -658,8 +657,7 @@ begin
 
     -- ... (full SQL implementation TBD at coding time) ...
 
-    get diagnostics v_count = row_count;
-    v_total := v_total + v_count;
+    v_total := v_total + 1;
 
     -- Advance watermark transactionally
     update ash.config
@@ -692,7 +690,6 @@ declare
   v_hour_end int4;
   v_batch_limit int := 24;  -- catch up at most 24 hours per call
   v_total int := 0;
-  v_count int;
 begin
   select last_rollup_1h_ts into v_last_ts
   from ash.config where singleton;
@@ -730,8 +727,7 @@ begin
       wait_counts = excluded.wait_counts,
       query_counts = excluded.query_counts;
 
-    get diagnostics v_count = row_count;
-    v_total := v_total + v_count;
+    v_total := v_total + 1;
 
     update ash.config
     set last_rollup_1h_ts = v_hour_end

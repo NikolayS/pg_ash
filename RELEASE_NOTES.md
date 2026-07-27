@@ -66,6 +66,10 @@ AAS-oriented 2.0 API:
   `revoke_reader()`. Other reader-function grants remain preserved, and
   complete reader bundles still gain newly introduced reader helpers.
   (issue #166; [PR #181](https://github.com/NikolayS/pg_ash/pull/181))
+- **Rollup return values now count time grains.** `ash.rollup_minute()` and
+  `ash.rollup_hour()` return processed minutes and hours rather than
+  per-database rows upserted, so activity from multiple databases no longer
+  inflates scheduler-visible results. (issue #191)
 
 ## Retired tooling
 
