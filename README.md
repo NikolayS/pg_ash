@@ -310,7 +310,9 @@ It includes:
 - wait classes: `total`, `cpu`, `io`, `ipc`, `lock`, `lwlock`
 - top wait events and top query IDs for extreme minutes
 - `top_queryids_available`, so scrapers can branch without guessing
-- `coverage`, so consumers can reconcile against `ash.aas()` and `ash.top()`
+- `coverage`, so consumers can reconcile against `ash.aas()` and `ash.top()`;
+  its `minutes_with_data` counts activity-bearing rollup minutes, not verified
+  sampler heartbeats
 
 `ash.report()` reads `ash.rollup_1m` only. If a requested window exists only
 in raw samples or `ash.rollup_1h`, it returns SQL `NULL` and emits a NOTICE
@@ -512,6 +514,19 @@ Postgres.
   exhaust it faster on older Postgres versions.
 - Parallel workers share the leader query ID and count as separate active
   backends.
+- 2.0 does not persist the cadence in force for historical samples. AAS readers
+  weight every stored appearance with the current
+  `ash.config.sample_interval`, so changing it rescales earlier raw and rollup
+  history. Keep the interval fixed while that history is needed. At intervals
+  greater than one minute, the full tick weight lands in one minute, so
+  one-minute peaks and report worst-minute values can exceed the concurrency
+  actually observed.
+- Successful idle sampler ticks write no row. `data_points`,
+  `buckets_with_data`, and report `minutes_with_data` describe
+  facts derived from stored activity, not verified sampling coverage; a
+  sampled-idle minute and a sampler outage are indistinguishable. Monitor
+  scheduler health independently. `ash.timeline()` calls these buckets “no
+  stored observation”; that wording does not add heartbeat storage.
 - Sampling generates WAL, but pg_ash does not currently ship a maintained 2.0
   benchmark for a portable per-sample estimate. Measure WAL on the target
   workload.
