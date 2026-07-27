@@ -1,0 +1,11 @@
+# demos/ working directory: captures, frames, casts, logs, window.env.
+# Everything the harness produces that is NOT a committed deliverable.
+# The deliverables live in ../assets/ and in demos/fixtures/.
+out/
+
+# Local, machine-specific overrides (paths to a repo copy, a scratch asset dir).
+# Absent in a normal checkout; see lib/env.sh.
+env.local
+
+# Left behind by `make check` when the renderer drifts, for eyeballing.
+*.drift.svg

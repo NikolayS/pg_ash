@@ -1,0 +1,21 @@
+-- lib/workload_read.sql — the read load for the calm and tail phases.
+--
+-- Why not `pgbench -b select-only`: that is a single indexed point lookup,
+-- roughly 50 microseconds of server work per round trip. Over a Unix socket
+-- the backends are still active often enough to sample; over TCP to a VM or a
+-- container the round trip dwarfs the work and EVERY backend reads as `idle`
+-- at every sampling instant. Measured on the docker backend: six clients,
+-- 100% idle, zero samples, and a seed that failed at virtual minute 1 with a
+-- perfectly accurate "the workload was not running".
+--
+-- So the read load does a real range aggregate instead. A few thousand rows
+-- through the primary key is a couple of milliseconds of genuine CPU plus, on
+-- a table larger than shared_buffers, genuine IO:DataFileRead. The backend is
+-- therefore active when we look at it — on any backend, over any transport —
+-- and the wait mix it produces (CPU* with an IO tail) is what a read-heavy
+-- system actually looks like.
+--
+-- :span is supplied per phase with pgbench -D span=N, so the same script gives
+-- a light calm baseline and a heavier read tail.
+\set aid random(1, 100000 * :scale)
+SELECT sum(abalance) FROM pgbench_accounts WHERE aid BETWEEN :aid AND :aid + :span;

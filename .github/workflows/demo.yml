@@ -1,0 +1,225 @@
+# .github/workflows/demo.yml — the demo harness gates.
+#
+# Two jobs with very different costs, on purpose.
+#
+#   demo-render   every push and PR, ~10 s, no Postgres, no browser, no Docker.
+#                 Re-renders the committed demos/fixtures/*.ansi and compares
+#                 byte-for-byte against demos/fixtures/expected/*.svg. Because
+#                 the SVG renderer is deterministic this is a genuine gate, not
+#                 a smoke test — but it proves only that the RENDERER still
+#                 works on frozen input. It cannot notice that pg_ash's output
+#                 changed shape underneath it. Only demo-refresh catches that.
+#
+#   demo-refresh  nightly, on demand, and whenever demos/** or sql/** changes.
+#                 ~3 min. Seeds a real PostgreSQL, re-captures every scene, and
+#                 records the reel. `git diff --exit-code demos/fixtures` is the
+#                 demo-rot alarm: a changed capture shape means a reader was
+#                 renamed, a column moved, or the installer path shifted. That
+#                 is the check that would have caught the demo pointing at an
+#                 installer path the release stamp had emptied, and the landing
+#                 page advertising a reader 2.0 removed — both of which shipped.
+#
+# ZERO container-registry traffic. The previous harness required a Docker Hub
+# pull, and `auth.docker.io` returns 503 in sandboxed runners, which is the root
+# cause of "I recorded it on my laptop". ubuntu-latest already ships a
+# PostgreSQL cluster and postgresql-client; we start that. No `services:` block.
+#
+# Fonts are vendored under demos/fonts and consumed BY PATH (agg --font-dir,
+# ansi2svg --font). No fontconfig, no `apt install fonts-*`, no Homebrew cask.
+# A missing font is a hard exit 6, never a silent fallback into a serif face.
+
+name: demo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 04:20 UTC nightly — after the test matrix, before anyone is awake to be
+    # surprised by a stale GIF.
+    - cron: '20 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =========================================================================
+  # Job A — the fast gate. Runs on everything.
+  # =========================================================================
+  demo-render:
+    name: renderer (fixtures, no database)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the tier-1 renderer dependencies
+        # fonttools + brotli are all `make check` needs. Deliberately NOT
+        # installing Postgres, tmux, ffmpeg or a browser here: if this job ever
+        # needs them, the "it only runs on my laptop" problem has come back.
+        run: python -m pip install --quiet fonttools brotli
+
+      - name: Assert the vendored font is present and is JetBrains Mono
+        run: |
+          python - <<'PY'
+          from fontTools.ttLib import TTFont
+          import sys
+          for p in ("demos/fonts/JetBrainsMono-Regular.ttf",
+                    "demos/fonts/JetBrainsMono-Bold.ttf"):
+              f = TTFont(p, lazy=True)
+              fam = f["name"].getDebugName(1) or ""
+              assert "JetBrains Mono" in fam, (p, fam)
+              # ash.chart() draws with these; a face without them renders tofu.
+              cmap = f.getBestCmap()
+              for cp in (0x2588, 0x2593, 0x2591, 0x2592, 0x00B7):
+                  assert cp in cmap, (p, hex(cp))
+          print("vendored font OK")
+          PY
+
+      - name: No reader removed in 2.0 may be referenced under demos/
+        # Assembled from fragments so this workflow file does not itself trip
+        # the grep it is running.
+        run: |
+          set -Eeuo pipefail
+          RE="top_$(printf 'waits')|query_$(printf 'waits')|top_by_$(printf 'type')|timeline_$(printf 'chart')"
+          if grep -rIEl "$RE" demos/ > /tmp/hits 2>/dev/null; then
+            echo "demos/ references a reader that 2.0 removed:" >&2
+            cat /tmp/hits >&2
+            exit 1
+          fi
+          echo "no removed-reader references"
+
+      - name: make check — re-render fixtures and compare byte-for-byte
+        run: ASH_SVG_ONLY=1 make -C demos check
+
+  # =========================================================================
+  # Job B — the real gate. Nightly, on demand, or when the demo/SQL changes.
+  # =========================================================================
+  demo-refresh:
+    name: capture + reel (real PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Decide whether this run needs the full pass
+        # On push/PR, only when demos/** or sql/** actually changed. Schedules
+        # and manual dispatches always run.
+        id: gate
+        run: |
+          set -Eeuo pipefail
+          if [ "${{ github.event_name }}" = "schedule" ] \
+             || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git fetch --no-tags --depth=50 origin "$base" 2>/dev/null || true
+          changed="$(git diff --name-only "$base"...HEAD -- demos sql || true)"
+          if [ -n "$changed" ]; then echo "run=yes" >> "$GITHUB_OUTPUT"
+          else echo "run=no" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Start the runner's own PostgreSQL cluster
+        if: steps.gate.outputs.run == 'yes'
+        # ubuntu-latest ships PostgreSQL and postgresql-client already. Starting
+        # the preinstalled cluster costs about two seconds and ZERO registry
+        # traffic, which is the whole point.
+        run: |
+          set -Eeuo pipefail
+          sudo systemctl start postgresql || sudo pg_ctlcluster "$(pg_lsclusters -h | awk 'NR==1{print $1}')" main start
+          for i in $(seq 1 30); do pg_isready -q && break; sleep 1; done
+          pg_isready
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
+            "create role \"$USER\" superuser login" || true
+          # pg_stat_statements gives ash.top('query_id') its query text. pg_cron
+          # is deliberately NOT installed: the harness drives sampling itself,
+          # which is both the portable path and the honest one for the RDS /
+          # Cloud SQL / Supabase / Neon users who cannot have pg_cron either.
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
+            "alter system set shared_preload_libraries = 'pg_stat_statements'"
+          sudo systemctl restart postgresql || true
+          for i in $(seq 1 30); do pg_isready -q && break; sleep 1; done
+          pg_isready
+
+      - name: Install the tier-3 dependencies
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux ffmpeg gifsicle postgresql-client
+          python -m pip install --quiet asciinema pillow fonttools brotli
+          # agg ships a single static binary in its GitHub release. No cargo
+          # build, no Docker Hub, no registry auth.
+          AGG_VER="1.7.0"
+          curl -fsSL -o /usr/local/bin/agg \
+            "https://github.com/asciinema/agg/releases/download/v${AGG_VER}/agg-x86_64-unknown-linux-gnu"
+          sudo chmod +x /usr/local/bin/agg
+          agg --version
+
+      - name: make doctor
+        if: steps.gate.outputs.run == 'yes'
+        run: make -C demos doctor
+
+      - name: make all — seed, capture, stills, reel
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          ASH_BACKEND: local
+          PGHOST: /var/run/postgresql
+          PGUSER: ${{ github.actor }}
+        run: make -C demos all
+
+      - name: Demo-rot alarm
+        if: steps.gate.outputs.run == 'yes'
+        # `make all` has just re-captured every scene against a real database,
+        # so demos/out/raw holds today's bytes. This compares the READER
+        # CONTRACT in those bytes -- column names, column count, report keys,
+        # the fixed label vocabularies -- against demos/fixtures/shape.tsv.
+        #
+        # NOT `git diff --exit-code demos/fixtures`, which is the obvious thing
+        # and does not work: `make all` does not write fixtures/ at all, so that
+        # diff is always clean and the alarm never fires. And if it were made to
+        # write them, every number in a capture is a real measurement, so the
+        # diff would be red on every single run instead -- a check that is always
+        # red is a check nobody reads. See demos/render/scene_shape.py.
+        run: make -C demos rot
+
+      - name: Upload the artifacts a human can eyeball
+        if: steps.gate.outputs.run == 'yes' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-assets
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            assets/*.svg
+            assets/*.png
+            assets/ash_demo.gif
+            assets/ash_demo.mp4
+            demos/out/transcript.log
+            demos/out/stderr.log
+            demos/out/window.env
+            demos/out/shots/*.ansi
+
+      - name: Teardown
+        if: always()
+        run: make -C demos down || true

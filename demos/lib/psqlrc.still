@@ -1,0 +1,41 @@
+-- lib/psqlrc.still -- psql settings for the SCRIPTED stills capture.
+--
+-- Loaded with `PSQLRC=lib/psqlrc.still psql ...` and WITHOUT -X. `-X` suppresses
+-- the startup file entirely, which silently disables everything below; that is
+-- a non-obvious footgun and it cost a prototype a debugging cycle.
+--
+-- The one thing this file must NOT do is turn on psql's aligned formatter.
+-- psql's ALIGNED output escapes 0x1B to the four-character text "\x1B" and then
+-- measures column widths from the escaped text, so a 24-bit-coloured cell is
+-- padded as if it were ~60 characters wider than it draws. bin/capture-stills.sh
+-- therefore passes `-A -F <US>` on the command line and render/ansitable.py owns
+-- the alignment. Do not "fix" that by setting \pset format aligned here.
+
+\set QUIET on
+
+-- No pager: a pager would inject terminal control sequences and could block.
+\pset pager off
+
+-- No "(N rows)" footer. It is psql chrome, not pg_ash output, and it would
+-- have to be stripped downstream anyway.
+\pset footer off
+
+-- NULL renders as nothing, exactly as it does in a default psql session.
+-- (ash.top() leaves query_text NULL for non-query dimensions.)
+\pset null ''
+
+-- No timing line, no border chatter: the box is drawn by ansitable.py from the
+-- theme, so psql's own border style is irrelevant and must not leak in.
+\timing off
+
+-- Errors must abort. A partial capture that still "looks fine" is the failure
+-- mode this whole harness exists to make impossible.
+\set ON_ERROR_STOP on
+
+-- Keep every byte pg_ash emits. psql's own colourisation (PSQL_COLOR) would add
+-- SGR that pg_ash did not write, and the stills are meant to be evidence of
+-- what pg_ash prints.
+\unset PROMPT1
+\unset PROMPT2
+
+\set QUIET off

@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "THE style file for the pg_ash visual harness. This is the ONLY file in demos/",
+    "that contains a colour or a geometry constant. render/ansi2svg.py, render/chrome.py",
+    "and bin/record-demo.sh (agg theme) all derive from here; nothing hardcodes a hex.",
+    "",
+    "Note what is deliberately NOT here: the wait-class -> colour mapping from",
+    "docs/COLOR_SCHEME.md. pg_ash emits those itself as 24-bit truecolor SGR and the",
+    "renderer reproduces the bytes verbatim. The renderer never assigns a wait colour;",
+    "if it did, the picture would stop being evidence of what pg_ash actually prints.",
+    "The `ansi` array below is only a fallback for stray 4-bit SGR codes."
+  ],
+
+  "font": {
+    "family": "JetBrains Mono",
+    "regular": "JetBrainsMono-Regular.ttf",
+    "bold": "JetBrainsMono-Bold.ttf",
+    "advance_em": 0.6,
+    "upm": 1000
+  },
+
+  "still": { "font_size": 16.0, "line_height": 1.34 },
+
+  "_reel_line_height": [
+    "1.25, not the still's 1.34, and the difference is load-bearing.",
+    "",
+    "The stills renderer promotes block glyphs to <rect> and can overdraw them, so",
+    "a stacked bar fuses into continuous area at any line height. agg cannot: it",
+    "draws U+2588 as a GLYPH. JetBrains Mono's full block spans -300..1020 of a",
+    "1000 upm em, i.e. 1.32em tall, while agg's cell is font_size * 1.05 *",
+    "line_height. At 1.34 the cell is 19.6px and the glyph 18.5px, so every row of",
+    "every bar carried a 1px horizontal seam and the flagship chart read as a wire",
+    "mesh rather than as a chart. At 1.25 the cell is 18.4px, the glyph covers it,",
+    "and the seams close. Anything above ~1.257 brings them back."
+  ],
+  "reel":  { "font_size": 14.0, "line_height": 1.25 },
+
+  "chrome": {
+    "margin": 24,
+    "radius": 12,
+    "border": 1,
+    "titlebar_h": 38,
+    "pad_x": 28,
+    "pad_y": 22,
+    "dot_r": 5.5,
+    "dot_x": [19, 38, 57],
+    "title_size_em": 0.8
+  },
+
+  "ui": {
+    "bg": "#0D1618",
+    "fg": "#E6EDF3",
+    "dim": "#7F949B",
+    "rule": "#2E4349",
+    "titlebar": "#16262A",
+    "border": "#25383D",
+    "marginfill": "#0A1416",
+    "prompt_accent": "#50FA7B",
+    "prompt_dim": "#6272A4",
+    "dots": ["#FF5F57", "#FEBC2E", "#28C840"]
+  },
+
+  "ansi": ["#21222C", "#FF5555", "#50FA7B", "#F1FA8C",
+           "#1E64FF", "#FF79C6", "#00C8FF", "#F8F8F2",
+           "#6272A4", "#FF6E6E", "#69FF94", "#FFFFA5",
+           "#5A8DFF", "#FF92DF", "#5AE0FF", "#FFFFFF"],
+
+  "shade": { "█": 1.00, "▓": 0.86, "░": 0.74, "▒": 0.62 }
+}

@@ -59,6 +59,25 @@ from ash.chart(
 );
 ```
 
+<img src="assets/chart.svg" alt="ash.chart() rendering Average Active Sessions per minute, stacked by wait event, in 24-bit color">
+
+`ash.chart()` — Average Active Sessions per minute, stacked by wait event, in
+24-bit color straight out of `psql`. The glyph varies per series (`█ ▓ ░ ▒ ·`)
+as well as the color, so the ranking still reads correctly for colorblind
+viewers and in a monochrome terminal.
+
+<img src="assets/top_event.svg" alt="ash.top('wait_event') ranking the wait-event breakdown for an incident window by Average Active Sessions">
+
+`ash.top('wait_event')` — the wait-event breakdown for the incident window,
+ranked by Average Active Sessions, with the share of total active time. When
+`Lock:transactionid` dominates, the database is not short of capacity — writers
+are queueing behind one another's row locks.
+
+![pg_ash 2.0 investigation demo](assets/ash_demo.gif)
+
+Every image above is real `ash.*` output over real samples, regenerated with
+`make -C demos all`. See [demos/README.md](demos/README.md).
+
 For the latest stable v1.5 tag, check out `v1.5` first and use:
 
 ```sql
