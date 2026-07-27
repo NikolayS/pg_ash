@@ -1711,6 +1711,279 @@ jobs:
           end $$;
           EOF
 
+      - name: "Issue #169: take_sample writes its captured query-map slot"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          n2_probe_pid=
+          cleanup_n2() {
+            psql \
+              -h localhost \
+              -U postgres \
+              -d postgres \
+              -AtX \
+              -c "
+                select pg_terminate_backend(pid)
+                from pg_stat_activity
+                where application_name = 'ash_n2_slot_probe'
+                  and pid <> pg_backend_pid();
+              " >/dev/null 2>&1 || true
+            if [ -n "$n2_probe_pid" ]; then
+              kill "$n2_probe_pid" 2>/dev/null || true
+              wait "$n2_probe_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup_n2 EXIT
+          cleanup_n2
+
+          # One tagged active backend gives take_sample() an exact one-row,
+          # one-query fixture. compute_query_id=on makes the query-map
+          # attribution invariant independent of the cluster default.
+          PGAPPNAME=ash_n2_slot_probe \
+          PGOPTIONS="-c compute_query_id=on" \
+            psql \
+              -h localhost \
+              -U postgres \
+              -d postgres \
+              -v ON_ERROR_STOP=1 \
+              -c "select pg_sleep(60);" >/dev/null 2>&1 &
+          n2_probe_pid=$!
+
+          n2_probe_count=0
+          for _ in {1..50}; do
+            n2_probe_count=$(
+              psql \
+                -h localhost \
+                -U postgres \
+                -d postgres \
+                -AtX \
+                -v ON_ERROR_STOP=1 \
+                -c "
+                  select count(*)
+                  from pg_stat_activity
+                  where application_name = 'ash_n2_slot_probe'
+                    and datid = (
+                      select oid
+                      from pg_database
+                      where datname = current_database()
+                    )
+                    and state = 'active'
+                    and query_id is not null;
+                "
+            )
+            if [ "$n2_probe_count" = "1" ]; then
+              break
+            fi
+            sleep 0.2
+          done
+          echo "tagged_probe_ready=$([ "$n2_probe_count" = "1" ] && echo 1 || echo 0) count=$n2_probe_count"
+          test "$n2_probe_count" = "1"
+
+          psql \
+            -h localhost \
+            -U postgres \
+            -d postgres \
+            -v ON_ERROR_STOP=1 << 'EOF'
+          \pset pager off
+          begin;
+          truncate ash.sample, ash.query_map_0, ash.query_map_1, ash.query_map_2
+            restart identity;
+          update ash.config
+          set current_slot = 0,
+            sampling_enabled = true,
+            include_bg_workers = false,
+            insert_errors = 0
+          where singleton;
+
+          /*
+           * Deterministically emulate rotation between the sampler's early
+           * slot read and its INSERT: call 1 resolves dictionary slot 0; any
+           * later DEFAULT evaluation returns slot 1. All DDL/data rolls back.
+           */
+          create temp sequence n2_slot_calls start 1;
+          create or replace function ash.current_slot()
+          returns smallint
+          language sql
+          volatile
+          set search_path = pg_catalog
+          as $$
+            select case nextval('pg_temp.n2_slot_calls')
+              when 1 then 0::smallint
+              else 1::smallint
+            end
+          $$;
+
+          do $$
+          declare
+            v_active_count smallint;
+            v_current_slot_calls bigint;
+            v_data_len int;
+            v_expected_query_id bigint;
+            v_insert_errors bigint;
+            v_map_id int4;
+            v_resolved_query_id bigint;
+            v_sample_count int;
+            v_sample_slot smallint;
+            v_stamped_query_id bigint;
+            v_tagged_backends int;
+            v_take_result int;
+          begin
+            select count(*), min(query_id)
+              into v_tagged_backends, v_expected_query_id
+            from pg_stat_activity
+            where application_name = 'ash_n2_slot_probe'
+              and datid = (
+                select oid
+                from pg_database
+                where datname = current_database()
+              )
+              and state = 'active';
+            assert v_tagged_backends = 1,
+              format(
+                '#169: expected exactly 1 tagged backend, got %s',
+                v_tagged_backends
+              );
+            assert v_expected_query_id is not null,
+              '#169: tagged backend query_id must not be null';
+
+            select ash.take_sample() into v_take_result;
+            select
+              count(*),
+              min(slot),
+              min(active_count),
+              min(array_length(data, 1)),
+              min(data[3])
+            into
+              v_sample_count,
+              v_sample_slot,
+              v_active_count,
+              v_data_len,
+              v_map_id
+            from ash.sample
+            where datid = (
+              select oid
+              from pg_database
+              where datname = current_database()
+            );
+            select query_id into v_resolved_query_id
+            from ash.query_map_0
+            where id = v_map_id;
+            select query_id into v_stamped_query_id
+            from ash.query_map_all
+            where slot = v_sample_slot
+              and id = v_map_id;
+            select last_value into v_current_slot_calls
+            from pg_temp.n2_slot_calls;
+            select insert_errors into v_insert_errors
+            from ash.config
+            where singleton;
+
+            raise notice
+              '#169 probe: take_result=%, backends=%, samples=%, slot=%, '
+              'active_count=%, data_len=%, expected_query_id=%, '
+              'resolved_query_id=%, stamped_query_id=%, '
+              'current_slot_calls=%, insert_errors=%',
+              v_take_result,
+              v_tagged_backends,
+              v_sample_count,
+              v_sample_slot,
+              v_active_count,
+              v_data_len,
+              v_expected_query_id,
+              v_resolved_query_id,
+              v_stamped_query_id,
+              v_current_slot_calls,
+              v_insert_errors;
+
+            assert v_take_result = 1,
+              format('#169: take_sample expected 1, got %s', v_take_result);
+            assert v_sample_count = 1,
+              format('#169: sample count expected 1, got %s', v_sample_count);
+            assert v_active_count = 1,
+              format('#169: active_count expected 1, got %s', v_active_count);
+            assert v_data_len = 3,
+              format('#169: encoded data length expected 3, got %s', v_data_len);
+            assert v_sample_slot = 0,
+              format(
+                '#169: sample slot must equal resolved dictionary slot 0, got %s',
+                v_sample_slot
+              );
+            assert v_resolved_query_id = v_expected_query_id,
+              format(
+                '#169: slot-0 map expected query_id %s, got %s',
+                v_expected_query_id,
+                v_resolved_query_id
+              );
+            assert v_stamped_query_id = v_expected_query_id,
+              format(
+                '#169: stamped slot expected query_id %s, got %s',
+                v_expected_query_id,
+                v_stamped_query_id
+              );
+            assert v_current_slot_calls = 1,
+              format(
+                '#169: current_slot must be read exactly once, got %s calls',
+                v_current_slot_calls
+              );
+            assert v_insert_errors = 0,
+              format(
+                '#169: silent mismatch must leave insert_errors 0, got %s',
+                v_insert_errors
+              );
+          end $$;
+
+          -- Deterministically rule out a second ash.sample INSERT path with
+          -- the same shape. This complements the behavioral forced-rotation
+          -- probe rather than substituting a catalog-only smoke test for it.
+          do $$
+          declare
+            v_definition text;
+            v_explicit_slot boolean;
+            v_insert_paths int;
+            v_omitted_slot boolean;
+          begin
+            v_definition := regexp_replace(
+              lower(
+                pg_get_functiondef('ash.take_sample()'::regprocedure)
+              ),
+              '\s+',
+              ' ',
+              'g'
+            );
+            select count(*) into v_insert_paths
+            from regexp_matches(
+              v_definition,
+              'insert into ash[.]sample [(]',
+              'g'
+            );
+            v_explicit_slot := v_definition ~
+              'insert into ash[.]sample *[(] *sample_ts *, *datid *, *'
+              'active_count *, *data *, *slot *[)] *values *[(] *'
+              'v_sample_ts *, *v_datid_rec[.]datid *, *v_active_count *, *'
+              'v_data *, *v_current_slot *[)]';
+            v_omitted_slot := v_definition ~
+              'insert into ash[.]sample *[(] *sample_ts *, *datid *, *'
+              'active_count *, *data *[)] *values *[(] *v_sample_ts *, *'
+              'v_datid_rec[.]datid *, *v_active_count *, *v_data *[)]';
+
+            raise notice
+              '#169 structural: paths=%, explicit_slot=%, omitted_slot=%',
+              v_insert_paths,
+              v_explicit_slot,
+              v_omitted_slot;
+            assert v_insert_paths = 1,
+              format(
+                '#169: expected exactly 1 ash.sample INSERT path, got %s',
+                v_insert_paths
+              );
+            assert v_explicit_slot = true,
+              '#169: ash.sample INSERT must write v_current_slot explicitly';
+            assert v_omitted_slot = false,
+              '#169: ash.sample INSERT must not use the slot DEFAULT';
+          end $$;
+          rollback;
+          EOF
+
       - name: "Test 2.0: grant_reader NOTICEs missing pg_read_all_stats; query_text needs it (final re-test papercut)"
         env:
           PGPASSWORD: postgres

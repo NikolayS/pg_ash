@@ -1023,8 +1023,10 @@ begin
       cross join backend_count;
 
       if v_data is not null and array_length(v_data, 1) >= 3 then
-        insert into ash.sample (sample_ts, datid, active_count, data)
-        values (v_sample_ts, v_datid_rec.datid, v_active_count, v_data);
+        insert into ash.sample (sample_ts, datid, active_count, data, slot)
+        values (
+          v_sample_ts, v_datid_rec.datid, v_active_count, v_data, v_current_slot
+        );
         v_rows_inserted := v_rows_inserted + 1;
       end if;
 
