@@ -59,14 +59,19 @@ import sys
 
 sys.path.insert(0, sys.argv[1])
 from ansitable import fold, render
-from dwidth import width
+from dwidth import strip_ansi, width
 
 cols = int(sys.argv[2])
 sep = "\x1f"
-legend = (
-    "█ Lock:transactionid  ▓ CPU*  ░ Client:ClientRead  "
-    "▒ Lock:tuple  ▒ LWLock:WALWrite  · Other"
-)
+legend_entries = [
+    "\x1b[38;2;255;82;112m█\x1b[0m Lock:transactionid",
+    "\x1b[38;2;255;184;77m▓\x1b[0m CPU*",
+    "\x1b[38;2;81;191;255m░\x1b[0m Client:ClientRead",
+    "\x1b[38;2;168;140;255m▒\x1b[0m Lock:tuple",
+    "\x1b[38;2;236;102;255m▒\x1b[0m LWLock:WALWrite",
+    "\x1b[38;2;170;170;170m·\x1b[0m Other",
+]
+legend = "  ".join(legend_entries)
 bar = "█" * 40
 screen = render(
     [
@@ -87,6 +92,27 @@ if widest > cols:
 if fold("█" * (cols + 1), cols) != ["█" * (cols + 1)]:
     sys.stderr.write("check: chart bar folded into a false second bucket\n")
     raise SystemExit(1)
+
+# A swatch and its label form one semantic legend entry. Exercise every useful
+# fold width: ANSI colour escapes are zero-width, and no entry may be split
+# even when the whole legend has to wrap.
+plain_entries = [strip_ansi(entry) for entry in legend_entries]
+minimum = max(width(entry) for entry in legend_entries)
+for budget in range(minimum, width(legend)):
+    lines = fold(legend, budget)
+    plain_lines = [strip_ansi(line) for line in lines]
+    if any(width(line) > budget for line in lines):
+        sys.stderr.write(
+            f"check: chart legend exceeded its {budget}-column fold budget\n"
+        )
+        raise SystemExit(1)
+    for entry in plain_entries:
+        if not any(entry in line for line in plain_lines):
+            sys.stderr.write(
+                f"check: chart legend split swatch from label at width {budget}: "
+                f"{entry!r}\n"
+            )
+            raise SystemExit(1)
 PY
 
 # Driver session ownership is tested with a shell-level tmux fake so this stays

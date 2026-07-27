@@ -101,6 +101,45 @@ def is_bar_cell(s):
     )
 
 
+def chart_legend_entries(s):
+    """Return ANSI-preserving legend entries, or None when `s` is not a legend.
+
+    ash.chart() separates entries with two spaces and starts each entry with
+    its swatch. Keeping that delimiter semantic matters: an ordinary word fold
+    can leave the swatch at the end of one line and its label at the start of
+    the next.
+    """
+    entries = re.split(r" {2,}", s.strip())
+    if len(entries) < 2:
+        return None
+    for entry in entries:
+        plain = strip_ansi(entry)
+        if (
+            len(plain) < 3
+            or plain[0] not in BAR_GLYPHS
+            or plain[1] != " "
+            or not plain[2:].strip()
+        ):
+            return None
+    return entries
+
+
+def fold_chart_legend(entries, budget):
+    """Pack whole chart-legend entries into lines within `budget`."""
+    out = []
+    line = ""
+    for entry in entries:
+        candidate = entry if not line else line + "  " + entry
+        if line and vis(candidate) > budget:
+            out.append(line)
+            line = entry
+        else:
+            line = candidate
+    if line:
+        out.append(line)
+    return out
+
+
 def fold(s, budget):
     """Split a possibly-coloured string into chunks of <= budget display columns.
 
@@ -118,6 +157,9 @@ def fold(s, budget):
         return [s]
     if is_bar_cell(s):
         return [s]
+    legend_entries = chart_legend_entries(s)
+    if legend_entries is not None:
+        return fold_chart_legend(legend_entries, budget)
     out = []
     buf = ""
     used = 0
