@@ -70,15 +70,22 @@ ASH_SEED_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 : "${ASH_READ_SPAN_TAIL:=5000}"
 : "${ASH_PGBENCH_SCALE:=20}"
 
+ASH_VMIN_TOTAL=$(( ASH_VMIN + ASH_VMIN_SLACK ))
+
 # Hard ceiling (real seconds) on any single background pgbench. The phase ends
 # when the SAMPLER says so and load_stop tears the client down; this is only a
 # seatbelt against an orphaned client if the harness is killed outright.
-: "${ASH_LOAD_CAP:=120}"
+if [ -z "${ASH_LOAD_CAP:-}" ]; then
+  if [ "${ASH_REAL_TIME:-}" = "1" ]; then
+    ASH_LOAD_CAP=$(( ASH_VMIN_TOTAL * 60 + 120 ))
+  else
+    ASH_LOAD_CAP=120
+  fi
+fi
 
 # Real seconds slept between samples inside a virtual minute.
 : "${ASH_SAMPLE_DELAY:=0.04}"
 
-ASH_VMIN_TOTAL=$(( ASH_VMIN + ASH_VMIN_SLACK ))
 ASH_PGBENCH_LOG="$ASH_OUT/pgbench.log"
 
 # ---------------------------------------------------------------------------

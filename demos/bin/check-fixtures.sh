@@ -271,6 +271,21 @@ if ! (
   fail=1
 fi
 
+# The real-time escape hatch keeps each pgbench process alive for its whole
+# wall-clock phase. The compressed-path two-minute seatbelt would otherwise
+# terminate the 12-minute baseline early and leave ten minutes of idle samples.
+if ! (
+  unset ASH_LOAD_CAP
+  ASH_REAL_TIME=1
+  export ASH_REAL_TIME
+  # shellcheck source=../lib/seed.sh
+  . "$DEMO_DIR/lib/seed.sh"
+  [ "$ASH_LOAD_CAP" -gt $((ASH_PH_BASELINE * 60)) ]
+) then
+  echo "check: ASH_REAL_TIME load cap cannot cover the baseline phase" >&2
+  fail=1
+fi
+
 # fd 3, not stdin: see the note in bin/capture-stills.sh -- children inherit
 # stdin and at least one of them reads it.
 while IFS=$'\t' read -r name sha title <&3; do
