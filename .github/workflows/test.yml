@@ -156,12 +156,27 @@ jobs:
           docker restart "$CONTAINER_ID"
           sleep 5
 
-      - name: Wait for PostgreSQL
+      - name: Wait for Postgres
         run: |
-          for i in {1..30}; do
-            if pg_isready -h localhost -p 5432 -U postgres; then break; fi
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          postgres_ready=false
+          for _ in {1..30}; do
+            if pg_isready \
+              --host=localhost \
+              --port=5432 \
+              --username=postgres; then
+              postgres_ready=true
+              break
+            fi
             sleep 1
           done
+          if [[ "$postgres_ready" != true ]]; then
+            printf '%s\n' \
+              "Postgres did not become ready after 30 probes" >&2
+            exit 1
+          fi
 
       - name: Create pg_cron extension
         env:
@@ -1159,7 +1174,16 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
+          psql \
+            --no-psqlrc \
+            --host=localhost \
+            --username=postgres \
+            --dbname=postgres \
+            --set=ON_ERROR_STOP=1 << 'EOF'
           do $$
           declare
             v_slot_before smallint;
@@ -1167,12 +1191,20 @@ jobs:
             v_target_slot smallint;
             v_count int;
             v_next_id int;
+            v_fixture_minute int4 := (
+              ash.ts_from_timestamptz(
+                date_trunc('minute', now()) - interval '2 minutes'
+              ) / 60
+            ) * 60;
           begin
             select current_slot into v_slot_before from ash.config;
 
-            -- Insert data into current partition
+            -- Keep the fixture in two adjacent, recently completed minutes.
+            -- Ancient sample_ts values forced rollup_minute() to scan a full
+            -- 1,440-minute rotation batch and emit one gap warning per minute
+            -- whenever earlier tests had left a recent sample behind.
             insert into ash.sample (sample_ts, datid, active_count, data)
-            values (1000, 1, 2, '{-1,2,1,1}');
+            values (v_fixture_minute + 60, 1, 2, '{-1,2,1,1}');
 
             -- new_slot = (old + 1) % N, truncate_slot = (new_slot + 1) % N
             declare
@@ -1184,8 +1216,8 @@ jobs:
             begin
               -- Seed the partition that will be TRUNCATED
               execute format(
-                'insert into ash.sample_%s (sample_ts, datid, active_count, data, slot) values (999, 1, 1, ''{-1,1,1}'', %s)',
-                v_truncate_slot, v_truncate_slot
+                'insert into ash.sample_%s (sample_ts, datid, active_count, data, slot) values (%s, 1, 1, ''{-1,1,1}'', %s)',
+                v_truncate_slot, v_fixture_minute, v_truncate_slot
               );
               execute format(
                 'insert into ash.query_map_%s (query_id) values (99999)',
@@ -1387,7 +1419,7 @@ jobs:
           $$;
           EOF
 
-      - name: Test all interval formats (issue #2)
+      - name: "Test all interval formats (issue #2)"
         env:
           PGPASSWORD: postgres
         run: |
