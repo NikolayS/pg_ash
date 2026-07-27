@@ -6631,12 +6631,34 @@ declare
   v_aas record;
   v_rec record;
   v_rank int;
+  v_drill_source text;
+  v_drill_period_start timestamptz;
+  v_drill_period_end timestamptz;
+  v_drill_effective_bucket interval;
 begin
   select * into v_aas from ash.aas(v_from, v_to);
   if v_aas.buckets_with_data = 0 then
     return query select 'status'::text, 'no data in this time range'::text;
     return;
   end if;
+
+  /*
+   * The headline can use rollup_1h minute_counts while the embedded
+   * wait/query drills necessarily use hourly arrays. Capture that shared
+   * dimensional plan so a widened drill is never presented under the
+   * headline's narrower bounds.
+   */
+  select
+    top_row.source,
+    top_row.period_start,
+    top_row.period_end,
+    top_row.effective_bucket
+  into
+    v_drill_source,
+    v_drill_period_start,
+    v_drill_period_end,
+    v_drill_effective_bucket
+  from ash.top('wait_event', v_from, v_to, n => 1) as top_row;
 
   return query select 'period_start'::text, v_aas.period_start::text;
   return query select 'period_end'::text, v_aas.period_end::text;
@@ -6646,6 +6668,12 @@ begin
   return query select 'peak_aas'::text, v_aas.peak_aas::text;
   return query select 'p99_aas'::text, v_aas.p99_aas::text;
   return query select 'backend_seconds'::text, v_aas.backend_seconds::text;
+  return query select 'drill_source'::text, v_drill_source;
+  return query
+    select 'drill_period_start'::text, v_drill_period_start::text;
+  return query select 'drill_period_end'::text, v_drill_period_end::text;
+  return query
+    select 'drill_effective_bucket'::text, v_drill_effective_bucket::text;
 
   return query
   select 'databases_active'::text,
@@ -6710,7 +6738,7 @@ comment on function ash.chart(timestamptz, timestamptz, interval, int, int, bool
 $$Human render helper: stacked ASCII per-bucket AAS chart over [since, until) (default last 1 hour). Series/legend = the window-wide top n wait events PLUS any event that is top-1 in at least one bucket, plus Other. bucket => null auto-selects grain by span. On rollup_1h the chart snaps partial bounds/buckets outward and emits a NOTICE naming source and effective plan; it never silently falls through to unavailable rollup_1m data. Presentation-only (bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with color => true or "set ash.color = on".$$;
 
 comment on function ash.summary(timestamptz, timestamptz) is
-$$Human render helper: key/value AAS overview for one window [since, until) (default last 1 hour) — the companion to ash.periods(). Returns (metric, value): effective period bounds, source, buckets_with_data, avg/peak/p99 AAS, backend_seconds, databases_active, and top waits/queries. Presentation-only; source = rollup_1h_flat means the bucket count is hourly. For typed data use ash.aas() and ash.top().$$;
+$$Human render helper: key/value AAS overview for one window [since, until) (default last 1 hour) — the companion to ash.periods(). Returns (metric, value): headline effective period bounds/source, buckets_with_data, avg/peak/p99 AAS, backend_seconds, databases_active, and top waits/queries. drill_source, drill_period_start/end, and drill_effective_bucket separately disclose the shared wait/query drill plan, which may widen beyond the headline's minute-precise window on rollup_1h. Presentation-only; source = rollup_1h_flat means the bucket count is hourly. For typed data use ash.aas() and ash.top().$$;
 
 /*
  * Schema-level map: one obj_description() lookup orients a human or agent on

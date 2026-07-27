@@ -32,12 +32,12 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
    `timeline`, and `top` report it in `source`; `compare` reports
    `source_1` / `source_2`; `report` embeds it in `coverage.source`; and the
    presentation-only `chart` emits a `NOTICE` when hour grain widens its plan.
-   `samples` is raw-only by definition, while `summary` includes a `source`
-   metric. `rollup_1h_flat` marks legacy/incomplete detail only when a
-   minute-capable plan must degrade to hour grain. When a request *cannot* be
-   answered (the event↔query tie needs raw samples but the window exceeds raw
-   retention), the reader raises a clear exception naming the boundary—never a
-   silent empty result.
+   `samples` is raw-only by definition, while `summary` includes separate
+   headline and wait/query drill provenance metrics. `rollup_1h_flat` marks
+   legacy/incomplete detail only when a minute-capable plan must degrade to
+   hour grain. When a request *cannot* be answered (the event↔query tie needs
+   raw samples but the window exceeds raw retention), the reader raises a
+   clear exception naming the boundary — never a silent empty result.
 6. **Self-describing.** Every function carries a catalog `comment` stating the
    unit, the column contract, and the recommended next call, so an AI agent
    can navigate via `\df+` / `obj_description()` alone.
@@ -259,9 +259,9 @@ pct_1 numeric, pct_2 numeric)`
 - **Grain visibility.** `source_1` / `source_2`, effective bounds, and
   `effective_bucket_1` / `_2` are constant per window. If the two retained
   read grains differ, both peak values and both p99 values are NULL as
-  incomparable—even when an explicit coarse request makes the two effective
+  incomparable — even when an explicit coarse request makes the two effective
   bucket labels equal. Exact averages and `avg_delta` remain available.
-  Different physical sources can still be comparable—for example valid
+  Different physical sources can still be comparable — for example valid
   `rollup_1h.minute_counts` and `rollup_1m` are both minute grain.
 - **Validation from `compare`'s own frame.** An unknown `dimension` raises
   `ash.compare: unknown dimension <v>; use wait_event_type|wait_event|query_id|database (or null for one overall row)` —
@@ -424,6 +424,12 @@ pg_ash never uses it in computation.
   of silently falling through to missing minute data.
 - `ash.summary(since, until)` — key/value overview (v1.x `activity_summary`,
   AAS units, plus top waits/queries), the human companion to `periods`.
+  `period_start` / `period_end` / `source` describe the headline `aas()` plan;
+  `drill_period_start` / `drill_period_end` / `drill_source` /
+  `drill_effective_bucket` separately describe the shared wait/query `top()`
+  plan. On `rollup_1h`, the headline can retain an exact partial-hour window
+  through `minute_counts` while the dimensional drills honestly widen to
+  complete hours.
 
 Both are presentation-only: they may format, color, truncate. No data
 function does any of that.
@@ -445,13 +451,16 @@ function does any of that.
 - Typed aggregate readers report `source`
   (`raw` | `rollup_1m` | `rollup_1h` | `rollup_1h_flat` | `none`);
   `compare` reports `source_1` / `source_2`, `report` uses JSON coverage,
-  `summary` uses a key/value metric, `samples` is raw-only, and `chart`
-  discloses hour-grain widening by `NOTICE`. `rollup_1h_flat` is a
+  `summary` uses separate headline and drill key/value provenance,
+  `samples` is raw-only, and `chart` discloses hour-grain widening by
+  `NOTICE`. `rollup_1h_flat` is a
   conservative window-level marker for a minute-capable plan: at least one
   contributing legacy or incomplete hour lacks trustworthy minute detail.
   Scalar readers and `top` pick a single source/effective grain per result
   (never mixing grains under one undisclosed label). A typed aggregate window
-  with no data reports `source = 'none'`.
+  with no covered rows keeps its planned source and reports
+  `buckets_with_data = 0`; `source = 'none'` means all aggregate source tables
+  are globally empty, not merely that this particular window is uncovered.
 - `ash.status()` gains rows for `raw_retention_start`,
   `rollup_1m_retention_start`, `rollup_1h_retention_start` so callers can
   plan windows before querying.

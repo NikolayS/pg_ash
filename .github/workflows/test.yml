@@ -6999,6 +6999,111 @@ jobs:
               );
           end $$;
 
+          -- summary(): the minute-precise headline and widened hour-only
+          -- wait/query drills must disclose their distinct effective plans.
+          do $$
+          declare
+            v_cpu smallint;
+            v_io smallint;
+            v_h timestamptz := date_trunc('hour', now()) - interval '45 days';
+            v_period_start text;
+            v_period_end text;
+            v_avg text;
+            v_drill_source text;
+            v_drill_start text;
+            v_drill_end text;
+            v_drill_bucket text;
+            v_top_wait text;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            /*
+             * Both hours contain load only in the halves outside the requested
+             * [h+30m, h+90m) window. The headline can prove measured zero from
+             * minute_counts; the dimensional drills can only report the two
+             * complete hours (IO 36000 / 7200 = 5.00 AAS).
+             */
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values
+              (
+                ash.ts_from_timestamptz(v_h),
+                0::oid,
+                3600,
+                20,
+                array[v_io, 36000]::int4[],
+                '{}'::int8[],
+                array_fill(1200, array[30])
+                  || array_fill(0, array[30])
+              ),
+              (
+                ash.ts_from_timestamptz(v_h + interval '1 hour'),
+                0::oid,
+                3600,
+                10,
+                array[v_cpu, 18000]::int4[],
+                '{}'::int8[],
+                array_fill(0, array[30])
+                  || array_fill(600, array[30])
+              );
+
+            select
+              max(value) filter (where metric = 'period_start'),
+              max(value) filter (where metric = 'period_end'),
+              max(value) filter (where metric = 'avg_aas'),
+              max(value) filter (where metric = 'drill_source'),
+              max(value) filter (where metric = 'drill_period_start'),
+              max(value) filter (where metric = 'drill_period_end'),
+              max(value) filter (where metric = 'drill_effective_bucket'),
+              max(value) filter (where metric = 'top_wait_1')
+              into
+                v_period_start,
+                v_period_end,
+                v_avg,
+                v_drill_source,
+                v_drill_start,
+                v_drill_end,
+                v_drill_bucket,
+                v_top_wait
+            from ash.summary(
+              v_h + interval '30 minutes',
+              v_h + interval '90 minutes'
+            );
+
+            assert v_period_start::timestamptz
+                     = v_h + interval '30 minutes'
+               and v_period_end::timestamptz
+                     = v_h + interval '90 minutes'
+               and v_avg = '0.00'
+               and v_drill_source = 'rollup_1h'
+               and v_drill_start::timestamptz = v_h
+               and v_drill_end::timestamptz = v_h + interval '2 hours'
+               and v_drill_bucket::interval = interval '1 hour'
+               and v_top_wait
+                     = 'IO:DataFileRead (avg_aas 5.00, 66.67%)',
+              format(
+                'summary headline=%s..%s avg=%s; drill=%s %s..%s bucket=%s top=%s',
+                v_period_start,
+                v_period_end,
+                v_avg,
+                v_drill_source,
+                v_drill_start,
+                v_drill_end,
+                v_drill_bucket,
+                v_top_wait
+              );
+          end $$;
+
           -- #131 regression controls: defaults and now()-relative calls remain
           -- usable when rollup_1h is the only retained source.
           do $$
@@ -7011,6 +7116,10 @@ jobs:
             v_expected_hours int;
             v_summary_rows bigint;
             v_summary_avg text;
+            v_summary_drill_source text;
+            v_summary_drill_start text;
+            v_summary_drill_end text;
+            v_summary_drill_bucket text;
             v_chart_rows bigint;
             v_chart_min numeric;
             v_chart_max numeric;
@@ -7060,8 +7169,20 @@ jobs:
               3600
             ) as hour_ts;
 
-            select count(*), max(value) filter (where metric = 'avg_aas')
-              into v_summary_rows, v_summary_avg
+            select
+              count(*),
+              max(value) filter (where metric = 'avg_aas'),
+              max(value) filter (where metric = 'drill_source'),
+              max(value) filter (where metric = 'drill_period_start'),
+              max(value) filter (where metric = 'drill_period_end'),
+              max(value) filter (where metric = 'drill_effective_bucket')
+              into
+                v_summary_rows,
+                v_summary_avg,
+                v_summary_drill_source,
+                v_summary_drill_start,
+                v_summary_drill_end,
+                v_summary_drill_bucket
             from ash.summary();
             select
               count(*) filter (where bucket_start is not null),
@@ -7088,8 +7209,14 @@ jobs:
             where key = 'IO';
             select * into v_aas from ash.aas(wait_event_type => 'IO');
 
-            assert v_summary_rows = 11
+            assert v_summary_rows = 15
                and v_summary_avg = '1.00'
+               and v_summary_drill_source = 'rollup_1h'
+               and v_summary_drill_start::timestamptz
+                     = ash.ts_to_timestamptz(v_effective_start)
+               and v_summary_drill_end::timestamptz
+                     = ash.ts_to_timestamptz(v_effective_end)
+               and v_summary_drill_bucket::interval = interval '1 hour'
                and v_chart_rows = v_expected_hours
                and v_chart_min = 1.00
                and v_chart_max = 1.00
@@ -7108,9 +7235,13 @@ jobs:
                and v_aas.peak_aas is null
                and v_aas.p99_aas is null,
               format(
-                '#131 defaults summary rows=%s avg=%s; chart rows=%s expected=%s aas=%s..%s; timeline rows=%s points=%s avg=%s..%s nonnull_peak=%s nonnull_p99=%s; top avg=%s peak=%s p99=%s; filtered aas avg=%s seconds=%s peak=%s p99=%s',
+                '#131 defaults summary rows=%s avg=%s drill=%s %s..%s bucket=%s; chart rows=%s expected=%s aas=%s..%s; timeline rows=%s points=%s avg=%s..%s nonnull_peak=%s nonnull_p99=%s; top avg=%s peak=%s p99=%s; filtered aas avg=%s seconds=%s peak=%s p99=%s',
                 v_summary_rows,
                 v_summary_avg,
+                v_summary_drill_source,
+                v_summary_drill_start,
+                v_summary_drill_end,
+                v_summary_drill_bucket,
                 v_chart_rows,
                 v_expected_hours,
                 v_chart_min,

@@ -105,9 +105,10 @@ Full mapping: [`blueprints/AAS_EXAMPLES.md`](blueprints/AAS_EXAMPLES.md).
 Start with `ash.periods()`, then drill down with `ash.timeline()` and `ash.top()`.
 Typed aggregate readers report `raw`, `rollup_1m`, `rollup_1h`,
 `rollup_1h_flat`, or `none`; `ash.compare()` reports `source_1` / `source_2`,
-`ash.report()` embeds provenance in JSON coverage, `ash.summary()` includes a
-source metric, `ash.samples()` is raw-only, and `ash.chart()` emits a planning
-`NOTICE` when hour grain widens the request. `rollup_1h_flat` means a
+`ash.report()` embeds provenance in JSON coverage, and `ash.summary()` includes
+separate headline and wait/query drill source/bounds metrics. `ash.samples()`
+is raw-only, and `ash.chart()` emits a planning `NOTICE` when hour grain widens
+the request. `rollup_1h_flat` means a
 minute-capable plan encountered legacy/incomplete detail and degraded honestly
 to hour grain.
 
