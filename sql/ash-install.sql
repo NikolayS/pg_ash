@@ -361,8 +361,10 @@ $$;
  * Ensure retention CHECK constraints exist for both fresh and upgrade paths.
  * ADD COLUMN IF NOT EXISTS above doesn't apply CHECKs to pre-existing columns,
  * so add them explicitly here (guarded by a not-exists probe for idempotency).
- * The rotation-period CHECK is installed at the end, after every replacement
- * function is safely in place for a legacy invalid-value upgrade.
+ * The rotation-period CHECK is installed at the end so a legacy invalid value
+ * reaches the actionable validator before PostgreSQL can emit a generic CHECK
+ * error. The file-level transaction rolls the attempted upgrade back; after
+ * correcting the legacy value, the operator re-runs the installer.
  */
 do $$
 begin
@@ -6844,10 +6846,11 @@ end $$;
 /*
  * Enforce the day-granular rotation contract last. A legacy install may
  * already contain a sub-day value that older versions accepted. The
- * actionable error must still stop that unsupported configuration, but only
- * after this autocommit-friendly installer has replaced rotate() and the rest
- * of the operational surface. The operator can set a whole-day value and
- * re-run the installer to add the declarative CHECK.
+ * actionable error must still stop that unsupported configuration. Because
+ * this installer is file-transactional, the error rolls every replacement
+ * back. The operator can update the pre-existing config to a whole-day value
+ * and re-run the installer to atomically install the operational surface and
+ * declarative CHECK.
  */
 do $$
 begin

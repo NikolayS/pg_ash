@@ -5880,7 +5880,8 @@ jobs:
 
           # Upgrade regression: older installers accepted sub-day periods.
           # Reapplication must stop with the actionable validator message,
-          # rather than PostgreSQL's generic CHECK failure.
+          # rather than PostgreSQL's generic CHECK failure, and #184's
+          # file-level transaction must roll the attempted upgrade back.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           alter table ash.config
             drop constraint config_rotation_period_day_check;
@@ -5931,16 +5932,26 @@ jobs:
             echo "::error::legacy sub-day upgrade error mismatch: $upgrade_error" >&2
             exit 1
           fi
-          upgrade_core_installed="$(
-            psql -h localhost -U postgres -d postgres -tAc "
-              select position(
-                'v_rollup_1m_cutoff'
-                in pg_get_functiondef('ash.rotate()'::regprocedure)
-              ) > 0
+          upgrade_atomic_state="$(
+            psql -h localhost -U postgres -d postgres -tA -F '|' -c "
+              select
+                rotation_period::text,
+                position(
+                  'legacy-upgrade sentinel'
+                  in pg_get_functiondef('ash.rotate()'::regprocedure)
+                ) > 0,
+                exists (
+                  select
+                  from pg_constraint
+                  where conname = 'config_rotation_period_day_check'
+                    and conrelid = 'ash.config'::regclass
+                )
+              from ash.config
+              where singleton
             "
           )"
-          if [ "$upgrade_core_installed" != "t" ]; then
-            echo "::error::legacy rejection happened before rotate() was replaced" >&2
+          if [ "$upgrade_atomic_state" != "12:00:00|t|f" ]; then
+            echo "::error::legacy rejection left a partial upgrade: $upgrade_atomic_state" >&2
             exit 1
           fi
 
@@ -5948,7 +5959,26 @@ jobs:
             -c "update ash.config set rotation_period = interval '1 day' where singleton"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -f "$install_sql" >/dev/null
-          echo "Legacy sub-day upgrade rejection PASSED"
+          upgrade_recovered_state="$(
+            psql -h localhost -U postgres -d postgres -tA -F '|' -c "
+              select
+                position(
+                  'v_rollup_1m_cutoff'
+                  in pg_get_functiondef('ash.rotate()'::regprocedure)
+                ) > 0,
+                exists (
+                  select
+                  from pg_constraint
+                  where conname = 'config_rotation_period_day_check'
+                    and conrelid = 'ash.config'::regclass
+                )
+            "
+          )"
+          if [ "$upgrade_recovered_state" != "t|t" ]; then
+            echo "::error::corrected legacy upgrade did not converge: $upgrade_recovered_state" >&2
+            exit 1
+          fi
+          echo "Legacy sub-day atomic rejection and recovery PASSED"
 
       - name: "Test 2.0 readers over rollup sources"
         env:
