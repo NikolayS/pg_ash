@@ -7140,7 +7140,7 @@ comment on function ash.rotate() is
 $$Admin: rotate to the next partition slot, rolling up and truncating the oldest (checked daily by ash.start()). Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. The pre-truncation guard requires minute rollups only while they remain inside rollup_1m_retention_days. Failed attempts increment consecutive_rotate_failures in ash.status(); successful rotation resets it. Safe to call manually to force a due rotation.$$;
 
 comment on function ash.rollup_minute(int) is
-$$Admin: fold completed minutes of raw samples into ash.rollup_1m (the every-minute job scheduled by ash.start()); batch_limit caps catch-up minutes per call. Returns minutes processed. Readers pick rollups automatically — this only needs manual calls when pg_cron is absent.$$;
+$$Admin: fold completed minutes of raw samples into ash.rollup_1m (the every-minute job scheduled by ash.start()); batch_limit caps catch-up minutes per call. Returns completed minute grains processed and watermark-advanced; empty minutes count even when they write no ash.rollup_1m row, while an already-caught-up call returns 0. Readers pick rollups automatically — this only needs manual calls when pg_cron is absent.$$;
 
 comment on function ash.rollup_hour() is
 $$Admin: fold completed hours of ash.rollup_1m into ash.rollup_1h. minute_counts preserves available per-minute totals and must sum to the hourly wait total; missing stored rows remain NULL slots because idle and uncovered minutes are indistinguishable (#137). Returns hours processed.$$;

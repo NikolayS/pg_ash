@@ -769,45 +769,33 @@ $feature_samples$;
 do $feature_rollup_minute_and_periods$
 declare
   v_fixture ash_feature_context%rowtype;
-  v_actual_rollup jsonb;
   v_periods jsonb;
   v_rollup record;
+  v_rollup_rows bigint;
   v_rolled int;
 begin
   select *
   into strict v_fixture
   from ash_feature_context;
 
-  select ash.rollup_minute(120)
+  select ash.rollup_minute(5)
   into v_rolled;
-  assert v_rolled = 4,
+  assert v_rolled = 5,
     format(
-      '[%s] ash.rollup_minute: expected four exact (minute,database) rows written, got %s',
+      '[%s] ash.rollup_minute return: expected five processed grains (four data-bearing plus one empty), got %s',
       pg_catalog.current_setting('ash.feature_mode'),
       v_rolled
     );
 
-  select pg_catalog.jsonb_agg(
-    pg_catalog.jsonb_build_array(
-      ash.ts_to_timestamptz(rollup_min.ts),
-      rollup_min.samples,
-      rollup_min.peak_backends,
-      rollup_min.wait_counts,
-      rollup_min.query_counts
-    )
-    order by rollup_min.ts
-  )
-  into v_actual_rollup
-  from ash.rollup_1m as rollup_min
-  where
-    rollup_min.ts >= ash.ts_from_timestamptz(v_fixture.fixture_start)
-    and rollup_min.ts < ash.ts_from_timestamptz(v_fixture.fixture_end);
+  select pg_catalog.count(*)
+  into v_rollup_rows
+  from ash.rollup_1m;
 
-  assert pg_catalog.jsonb_array_length(v_actual_rollup) = 4,
+  assert v_rollup_rows = 4,
     format(
-      '[%s] ash.rollup_minute rows: expected four persisted minute rollups, got %s',
+      '[%s] ash.rollup_minute rows: expected exactly four data-bearing rollup_1m rows, got %s',
       pg_catalog.current_setting('ash.feature_mode'),
-      v_actual_rollup
+      v_rollup_rows
     );
 
   select *
@@ -1113,7 +1101,7 @@ begin
     'minutes_with_data',
     4,
     'raw_retention_start',
-    v_fixture.fixture_start
+    v_fixture.raw_retention_start
   ),
     format(
       '[%s] ash.report coverage: expected exact four-minute rollup coverage, got %s',
@@ -1226,11 +1214,15 @@ begin
       'period_start',
       'period_end',
       'source',
-      'minutes_with_data',
+      'buckets_with_data',
       'avg_aas',
       'peak_aas',
       'p99_aas',
       'backend_seconds',
+      'drill_source',
+      'drill_period_start',
+      'drill_period_end',
+      'drill_effective_bucket',
       'databases_active',
       'top_wait_1',
       'top_wait_2',
@@ -1248,6 +1240,10 @@ begin
       '5.00',
       '4.97',
       '960.00',
+      'raw',
+      v_fixture.fixture_start::text,
+      v_fixture.fixture_end::text,
+      interval '1 minute'::text,
       '1',
       'IO:DataFileRead (avg_aas 1.75, 43.75%)',
       'Lock:tuple (avg_aas 1.25, 31.25%)',
@@ -1257,7 +1253,7 @@ begin
       '10101 (avg_aas 1.00, 25.00%)'
     ]::text[],
     format(
-      '[%s] ash.summary: expected exact 15-row human summary, got metrics=%s values=%s',
+      '[%s] ash.summary: expected exact 19-row human summary with headline and drill provenance, got metrics=%s values=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       v_metrics,
       v_values
@@ -1292,7 +1288,7 @@ begin
     and v_status ->> 'query_map_count' = '3'
     and v_status ->> 'rollup_1m_rows' = '4'
     and (v_status ->> 'raw_retention_start')::timestamptz =
-      v_fixture.fixture_start
+      v_fixture.raw_retention_start
     and (v_status ->> 'rollup_1m_retention_start')::timestamptz =
       v_fixture.fixture_start,
     format(

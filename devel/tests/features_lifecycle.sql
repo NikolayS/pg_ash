@@ -568,11 +568,21 @@ begin
   into strict v_fixture
   from ash_feature_context;
 
+  /*
+   * ash.rollup_hour() may seal an hour only after minute processing has
+   * reached its end. Pin both watermarks so this fixture states that
+   * precondition explicitly.
+   */
   update ash.config
-  set last_rollup_1h_ts =
-    ash.ts_from_timestamptz(
-      pg_catalog.date_trunc('hour', v_fixture.fixture_start)
-    )
+  set last_rollup_1m_ts =
+        ash.ts_from_timestamptz(
+          pg_catalog.date_trunc('hour', v_fixture.fixture_start)
+            + interval '1 hour'
+        ),
+      last_rollup_1h_ts =
+        ash.ts_from_timestamptz(
+          pg_catalog.date_trunc('hour', v_fixture.fixture_start)
+        )
   where singleton;
   select ash.rollup_hour()
   into v_result;

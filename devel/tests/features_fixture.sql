@@ -31,7 +31,6 @@ set
   rollup_1m_retention_days = 30,
   rollup_1h_retention_days = 1825,
   rollup_min_backend_seconds = 1,
-  last_rollup_1m_ts = null,
   last_rollup_1h_ts = null,
   debug_logging = false
 where singleton;
@@ -55,6 +54,7 @@ values
 create temporary table ash_feature_context (
   fixture_start timestamptz not null,
   fixture_end timestamptz not null,
+  raw_retention_start timestamptz not null,
   datid oid not null,
   cpu_wait_id smallint not null,
   io_wait_id smallint not null,
@@ -68,6 +68,7 @@ on commit preserve rows;
 insert into ash_feature_context (
   fixture_start,
   fixture_end,
+  raw_retention_start,
   datid,
   cpu_wait_id,
   io_wait_id,
@@ -79,6 +80,15 @@ insert into ash_feature_context (
 select
   fixture_anchor.fixture_start,
   fixture_anchor.fixture_start + interval '4 minutes',
+  ash.ts_to_timestamptz(
+    ash.ts_from_timestamptz(
+      pg_catalog.date_trunc(
+        'minute',
+        config_row.rotated_at
+          - (config_row.num_partitions - 2) * config_row.rotation_period
+      )
+    )
+  ),
   database_row.oid,
   cpu_wait.id,
   io_wait.id,
@@ -87,6 +97,7 @@ select
   query_20202.id,
   query_30303.id
 from pg_catalog.pg_database as database_row
+cross join ash.config as config_row
 cross join lateral (
   select
     pg_catalog.date_trunc(
@@ -124,7 +135,22 @@ cross join lateral (
   from ash.query_map_0
   where query_id = 30303
 ) as query_30303
-where database_row.datname = pg_catalog.current_database();
+where
+  database_row.datname = pg_catalog.current_database()
+  and config_row.singleton;
+
+/*
+ * Pin the minute watermark to the first data-bearing grain. The reader test
+ * processes exactly five completed grains: these four fixture minutes plus
+ * one trailing empty minute. This keeps processed-grain and persisted-row
+ * assertions deterministic and deliberately different.
+ */
+update ash.config as config
+set last_rollup_1m_ts = ash.ts_from_timestamptz(
+  fixture.fixture_start
+)
+from ash_feature_context as fixture
+where config.singleton;
 
 insert into ash.sample (
   sample_ts,
