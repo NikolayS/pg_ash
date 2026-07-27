@@ -1985,6 +1985,7 @@ declare
   v_skip_nodename_update boolean := false;
   v_debug_logging boolean := false;
   v_pg_cron_available boolean;
+  v_cron_database text;
 begin
   /*
    * Read debug_logging flag so we can trace the pg_cron detection /
@@ -2152,11 +2153,24 @@ begin
     raise notice
       'pg_cron is not available in this database. To sample, call '
       'ash.take_sample() from an external scheduler:';
-    raise notice
-      '  hint: current_setting(''cron.database_name'', true) = %; install '
-      'pg_ash in that database to use pg_cron scheduling.',
-      coalesce(nullif(current_setting('cron.database_name', true), ''),
-               '(not set)');
+    v_cron_database :=
+      nullif(current_setting('cron.database_name', true), '');
+    if v_cron_database is null then
+      raise notice
+        '  hint: current_setting(''cron.database_name'', true) is not set; '
+        'configure pg_cron for this database or use the external scheduler below';
+    elsif v_cron_database <> current_database() then
+      raise notice
+        '  hint: current_setting(''cron.database_name'', true) = %; install '
+        'pg_ash in that database to use pg_cron scheduling.',
+        v_cron_database;
+    else
+      raise notice
+        '  hint: current_setting(''cron.database_name'', true) = % names this '
+        'database, but pg_cron is unavailable here; install or configure '
+        'pg_cron here, or use the external scheduler below.',
+        v_cron_database;
+    end if;
     raise notice
       '  system cron:    * * * * * psql -qAtX -c '
       '"select ash.take_sample()" (for per-second, use a loop)';

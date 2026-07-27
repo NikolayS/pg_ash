@@ -312,6 +312,10 @@ It includes:
 - `top_queryids_available`, so scrapers can branch without guessing
 - `coverage`, so consumers can reconcile against `ash.aas()` and `ash.top()`
 
+`ash.report()` reads `ash.rollup_1m` only. If a requested window exists only
+in raw samples or `ash.rollup_1h`, it returns SQL `NULL` and emits a NOTICE
+naming that alternate source; it does not synthesize per-minute class data.
+
 The payload contract is stable for the 2.0 minor line: keys may be added, not
 renamed or removed.
 

@@ -92,6 +92,8 @@ jobs:
           grep -Fq \
             'named by `cron.database_name`; it still observes activity from every database.' \
             README.md
+          grep -Fq '`ash.report()` reads `ash.rollup_1m` only.' README.md
+          grep -Fq 'it returns SQL `NULL` and emits a NOTICE' README.md
           grep -Fq "function signatures are unchanged; parameter" RELEASE_NOTES.md
           grep -Fq "names were de-prefixed." RELEASE_NOTES.md
           if grep -Fq "lifecycle/admin functions remain compatible" RELEASE_NOTES.md; then
@@ -10957,6 +10959,7 @@ jobs:
       - name: "Degraded mode: without pg_cron"
         env:
           PGPASSWORD: postgres
+          CRON: ${{ matrix.cron }}
         run: |
           # Install pg_ash fresh without pg_cron.
           # `drop extension if exists` is a no-op when pg_cron isn't installed
@@ -10979,6 +10982,23 @@ jobs:
             where job_type = 'sampler';
             assert v_status_val like '%schedule externally%',
               'start() without pg_cron should say schedule externally, got: ' || v_status_val;
+
+            /*
+             * A preloaded pg_cron registers cron.database_name as
+             * postmaster-only even after DROP EXTENSION. Exercise mutable
+             * placeholder values only on the dedicated cron-off axis, where
+             * the setting starts absent.
+             */
+            if current_setting('cron.database_name', true) is null then
+              perform set_config(
+                'cron.database_name', current_database(), false
+              );
+              perform * from ash.start('1 second');
+              perform set_config(
+                'cron.database_name', 'cron_control', false
+              );
+              perform * from ash.start('1 second');
+            end if;
 
             -- stop() should work without pg_cron
             select status into v_status_val
@@ -11017,8 +11037,25 @@ jobs:
             exit 1
           fi
           if ! printf '%s\n' "$cronless_out" | grep -Fq \
-              "current_setting('cron.database_name', true)"; then
-            echo "FAIL: ash.start cron.database_name hint missing" >&2
+              "current_setting('cron.database_name', true) = postgres names this database"; then
+            echo "FAIL: ash.start local cron.database_name guidance missing" >&2
+            exit 1
+          fi
+          if [ "$CRON" = "off" ]; then
+            if ! printf '%s\n' "$cronless_out" | grep -Fq \
+                "current_setting('cron.database_name', true) is not set; configure pg_cron"; then
+              echo "FAIL: ash.start unset cron.database_name guidance missing" >&2
+              exit 1
+            fi
+            if ! printf '%s\n' "$cronless_out" | grep -Fq \
+                "current_setting('cron.database_name', true) = cron_control; install pg_ash in that database"; then
+              echo "FAIL: ash.start remote cron.database_name guidance missing" >&2
+              exit 1
+            fi
+          fi
+          if printf '%s\n' "$cronless_out" | grep -Fq \
+              "install pg_ash in (not set)"; then
+            echo "FAIL: ash.start recommended an impossible pg_ash target" >&2
             exit 1
           fi
           if printf '%s\n' "$cronless_out" | grep -Fq \
