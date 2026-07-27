@@ -11324,6 +11324,12 @@ jobs:
             if [[ "${expected_pgss}" == "true" ]]; then
               "${psql_base[@]}" \
                 --command="create extension pg_stat_statements;"
+              # The full workflow has already exercised hundreds of distinct
+              # statements before this shared feature step. DROP/CREATE does
+              # not clear pg_stat_statements' preloaded shared state, so reset
+              # it explicitly before asserting exact marker-query enrichment.
+              "${psql_base[@]}" \
+                --command="select pg_stat_statements_reset();"
             fi
 
             actual="$("${psql_base[@]}" \
