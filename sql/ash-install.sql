@@ -71,10 +71,14 @@ begin
    * restore, which grants the complete current closure. Detection uses the
    * snapshotted explicit aclitems, not has_function_privilege(), so
    * superusers and role-membership shortcuts never qualify; roles holding
-   * only partial manual grants keep the exact-signature restore path and
-   * are never widened. ash._admin_funcs() may not exist yet (fresh install,
-   * or upgrade from a version predating the #45 hardening — which also
-   * predates grant_reader, so there are no reader bundles to detect).
+   * only partial manual FUNCTION grants keep the exact-signature restore
+   * path and are not widened. Table ACLs are not snapshotted: a role with
+   * the full function bundle is classified as a reader even if an operator
+   * narrowed its table access, so the full-bundle restore below re-grants
+   * that access and emits a WARNING. ash._admin_funcs() may not exist yet
+   * (fresh install, or upgrade from a version predating the #45 hardening —
+   * which also predates grant_reader, so there are no reader bundles to
+   * detect).
    */
   drop table if exists pg_temp._ash_install_reader_roles;
   create temp table _ash_install_reader_roles (rolname name primary key);
@@ -1981,6 +1985,7 @@ declare
   v_skip_nodename_update boolean := false;
   v_debug_logging boolean := false;
   v_pg_cron_available boolean;
+  v_cron_database text;
 begin
   /*
    * Read debug_logging flag so we can trace the pg_cron detection /
@@ -2146,8 +2151,26 @@ begin
     return next;
 
     raise notice
-      'pg_cron is not installed. To sample, call ash.take_sample() '
-      'from an external scheduler:';
+      'pg_cron is not available in this database. To sample, call '
+      'ash.take_sample() from an external scheduler:';
+    v_cron_database :=
+      nullif(current_setting('cron.database_name', true), '');
+    if v_cron_database is null then
+      raise notice
+        '  hint: current_setting(''cron.database_name'', true) is not set; '
+        'configure pg_cron for this database or use the external scheduler below';
+    elsif v_cron_database <> current_database() then
+      raise notice
+        '  hint: current_setting(''cron.database_name'', true) = %; install '
+        'pg_ash in that database to use pg_cron scheduling.',
+        v_cron_database;
+    else
+      raise notice
+        '  hint: current_setting(''cron.database_name'', true) = % names this '
+        'database, but pg_cron is unavailable here; install or configure '
+        'pg_cron here, or use the external scheduler below.',
+        v_cron_database;
+    end if;
     raise notice
       '  system cron:    * * * * * psql -qAtX -c '
       '"select ash.take_sample()" (for per-second, use a loop)';
@@ -4368,7 +4391,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
+  v_from timestamptz := coalesce(
+    since, until - interval '1 hour', now() - interval '1 hour');
   v_to timestamptz := coalesce(until, now());
   v_start_ts int4;
   v_end_ts int4;
@@ -4382,6 +4406,11 @@ declare
   v_extrema_supported boolean;
   v_raw_start timestamptz;
 begin
+  if v_from > v_to then
+    raise exception
+      'ash.aas: since must be less than or equal to until';
+  end if;
+
   v_requested_bucket_secs := extract(epoch from bucket);
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
@@ -4546,7 +4575,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
+  v_from timestamptz := coalesce(
+    since, until - interval '1 hour', now() - interval '1 hour');
   v_to timestamptz := coalesce(until, now());
   v_start_ts int4;
   v_end_ts int4;
@@ -4561,6 +4591,11 @@ declare
   v_extrema_supported boolean;
   v_raw_start timestamptz;
 begin
+  if v_from > v_to then
+    raise exception
+      'ash.timeline: since must be less than or equal to until';
+  end if;
+
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
@@ -5079,7 +5114,8 @@ set jit = off
 set search_path = pg_catalog, ash, public
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
+  v_from timestamptz := coalesce(
+    since, until - interval '1 hour', now() - interval '1 hour');
   v_to timestamptz := coalesce(until, now());
   v_start_ts int4;
   v_end_ts int4;
@@ -5096,6 +5132,11 @@ declare
   v_pgss_schema text;
   v_key_num bigint;
 begin
+  if v_from > v_to then
+    raise exception
+      'ash.top: since must be less than or equal to until';
+  end if;
+
   if dimension not in (
        'wait_event_type', 'wait_event', 'query_id', 'database'
      ) then
@@ -5391,14 +5432,16 @@ set jit = off
 set search_path = pg_catalog, ash, public
 as $$
 declare
+  v_from1 timestamptz := coalesce(
+    since_1, until_1 - interval '1 hour', now() - interval '1 hour');
+  v_to1 timestamptz := coalesce(until_1, now());
+  v_from2 timestamptz := coalesce(
+    since_2, until_2 - interval '1 hour', now() - interval '1 hour');
+  v_to2 timestamptz := coalesce(until_2, now());
   v_aas1 record;
   v_aas2 record;
   v_cov1 boolean;
   v_cov2 boolean;
-  v_from1 timestamptz := coalesce(since_1, now() - interval '1 hour');
-  v_to1 timestamptz := coalesce(until_1, now());
-  v_from2 timestamptz := coalesce(since_2, now() - interval '1 hour');
-  v_to2 timestamptz := coalesce(until_2, now());
   v_start1 int4;
   v_end1 int4;
   v_start2 int4;
@@ -5424,6 +5467,14 @@ begin
       'wait_event_type|wait_event|query_id|database '
       '(or null for one overall row)', dimension;
   end if;
+  if v_from1 > v_to1 then
+    raise exception
+      'ash.compare: since_1 must be less than or equal to until_1';
+  end if;
+  if v_from2 > v_to2 then
+    raise exception
+      'ash.compare: since_2 must be less than or equal to until_2';
+  end if;
 
   /*
    * Per-window coverage probe (rollup-backed, cheap). buckets_with_data = 0
@@ -5431,9 +5482,9 @@ begin
    * caller is warned: comparing against an uncovered window says nothing
    * about a regression.
    */
-  select * into v_aas1 from ash.aas(since_1, until_1,
+  select * into v_aas1 from ash.aas(v_from1, v_to1,
     wait_event_type, wait_event, query_id, database, bucket);
-  select * into v_aas2 from ash.aas(since_2, until_2,
+  select * into v_aas2 from ash.aas(v_from2, v_to2,
     wait_event_type, wait_event, query_id, database, bucket);
   v_cov1 := v_aas1.buckets_with_data > 0;
   v_cov2 := v_aas2.buckets_with_data > 0;
@@ -5612,11 +5663,11 @@ begin
 
   return query
   with window1 as (
-    select * from ash.top(dimension, since_1, until_1,
+    select * from ash.top(dimension, v_from1, v_to1,
       wait_event_type, wait_event, query_id, database, 2147483647, bucket)
   ),
   window2 as (
-    select * from ash.top(dimension, since_2, until_2,
+    select * from ash.top(dimension, v_from2, v_to2,
       wait_event_type, wait_event, query_id, database, 2147483647, bucket)
   )
   select
@@ -5731,7 +5782,8 @@ set jit = off
 set search_path = pg_catalog, ash, public
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
+  v_from timestamptz := coalesce(
+    since, until - interval '1 hour', now() - interval '1 hour');
   v_to timestamptz := coalesce(until, now());
   v_start int4;
   v_end int4;
@@ -5740,6 +5792,11 @@ declare
   v_has_pgss boolean := false;
   v_pgss_schema text;
 begin
+  if v_from > v_to then
+    raise exception
+      'ash.samples: since must be less than or equal to until';
+  end if;
+
   v_start := ash.ts_from_timestamptz(v_from);
   v_end := ash.ts_from_timestamptz(v_to);
   v_slots := ash._active_slots_for_at(v_from, v_to);
@@ -5986,7 +6043,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 day');
+  v_from timestamptz := coalesce(
+    since, until - interval '1 hour', now() - interval '1 day');
   v_to timestamptz := coalesce(until, now());
   v_start_ts int4;
   v_end_ts int4;
@@ -6021,7 +6079,14 @@ declare
   v_t999_mins int4[];
   v_t99_thr numeric;
   v_t999_thr numeric;
+  v_available_source text;
+  v_raw_retention_start timestamptz;
 begin
+  if v_from > v_to then
+    raise exception
+      'ash.report: since must be less than or equal to until';
+  end if;
+
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
@@ -6035,6 +6100,47 @@ begin
   from (select distinct ts from ash.rollup_1m
         where ts >= v_start_ts and ts < v_end_ts) as covered;
   if v_n = 0 then
+    /*
+     * report's per-class minute payload is rollup_1m-only. Do not synthesize
+     * it from another source; just distinguish "pg_ash has no data" from
+     * "another reader source holds this window" before returning the same
+     * SQL NULL as before.
+     */
+    /*
+     * Reuse the B3 boundary split: _raw_retention_start() is the logical
+     * planning boundary, while the row probe below proves physical coverage.
+     * _active_slots() excludes the ring slot that readers must not expose.
+     */
+    v_raw_retention_start := ash._raw_retention_start();
+
+    if v_raw_retention_start is not null
+       and ash.ts_to_timestamptz(v_end_ts) > v_raw_retention_start
+       and ash.ts_to_timestamptz(v_start_ts) <= now()
+       and exists (
+         select
+         from ash.sample as sample_row
+         where sample_row.slot = any(ash._active_slots())
+           and sample_row.sample_ts >= v_start_ts
+           and sample_row.sample_ts < v_end_ts
+       ) then
+      v_available_source := 'raw';
+    elsif exists (
+      select
+      from ash._grain_counts(
+        v_start_ts, v_end_ts, 'rollup_1h_minutes'
+      )
+    ) then
+      v_available_source := 'rollup_1h';
+    end if;
+
+    if v_available_source is not null then
+      raise notice
+        'ash.report: no rollup_1m coverage for [%, %); % has coverage, '
+        'but report reads rollup_1m only and returns NULL',
+        ash.ts_to_timestamptz(v_start_ts),
+        ash.ts_to_timestamptz(v_end_ts),
+        v_available_source;
+    end if;
     return null;
   end if;
 
@@ -6385,7 +6491,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
+  v_from timestamptz := coalesce(
+    since, until - interval '1 hour', now() - interval '1 hour');
   v_to timestamptz := coalesce(until, now());
   v_start_ts int4;
   v_end_ts int4;
@@ -6410,6 +6517,11 @@ declare
   v_i int;
   v_char_count int;
 begin
+  if v_from > v_to then
+    raise exception
+      'ash.chart: since must be less than or equal to until';
+  end if;
+
   width := least(greatest(width, 1), 500);
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
@@ -6631,7 +6743,8 @@ set jit = off
 set search_path = pg_catalog, ash, public
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
+  v_from timestamptz := coalesce(
+    since, until - interval '1 hour', now() - interval '1 hour');
   v_to timestamptz := coalesce(until, now());
   v_aas record;
   v_rec record;
@@ -6641,6 +6754,11 @@ declare
   v_drill_period_end timestamptz;
   v_drill_effective_bucket interval;
 begin
+  if v_from > v_to then
+    raise exception
+      'ash.summary: since must be less than or equal to until';
+  end if;
+
   select * into v_aas from ash.aas(v_from, v_to);
   if v_aas.buckets_with_data = 0 then
     return query select 'status'::text, 'no data in this time range'::text;
@@ -6737,7 +6855,7 @@ comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigin
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is null. Reads ash.sample directly (raw retention only).$$;
 
 comment on function ash.report(timestamptz, timestamptz, int, int) is
-$$Machine-readable load report as one jsonb (US-8) for [since, until) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution; raw_retention_start is the logical planning/loss boundary, not the physical query-attribution cutoff. vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage; never raises. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
+$$Machine-readable load report as one jsonb (US-8) for [since, until) (no bounds: last 1 day; until-only: preceding 1 hour). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution; raw_retention_start is the logical planning/loss boundary, not the physical query-attribution cutoff. vcpus (echoed, never used) and cluster_name are pass-throughs. Reads ash.rollup_1m only. If it has no coverage for the window, returns null even when raw or rollup_1h has coverage, emits a NOTICE naming that source, and never raises for missing coverage. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
 
 comment on function ash.chart(timestamptz, timestamptz, interval, int, int, boolean) is
 $$Human render helper: stacked ASCII per-bucket AAS chart over [since, until) (default last 1 hour). Series/legend = the window-wide top n wait events PLUS any event that is top-1 in at least one bucket, plus Other. bucket => null auto-selects grain by span. On rollup_1h the chart snaps partial bounds/buckets outward and emits a NOTICE naming source and effective plan; it never silently falls through to unavailable rollup_1m data. Presentation-only (bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with color => true or "set ash.color = on".$$;
@@ -7297,17 +7415,20 @@ end $$;
  *     name.
  * This mirrors what CREATE OR REPLACE would have preserved: function names
  * that no longer exist (removed/renamed) are skipped, roles dropped
- * mid-script are skipped, and a partially-granted role's reach is never
- * widened. Roles that held the FULL pre-upgrade reader bundle (detected in
- * the snapshot block at the top of this script) are additionally re-run
- * through ash.grant_reader() afterwards, so they can also execute helpers
- * introduced by this version — otherwise the readers they kept would fail
- * mid-call on the first new internal helper.
+ * mid-script are skipped, and a role with only partial FUNCTION grants is
+ * not widened. Roles that held the FULL pre-upgrade reader-function bundle
+ * (detected in the snapshot block at the top of this script) are additionally
+ * re-run through ash.grant_reader() afterwards, so they can also execute
+ * helpers introduced by this version — otherwise the readers they kept would
+ * fail mid-call on the first new internal helper. This classification does
+ * not snapshot table ACLs, so the full-bundle replay can restore table access
+ * an operator narrowed; the WARNING below lists every affected role.
  */
 do $$
 declare
   v_rec record;
   v_admin_funcs constant text[] := ash._admin_funcs();
+  v_reader_roles text;
 begin
   for v_rec in
     select distinct func_acl.grantee, func_acl.grantable, proc.proname,
@@ -7341,11 +7462,29 @@ begin
                         else '' end);
   end loop;
 
+  select string_agg(
+           pg_catalog.quote_ident(reader_role.rolname),
+           ', ' order by reader_role.rolname
+         )
+  into v_reader_roles
+  from pg_temp._ash_install_reader_roles as reader_role
+  join pg_catalog.pg_roles as role_row
+    on role_row.rolname = reader_role.rolname;
+
+  if v_reader_roles is not null then
+    raise warning
+      'pg_ash installer: restoring the full reader bundle for role(s) %; '
+      'any operator-narrowed table privileges will be re-granted',
+      v_reader_roles;
+  end if;
+
   /*
    * Preserved reader roles: grant the full CURRENT reader closure. The
    * exact-signature loop above only replays pre-upgrade grants, so helpers
    * new in this version would stay denied for these roles. grant_reader()
-   * excludes the admin set, so this never widens beyond reader access.
+   * excludes the admin set, so this never widens beyond reader access, but it
+   * can restore manually revoked reader-table access because the detection
+   * snapshot records function grants only.
    *
    * _admin_funcs() moved from the reader set into the admin set in #166.
    * CREATE OR REPLACE preserves its old ACL, so explicitly remove that one
@@ -7379,7 +7518,8 @@ end $$;
  * nothing they could not already see, and it makes monitoring tools running
  * as pg_monitor members (Grafana, exporters) work out of the box.
  *
- * Opt out at any time (the grant is a plain ash.grant_reader() bundle):
+ * To opt out, run this after installation and after every installer re-apply
+ * (including upgrades, which restore the default grant):
  *   select ash.revoke_reader('pg_monitor');
  *
  * Best-effort: this must NEVER abort the install. On a locked-down managed

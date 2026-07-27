@@ -7,8 +7,9 @@ migrations. Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for
 compatibility.
 
 This is a breaking reader-API release. Sampling, storage, rollups, scheduler
-functions, and lifecycle/admin functions remain compatible, but the 1.x reader
-surface has been replaced by the AAS-oriented 2.0 API:
+functions, and lifecycle/admin function signatures are unchanged; parameter
+names were de-prefixed. The 1.x reader surface has been replaced by the
+AAS-oriented 2.0 API:
 
 | 1.x | 2.0 |
 |---|---|
@@ -30,8 +31,10 @@ surface has been replaced by the AAS-oriented 2.0 API:
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.
 - **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the finalized 2.0
-  installer, removes stale 1.x and earlier draft reader functions, and preserves
-  explicit reader grants where safe.
+  installer, removes stale 1.x and earlier draft reader functions, and restores
+  eligible explicit reader-function grants. Roles that held the full
+  reader-function bundle receive the full current reader bundle; the installer
+  warns that this can re-grant operator-narrowed table privileges.
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
   `select ash.revoke_reader('pg_monitor');`.
@@ -41,6 +44,10 @@ surface has been replaced by the AAS-oriented 2.0 API:
 
 ## Fixes since 2.0 beta 1
 
+- **Reader windows and diagnostics are now explicit.** Reader functions reject
+  inverted windows and anchor an `until`-only call to the preceding hour.
+  Installer re-apply, report coverage, and pg_cron availability messages now
+  describe their actual behavior. (issues #165, #170, #171, #172, #173, #174)
 - **Malformed decoder input is rejected consistently.** `ash.decode_sample()`
   now returns zero rows with a position-specific warning when a packed sample
   array contains a NULL wait marker, count, or query-map id, matching the
