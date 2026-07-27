@@ -7146,9 +7146,9 @@ jobs:
               0
             );
 
-            select ash.rollup_minute() into v_result;
+            select ash.rollup_minute(1) into v_result;
             assert v_result = 1,
-              'rollup_minute should create exactly one database row, got '
+              'rollup_minute should process exactly one completed minute, got '
               || v_result;
             assert (
               select query_counts
