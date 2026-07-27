@@ -6172,7 +6172,7 @@ comment on function ash.take_sample() is
 $$Admin/internal: take one wait-event sample of pg_stat_activity into the current slot (the every-second worker that ash.start() schedules). Returns the number of active backends captured. Call manually only for testing; continuous sampling belongs to ash.start().$$;
 
 comment on function ash.rotate() is
-$$Admin: rotate to the next partition slot, rolling up and truncating the oldest (checked daily by ash.start()). Readable raw retention is roughly (num_partitions - 2) * rotation_period plus the current partial period. The pre-truncation guard requires minute rollups only while they remain inside rollup_1m_retention_days. Failed attempts increment consecutive_rotate_failures in ash.status(); successful rotation resets it. Safe to call manually to force a due rotation.$$;
+$$Admin: rotate to the next partition slot, rolling up and truncating the oldest (checked daily by ash.start()). Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. The pre-truncation guard requires minute rollups only while they remain inside rollup_1m_retention_days. Failed attempts increment consecutive_rotate_failures in ash.status(); successful rotation resets it. Safe to call manually to force a due rotation.$$;
 
 comment on function ash.rollup_minute(int) is
 $$Admin: fold completed minutes of raw samples into ash.rollup_1m (the every-minute job scheduled by ash.start()); batch_limit caps catch-up minutes per call. Returns minutes processed. Readers pick rollups automatically — this only needs manual calls when pg_cron is absent.$$;
@@ -6184,7 +6184,7 @@ comment on function ash.rollup_cleanup() is
 $$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Rotation deliberately does not require minute rollups that this cleanup is entitled to delete. Returns a summary of rows deleted.$$;
 
 comment on function ash.rebuild_partitions(int, text) is
-$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is roughly (num_partitions - 2) * rotation_period plus the current partial period. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
+$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
 
 comment on function ash.set_debug_logging(bool) is
 $$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
