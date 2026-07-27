@@ -30,6 +30,7 @@ readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19beta2)
 readonly -a SURFACES=(
   fresh-install
   upgrade-chain
+  features
   degraded-no-cron
   degraded-no-pgss
   degraded-neither
@@ -62,6 +63,7 @@ Supported majors:
 Supported surfaces:
   fresh-install
   upgrade-chain
+  features
   degraded-no-cron
   degraded-no-pgss
   degraded-neither
@@ -421,16 +423,38 @@ run_upgrade_chain() {
     "Schema equivalence: fresh dev install vs full upgrade path"
 }
 
+run_features() {
+  assert_extension_state t t
+  run_ci_selection \
+    step \
+    "Behavioral feature coverage across extension modes"
+}
+
+run_feature_mode() {
+  local feature_mode=$1
+  local expected_cron=$2
+  local expected_pgss=$3
+
+  PG_ASH_FEATURE_MODE_ROWS="$(
+    printf '%s\t%s\t%s\n' \
+      "${feature_mode}" "${expected_cron}" "${expected_pgss}"
+  )" run_ci_selection \
+    step \
+    "Behavioral feature coverage across extension modes"
+}
+
 run_degraded_no_cron() {
   assert_extension_state f t
   install_fresh
   psql_gate --file="${REPO_ROOT}/devel/tests/degraded_no_cron.sql"
+  run_feature_mode no-cron false true
 }
 
 run_degraded_no_pgss() {
   assert_extension_state t f
   install_fresh
   psql_gate --file="${REPO_ROOT}/devel/tests/degraded_no_pgss.sql"
+  run_feature_mode no-pgss true false
 }
 
 run_degraded_neither() {
@@ -443,6 +467,7 @@ run_degraded_neither() {
   install_fresh
   assert_extension_state f f
   psql_gate --file="${REPO_ROOT}/devel/tests/degraded_no_cron.sql"
+  run_feature_mode neither false false
 }
 
 run_cron_path() {
@@ -461,7 +486,7 @@ surface_configuration() {
   local surface=$1
 
   case "${surface}" in
-    fresh-install | upgrade-chain | cron-path)
+    fresh-install | upgrade-chain | features | cron-path)
       printf '%s\t%s\t%s\n' "pg_cron,pg_stat_statements" t t
       ;;
     degraded-neither)
@@ -494,6 +519,9 @@ execute_surface() {
       ;;
     upgrade-chain)
       run_upgrade_chain "${major}"
+      ;;
+    features)
+      run_features
       ;;
     degraded-no-cron)
       run_degraded_no_cron

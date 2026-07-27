@@ -11171,6 +11171,259 @@ jobs:
             echo "FAIL: ash.start emitted the old cluster-wide pg_cron claim" >&2
             exit 1
           fi
+      - name: "Behavioral feature coverage across extension modes"
+        env:
+          PGPASSWORD: postgres
+          CRON: ${{ matrix.cron }}
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
+          psql_base=(
+            psql
+            --no-psqlrc
+            --host=localhost
+            --username=postgres
+            --dbname=postgres
+            --set=ON_ERROR_STOP=1
+          )
+          sleeper_pid=""
+          sleeper_backend_pid=""
+          sleeper_application=""
+
+          stop_feature_sleeper() {
+            local pid="${sleeper_pid}"
+            local backend_pid="${sleeper_backend_pid}"
+            local application="${sleeper_application}"
+
+            sleeper_backend_pid=""
+            sleeper_application=""
+            if [[ "${backend_pid}" =~ ^[0-9]+$ ]]; then
+              "${psql_base[@]}" \
+                --command="
+                  select pg_terminate_backend(pid)
+                  from pg_stat_activity
+                  where pid = ${backend_pid}
+                    and application_name = '${application}';
+                " >/dev/null 2>&1 || true
+            fi
+            sleeper_pid=""
+            if [[ -n "${pid}" ]]; then
+              kill -TERM "${pid}" >/dev/null 2>&1 || true
+              wait "${pid}" >/dev/null 2>&1 || true
+            fi
+          }
+
+          cleanup_feature_step() {
+            local exit_code=$?
+
+            trap - EXIT INT TERM
+            stop_feature_sleeper
+            exit "${exit_code}"
+          }
+
+          signal_feature_step() {
+            local exit_code=$1
+
+            trap - INT TERM
+            exit "${exit_code}"
+          }
+
+          uninstall_ash_if_present() {
+            local ash_present
+
+            ash_present="$("${psql_base[@]}" \
+              --tuples-only \
+              --no-align \
+              --command="
+                select (
+                  pg_catalog.to_regnamespace('ash') is not null
+                )::text;
+              ")"
+            if [[ "${ash_present//$'\r'/}" == "true" ]]; then
+              "${psql_base[@]}" \
+                --command="select ash.uninstall('yes');"
+            fi
+          }
+
+          assert_ash_absent() {
+            local ash_absent
+
+            ash_absent="$("${psql_base[@]}" \
+              --tuples-only \
+              --no-align \
+              --command="
+                select (
+                  pg_catalog.to_regnamespace('ash') is null
+                )::text;
+              ")"
+            if [[ "${ash_absent//$'\r'/}" != "true" ]]; then
+              printf '%s\n' \
+                "feature driver left the ash schema installed" >&2
+              return 1
+            fi
+          }
+
+          configure_extensions() {
+            local expected_cron=$1
+            local expected_pgss=$2
+            local actual
+
+            "${psql_base[@]}" \
+              --command="
+                drop extension if exists pg_cron cascade;
+                drop extension if exists pg_stat_statements cascade;
+              "
+            if [[ "${expected_cron}" == "true" ]]; then
+              "${psql_base[@]}" \
+                --command="create extension pg_cron;"
+            fi
+            if [[ "${expected_pgss}" == "true" ]]; then
+              "${psql_base[@]}" \
+                --command="create extension pg_stat_statements;"
+            fi
+
+            actual="$("${psql_base[@]}" \
+              --tuples-only \
+              --no-align \
+              --command="
+                select
+                  (
+                    select count(*) = 1
+                    from pg_extension
+                    where extname = 'pg_cron'
+                  )::text
+                  || '|'
+                  || (
+                    select count(*) = 1
+                    from pg_extension
+                    where extname = 'pg_stat_statements'
+                  )::text;
+              ")"
+            actual="${actual//$'\r'/}"
+            if [[ "${actual}" != "${expected_cron}|${expected_pgss}" ]]; then
+              printf '%s\n' \
+                "extension mode mismatch: expected ${expected_cron}|${expected_pgss}, got ${actual}" >&2
+              return 1
+            fi
+          }
+
+          wait_for_feature_sleeper() {
+            local attempt
+            local backend_pids
+
+            for ((attempt = 1; attempt <= 50; attempt++)); do
+              backend_pids="$("${psql_base[@]}" \
+                --tuples-only \
+                --no-align \
+                --command="
+                  select string_agg(pid::text, ',' order by pid)
+                  from pg_stat_activity
+                  where application_name = '${sleeper_application}'
+                    and state = 'active'
+                    and query = 'select pg_sleep(300);';
+                ")"
+              backend_pids="${backend_pids//$'\r'/}"
+              if [[ "${backend_pids}" =~ ^[0-9]+$ ]]; then
+                sleeper_backend_pid="${backend_pids}"
+                return 0
+              fi
+              if [[ -n "${backend_pids}" ]]; then
+                printf '%s\n' \
+                  "expected exactly one feature sleeper, found backend PIDs ${backend_pids}" >&2
+                return 1
+              fi
+              sleep 0.1
+            done
+
+            printf '%s\n' \
+              "feature sleeper did not become active" >&2
+            return 1
+          }
+
+          run_feature_mode() {
+            local feature_mode=$1
+            local expected_cron=$2
+            local expected_pgss=$3
+            local install_path
+
+            printf 'Feature mode: %s (pg_cron=%s pg_stat_statements=%s)\n' \
+              "${feature_mode}" "${expected_cron}" "${expected_pgss}"
+            uninstall_ash_if_present
+            assert_ash_absent
+            configure_extensions "${expected_cron}" "${expected_pgss}"
+
+            install_path="$(
+              python3 devel/scripts/ash_sql_chain.py fresh-install-path
+            )"
+            if [[ "${install_path}" == /* || ! -f "${install_path}" ]]; then
+              printf 'Invalid fresh-install path: %s\n' \
+                "${install_path}" >&2
+              return 1
+            fi
+            "${psql_base[@]}" --file="${install_path}" >/dev/null
+
+            sleeper_application="pg_ash_features_${feature_mode}"
+            PGAPPNAME="${sleeper_application}" \
+              "${psql_base[@]}" \
+              --command="select pg_sleep(300);" >/dev/null 2>&1 &
+            sleeper_pid=$!
+            wait_for_feature_sleeper
+
+            "${psql_base[@]}" \
+              -v "expected_cron=${expected_cron}" \
+              -v "expected_pgss=${expected_pgss}" \
+              -v "feature_mode=${feature_mode}" \
+              --file=devel/tests/features.sql
+
+            stop_feature_sleeper
+            assert_ash_absent
+          }
+
+          trap cleanup_feature_step EXIT
+          trap 'signal_feature_step 130' INT
+          trap 'signal_feature_step 143' TERM
+
+          cron_available="$("${psql_base[@]}" \
+            --tuples-only \
+            --no-align \
+            --command="
+              select exists (
+                select
+                from pg_available_extensions
+                where name = 'pg_cron'
+              )::text;
+            ")"
+          cron_available="${cron_available//$'\r'/}"
+
+          if [[ -n "${PG_ASH_FEATURE_MODE_ROWS:-}" ]]; then
+            mapfile -t feature_modes \
+              <<<"${PG_ASH_FEATURE_MODE_ROWS}"
+          elif [[ "${CRON}" == "on" && "${cron_available}" == "true" ]]; then
+            feature_modes=(
+              $'both\ttrue\ttrue'
+              $'no-cron\tfalse\ttrue'
+              $'no-pgss\ttrue\tfalse'
+              $'neither\tfalse\tfalse'
+            )
+          else
+            feature_modes=(
+              $'no-cron\tfalse\ttrue'
+              $'neither\tfalse\tfalse'
+            )
+          fi
+
+          for feature_mode_row in "${feature_modes[@]}"; do
+            IFS=$'\t' read -r \
+              feature_mode expected_cron expected_pgss \
+              <<<"${feature_mode_row}"
+            run_feature_mode \
+              "${feature_mode}" "${expected_cron}" "${expected_pgss}"
+          done
+
+          assert_ash_absent
+
       - name: Final summary
         env:
           PGPASSWORD: postgres
