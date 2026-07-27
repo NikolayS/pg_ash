@@ -4041,12 +4041,15 @@ $$;
  * grain, so for anything wider than ~1 hour whose requested start is within
  * rollup_1m retention we prefer rollup_1m (a raw decode of a wide window spills
  * hundreds of MB — the last-24h read cost ~4.5s and ~500MB before this).
- * #122 tracks the separate end-watermark/completeness gap. Narrow windows
- * still fall through to _pick_source (raw preferred) so the freshest partial
- * minute is captured, and windows rollup can't cover (or where rollup is
- * disabled/lagging) still fall to raw / rollup_1h. Exact-query drills and
- * samples bypass this and force raw. The source column stays honest — it names
- * whatever was actually read.
+ * The rollup watermark must also reach the latest complete minute whenever raw
+ * is the preferred source at the window start; otherwise a stalled rollup
+ * worker would hide newer raw load. Narrow windows still fall through to
+ * _pick_source (raw preferred) so the freshest partial minute is captured.
+ * When raw covers the window start, a rollup that is disabled, cannot cover it,
+ * or lags the requested end falls back through _pick_source. Completeness for a
+ * stalled rollup when the window starts before physical raw coverage remains
+ * tracked by #122. Exact-query drills and samples bypass this and force raw.
+ * The source column stays honest — it names whatever was actually read.
  */
 create or replace function ash._pick_source_agg(
   since timestamptz,
@@ -4057,12 +4060,31 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
+  with fallback as (
+    select ash._pick_source(since) as source
+  )
   select case
     when extract(epoch from (until - since)) > 3600
          and ash._rollup_1m_retention_start() is not null
-         and since >= ash._rollup_1m_retention_start() then 'rollup_1m'
-    else ash._pick_source(since)
+         and since >= ash._rollup_1m_retention_start()
+         and (
+           fallback.source <> 'raw'
+           or coalesce(
+                (
+                  select ash.ts_to_timestamptz(last_rollup_1m_ts)
+                           >= least(
+                                until,
+                                date_trunc('minute', now())
+                              )
+                  from ash.config
+                  where singleton
+                ),
+                false
+              )
+         ) then 'rollup_1m'
+    else fallback.source
   end
+  from fallback
 $$;
 
 /*
