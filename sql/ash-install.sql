@@ -4983,8 +4983,8 @@ $$;
 
 /*
  * report helper: top query ids at a set of minutes, optionally within one
- * wait class (type null = across all classes = the 'total' key), read from RAW
- * samples (the wait<->query tie). "queryid(aas)" strings, int64-safe.
+ * wait class (type null = the five classes included in the 'total' key), read
+ * from RAW samples (the wait<->query tie). "queryid(aas)" strings, int64-safe.
  */
 create or replace function ash._hr_top_queryids(
   type text, minutes int4[], n int, si numeric
@@ -5292,9 +5292,9 @@ begin
   end loop;
 
   /*
-   * Total = the summed per-minute series' OWN extreme (matches the platform
-   * ingestion recipe and top_queryids_*.total). Statement 1: values +
-   * unrounded thresholds + worst minute.
+   * Total statistics come from the summed per-minute series (matching the
+   * platform ingestion recipe and top_queryids_*.total). Statement 1: average,
+   * own extremes, unrounded thresholds, and worst minute.
    */
   with grid as (
     select covered.ts, coalesce(total_counts.cnt, 0) * v_si / 60.0 as aas
