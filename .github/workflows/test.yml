@@ -10132,6 +10132,48 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
+      - name: "Upgrade path: ash.config canonical column order and preservation"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
+          sed '$d' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_before_latest.sql
+          tail -n 1 /tmp/ash_full_upgrade_chain.sql > /tmp/ash_latest_upgrade.sql
+          test -s /tmp/ash_chain_before_latest.sql
+          test -s /tmp/ash_latest_upgrade.sql
+
+          cat > /tmp/ash_config_ordinal_driver.sql << 'EOF'
+          \i /tmp/ash_chain_before_latest.sql
+          \i devel/tests/config_ordinal_setup.sql
+          \i /tmp/ash_latest_upgrade.sql
+          \i devel/tests/config_ordinal_assert.sql
+
+          create temporary table config_ordinal_oid_after
+          on commit preserve rows
+          as
+          select 'ash.config'::regclass::oid as relation_oid;
+
+          -- The released migration remains safe to re-apply after normalization.
+          \i /tmp/ash_latest_upgrade.sql
+          \i devel/tests/config_ordinal_assert.sql
+
+          do $$
+          begin
+            assert 'ash.config'::regclass::oid = (
+              select relation_oid from config_ordinal_oid_after
+            ), 'canonical ash.config was rebuilt during migration re-apply';
+          end $$;
+
+          select ash.uninstall('yes');
+          drop owned by config_ordinal_owner, config_ordinal_reader;
+          drop role config_ordinal_owner;
+          drop role config_ordinal_reader;
+          EOF
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" \
+            -f /tmp/ash_config_ordinal_driver.sql
+
       - name: "Issue #49: sample_data_check tightened by discovered upgrade chain"
         env:
           PGPASSWORD: postgres
