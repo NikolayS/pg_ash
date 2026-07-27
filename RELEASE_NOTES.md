@@ -157,7 +157,7 @@ select ash.revoke_reader('grafana');
 
 The admin function set is centralized in `ash._admin_funcs()` — a single source of truth for the REVOKE-from-PUBLIC hardening block and the grant/revoke helpers. (issue #67; [PR #71](https://github.com/NikolayS/pg_ash/pull/71))
 
-> **Note:** After `ash.rebuild_partitions(N, 'yes')`, previously-granted reader roles lose access to the new partition tables. Re-run `ash.grant_reader(...)` for each monitoring role.
+> **Note:** `ash.rebuild_partitions(N, 'yes')` preserves complete reader bundles automatically across the recreated query-map view and partition tables, including the installer-default `pg_monitor` bundle.
 
 ### Decoded-sample convenience overloads
 
