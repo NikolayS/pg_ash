@@ -70,6 +70,13 @@ AAS-oriented 2.0 API:
   `ash.rollup_hour()` return processed minutes and hours rather than
   per-database rows upserted, so activity from multiple databases no longer
   inflates scheduler-visible results. (issue #191)
+- **Wide aggregate readers now reject stale rollup coverage without losing the
+  fast path.** When raw is the canonical source for a wide window, readers fall
+  back to it if `rollup_1m` has not reached the requested end, clamped at the
+  latest complete-minute boundary; a dashboard `until` rounded up to the next
+  minute no longer makes a healthy rollup fall back to raw. Completeness when a
+  window starts before physical raw coverage remains tracked by issue #122.
+  ([PR #199](https://github.com/NikolayS/pg_ash/pull/199))
 
 ## Retired tooling
 
