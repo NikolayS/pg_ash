@@ -4974,9 +4974,8 @@ as $$
   )
   select coalesce(
     array_agg(ev || '(' ||
-      to_char(round(cnt * si
-                    / (greatest(array_length(minutes, 1), 1) * 60.0), 1),
-              'FM990.0') || ')'
+      round(cnt * si
+            / (greatest(array_length(minutes, 1), 1) * 60.0), 1)::text || ')'
       order by cnt desc),
     array[]::text[])
   from per_minute_event
@@ -4984,8 +4983,8 @@ $$;
 
 /*
  * report helper: top query ids at a set of minutes, optionally within one
- * wait class (type null = across all classes = the 'total' key), read from RAW
- * samples (the wait<->query tie). "queryid(aas)" strings, int64-safe.
+ * wait class (type null = the five classes included in the 'total' key), read
+ * from RAW samples (the wait<->query tie). "queryid(aas)" strings, int64-safe.
  */
 create or replace function ash._hr_top_queryids(
   type text, minutes int4[], n int, si numeric
@@ -5036,17 +5035,19 @@ as $$
      * to the event_map.type column (columns take precedence), not the
      * parameter
      */
-    where (_hr_top_queryids.type is null
-           or event_map.type = _hr_top_queryids.type)
+    where (
+      (_hr_top_queryids.type is null
+       and event_map.type in ('CPU*', 'IO', 'IPC', 'Lock', 'LWLock'))
+      or event_map.type = _hr_top_queryids.type
+    )
     group by query_map.query_id
     order by 2 desc
     limit greatest(n, 0)
   )
   select coalesce(
     array_agg(qid::text || '(' ||
-      to_char(round(cnt * si
-                    / (greatest(array_length(minutes, 1), 1) * 60.0), 1),
-              'FM990.0') || ')'
+      round(cnt * si
+            / (greatest(array_length(minutes, 1), 1) * 60.0), 1)::text || ')'
       order by cnt desc),
     array[]::text[])
   from hits
@@ -5250,13 +5251,6 @@ begin
       v_p99 := v_p99 || jsonb_build_object(v_class.k, v_cp99);
       v_p999 := v_p999 || jsonb_build_object(v_class.k, v_cp999);
       /*
-       * avg of a sum == sum of the class avgs, so total avg is accumulated
-       * here; worst1m/p99/p999 total come from the summed series' OWN extreme
-       * (below), not the sum of each class's independent worst minute.
-       */
-      v_tot_avg := v_tot_avg + coalesce(v_cavg, 0);
-
-      /*
        * top_events (rollup) and top_queryids (raw) for the four non-cpu
        * classes; top_queryids 'total' is handled once, outside this loop.
        */
@@ -5298,9 +5292,9 @@ begin
   end loop;
 
   /*
-   * Total = the summed per-minute series' OWN extreme (matches the platform
-   * ingestion recipe and top_queryids_*.total). Statement 1: values +
-   * unrounded thresholds + worst minute.
+   * Total statistics come from the summed per-minute series (matching the
+   * platform ingestion recipe and top_queryids_*.total). Statement 1: average,
+   * own extremes, unrounded thresholds, and worst minute.
    */
   with grid as (
     select covered.ts, coalesce(total_counts.cnt, 0) * v_si / 60.0 as aas
@@ -5320,6 +5314,7 @@ begin
     ) as total_counts on total_counts.ts = covered.ts
   )
   select
+    round(coalesce(avg(aas), 0), 2),
     round(coalesce(max(aas), 0), 2),
     round(coalesce(
       percentile_cont(0.99) within group (order by aas), 0)::numeric, 2),
@@ -5328,7 +5323,8 @@ begin
     percentile_cont(0.99) within group (order by aas),
     percentile_cont(0.999) within group (order by aas),
     (select ts from grid order by aas desc, ts limit 1)
-  into v_tot_worst, v_tot_p99, v_tot_p999, v_t99_thr, v_t999_thr, v_tworst_min
+  into v_tot_avg, v_tot_worst, v_tot_p99, v_tot_p999,
+       v_t99_thr, v_t999_thr, v_tworst_min
   from grid;
 
   -- Statement 2: the p99/p999 minute sets (>= the unrounded thresholds).
