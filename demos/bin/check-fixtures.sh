@@ -297,6 +297,86 @@ if ! (
   fail=1
 fi
 
+# Database teardown must obey the same ownership rule as container teardown.
+# A local database can predate the harness, and the remote backend necessarily
+# connects to a database it did not create. The ash_demo* name guard narrows
+# the target; it does not confer ownership.
+if ! (
+  fake_root="$TMP/database-cleanup"
+  mkdir -p "$fake_root"
+  fake_calls="$fake_root/calls"
+  : > "$fake_calls"
+
+  # shellcheck source=../lib/backend.sh
+  . "$DEMO_DIR/lib/backend.sh"
+  ASH_STATE_FILE="$fake_root/backend.state"
+  ASH_DEMO_DB=ash_demo_ambient
+  ASH_KEEP_DB=
+
+  if (_bk_assert_db_glob 'ash_demo;unsafe' >/dev/null 2>&1); then
+    echo "check: database guard accepted SQL metacharacters" >&2
+    exit 1
+  fi
+
+  ash_psql_maint() {
+    printf 'psql:%s\n' "$*" >> "$fake_calls"
+  }
+  _bk_terminate_demo_backends() {
+    printf 'terminate:%s\n' "${1:-}" >> "$fake_calls"
+  }
+  write_state() {
+    printf '%s\n' \
+      "ASH_STATE_BACKEND=$1" \
+      "ASH_STATE_OWNERSHIP=$2" \
+      "ASH_STATE_DB=$3" \
+      "ASH_STATE_CONTAINER=" \
+      "ASH_STATE_PORT=" > "$ASH_STATE_FILE"
+  }
+
+  for backend_kind in local remote; do
+    : > "$fake_calls"
+    write_state "$backend_kind" reused "ash_demo_${backend_kind}_reused"
+    backend_down >/dev/null 2>&1
+    [ ! -s "$fake_calls" ] || {
+      echo "check: $backend_kind teardown touched a reused database" >&2
+      exit 1
+    }
+    [ ! -e "$ASH_STATE_FILE" ] || exit 1
+  done
+
+  # Mutable ambient PGDATABASE state may not redirect a valid ledger to some
+  # other ash_demo* target. Refuse the mismatch and retain the ledger.
+  : > "$fake_calls"
+  write_state local created ash_demo_owned
+  if (backend_down >/dev/null 2>&1); then
+    echo "check: database teardown accepted an ambient/ledger mismatch" >&2
+    exit 1
+  fi
+  [ ! -s "$fake_calls" ] || exit 1
+  [ -f "$ASH_STATE_FILE" ] || exit 1
+
+  # With the exact recorded target selected, both termination and DROP use it.
+  ASH_DEMO_DB=ash_demo_owned
+  backend_down >/dev/null 2>&1
+  grep -Fx 'terminate:ash_demo_owned' "$fake_calls" >/dev/null
+  grep -F 'drop database if exists "ash_demo_owned" with (force)' \
+    "$fake_calls" >/dev/null
+
+  # A failed drop must stay loud and retain the ledger so a later `make down`
+  # can retry instead of forgetting what this run created.
+  ASH_DEMO_DB=ash_demo_drop_failure
+  write_state local created ash_demo_drop_failure
+  ash_psql_maint() { return 1; }
+  if (backend_down >/dev/null 2>&1); then
+    echo "check: database teardown swallowed a failed drop" >&2
+    exit 1
+  fi
+  [ -f "$ASH_STATE_FILE" ]
+) then
+  echo "check: database teardown ownership regression" >&2
+  fail=1
+fi
+
 # The real-time escape hatch keeps each pgbench process alive for its whole
 # wall-clock phase. The compressed-path two-minute seatbelt would otherwise
 # terminate the 12-minute baseline early and leave ten minutes of idle samples.

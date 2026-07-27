@@ -86,7 +86,7 @@ make -C demos stills     # assets/*.svg (+ *.png)
 make -C demos demo       # assets/ash_demo.gif + .mp4
 make -C demos all        # both, from ONE seed and ONE frozen window
 make -C demos check      # no database at all: renderer regression gate
-make -C demos down       # drop the demo database / remove the container
+make -C demos down       # remove only a database/container this run created
 ```
 
 `make help` prints the same list plus every knob.
@@ -185,12 +185,13 @@ checkout the file is absent and both resolve from `demos/`'s own location.
 |---|---|
 | `local` (default) | whatever cluster the ambient `PG*` settings already reach. Needs only `psql` + `pgbench`. No Docker, no image pull, no `ALTER SYSTEM`, no restart. This is also the CI path. |
 | `docker` | optional; for pinning a major version or getting a real pg_cron. The port is probed free from 5500-5599, never hardcoded. |
-| `remote` | standard `PG*` variables, with two guardrails that cannot be switched off: the target database name must match `ash_demo*`, and the harness refuses to seed on top of an `ash.sample` table it did not fill. |
+| `remote` | standard `PG*` variables, with two guardrails that cannot be switched off: the target database name must match `ash_demo*`, and the harness refuses to seed on top of an `ash.sample` table it did not fill. `make down` never drops a remote database. |
 
 House rules are enforced in code, not in this document: `backend_down` asserts
-the `ash_demo*` / `ash_demo_*` name globs and consults an ownership ledger
-before it drops or removes anything, so the harness cannot delete a database or
-a container it did not create.
+the safe `ash_demo*` / `ash_demo_*` name forms and consults an ownership ledger
+before it drops or removes anything. Reused local databases, every remote
+database, and containers without a `created` ledger are left in place. A failed
+owned-resource teardown stays loud and retains the ledger for a retry.
 
 ---
 

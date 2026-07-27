@@ -31,7 +31,7 @@ help:
 	@echo '  make rot        did a reader change its columns? (needs a fresh capture)'
 	@echo '  make fixtures   refresh fixtures/ from the current capture (manual, reviewable)'
 	@echo '  make clean      remove out/'
-	@echo '  make down       drop the demo database / remove the container'
+	@echo '  make down       remove only a database/container this harness created'
 	@echo '  make open       open the produced GIF (macOS)'
 	@echo
 	@echo 'What `make check` proves, and what it does not:'

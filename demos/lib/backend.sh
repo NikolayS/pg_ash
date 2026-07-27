@@ -43,6 +43,11 @@ _bk_assert_db_glob() {
     ash_demo*) : ;;
     *) ash_die 1 "refusing to manage database '$1': the harness only touches ash_demo*" ;;
   esac
+  case "$1" in
+    *[!A-Za-z0-9_-]*)
+      ash_die 1 "refusing unsafe database name '$1': use only letters, digits, underscores and hyphens"
+      ;;
+  esac
 }
 
 # _bk_assert_container_glob <name> — likewise for containers.
@@ -159,8 +164,7 @@ _bk_up_local() {
     || ash_die 3 "cannot reach a local PostgreSQL cluster (tried database '$ASH_MAINT_DB' with the ambient PG* settings)"
 
   # Create the demo database if it is not already there, and remember whether
-  # THIS run created it — backend_down only drops what it created, unless the
-  # operator forces it.
+  # THIS run created it — backend_down only drops what it created.
   if [ "$(ash_psql_maint -tAc \
         "select count(*) from pg_database where datname = '$ASH_DEMO_DB'")" = "0" ]; then
     ash_log "creating database $ASH_DEMO_DB"
@@ -351,14 +355,18 @@ backend_down() {
   fi
 
   # Read the ownership ledger if we have one. Without it we still honour the
-  # name globs, but we refuse to remove a container we have no record of
-  # creating.
-  local state_backend="" state_own=""
+  # name globs, but we refuse to remove any resource we have no record of
+  # creating. Keep sourced values local so repeated calls cannot inherit stale
+  # state after the ledger has been cleared.
+  local state_backend="" state_own="" state_db="" target_db=""
+  local ASH_STATE_BACKEND="" ASH_STATE_OWNERSHIP="" ASH_STATE_DB=""
+  local ASH_STATE_CONTAINER="" ASH_STATE_PORT=""
   if [ -f "$ASH_STATE_FILE" ]; then
     # shellcheck disable=SC1090
     . "$ASH_STATE_FILE"
     state_backend=${ASH_STATE_BACKEND:-}
     state_own=${ASH_STATE_OWNERSHIP:-}
+    state_db=${ASH_STATE_DB:-}
   fi
   [ -n "$state_backend" ] || state_backend=$ASH_BACKEND
 
@@ -373,12 +381,25 @@ backend_down() {
         ash_warn "container ${ASH_STATE_CONTAINER:-$ASH_DEMO_CONTAINER} was not created by this harness; leaving it alone"
       fi
       ;;
-    local|remote)
-      _bk_assert_db_glob "$ASH_DEMO_DB"
-      _bk_terminate_demo_backends || true
-      ash_log "dropping database $ASH_DEMO_DB"
-      ash_psql_maint -c "drop database if exists \"$ASH_DEMO_DB\" with (force)" >/dev/null \
-        || ash_warn "could not drop $ASH_DEMO_DB (still in use?)"
+    local)
+      target_db=${state_db:-$ASH_DEMO_DB}
+      _bk_assert_db_glob "$target_db"
+      if [ "$state_own" != "created" ]; then
+        ash_warn "database $target_db was not created by this harness; leaving it alone"
+      else
+        [ "$target_db" = "$ASH_DEMO_DB" ] \
+          || ash_die 3 "refusing database teardown: ledger owns '$target_db' but the selected database is '$ASH_DEMO_DB'"
+        _bk_terminate_demo_backends "$target_db" || true
+        ash_log "dropping database $target_db"
+        ash_psql_maint -c \
+          "drop database if exists \"$target_db\" with (force)" >/dev/null \
+          || ash_die 3 "could not drop owned database $target_db; ownership ledger retained for retry"
+      fi
+      ;;
+    remote)
+      target_db=${state_db:-$ASH_DEMO_DB}
+      _bk_assert_db_glob "$target_db"
+      ash_warn "remote database $target_db was not created by this harness; leaving it alone"
       ;;
   esac
 
@@ -389,9 +410,10 @@ backend_down() {
 # was measured unreliable (it races the shell that spawned the client and
 # happily matches unrelated psql invocations).
 _bk_terminate_demo_backends() {
+  local target_db=${1:-$ASH_DEMO_DB}
   ash_psql_maint -tAc "
     select pg_terminate_backend(pid)
     from pg_stat_activity
-    where datname = '$ASH_DEMO_DB'
+    where datname = '$target_db'
       and pid <> pg_backend_pid()" >/dev/null 2>&1
 }
