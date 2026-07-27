@@ -7847,6 +7847,42 @@ jobs:
           select set_config('pg_ash.expected_version', :'expected_version', false);
           \i /tmp/ash-v1.5-install.sql
 
+          /*
+           * Earlier matrix steps can leave a pg_cron worker already
+           * dispatched even after uninstall unschedules its job. Hold all
+           * scheduler locks through this fixture before manually inserting a
+           * backdated sample: otherwise a delayed worker can advance the
+           * watermark past that row, or make the explicit rollup below return
+           * 0 on its try-lock. Acquire in dependency order (rotate may take
+           * rollup; rollup may take sampler), clear any state a worker wrote
+           * during the non-transactional v1.5 install, and release in reverse
+           * below.
+           */
+          select ash.stop();
+          select pg_advisory_lock(
+            hashtext('pg_ash')::int4,
+            hashtext('pg_ash_rotate')::int4
+          );
+          select pg_advisory_lock(
+            hashtext('pg_ash')::int4,
+            hashtext('pg_ash_rollup')::int4
+          );
+          select pg_advisory_lock(
+            hashtext('pg_ash')::int4,
+            hashtext('pg_ash_sampler')::int4
+          );
+          truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+          truncate
+            ash.query_map_0,
+            ash.query_map_1,
+            ash.query_map_2
+          restart identity;
+          truncate ash.wait_event_map restart identity;
+          update ash.config
+          set last_rollup_1m_ts = null,
+              last_rollup_1h_ts = null
+          where singleton;
+
           do $$
           begin
             assert (select version from ash.config where singleton) = '1.5',
@@ -7872,7 +7908,8 @@ jobs:
           update ash.config
           set missed_samples = 42,
               sample_interval = interval '7 seconds',
-              include_bg_workers = true
+              include_bg_workers = true,
+              sampling_enabled = true
           where singleton;
 
           do $$
@@ -8247,6 +8284,18 @@ jobs:
           reset role;
 
           drop table public.v15_acl_before;
+          select pg_advisory_unlock(
+            hashtext('pg_ash')::int4,
+            hashtext('pg_ash_sampler')::int4
+          );
+          select pg_advisory_unlock(
+            hashtext('pg_ash')::int4,
+            hashtext('pg_ash_rollup')::int4
+          );
+          select pg_advisory_unlock(
+            hashtext('pg_ash')::int4,
+            hashtext('pg_ash_rotate')::int4
+          );
           select ash.uninstall('yes');
           drop role ash_b1_reader;
           EOF
