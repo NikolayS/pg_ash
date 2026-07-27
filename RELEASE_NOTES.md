@@ -52,6 +52,13 @@ surface has been replaced by the AAS-oriented 2.0 API:
   it. The three earlier legacy migration legs remain unchanged. Invoking the
   installer with `\i` inside an existing transaction commits the caller's outer
   work when the installer reaches its final `COMMIT`. (issue #124)
+- **Reader upgrades remove a legacy admin-helper grant.** Reapplying or
+  upgrading intentionally revokes reader-role `EXECUTE` on
+  `ash._admin_funcs()` (including delegated grants), because it is an
+  administrative implementation detail used by `grant_reader()` and
+  `revoke_reader()`. Other reader-function grants remain preserved, and
+  complete reader bundles still gain newly introduced reader helpers.
+  (issue #166; [PR #181](https://github.com/NikolayS/pg_ash/pull/181))
 
 ## Retired tooling
 
