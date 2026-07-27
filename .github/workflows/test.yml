@@ -5667,6 +5667,200 @@ jobs:
             raise notice 'Rollup hour different-length arrays test PASSED';
           end;
           $$;
+
+          /*
+           * #191: return processed time grains, independently of the number of
+           * per-database rows written. Exercise both the historically invisible
+           * single-database case and the failing two-database case.
+           */
+          do $rollup_return_contract$
+          declare
+            v_anchor int4 := ash.ts_from_timestamptz(
+              date_trunc('hour', statement_timestamp()) - interval '1 hour'
+            );
+            v_datids bigint;
+            v_expected_datids int;
+            v_hour_result int;
+            v_hour_rows bigint;
+            v_hour_watermark int4;
+            v_minute_result int;
+            v_minute_rows bigint;
+            v_minute_watermark int4;
+            v_wait_id smallint;
+          begin
+            select ash._register_wait(
+              'active',
+              'Issue191',
+              'ReturnContract'
+            )
+            into v_wait_id;
+
+            for v_expected_datids in 1..2 loop
+              truncate table ash.sample;
+              truncate table ash.rollup_1m, ash.rollup_1h;
+              update ash.config
+              set current_slot = 0,
+                sample_interval = interval '1 second',
+                last_rollup_1m_ts = v_anchor,
+                last_rollup_1h_ts = null
+              where singleton;
+
+              with database_ids as (
+                select database_row.oid as datid
+                from pg_catalog.pg_database as database_row
+                order by
+                  (
+                    database_row.datname = pg_catalog.current_database()
+                  ) desc,
+                  database_row.oid
+                limit v_expected_datids
+              )
+              insert into ash.sample (
+                sample_ts,
+                datid,
+                active_count,
+                data,
+                slot
+              )
+              select
+                v_anchor,
+                database_ids.datid,
+                1,
+                array[-v_wait_id::int, 1, 0]::int4[],
+                0
+              from database_ids;
+
+              select pg_catalog.count(distinct sample_row.datid)
+              into v_datids
+              from ash.sample as sample_row;
+              select ash.rollup_minute(1)
+              into v_minute_result;
+              select pg_catalog.count(*)
+              into v_minute_rows
+              from ash.rollup_1m;
+              select last_rollup_1m_ts
+              into v_minute_watermark
+              from ash.config
+              where singleton;
+
+              update ash.config
+              set last_rollup_1m_ts = v_anchor + 3600,
+                last_rollup_1h_ts = v_anchor
+              where singleton;
+              select ash.rollup_hour()
+              into v_hour_result;
+              select pg_catalog.count(*)
+              into v_hour_rows
+              from ash.rollup_1h;
+              select last_rollup_1h_ts
+              into v_hour_watermark
+              from ash.config
+              where singleton;
+
+              assert v_datids = v_expected_datids
+                and v_minute_result = 1
+                and v_minute_rows = v_expected_datids
+                and v_minute_watermark = v_anchor + 60
+                and v_hour_result = 1
+                and v_hour_rows = v_expected_datids
+                and v_hour_watermark = v_anchor + 3600,
+                format(
+                  'ash.rollup return contract (#191, %s databases): expected '
+                  'datids=%s minute_result=1 minute_rows=%s '
+                  'minute_watermark_delta=60 hour_result=1 hour_rows=%s '
+                  'hour_watermark_delta=3600, got datids=%s minute_result=%s '
+                  'minute_rows=%s minute_watermark_delta=%s hour_result=%s '
+                  'hour_rows=%s hour_watermark_delta=%s',
+                  v_expected_datids,
+                  v_expected_datids,
+                  v_expected_datids,
+                  v_expected_datids,
+                  v_datids,
+                  v_minute_result,
+                  v_minute_rows,
+                  v_minute_watermark - v_anchor,
+                  v_hour_result,
+                  v_hour_rows,
+                  v_hour_watermark - v_anchor
+                );
+            end loop;
+
+            /*
+             * Empty completed periods still consume a batch slot and advance
+             * the watermark, so they count as processed grains despite writing
+             * no per-database rows.
+             */
+            truncate table ash.sample;
+            truncate table ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set last_rollup_1m_ts = v_anchor,
+              last_rollup_1h_ts = null
+            where singleton;
+            select ash.rollup_minute(1)
+            into v_minute_result;
+            select pg_catalog.count(*)
+            into v_minute_rows
+            from ash.rollup_1m;
+            select last_rollup_1m_ts
+            into v_minute_watermark
+            from ash.config
+            where singleton;
+
+            update ash.config
+            set last_rollup_1m_ts = v_anchor + 3600,
+              last_rollup_1h_ts = v_anchor
+            where singleton;
+            select ash.rollup_hour()
+            into v_hour_result;
+            select pg_catalog.count(*)
+            into v_hour_rows
+            from ash.rollup_1h;
+            select last_rollup_1h_ts
+            into v_hour_watermark
+            from ash.config
+            where singleton;
+
+            assert v_minute_result = 1
+              and v_minute_rows = 0
+              and v_minute_watermark = v_anchor + 60
+              and v_hour_result = 1
+              and v_hour_rows = 0
+              and v_hour_watermark = v_anchor + 3600,
+              format(
+                'ash.rollup empty-grain contract (#191): expected '
+                'minute_result=1 minute_rows=0 minute_watermark_delta=60 '
+                'hour_result=1 hour_rows=0 hour_watermark_delta=3600, got '
+                'minute_result=%s minute_rows=%s minute_watermark_delta=%s '
+                'hour_result=%s hour_rows=%s hour_watermark_delta=%s',
+                v_minute_result,
+                v_minute_rows,
+                v_minute_watermark - v_anchor,
+                v_hour_result,
+                v_hour_rows,
+                v_hour_watermark - v_anchor
+              );
+
+            update ash.config
+            set last_rollup_1m_ts = ash.ts_from_timestamptz(
+              date_trunc('minute', statement_timestamp())
+            )
+            where singleton;
+            select ash.rollup_minute(1000000)
+            into v_minute_result;
+            assert v_minute_result = 0,
+              format(
+                'already-caught-up rollup_minute(1000000) expected 0, got %s',
+                v_minute_result
+              );
+
+            truncate table ash.sample;
+            truncate table ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set last_rollup_1m_ts = null,
+              last_rollup_1h_ts = null
+            where singleton;
+          end
+          $rollup_return_contract$;
           EOF
 
       - name: "Critical: rollup_hour waits for complete minute coverage"
