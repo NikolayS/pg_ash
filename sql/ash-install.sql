@@ -1651,6 +1651,7 @@ declare
   v_sampler_job bigint;
   v_rotation_job bigint;
   v_cron_version text;
+  v_seconds_exact numeric;
   v_seconds int;
   v_hours int;
   v_schedule text;
@@ -1679,14 +1680,42 @@ begin
     return;
   end if;
 
-  v_seconds := extract(epoch from every)::int;
-  if v_seconds < 1 then
+  v_seconds_exact := extract(epoch from every);
+  if v_seconds_exact < 1 then
     job_type := 'error';
     job_id := null;
     status := format('interval must be at least 1 second, got %s', every);
     return next;
     return;
   end if;
+
+  /*
+   * pg_cron schedules whole seconds. Validate the exact numeric epoch before
+   * converting to int: PostgreSQL rounds numeric-to-int casts, which used to
+   * accept e.g. 0.6s/59.6s while storing the fractional interval in config.
+   * That made the real schedule disagree with the cadence used by AAS math.
+   */
+  if v_seconds_exact <> trunc(v_seconds_exact) then
+    job_type := 'error';
+    job_id := null;
+    status := format(
+      'interval must be an exact whole number of seconds, got %s', every);
+    return next;
+    return;
+  end if;
+
+  /* Check the upper bound before the int cast so huge intervals stay errors. */
+  if v_seconds_exact > 82800 then
+    job_type := 'error';
+    job_id := null;
+    status := format(
+      'interval exceeds maximum 23 hours (82800s), got %s. '
+      'Use days or shorter interval.', every);
+    return next;
+    return;
+  end if;
+
+  v_seconds := v_seconds_exact::int;
 
   /*
    * H-BUG-1: validate interval shape BEFORE branching on pg_cron
@@ -1722,15 +1751,6 @@ begin
       return;
     end if;
     v_hours := v_seconds / 3600;
-    if v_hours > 23 then
-      job_type := 'error';
-      job_id := null;
-      status := format(
-        'interval exceeds maximum 23 hours (82800s), got %s = %s hours. '
-        'Use days or shorter interval.', every, v_hours);
-      return next;
-      return;
-    end if;
     if v_hours = 1 then
       v_schedule := '0 * * * *';  -- every hour at minute 0
     else
@@ -5805,7 +5825,7 @@ comment on function ash.status() is
 $$Installation health snapshot (readable by monitoring roles): sampling state and interval, pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start, rollup_1m_retention_start, rollup_1h_retention_start — use these to plan reader windows), error counters (insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
-$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second) plus rollup_minute()/rollup_hour()/rollup_cleanup() and rotation via pg_cron when available; without pg_cron it enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
+$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and rotation via pg_cron when available; without pg_cron it enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
 
 comment on function ash.stop() is
 $$Admin: stop sampling — unschedules the pg_cron jobs created by ash.start() (or disables sampling when pg_cron is absent). Collected data is kept and remains readable. Inverse: ash.start().$$;

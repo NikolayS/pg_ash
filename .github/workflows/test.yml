@@ -2925,6 +2925,67 @@ jobs:
           $$;
           EOF
 
+      - name: "Release-gate: ash.start rejects fractional and oversized intervals"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_before interval;
+            v_after interval;
+            v_errors int;
+            v_status text;
+          begin
+            select sample_interval into v_before
+            from ash.config
+            where singleton;
+
+            select count(*) filter (where job_type = 'error'), min(status)
+            into v_errors, v_status
+            from ash.start(interval '0.6 seconds');
+            assert v_errors = 1,
+              format('ash.start(0.6s): expected one error row, got %s', v_errors);
+            assert v_status like 'interval must be at least 1 second,%',
+              format('ash.start(0.6s): unexpected status: %s', v_status);
+
+            select count(*) filter (where job_type = 'error'), min(status)
+            into v_errors, v_status
+            from ash.start(interval '1.4 seconds');
+            assert v_errors = 1,
+              format('ash.start(1.4s): expected one error row, got %s', v_errors);
+            assert v_status like 'interval must be an exact whole number of seconds,%',
+              format('ash.start(1.4s): unexpected status: %s', v_status);
+
+            select count(*) filter (where job_type = 'error'), min(status)
+            into v_errors, v_status
+            from ash.start(interval '59.6 seconds');
+            assert v_errors = 1,
+              format('ash.start(59.6s): expected one error row, got %s', v_errors);
+
+            select count(*) filter (where job_type = 'error'), min(status)
+            into v_errors, v_status
+            from ash.start(interval '100000000 days');
+            assert v_errors = 1,
+              format('ash.start(oversized): expected one error row, got %s', v_errors);
+            assert v_status like 'interval exceeds maximum 23 hours%',
+              format('ash.start(oversized): unexpected status: %s', v_status);
+
+            select sample_interval into v_after
+            from ash.config
+            where singleton;
+            assert v_after = v_before,
+              format(
+                'rejected ash.start calls changed sample_interval: %s -> %s',
+                v_before,
+                v_after
+              );
+
+            raise notice 'ash.start interval validation tests PASSED';
+          end;
+          $$;
+          EOF
+
       - name: "Release-gate: _active_slots_for{,_at} respect num_partitions"
         env:
           PGPASSWORD: postgres
