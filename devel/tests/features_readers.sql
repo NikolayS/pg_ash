@@ -936,6 +936,7 @@ declare
   v_expected_keys text[];
   v_keys text[];
   v_report jsonb;
+  v_boundary_report jsonb;
 begin
   select *
   into strict v_fixture
@@ -1107,6 +1108,31 @@ begin
       '[%s] ash.report coverage: expected exact four-minute rollup coverage, got %s',
       pg_catalog.current_setting('ash.feature_mode'),
       v_report -> 'coverage'
+    );
+
+  select ash.report(
+    v_fixture.fixture_start + interval '59.9 seconds',
+    v_fixture.fixture_end + interval '59.9 seconds',
+    vcpus => 8,
+    n => 3
+  )
+  into strict v_boundary_report;
+  assert (
+    v_boundary_report -> 'coverage' ->> 'from'
+  )::timestamptz = v_fixture.fixture_start
+  and (
+    v_boundary_report -> 'coverage' ->> 'to'
+  )::timestamptz = v_fixture.fixture_end
+  and (
+    v_boundary_report -> 'coverage' ->> 'minutes_expected'
+  )::int = 4
+  and (
+    v_boundary_report -> 'coverage' ->> 'minutes_with_data'
+  )::int = 4,
+    format(
+      '[%s] ash.report minute-floor boundary: expected exact four-minute coverage, got %s',
+      pg_catalog.current_setting('ash.feature_mode'),
+      (v_boundary_report -> 'coverage')::text
     );
 end
 $feature_report$;

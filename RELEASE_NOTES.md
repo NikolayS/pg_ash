@@ -77,6 +77,11 @@ AAS-oriented 2.0 API:
   minute no longer makes a healthy rollup fall back to raw. Completeness when a
   window starts before physical raw coverage remains tracked by issue #122.
   ([PR #199](https://github.com/NikolayS/pg_ash/pull/199))
+- **Report windows now floor subsecond endpoints before epoch conversion.**
+  `ash.report()` no longer shifts a request made in the final half-second of a
+  minute into the next minute, so its coverage bounds and data-bearing minute
+  count remain aligned with the documented minute floor.
+  ([PR #192](https://github.com/NikolayS/pg_ash/pull/192))
 
 ## Retired tooling
 

@@ -6337,8 +6337,13 @@ begin
       'ash.report: since must be less than or equal to until';
   end if;
 
-  v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
+  /*
+   * Floor in timestamp space before converting to int4 seconds.
+   * ts_from_timestamptz() rounds fractional seconds while casting; converting
+   * first could therefore move a :59.5+ endpoint into the next minute.
+   */
+  v_start_ts := ash.ts_from_timestamptz(date_trunc('minute', v_from));
+  v_end_ts := ash.ts_from_timestamptz(date_trunc('minute', v_to));
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
