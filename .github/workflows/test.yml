@@ -3060,7 +3060,7 @@ jobs:
           -- --- raw-retention exception (tie drill before raw retention) ----------------
           update ash.config
           set num_partitions = 3,
-              rotation_period = interval '30 minutes',
+              rotation_period = interval '1 day',
               rotated_at = date_trunc('minute', now())
           where singleton;
 
@@ -3070,7 +3070,8 @@ jobs:
             select base_ts into v_base from t2anchor;
             begin
               perform * from ash.top('query_id',
-                ash.ts_to_timestamptz(v_base - 3600), ash.ts_to_timestamptz(v_base - 3000),
+                ash.ts_to_timestamptz(v_base - 172800),
+                ash.ts_to_timestamptz(v_base - 172200),
                 wait_event => 'DataFileRead');
               raise exception 'expected raw-retention exception, none raised';
             exception when others then
@@ -6563,7 +6564,7 @@ jobs:
             v_slots smallint[];
           begin
             update ash.config
-            set rotation_period = interval '30 minutes',
+            set rotation_period = interval '1 day',
                 rotated_at = v_end
             where singleton;
             select ash._register_wait('active','CPU*','CPU*') into v_cpu;
@@ -6582,8 +6583,9 @@ jobs:
                            else array[v_cpu, 60]::int4[] end,
                       case when i = 5 then array[424242::bigint, 540]::int8[] else '{}'::int8[] end);
             end loop;
-            -- raw samples for the last 30 minutes ONLY (raw retention starts at
-            -- v_end-30min); worst minute carries the 424242 tie.
+            -- Raw samples cover the last 30 minutes only (physical coverage);
+            -- the logical planning boundary is v_end-1day. The worst minute
+            -- carries the 424242 tie.
             for i in 1..30 loop
               insert into ash.sample (sample_ts, datid, active_count, data, slot)
               values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), v_dp,
@@ -6610,8 +6612,10 @@ jobs:
             assert (j->'coverage'->>'minutes_with_data')::int = 120, 'coverage.minutes_with_data 120';
             assert (j->'coverage'->>'from')::timestamptz = v_end - interval '2 hours', 'coverage.from';
             assert (j->'coverage'->>'to')::timestamptz = v_end, 'coverage.to';
-            assert (j->'coverage'->>'raw_retention_start')::timestamptz = v_end - interval '30 minutes',
-              'coverage.raw_retention_start -30min, got ' || (j->'coverage'->>'raw_retention_start');
+            assert (j->'coverage'->>'raw_retention_start')::timestamptz
+                = v_end - interval '1 day',
+              'coverage.raw_retention_start -1day, got '
+                || (j->'coverage'->>'raw_retention_start');
 
             -- window whose extremes all predate raw retention: aas_* still present,
             -- attribution keys absent, availability flag false, never raises.
@@ -6628,8 +6632,8 @@ jobs:
             -- entirely past raw retention: unrecoverable, no "narrow" advice.
             v_raised := false;
             begin
-              perform * from ash.top('query_id', v_end - interval '2 hours',
-                                     v_end - interval '1 hour', wait_event => 'DataFileRead');
+              perform * from ash.top('query_id', v_end - interval '2 days',
+                                     v_end - interval '1 day', wait_event => 'DataFileRead');
               raise exception 'entirely-past tie drill should have raised';
             exception when others then
               if sqlerrm like '%entirely outside raw retention%'
@@ -6643,24 +6647,27 @@ jobs:
             -- the message must (a) echo the un-floored start the USER passed and
             -- (b) advise the logical, minute-aligned retention boundary.
             insert into ash.sample (sample_ts, datid, active_count, data, slot)
-            values (ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds'),
+            values (ash.ts_from_timestamptz(
+                      v_end - interval '1 day 40 minutes' + interval '37 seconds'
+                    ),
                     v_dp, 1, array[-v_cpu, 1, 0]::integer[], 0);
             v_raw := ash._raw_retention_start();
-            assert v_raw = v_end - interval '40 minutes',
+            assert v_raw = v_end - interval '1 day 40 minutes',
               'logical boundary must preserve delayed-rotation evidence, got '
                 || v_raw;
             v_oldest := ash._raw_oldest_sample();
-            assert v_oldest = v_end - interval '40 minutes' + interval '37 seconds',
+            assert v_oldest
+                = v_end - interval '1 day 40 minutes' + interval '37 seconds',
               'physical oldest raw sample mismatch: ' || v_oldest;
             v_slots := ash._active_slots_for_at(
-              v_end - interval '40 minutes',
-              v_end - interval '39 minutes'
+              v_end - interval '1 day 40 minutes',
+              v_end - interval '1 day 39 minutes'
             );
             assert v_slots = array[0, 2]::smallint[],
               'absolute range guard discarded delayed-rotation evidence: '
                 || v_slots::text;
             v_bound := v_raw;
-            v_passed := v_end - interval '2 hours' + interval '23 seconds';  -- mid-minute passed start
+            v_passed := v_end - interval '2 days' + interval '23 seconds';
             v_raised := false;
             begin
               perform * from ash.aas(v_passed, v_end,
@@ -6711,7 +6718,9 @@ jobs:
             );
             -- restore pre-test raw retention so downstream assertions see original state
             delete from ash.sample
-              where sample_ts = ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds');
+              where sample_ts = ash.ts_from_timestamptz(
+                v_end - interval '1 day 40 minutes' + interval '37 seconds'
+              );
             raise notice 'retention error split PASSED (logical boundary + down-rounded helper hint)';
 
             -- ---- compare coverage honesty ----
