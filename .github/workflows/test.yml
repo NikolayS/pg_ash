@@ -3667,7 +3667,7 @@ jobs:
                and (j->'coverage'->>'minutes_expected')::int = 60
                and (j->'coverage'->>'minutes_with_data')::int = 1,
               'report until-only coverage must be exactly the preceding hour: '
-              || j->'coverage';
+              || (j->'coverage')::text;
             j := ash.report();
             assert (j->'coverage'->>'from')::timestamptz
                      = date_trunc('minute', now() - interval '1 day')
@@ -3676,7 +3676,7 @@ jobs:
                and (j->'coverage'->>'minutes_expected')::int = 1440
                and (j->'coverage'->>'minutes_with_data')::int = 2,
               'report() no-argument default must remain the preceding day: '
-              || j->'coverage';
+              || (j->'coverage')::text;
 
             select value into v_value
             from ash.summary(until => v_until) where metric = 'avg_aas';
