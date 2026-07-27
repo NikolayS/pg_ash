@@ -8,6 +8,7 @@ declare
   v_decoded_at jsonb;
   v_decoded_row jsonb;
   v_decoded_ts jsonb;
+  v_expected_decoded_ts jsonb;
 begin
   select *
   into strict v_fixture
@@ -99,11 +100,32 @@ begin
   into v_decoded_at
   from ash.decode_sample_at(v_fixture.fixture_start) as decoded;
 
-  assert v_decoded_ts = v_decoded_at
-    and pg_catalog.jsonb_array_length(v_decoded_ts) = 3,
+  v_expected_decoded_ts := pg_catalog.jsonb_build_array(
+    pg_catalog.jsonb_build_array(
+      v_fixture.datid,
+      'CPU*',
+      10101,
+      1
+    ),
+    pg_catalog.jsonb_build_array(
+      v_fixture.datid,
+      'IO:DataFileRead',
+      10101,
+      1
+    ),
+    pg_catalog.jsonb_build_array(
+      v_fixture.datid,
+      'IO:DataFileRead',
+      20202,
+      1
+    )
+  );
+  assert v_decoded_ts = v_expected_decoded_ts
+    and v_decoded_at = v_expected_decoded_ts,
     format(
-      '[%s] ash.decode_sample(int4)/decode_sample_at: expected the same three exact rows, got int4=%s timestamptz=%s',
+      '[%s] ash.decode_sample(int4)/decode_sample_at: expected exact rows %s, got int4=%s timestamptz=%s',
       pg_catalog.current_setting('ash.feature_mode'),
+      v_expected_decoded_ts,
       v_decoded_ts,
       v_decoded_at
     );
@@ -920,6 +942,8 @@ $feature_rollup_minute_and_periods$;
  * ------------------------------------------------------------------------- */
 do $feature_report$
 declare
+  v_cluster_name text :=
+    pg_catalog.current_setting('cluster_name', true);
   v_fixture ash_feature_context%rowtype;
   v_expected_keys text[];
   v_keys text[];
@@ -964,6 +988,21 @@ begin
       pg_catalog.current_setting('ash.feature_mode'),
       v_expected_keys,
       v_keys
+    );
+  assert (
+      coalesce(v_cluster_name, '') = ''
+      and not (v_report ? 'cluster_name')
+    )
+    or (
+      coalesce(v_cluster_name, '') <> ''
+      and v_report ->> 'cluster_name' = v_cluster_name
+    ),
+    format(
+      '[%s] ash.report cluster_name: expected exact optional pass-through %L, got key=%s value=%L',
+      pg_catalog.current_setting('ash.feature_mode'),
+      v_cluster_name,
+      v_report ? 'cluster_name',
+      v_report ->> 'cluster_name'
     );
   assert v_report -> 'vcpus' = '8'::jsonb,
     format(
@@ -1102,10 +1141,10 @@ begin
   from ash_feature_context;
 
   select
-    pg_catalog.array_agg(bucket_start),
-    pg_catalog.array_agg(aas),
-    pg_catalog.array_agg(detail),
-    pg_catalog.array_agg(chart)
+    pg_catalog.array_agg(bucket_start order by ordinal),
+    pg_catalog.array_agg(aas order by ordinal),
+    pg_catalog.array_agg(detail order by ordinal),
+    pg_catalog.array_agg(chart order by ordinal)
   into
     v_buckets,
     v_aas,
@@ -1118,6 +1157,12 @@ begin
     n => 1,
     width => 10,
     color => false
+  ) with ordinality as chart_row(
+    bucket_start,
+    aas,
+    detail,
+    chart,
+    ordinal
   );
 
   assert v_buckets = array[
@@ -1167,15 +1212,15 @@ begin
   from ash_feature_context;
 
   select
-    pg_catalog.array_agg(metric),
-    pg_catalog.array_agg(value)
+    pg_catalog.array_agg(metric order by ordinal),
+    pg_catalog.array_agg(value order by ordinal)
   into
     v_metrics,
     v_values
   from ash.summary(
     v_fixture.fixture_start,
     v_fixture.fixture_end
-  );
+  ) with ordinality as summary_row(metric, value, ordinal);
 
   assert v_metrics = array[
       'period_start',

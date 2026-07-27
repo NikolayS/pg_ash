@@ -81,10 +81,10 @@ begin
       'ash',
       'USAGE'
     )
-    and v_direct_functions = 41
+    and v_direct_functions = 40
     and v_direct_tables = 12,
     format(
-      '[%s] ash.grant_reader ACLs: expected schema USAGE, 41 direct function EXECUTEs, and 12 direct table SELECTs; got usage=%s functions=%s tables=%s',
+      '[%s] ash.grant_reader ACLs: expected schema USAGE, 40 direct function EXECUTEs, and 12 direct table SELECTs; got usage=%s functions=%s tables=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       pg_catalog.has_schema_privilege(
         'ash_feature_reader',
@@ -107,6 +107,11 @@ begin
     and not pg_catalog.has_function_privilege(
       'ash_feature_reader',
       'ash.rebuild_partitions(integer,text)',
+      'EXECUTE'
+    )
+    and not pg_catalog.has_function_privilege(
+      'ash_feature_reader',
+      'ash._admin_funcs()',
       'EXECUTE'
     ),
     format(
@@ -222,6 +227,101 @@ begin
 end
 $feature_privileges$;
 
+do $feature_revoke_protected$
+declare
+  v_acl_after jsonb;
+  v_acl_before jsonb;
+  v_refused boolean := false;
+begin
+  select pg_catalog.jsonb_build_object(
+    'schema',
+    (
+      select pg_catalog.to_jsonb(namespace_row.nspacl)
+      from pg_catalog.pg_namespace as namespace_row
+      where namespace_row.nspname = 'ash'
+    ),
+    'functions',
+    (
+      select pg_catalog.jsonb_object_agg(
+        procedure_row.oid::text,
+        pg_catalog.to_jsonb(procedure_row.proacl)
+        order by procedure_row.oid
+      )
+      from pg_catalog.pg_proc as procedure_row
+      inner join pg_catalog.pg_namespace as namespace_row
+        on namespace_row.oid = procedure_row.pronamespace
+      where namespace_row.nspname = 'ash'
+    ),
+    'relations',
+    (
+      select pg_catalog.jsonb_object_agg(
+        relation_row.oid::text,
+        pg_catalog.to_jsonb(relation_row.relacl)
+        order by relation_row.oid
+      )
+      from pg_catalog.pg_class as relation_row
+      inner join pg_catalog.pg_namespace as namespace_row
+        on namespace_row.oid = relation_row.relnamespace
+      where namespace_row.nspname = 'ash'
+    )
+  )
+  into v_acl_before;
+
+  begin
+    perform ash.revoke_reader(current_user::name);
+  exception
+    when others then
+      v_refused := sqlerrm = pg_catalog.format(
+        'ash.revoke_reader: refusing protected role %s (schema owner, current user, or superuser)',
+        current_user
+      );
+  end;
+
+  select pg_catalog.jsonb_build_object(
+    'schema',
+    (
+      select pg_catalog.to_jsonb(namespace_row.nspacl)
+      from pg_catalog.pg_namespace as namespace_row
+      where namespace_row.nspname = 'ash'
+    ),
+    'functions',
+    (
+      select pg_catalog.jsonb_object_agg(
+        procedure_row.oid::text,
+        pg_catalog.to_jsonb(procedure_row.proacl)
+        order by procedure_row.oid
+      )
+      from pg_catalog.pg_proc as procedure_row
+      inner join pg_catalog.pg_namespace as namespace_row
+        on namespace_row.oid = procedure_row.pronamespace
+      where namespace_row.nspname = 'ash'
+    ),
+    'relations',
+    (
+      select pg_catalog.jsonb_object_agg(
+        relation_row.oid::text,
+        pg_catalog.to_jsonb(relation_row.relacl)
+        order by relation_row.oid
+      )
+      from pg_catalog.pg_class as relation_row
+      inner join pg_catalog.pg_namespace as namespace_row
+        on namespace_row.oid = relation_row.relnamespace
+      where namespace_row.nspname = 'ash'
+    )
+  )
+  into v_acl_after;
+
+  assert v_refused
+    and v_acl_after = v_acl_before,
+    format(
+      '[%s] ash.revoke_reader protected target: expected exact refusal before any ACL mutation, got refused=%s acl_unchanged=%s',
+      pg_catalog.current_setting('ash.feature_mode'),
+      v_refused,
+      v_acl_after = v_acl_before
+    );
+end
+$feature_revoke_protected$;
+
 do $feature_default_pg_monitor$
 declare
   v_admin_denied boolean := false;
@@ -266,15 +366,20 @@ begin
     and acl.privilege_type = 'SELECT';
 
   assert pg_catalog.has_schema_privilege('pg_monitor', 'ash', 'USAGE')
-    and v_direct_functions = 41
+    and v_direct_functions = 40
     and v_direct_tables = 12
     and not pg_catalog.has_function_privilege(
       'pg_monitor',
       'ash.start(interval)',
       'EXECUTE'
+    )
+    and not pg_catalog.has_function_privilege(
+      'pg_monitor',
+      'ash._admin_funcs()',
+      'EXECUTE'
     ),
     format(
-      '[%s] default pg_monitor ACLs: expected USAGE/41 reader functions/12 tables/no start(), got usage=%s functions=%s tables=%s start=%s',
+      '[%s] default pg_monitor ACLs: expected USAGE/40 reader functions/12 tables/no start() or _admin_funcs(), got usage=%s functions=%s tables=%s start=%s admin_list=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       pg_catalog.has_schema_privilege('pg_monitor', 'ash', 'USAGE'),
       v_direct_functions,
@@ -282,6 +387,11 @@ begin
       pg_catalog.has_function_privilege(
         'pg_monitor',
         'ash.start(interval)',
+        'EXECUTE'
+      ),
+      pg_catalog.has_function_privilege(
+        'pg_monitor',
+        'ash._admin_funcs()',
         'EXECUTE'
       )
     );

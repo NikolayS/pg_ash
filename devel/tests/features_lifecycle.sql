@@ -118,7 +118,19 @@ declare
   v_before_rows bigint;
   v_before_waits bigint;
   v_decoded jsonb;
+  v_expected_query_id bigint;
   v_new_sample record;
+  v_pgss_preloaded boolean :=
+    'pg_stat_statements' = any (
+      pg_catalog.string_to_array(
+        pg_catalog.replace(
+          pg_catalog.current_setting('shared_preload_libraries'),
+          ' ',
+          ''
+        ),
+        ','
+      )
+    );
   v_result int;
 begin
   select pg_catalog.count(*)
@@ -130,6 +142,24 @@ begin
   select pg_catalog.count(*)
   into v_before_queries
   from ash.query_map_all;
+  select activity.query_id
+  into strict v_expected_query_id
+  from pg_catalog.pg_stat_activity as activity
+  where
+    activity.application_name = pg_catalog.format(
+      'pg_ash_features_%s',
+      pg_catalog.current_setting('ash.feature_mode')
+    )
+    and activity.state = 'active'
+    and activity.query = 'select pg_sleep(300);';
+
+  assert v_pgss_preloaded = (v_expected_query_id is not null),
+    format(
+      '[%s] ash.take_sample preload precondition: expected pg_stat_statements preload=%s to match sleeper query_id presence, got query_id=%s',
+      pg_catalog.current_setting('ash.feature_mode'),
+      v_pgss_preloaded,
+      v_expected_query_id
+    );
 
   update ash.config
   set
@@ -166,10 +196,13 @@ begin
     and v_new_sample.active_count = 1
     and v_new_sample.slot = 0
     and pg_catalog.jsonb_array_length(v_decoded) = 1
-    and v_decoded -> 0 ->> 0 = 'Timeout:PgSleep',
+    and v_decoded -> 0 ->> 0 = 'Timeout:PgSleep'
+    and (v_decoded -> 0 ->> 1)::bigint
+      is not distinct from v_expected_query_id,
     format(
-      '[%s] ash.take_sample live: expected one inserted row containing exactly one Timeout:PgSleep backend, got return=%s row=%s decoded=%s total_rows=%s',
+      '[%s] ash.take_sample live: expected one inserted Timeout:PgSleep backend with exact live query_id %s, got return=%s row=%s decoded=%s total_rows=%s',
       pg_catalog.current_setting('ash.feature_mode'),
+      v_expected_query_id,
       v_result,
       pg_catalog.row_to_json(v_new_sample),
       v_decoded,
@@ -185,10 +218,12 @@ begin
     and (
       select pg_catalog.count(*)
       from ash.query_map_all
-    ) between v_before_queries and v_before_queries + 1,
+    ) = v_before_queries
+      + case when v_expected_query_id is null then 0 else 1 end,
     format(
-      '[%s] ash.take_sample dictionaries: expected one PgSleep wait and zero/one real query mapping, got waits %s->%s queries %s->%s',
+      '[%s] ash.take_sample dictionaries: expected one PgSleep wait and exactly %s real query mapping(s), got waits %s->%s queries %s->%s',
       pg_catalog.current_setting('ash.feature_mode'),
+      case when v_expected_query_id is null then 0 else 1 end,
       v_before_waits,
       (
         select pg_catalog.count(*)
@@ -418,9 +453,14 @@ begin;
 
 do $feature_rotate$
 declare
+  v_fixture ash_feature_context%rowtype;
   v_inserted_id int4;
   v_result text;
 begin
+  select *
+  into strict v_fixture
+  from ash_feature_context;
+
   insert into ash.query_map_2 (query_id)
   values (909090)
   returning id
@@ -430,6 +470,29 @@ begin
       '[%s] ash.rotate setup: expected fresh slot-2 identity 1, got %s',
       pg_catalog.current_setting('ash.feature_mode'),
       v_inserted_id
+    );
+
+  insert into ash.sample_2 (
+    sample_ts,
+    datid,
+    active_count,
+    data,
+    slot
+  )
+  values (
+    ash.ts_from_timestamptz(v_fixture.fixture_start),
+    v_fixture.datid,
+    1,
+    array[-v_fixture.cpu_wait_id, 1, 0]::int4[],
+    2
+  );
+  assert (
+    select pg_catalog.count(*)
+    from ash.sample_2
+  ) = 1,
+    format(
+      '[%s] ash.rotate setup: expected one doomed slot-2 sample sentinel',
+      pg_catalog.current_setting('ash.feature_mode')
     );
 
   update ash.config
@@ -450,16 +513,24 @@ begin
     ) = 0
     and (
       select pg_catalog.count(*)
+      from ash.sample_2
+    ) = 0
+    and (
+      select pg_catalog.count(*)
       from ash.sample
     ) = 4,
     format(
-      '[%s] ash.rotate: expected exact slot 0->1/truncate slot2 while retaining four slot0 samples, got result=%L slot=%s qmap2=%s samples=%s',
+      '[%s] ash.rotate: expected exact slot 0->1, empty slot-2 sample/query partitions, and four retained slot-0 samples; got result=%L slot=%s qmap2=%s sample2=%s samples=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       v_result,
       ash.current_slot(),
       (
         select pg_catalog.count(*)
         from ash.query_map_2
+      ),
+      (
+        select pg_catalog.count(*)
+        from ash.sample_2
       ),
       (
         select pg_catalog.count(*)
@@ -675,7 +746,7 @@ $feature_rollup_cleanup$;
 rollback;
 
 /* -------------------------------------------------------------------------
- * ash.rebuild_partitions(): destructive side effects and reader re-grant.
+ * ash.rebuild_partitions(): destructive side effects and preserved readers.
  * ------------------------------------------------------------------------- */
 begin;
 
@@ -714,7 +785,8 @@ $feature_rebuild_confirmation$;
 
 do $feature_rebuild$
 declare
-  v_actual_read boolean := false;
+  v_monitor_read boolean := false;
+  v_reader_read boolean := false;
   v_result text;
 begin
   select ash.rebuild_partitions(4, 'yes')
@@ -784,35 +856,60 @@ begin
       )
     );
 
-  assert not pg_catalog.has_table_privilege(
-    'ash_feature_reader',
-    'ash.sample_3',
-    'SELECT'
-  ),
-    format(
-      '[%s] ash.rebuild_partitions ACL contract: expected replacement partition to require re-running grant_reader()',
-      pg_catalog.current_setting('ash.feature_mode')
-    );
-  perform ash.grant_reader('ash_feature_reader');
-  execute 'set local role ash_feature_reader';
-  begin
-    perform pg_catalog.count(*) from ash.query_map_all;
-    perform pg_catalog.count(*) from ash.sample_3;
-    v_actual_read := true;
-  exception
-    when insufficient_privilege then
-      v_actual_read := false;
-  end;
-  execute 'reset role';
-  assert v_actual_read
-    and pg_catalog.has_table_privilege(
+  assert pg_catalog.has_table_privilege(
       'ash_feature_reader',
+      'ash.sample_3',
+      'SELECT'
+    )
+    and pg_catalog.has_table_privilege(
+      'pg_monitor',
       'ash.sample_3',
       'SELECT'
     ),
     format(
-      '[%s] ash.rebuild_partitions re-grant: reader could not actually read replacement view/partition after grant_reader()',
-      pg_catalog.current_setting('ash.feature_mode')
+      '[%s] ash.rebuild_partitions preserved ACLs: expected both reader bundles on replacement sample_3, got custom=%s pg_monitor=%s',
+      pg_catalog.current_setting('ash.feature_mode'),
+      pg_catalog.has_table_privilege(
+        'ash_feature_reader',
+        'ash.sample_3',
+        'SELECT'
+      ),
+      pg_catalog.has_table_privilege(
+        'pg_monitor',
+        'ash.sample_3',
+        'SELECT'
+      )
+    );
+
+  execute 'set local role ash_feature_reader';
+  begin
+    perform pg_catalog.count(*) from ash.query_map_all;
+    perform pg_catalog.count(*) from ash.sample_3;
+    v_reader_read := true;
+  exception
+    when insufficient_privilege then
+      v_reader_read := false;
+  end;
+  execute 'reset role';
+
+  execute 'set local role pg_monitor';
+  begin
+    perform pg_catalog.count(*) from ash.query_map_all;
+    perform pg_catalog.count(*) from ash.sample_3;
+    v_monitor_read := true;
+  exception
+    when insufficient_privilege then
+      v_monitor_read := false;
+  end;
+  execute 'reset role';
+
+  assert v_reader_read
+    and v_monitor_read,
+    format(
+      '[%s] ash.rebuild_partitions preserved ACL behavior: expected immediate custom/pg_monitor reads without re-grant, got custom=%s pg_monitor=%s',
+      pg_catalog.current_setting('ash.feature_mode'),
+      v_reader_read,
+      v_monitor_read
     );
 end
 $feature_rebuild$;
@@ -823,6 +920,32 @@ rollback;
  * ash.uninstall(): verify the destructive effect, then rollback for cleanup.
  * ------------------------------------------------------------------------- */
 begin;
+
+do $feature_uninstall_setup$
+declare
+  v_expected_cron boolean :=
+    pg_catalog.current_setting('ash.feature_expected_cron')::boolean;
+begin
+  if v_expected_cron then
+    perform *
+    from ash.start(interval '5 seconds');
+    assert (
+      select pg_catalog.count(*)
+      from cron.job
+      where jobname like 'ash_%'
+    ) = 5,
+      format(
+        '[%s] ash.uninstall setup: expected exactly five ash_* jobs for uninstall to remove, got %s',
+        pg_catalog.current_setting('ash.feature_mode'),
+        (
+          select pg_catalog.count(*)
+          from cron.job
+          where jobname like 'ash_%'
+        )
+      );
+  end if;
+end
+$feature_uninstall_setup$;
 
 create temporary table ash_feature_uninstall_result
 on commit drop
@@ -838,12 +961,15 @@ begin
   select result
   into strict v_result
   from ash_feature_uninstall_result;
-  assert v_result =
-    'uninstalled: removed 0 pg_cron jobs, dropped ash schema'
+  assert v_result = pg_catalog.format(
+      'uninstalled: removed %s pg_cron jobs, dropped ash schema',
+      case when v_expected_cron then 5 else 0 end
+    )
     and pg_catalog.to_regnamespace('ash') is null,
     format(
-      '[%s] ash.uninstall: expected exact zero-job result and absent schema, got result=%L schema=%s',
+      '[%s] ash.uninstall: expected exact %s-job removal result and absent schema, got result=%L schema=%s',
       pg_catalog.current_setting('ash.feature_mode'),
+      case when v_expected_cron then 5 else 0 end,
       v_result,
       pg_catalog.to_regnamespace('ash')
     );

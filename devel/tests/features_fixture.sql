@@ -231,7 +231,7 @@ begin
   assert v_rows = 4 and v_backends = 16,
     format(
       '[%s] fixture: expected 4 sample rows and 16 encoded backends, got rows=%s backends=%s',
-      pg_catalog.coalesce(v_mode, 'standalone'),
+      coalesce(v_mode, 'standalone'),
       v_rows,
       v_backends
     );
