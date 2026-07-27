@@ -5410,6 +5410,354 @@ jobs:
 
           echo "Critical bug #81 regression tests PASSED"
 
+      - name: "Blocker #162: cleanup/rotation compatibility and config geometry"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          /*
+           * The cleanup deadlock remains covered independently of the
+           * geometry validator. This is the audited 3-partition / 1-day
+           * rotation / 1-day minute-retention path with a 36-hour-old minute.
+           * session_replication_role models a value already present when this
+           * validator is installed; supported config writes are tested below.
+           */
+          begin;
+          truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+          set local session_replication_role = replica;
+          update ash.config
+          set current_slot = 0,
+            num_partitions = 3,
+            rotation_period = interval '1 day',
+            rollup_1m_retention_days = 1,
+            rotated_at = now() - interval '2 days',
+            last_rollup_1m_ts = null,
+            last_rollup_1h_ts = null
+          where singleton;
+          set local session_replication_role = origin;
+
+          do $$
+          declare
+            v_wait_id smallint;
+            v_old_ts int4;
+            v_result_int int;
+            v_result_text text;
+          begin
+            select ash._register_wait('active', 'Issue162', 'CleanupDeadlock')
+            into v_wait_id;
+            v_old_ts := ash.ts_from_timestamptz(
+              date_trunc('minute', now()) - interval '36 hours'
+            );
+
+            insert into ash.sample (
+              sample_ts,
+              datid,
+              active_count,
+              data,
+              slot
+            )
+            values (
+              v_old_ts,
+              (select oid from pg_database where datname = current_database()),
+              1,
+              array[-v_wait_id, 1, 0]::int[],
+              2
+            );
+
+            update ash.config
+            set last_rollup_1m_ts = v_old_ts
+            where singleton;
+            select ash.rollup_minute(1) into v_result_int;
+            assert v_result_int = 1,
+              format('precondition rollup expected 1, got %s', v_result_int);
+            assert (select count(*) from ash.rollup_1m) = 1,
+              'precondition expected exactly 1 minute-rollup row';
+
+            /*
+             * Model the shipped minute job advancing normally before the
+             * daily cleanup and rotation jobs run.
+             */
+            update ash.config
+            set last_rollup_1m_ts = ash.ts_from_timestamptz(
+              date_trunc('minute', now())
+            )
+            where singleton;
+            select ash.rollup_cleanup() into v_result_text;
+            assert v_result_text =
+              'cleanup: deleted 1 minute rows, 0 hourly rows',
+              'cleanup result mismatch: ' || v_result_text;
+            assert (select count(*) from ash.rollup_1m) = 0,
+              'cleanup must delete exactly the expired minute rollup';
+            select ash.rollup_minute(1000000) into v_result_int;
+            assert v_result_int = 0,
+              format(
+                'forward-only catch-up expected 0, got %s',
+                v_result_int
+              );
+
+            select ash.rotate() into v_result_text;
+            /*
+             * RED on the pre-fix baseline:
+             * failed: pre-truncation rollup incomplete for 1 group(s) in
+             * slot 2; slot not truncated
+             */
+            assert v_result_text =
+              'rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)',
+              'rotation did not escape cleanup deadlock: ' || v_result_text;
+            assert (select current_slot from ash.config where singleton) = 1,
+              'successful rotation must advance current_slot to 1';
+            assert (select count(*) from ash.sample_2) = 0,
+              'successful rotation must truncate sample_2';
+            assert (select count(*) from ash.rollup_1m) = 0,
+              'rotation must not recreate data beyond configured retention';
+            assert (
+              select value::bigint
+              from ash.status()
+              where metric = 'consecutive_rotate_failures'
+            ) = 0,
+              'successful rotation must leave consecutive failures at 0';
+          end;
+          $$;
+          rollback;
+
+          /*
+           * Every supported config mutation must reject unsafe retention
+           * geometry and non-day-granular rotation periods before changing
+           * state.
+           */
+          begin;
+          do $$
+          declare
+            v_enabled boolean;
+            v_input interval;
+            v_message text;
+            v_raised boolean;
+            v_rotation_job bigint;
+            v_sqlstate text;
+          begin
+            update ash.config
+            set num_partitions = 3,
+              rotation_period = interval '1 day',
+              rollup_1m_retention_days = 30,
+              sampling_enabled = true
+            where singleton;
+
+            v_raised := false;
+            begin
+              update ash.config
+              set rollup_1m_retention_days = 1
+              where singleton;
+            exception when others then
+              v_raised := true;
+              get stacked diagnostics
+                v_message = message_text,
+                v_sqlstate = returned_sqlstate;
+            end;
+            assert v_raised,
+              '1-day rollup retention must reject 3-partition geometry';
+            assert v_sqlstate = '23514',
+              format('retention SQLSTATE expected 23514, got %s', v_sqlstate);
+            assert v_message =
+              'pg_ash: invalid retention geometry: '
+              '(num_partitions - 1) * rotation_period = '
+              '(3 - 1) * 1 day = 2 days exceeds '
+              'rollup_1m_retention_days = 1 day; increase '
+              'rollup_1m_retention_days or reduce num_partitions or '
+              'rotation_period',
+              'retention message mismatch: ' || v_message;
+            assert (
+              select rollup_1m_retention_days
+              from ash.config
+              where singleton
+            ) = 30,
+              'rejected retention update changed config';
+
+            select sampling_enabled into v_enabled
+            from ash.config
+            where singleton;
+            v_raised := false;
+            begin
+              perform ash.rebuild_partitions(32, 'yes');
+            exception when others then
+              v_raised := true;
+              get stacked diagnostics
+                v_message = message_text,
+                v_sqlstate = returned_sqlstate;
+            end;
+            assert v_raised,
+              '32 partitions must reject stock 30-day retention geometry';
+            assert v_sqlstate = '23514',
+              format('rebuild SQLSTATE expected 23514, got %s', v_sqlstate);
+            assert v_message =
+              'pg_ash: invalid retention geometry: '
+              '(num_partitions - 1) * rotation_period = '
+              '(32 - 1) * 1 day = 31 days exceeds '
+              'rollup_1m_retention_days = 30 days; increase '
+              'rollup_1m_retention_days or reduce num_partitions or '
+              'rotation_period',
+              'rebuild message mismatch: ' || v_message;
+            assert (
+              select num_partitions from ash.config where singleton
+            ) = 3,
+              'rejected rebuild changed num_partitions';
+            assert (
+              select sampling_enabled from ash.config where singleton
+            ) = v_enabled,
+              'rejected rebuild changed sampling_enabled';
+            assert to_regclass('ash.sample_31') is null,
+              'rejected rebuild created sample_31';
+
+            foreach v_input in array
+              array[interval '12 hours', interval '36 hours']
+            loop
+              v_raised := false;
+              begin
+                update ash.config
+                set rotation_period = v_input
+                where singleton;
+              exception when others then
+                v_raised := true;
+                get stacked diagnostics
+                  v_message = message_text,
+                  v_sqlstate = returned_sqlstate;
+              end;
+              assert v_raised,
+                'non-day-granular rotation_period must be rejected';
+              assert v_sqlstate = '23514',
+                format(
+                  'rotation_period SQLSTATE expected 23514, got %s',
+                  v_sqlstate
+                );
+              assert v_message = format(
+                'pg_ash: rotation_period must be a whole number of days '
+                '(minimum 1 day); sub-day and fractional-day rotation are '
+                'unsupported because ash.rotate() is scheduled daily; got %s',
+                v_input
+              ),
+                'rotation_period message mismatch: ' || v_message;
+            end loop;
+            assert (
+              select rotation_period from ash.config where singleton
+            ) = interval '1 day',
+              'rejected rotation_period update changed config';
+
+            update ash.config
+            set rotation_period = interval '2 days'
+            where singleton;
+            assert (
+              select rotation_period from ash.config where singleton
+            ) = interval '2 days',
+              'safe whole-day rotation_period must be accepted';
+            assert (
+              select value from ash.status() where metric = 'rotation_period'
+            ) = '2 days',
+              'status must report an accepted multi-day rotation_period';
+            update ash.config
+            set rotation_period = interval '1 day'
+            where singleton;
+
+            assert (
+              select value from ash.status() where metric = 'rotation_period'
+            ) = '1 day',
+              'status rotation_period value must remain machine-readable';
+            assert (
+              select value
+              from ash.status()
+              where metric = 'rotation_period_contract'
+            ) = 'day-granular; minimum 1 day',
+              'status must document the day-granular rotation contract';
+
+            if ash._pg_cron_available() then
+              perform 1 from ash.start();
+              select jobid into v_rotation_job
+              from cron.job
+              where jobname = 'ash_rotation';
+              perform cron.alter_job(
+                job_id := v_rotation_job,
+                schedule := '*/5 * * * *'
+              );
+              assert (
+                select schedule
+                from cron.job
+                where jobname = 'ash_rotation'
+              ) = '*/5 * * * *',
+                'precondition: rotation schedule drift was not installed';
+
+              perform 1 from ash.start();
+              assert (
+                select schedule
+                from cron.job
+                where jobname = 'ash_rotation'
+              ) = '0 0 * * *',
+                'ash_rotation must keep its daily schedule';
+            end if;
+          end;
+          $$;
+          rollback;
+
+          /*
+           * The formerly documented 32-partition sequence stays covered at
+           * the safe 31-day minute-rollup boundary.
+           */
+          begin;
+          do $$
+          declare
+            v_expected smallint[] := array[
+              2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+              17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+              31, 0, 1, 2, 3, 4, 5
+            ]::smallint[];
+            v_result text;
+            v_target smallint;
+            v_targets smallint[] := '{}'::smallint[];
+          begin
+            update ash.config
+            set rollup_1m_retention_days = 31
+            where singleton;
+            select ash.rebuild_partitions(32, 'yes') into v_result;
+            assert v_result =
+              'rebuilt: 3 -> 32 partitions. all raw data cleared. '
+              'call ash.start() to resume sampling.',
+              'safe rebuild result mismatch: ' || v_result;
+
+            for i in 1 .. 36 loop
+              update ash.config
+              set rotated_at = now() - interval '2 days'
+              where singleton;
+              select ash.rotate() into v_result;
+              v_target := ((i + 1) % 32)::smallint;
+              assert v_result = format(
+                'rotated: slot %s -> %s, truncated slot %s '
+                '(sample + query_map)',
+                (i - 1) % 32,
+                i % 32,
+                v_target
+              ),
+                format('rotation %s result mismatch: %s', i, v_result);
+              v_targets := array_append(v_targets, v_target);
+            end loop;
+
+            assert v_targets = v_expected,
+              format(
+                'truncate targets expected %s, got %s',
+                v_expected,
+                v_targets
+              );
+            assert (
+              select current_slot from ash.config where singleton
+            ) = 4,
+              '36 rotations from slot 0 must end at slot 4';
+          end;
+          $$;
+          rollback;
+
+          do $$
+          begin
+            raise notice 'issue #162 cleanup/rotation regression tests PASSED';
+          end;
+          $$;
+          EOF
+
       - name: "Test 2.0 readers over rollup sources"
         env:
           PGPASSWORD: postgres
