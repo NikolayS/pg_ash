@@ -7151,6 +7151,12 @@ jobs:
               'rollup_minute should process exactly one completed minute, got '
               || v_result;
             assert (
+              select count(*)
+              from ash.rollup_1m
+              where ts = v_ts
+            ) = 1,
+              'minute fixture should create exactly one database row';
+            assert (
               select query_counts
               from ash.rollup_1m
               where ts = v_ts
@@ -7338,8 +7344,14 @@ jobs:
             where singleton;
             select ash.rollup_hour() into v_result;
             assert v_result = 1,
-              'rollup_hour should create exactly one database row, got '
+              'rollup_hour should process exactly one hour grain, got '
               || v_result;
+            assert (
+              select count(*)
+              from ash.rollup_1h
+              where ts = v_hour_ts
+            ) = 1,
+              'hour fixture should create exactly one database row';
 
             select
               cardinality(query_counts) / 2,
@@ -7447,6 +7459,7 @@ jobs:
             v_wait_id smallint;
             v_q1 int4;
             v_aas record;
+            v_until_aas record;
             v_top record;
             v_compare record;
             v_timeline_rows int;
@@ -7455,6 +7468,8 @@ jobs:
             v_timeline_source_max text;
             v_timeline_avg numeric;
             v_aas_error text;
+            v_until_aas_error text;
+            v_inverted_error text;
             v_timeline_error text;
             v_top_error text;
             v_compare_error text;
@@ -7521,6 +7536,24 @@ jobs:
               v_aas_error := sqlerrm;
             end;
             begin
+              select * into v_until_aas
+              from ash.aas(
+                until => date_trunc('minute', now()),
+                query_id => 111
+              );
+            exception when others then
+              v_until_aas_error := sqlerrm;
+            end;
+            begin
+              perform * from ash.aas(
+                since => date_trunc('minute', now()),
+                until => date_trunc('minute', now()) - interval '1 minute',
+                query_id => 111
+              );
+            exception when others then
+              v_inverted_error := sqlerrm;
+            end;
+            begin
               select
                 count(*),
                 count(*) filter (where data_points = 1),
@@ -7560,12 +7593,14 @@ jobs:
             end;
 
             assert v_aas_error is null
+                   and v_until_aas_error is null
                    and v_timeline_error is null
                    and v_top_error is null
                    and v_compare_error is null,
               format(
-                'young-install query_id errors: aas=%s timeline=%s top=%s compare=%s',
+                'young-install query_id errors: aas=%s until_aas=%s timeline=%s top=%s compare=%s',
                 coalesce(v_aas_error, '<none>'),
+                coalesce(v_until_aas_error, '<none>'),
                 coalesce(v_timeline_error, '<none>'),
                 coalesce(v_top_error, '<none>'),
                 coalesce(v_compare_error, '<none>')
@@ -7579,6 +7614,22 @@ jobs:
                 v_aas.buckets_with_data,
                 v_aas.backend_seconds
               );
+            assert v_until_aas.period_start
+                     = date_trunc('minute', now()) - interval '1 hour'
+                   and v_until_aas.period_end = date_trunc('minute', now())
+                   and v_until_aas.source = 'raw'
+                   and v_until_aas.backend_seconds = 7.00,
+              format(
+                'young-install until-only aas mismatch: period=%s..%s source=%s seconds=%s',
+                v_until_aas.period_start,
+                v_until_aas.period_end,
+                v_until_aas.source,
+                v_until_aas.backend_seconds
+              );
+            assert v_inverted_error
+                     = 'ash.aas: since must be less than or equal to until',
+              'young-install inverted-window validation mismatch: '
+              || coalesce(v_inverted_error, '<none>');
             assert v_timeline_rows = 60
                    and v_timeline_data_rows = 1
                    and v_timeline_source_min = 'raw'
@@ -7776,7 +7827,7 @@ jobs:
                 last_rollup_1h_ts = null
             where singleton;
             raise notice
-              'issue #136 young-install GREEN: same-minute 1m/1h rollups ignored; aas=raw/7.00 timeline=raw/0.12 top=raw/7.00 compare=raw/raw; other-db allowed; old rollup rejected';
+              'issue #136 young-install GREEN: same-minute 1m/1h rollups ignored; aas=raw/7.00 until-only=raw/7.00 inverted=validated timeline=raw/0.12 top=raw/7.00 compare=raw/raw; other-db allowed; old rollup rejected';
           end $$;
           EOF
 
