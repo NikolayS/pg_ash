@@ -8,8 +8,14 @@
  * Upgrade from 1.3: \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.4: \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.5: \i sql/migrations/ash-1.5-to-2.0.sql
+ *
+ * Transaction behavior: this entrypoint enables ON_ERROR_STOP and owns its
+ * transaction. When invoked with \i inside an existing transaction, its final
+ * COMMIT also commits the caller's outer work.
  */
 
+\set ON_ERROR_STOP on
+begin;
 
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
@@ -6404,3 +6410,5 @@ exception when others then
     'ignore to leave pg_monitor without access',
     sqlstate, sqlerrm;
 end $$;
+
+commit;

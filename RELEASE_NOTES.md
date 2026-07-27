@@ -46,6 +46,12 @@ surface has been replaced by the AAS-oriented 2.0 API:
   array contains a NULL wait marker, count, or query-map id, matching the
   storage validator instead of emitting a fabricated row or raising an
   internal PL/pgSQL error. (issue #143)
+- **Installer failures now roll back partial schemas.** The fresh installer
+  enables `ON_ERROR_STOP` and owns a transaction; the 1.3-to-1.4,
+  1.4-to-1.5, and 1.5-to-2.0 paths inherit that behavior when they delegate to
+  it. The three earlier legacy migration legs remain unchanged. Invoking the
+  installer with `\i` inside an existing transaction commits the caller's outer
+  work when the installer reaches its final `COMMIT`. (issue #124)
 
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
