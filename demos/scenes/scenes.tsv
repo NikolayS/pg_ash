@@ -41,4 +41,6 @@ compare	3.5	6	ash.compare() — incident vs baseline	avg_delta,Lock:transactioni
 summary	0.0	0	ash.summary() — the one-paragraph verdict	peak_aas,Lock:transactionid,pgbench_accounts	select metric, value from ash.summary(since => $STORM_SINCE, until => $STORM_UNTIL);
 # cluster_name is a host setting and its key is absent when unset; omit it so
 # the scene and its contract fingerprint do not depend on local configuration.
-report	0.0	0	ash.report() — hand this to an LLM	transactionid,coverage,aas_p99	select jsonb_pretty(ash.report(since => $STORM_SINCE, until => $STORM_UNTIL, n => 2) - array['cluster_name', 'aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m', 'top_queryids_p999', 'top_queryids_worst1m']) as report;
+# Report top events describe each class's single p99 minute, so that minute can
+# legitimately differ from the whole-storm winner asserted by top_event/shape.
+report	0.0	0	ash.report() — hand this to an LLM	top_events_p99,coverage,aas_p99	select jsonb_pretty(ash.report(since => $STORM_SINCE, until => $STORM_UNTIL, n => 2) - array['cluster_name', 'aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m', 'top_queryids_p999', 'top_queryids_worst1m']) as report;
