@@ -916,6 +916,114 @@ $feature_rebuild$;
 
 rollback;
 
+/*
+ * rollup return contract: one time grain containing two databases must count
+ * as one processed minute/hour, not two physical rollup rows (#191). Record
+ * both calls now, then raise only after uninstall and role cleanup below.
+ */
+create temporary table ash_feature_rollup_return_contract (
+  datids bigint not null,
+  minute_result int not null,
+  minute_rows bigint not null,
+  hour_result int not null,
+  hour_rows bigint not null
+)
+on commit preserve rows;
+
+do $feature_rollup_return_probe$
+declare
+  v_anchor timestamptz :=
+    pg_catalog.date_trunc(
+      'hour',
+      pg_catalog.statement_timestamp()
+    ) - interval '1 hour';
+  v_datids bigint;
+  v_hour_result int;
+  v_minute_result int;
+begin
+  truncate table ash.sample;
+  truncate table ash.rollup_1m, ash.rollup_1h;
+  truncate table ash.wait_event_map restart identity;
+
+  insert into ash.wait_event_map (state, type, event)
+  values ('active', 'CPU*', 'CPU*');
+
+  update ash.config
+  set
+    current_slot = 0,
+    sample_interval = interval '1 second',
+    last_rollup_1m_ts = ash.ts_from_timestamptz(v_anchor),
+    last_rollup_1h_ts = null
+  where singleton;
+
+  with database_ids as (
+    select database_row.oid as datid
+    from pg_catalog.pg_database as database_row
+    order by
+      (database_row.datname = pg_catalog.current_database()) desc,
+      database_row.oid
+    limit 2
+  ),
+  wait_id as (
+    select id
+    from ash.wait_event_map
+    where
+      state = 'active'
+      and type = 'CPU*'
+      and event = 'CPU*'
+  )
+  insert into ash.sample (
+    sample_ts,
+    datid,
+    active_count,
+    data,
+    slot
+  )
+  select
+    ash.ts_from_timestamptz(v_anchor),
+    database_ids.datid,
+    1,
+    array[-wait_id.id::int, 1, 0]::int4[],
+    0
+  from database_ids
+  cross join wait_id;
+
+  select pg_catalog.count(distinct sample_row.datid)
+  into v_datids
+  from ash.sample as sample_row;
+  select ash.rollup_minute(1)
+  into v_minute_result;
+
+  update ash.config
+  set
+    last_rollup_1m_ts = ash.ts_from_timestamptz(v_anchor + interval '1 hour'),
+    last_rollup_1h_ts = ash.ts_from_timestamptz(v_anchor)
+  where singleton;
+  select ash.rollup_hour()
+  into v_hour_result;
+
+  insert into ash_feature_rollup_return_contract (
+    datids,
+    minute_result,
+    minute_rows,
+    hour_result,
+    hour_rows
+  )
+  select
+    v_datids,
+    v_minute_result,
+    (
+      select pg_catalog.count(*)
+      from ash.rollup_1m
+    ),
+    v_hour_result,
+    (
+      select pg_catalog.count(*)
+      from ash.rollup_1h
+    );
+end
+$feature_rollup_return_probe$;
+
 /* -------------------------------------------------------------------------
  * ash.uninstall(): verify the destructive effect, then rollback for cleanup.
  * ------------------------------------------------------------------------- */
@@ -1019,3 +1127,28 @@ $feature_final_cleanup$;
 
 drop owned by ash_feature_reader;
 drop role ash_feature_reader;
+
+do $feature_rollup_return_contract$
+declare
+  v_probe ash_feature_rollup_return_contract%rowtype;
+begin
+  select *
+  into strict v_probe
+  from ash_feature_rollup_return_contract;
+
+  assert v_probe.datids = 2
+    and v_probe.minute_rows = 2
+    and v_probe.hour_rows = 2
+    and v_probe.minute_result = 1
+    and v_probe.hour_result = 1,
+    format(
+      '[%s] ash.rollup return contract (#191): expected one processed minute/hour for two datids while writing two rows each, got datids=%s minute_result=%s minute_rows=%s hour_result=%s hour_rows=%s',
+      pg_catalog.current_setting('ash.feature_mode'),
+      v_probe.datids,
+      v_probe.minute_result,
+      v_probe.minute_rows,
+      v_probe.hour_result,
+      v_probe.hour_rows
+    );
+end
+$feature_rollup_return_contract$;
