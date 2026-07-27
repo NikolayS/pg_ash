@@ -260,7 +260,16 @@ create table if not exists ash.config (
   skipped_samples            int4 not null default 0,
   missed_samples             bigint not null default 0,
   sample_interval            interval not null default '1 second',
-  rotation_period            interval not null default '1 day',
+  -- Keep this predicate aligned with _validate_rotation_period() below.
+  rotation_period            interval not null default '1 day'
+                               constraint config_rotation_period_day_check
+                               check (
+                                 rotation_period >= interval '1 day'
+                                 and extract(year from rotation_period) = 0
+                                 and extract(month from rotation_period) = 0
+                                 and extract(epoch from rotation_period)
+                                   % 86400 = 0
+                               ),
   include_bg_workers         bool not null default false,
   debug_logging              bool not null default false,
   encoding_version           smallint not null default 1,
@@ -277,7 +286,9 @@ create table if not exists ash.config (
   -- M-BUG-4: rows silently dropped by take_sample()'s inner exception handler.
   insert_errors              bigint not null default 0,
   -- M-BUG-6 / H-SEC-3: _register_wait dictionary-cap hit counter.
-  register_wait_cap_hits     bigint not null default 0
+  register_wait_cap_hits     bigint not null default 0,
+  -- Consecutive rotate() failure returns; reset by a successful rotation.
+  consecutive_rotate_failures bigint not null default 0
 );
 
 -- Insert initial row if not exists.
@@ -309,18 +320,56 @@ alter table ash.config
    * registrations are being silently dropped for that sample (those sessions
    * won't appear in encoded data for this tick). Surfaced by ash.status().
    */
-  add column if not exists register_wait_cap_hits bigint not null default 0;
+  add column if not exists register_wait_cap_hits bigint not null default 0,
+  add column if not exists consecutive_rotate_failures bigint not null
+    default 0;
+
+/*
+ * Keep the day-granularity error reusable and actionable. The explicit call
+ * before ADD CONSTRAINT makes upgrades from a formerly accepted sub-day value
+ * fail with remediation text instead of PostgreSQL's generic CHECK message.
+ */
+create or replace function ash._validate_rotation_period(
+  rotation_period interval
+)
+returns void
+language plpgsql
+immutable
+set search_path = pg_catalog, ash
+as $$
+begin
+  -- This predicate mirrors both the declarative CHECKs below.
+  if rotation_period < interval '1 day'
+     or extract(year from rotation_period) <> 0
+     or extract(month from rotation_period) <> 0
+     or extract(epoch from rotation_period) % 86400 <> 0 then
+    raise exception using
+      errcode = '23514',
+      message = format(
+        'pg_ash: rotation_period must be a whole number of days '
+        '(minimum 1 day); sub-day and fractional-day rotation are '
+        'unsupported because ash.rotate() is scheduled daily; got %s; '
+        'set ash.config.rotation_period to a whole-day interval '
+        '(for example, 1 day) before retrying',
+        rotation_period
+      );
+  end if;
+end;
+$$;
 
 /*
  * Ensure retention CHECK constraints exist for both fresh and upgrade paths.
  * ADD COLUMN IF NOT EXISTS above doesn't apply CHECKs to pre-existing columns,
  * so add them explicitly here (guarded by a not-exists probe for idempotency).
+ * The rotation-period CHECK is installed at the end, after every replacement
+ * function is safely in place for a legacy invalid-value upgrade.
  */
 do $$
 begin
   if not exists (
     select from pg_constraint
     where conname = 'config_rollup_1m_retention_days_check'
+      and conrelid = 'ash.config'::regclass
   ) then
     alter table ash.config
       add constraint config_rollup_1m_retention_days_check
@@ -329,12 +378,100 @@ begin
   if not exists (
     select from pg_constraint
     where conname = 'config_rollup_1h_retention_days_check'
+      and conrelid = 'ash.config'::regclass
   ) then
     alter table ash.config
       add constraint config_rollup_1h_retention_days_check
       check (rollup_1h_retention_days >= 1);
   end if;
 end $$;
+
+/*
+ * Validate the ring geometry whenever one of its three knobs changes.
+ * This is deliberately an UPDATE-OF trigger rather than a cross-column CHECK:
+ * an existing 32-slot / 30-day install must be able to re-apply this installer
+ * and use rotate()'s expired-data escape hatch. The next attempted knob change
+ * is rejected until the geometry is safe.
+ */
+create or replace function ash._validate_rotation_config(
+  num_partitions int,
+  rotation_period interval,
+  rollup_1m_retention_days int
+)
+returns void
+language plpgsql
+immutable
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_geometry interval;
+begin
+  perform ash._validate_rotation_period(rotation_period);
+
+  v_geometry := (num_partitions - 1) * rotation_period;
+  if v_geometry >
+     rollup_1m_retention_days * interval '1 day' then
+    raise exception using
+      errcode = '23514',
+      message = format(
+        'pg_ash: invalid retention geometry: '
+        '(num_partitions - 1) * rotation_period = '
+        '(%s - 1) * %s = %s exceeds '
+        'rollup_1m_retention_days = %s; increase '
+        'rollup_1m_retention_days or reduce num_partitions or '
+        'rotation_period',
+        num_partitions,
+        rotation_period,
+        v_geometry,
+        rollup_1m_retention_days
+          || case
+               when rollup_1m_retention_days = 1 then ' day'
+               else ' days'
+             end
+      );
+  end if;
+end;
+$$;
+
+create or replace function ash._validate_config_update()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+begin
+  perform ash._validate_rotation_config(
+    new.num_partitions,
+    new.rotation_period,
+    new.rollup_1m_retention_days
+  );
+  return new;
+end;
+$$;
+
+drop trigger if exists config_validate_rotation on ash.config;
+create trigger config_validate_rotation
+before insert or update of
+  num_partitions,
+  rotation_period,
+  rollup_1m_retention_days
+on ash.config
+for each row
+execute function ash._validate_config_update();
+
+comment on column ash.config.rotation_period is
+$$Whole-day partition rotation period (minimum 1 day). ash.start() checks for rotation daily; sub-day and fractional-day values are unsupported.$$;
+
+comment on column ash.config.rollup_1m_retention_days is
+$$Minute-rollup retention in days. Must cover the endangered raw-slot age: (num_partitions - 1) * rotation_period.$$;
+
+comment on function ash._validate_rotation_config(int, interval, int) is
+$$Internal validator for day-granular rotation_period and safe raw-ring/minute-rollup retention geometry.$$;
+
+comment on function ash._validate_rotation_period(interval) is
+$$Internal validator for the whole-day rotation_period contract; raises an actionable check-violation message.$$;
+
+comment on function ash._validate_config_update() is
+$$Internal trigger enforcing rotation and retention geometry whenever its ash.config knobs change.$$;
 
 /*
  * Stamp the version on both fresh installs and upgrades. On an existing
@@ -1318,6 +1455,31 @@ $$Wall-clock convenience: same as decode_sample(int4) but accepts timestamptz, c
 --------------------------------------------------------------------------------
 
 /*
+ * Record a returned rotate() failure without letting observability
+ * bookkeeping replace the operation's stable text result. rotate() sets a
+ * short lock_timeout before touching partitions; a concurrent config writer
+ * can therefore make this counter update time out too.
+ */
+create or replace function ash._record_rotate_failure()
+returns void
+language plpgsql
+set search_path = pg_catalog, ash
+set lock_timeout = '250ms'
+as $$
+begin
+  update ash.config
+  set consecutive_rotate_failures = consecutive_rotate_failures + 1
+  where singleton;
+exception when lock_not_available then
+  raise warning
+    'ash.rotate: config row locked; could not record rotate failure';
+end;
+$$;
+
+comment on function ash._record_rotate_failure() is
+$$Internal best-effort increment for consecutive_rotate_failures; config-row lock timeout must not mask rotate()'s failure result.$$;
+
+/*
  * Rotate partitions: advance current_slot, truncate the old previous
  * partition and its matching query_map partition (lockstep TRUNCATE — zero
  * bloat everywhere). Uses dynamic SQL with modulo-N for configurable
@@ -1334,6 +1496,8 @@ declare
   v_truncate_slot smallint;
   v_num_partitions smallint;
   v_rotation_period interval;
+  v_rollup_1m_retention_days smallint;
+  v_rollup_1m_cutoff int4;
   v_rotated_at timestamptz;
   v_rotation_minutes int;
   v_rollup_result int;
@@ -1357,8 +1521,18 @@ begin
 
   begin
     -- Get current config.
-    select current_slot, num_partitions, rotation_period, rotated_at
-    into v_old_slot, v_num_partitions, v_rotation_period, v_rotated_at
+    select
+      current_slot,
+      num_partitions,
+      rotation_period,
+      rollup_1m_retention_days,
+      rotated_at
+    into
+      v_old_slot,
+      v_num_partitions,
+      v_rotation_period,
+      v_rollup_1m_retention_days,
+      v_rotated_at
     from ash.config
     where singleton;
 
@@ -1372,24 +1546,36 @@ begin
 
     -- The partition to truncate is the one after the new slot.
     v_truncate_slot := (v_new_slot + 1) % v_num_partitions;
+    v_rollup_1m_cutoff := ash.ts_from_timestamptz(
+      now() - v_rollup_1m_retention_days * interval '1 day'
+    );
 
     -- Set lock timeout to avoid blocking on long-running queries.
     set local lock_timeout = '2s';
 
     /*
      * Pre-truncation rollup: process endangered minutes before they are lost.
-     * This is no longer best-effort: if the endangered raw slot has rows and
-     * we cannot prove they are represented in rollup_1m, skip rotation rather
-     * than deleting the only copy of the samples (#81).
+     * For minutes still promised by rollup_1m retention, this is no longer
+     * best-effort: if we cannot prove they are represented in rollup_1m,
+     * skip rotation rather than deleting the only copy (#81). Older minutes
+     * are outside the configured rollup contract and must not deadlock the
+     * raw ring after rollup_cleanup() has intentionally deleted them (#162).
      */
-    execute format('select count(*) from ash.sample_%s', v_truncate_slot)
-    into v_endangered_rows;
+    execute format(
+      'select count(*) '
+      'from ash.sample_%s '
+      'where (sample_ts / 60) * 60 >= $1',
+      v_truncate_slot
+    )
+    into v_endangered_rows
+    using v_rollup_1m_cutoff;
 
     if v_endangered_rows > 0 then
       if not pg_try_advisory_xact_lock(
            hashtext('pg_ash')::int4,
            hashtext('pg_ash_rollup')::int4
          ) then
+        perform ash._record_rotate_failure();
         return format(
           'failed: pre-truncation rollup busy; slot %s not truncated',
           v_truncate_slot
@@ -1402,6 +1588,7 @@ begin
       begin
         select ash.rollup_minute(v_rotation_minutes) into v_rollup_result;
       exception when undefined_function then
+        perform ash._record_rotate_failure();
         return format(
           'failed: rollup_minute() unavailable; slot %s not truncated',
           v_truncate_slot
@@ -1409,6 +1596,7 @@ begin
       when others then
         raise warning 'ash.rotate: rollup_minute failed [%]: %',
           sqlstate, sqlerrm;
+        perform ash._record_rotate_failure();
         return format(
           'failed: pre-truncation rollup failed [%s]; slot %s not truncated',
           sqlstate,
@@ -1422,6 +1610,7 @@ begin
         '         count(distinct sample_ts)::smallint as samples,'
         '         max(active_count)::smallint as peak_backends'
         '  from ash.sample_%1$s'
+        '  where (sample_ts / 60) * 60 >= $1'
         '  group by 1, 2'
         ') '
         'select count(*) '
@@ -1432,9 +1621,12 @@ begin
         '   or rollup_min.samples < raw.samples '
         '   or rollup_min.peak_backends < raw.peak_backends',
         v_truncate_slot
-      ) into v_unrolled_groups;
+      )
+      into v_unrolled_groups
+      using v_rollup_1m_cutoff;
 
       if v_unrolled_groups > 0 then
+        perform ash._record_rotate_failure();
         return format(
           'failed: pre-truncation rollup incomplete for %s group(s) '
           'in slot %s; slot not truncated',
@@ -1447,7 +1639,8 @@ begin
     -- Advance current_slot first (before truncate).
     update ash.config
     set current_slot = v_new_slot,
-      rotated_at = now()
+      rotated_at = now(),
+      consecutive_rotate_failures = 0
     where singleton;
 
     /*
@@ -1468,6 +1661,7 @@ begin
       v_old_slot, v_new_slot, v_truncate_slot);
 
   exception when lock_not_available then
+    perform ash._record_rotate_failure();
     return 'failed: lock timeout on partition truncate, will retry next cycle';
   when others then
     raise;
@@ -1495,6 +1689,8 @@ declare
   v_old_n int;
   v_new_n int;
   v_rec record;
+  v_rotation_period interval;
+  v_rollup_1m_retention_days int;
 begin
   /*
    * Destructive: drops all raw sample partitions. Require explicit
@@ -1507,7 +1703,14 @@ begin
       'select ash.rebuild_partitions(%, ''yes'')', num_partitions;
   end if;
 
-  select config_row.num_partitions into v_old_n
+  select
+    config_row.num_partitions,
+    config_row.rotation_period,
+    config_row.rollup_1m_retention_days
+  into
+    v_old_n,
+    v_rotation_period,
+    v_rollup_1m_retention_days
   from ash.config as config_row
   where config_row.singleton;
   v_new_n := coalesce(rebuild_partitions.num_partitions, v_old_n);
@@ -1515,6 +1718,17 @@ begin
   if v_new_n < 3 or v_new_n > 32 then
     raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
   end if;
+
+  /*
+   * Reject unsafe geometry before disabling sampling, changing cron jobs, or
+   * touching partitions. The endangered slot is (num_partitions - 1)
+   * rotation periods old, so its minute rollups must still be retained.
+   */
+  perform ash._validate_rotation_config(
+    v_new_n,
+    v_rotation_period,
+    v_rollup_1m_retention_days
+  );
 
   -- Step 1: mark sampling disabled. take_sample() checks this and returns
   -- early.
@@ -2058,9 +2272,17 @@ begin
   where jobname = 'ash_rotation';
 
   if v_rotation_job is not null then
+    /*
+     * The supported rotation contract is day-granular. Repair any manually
+     * drifted or legacy sub-day cron expression on every idempotent start.
+     */
+    perform cron.alter_job(
+      job_id := v_rotation_job,
+      schedule := '0 0 * * *'
+    );
     job_type := 'rotation';
     job_id := v_rotation_job;
-    status := 'already exists';
+    status := 'already exists — schedule reset to 0 0 * * *';
     return next;
   else
     -- Create rotation job (daily at midnight UTC).
@@ -2598,6 +2820,9 @@ begin
   metric := 'current_slot'; value := v_config.current_slot::text; return next;
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
+  metric := 'rotation_period_contract';
+  value := 'day-granular; minimum 1 day';
+  return next;
   metric := 'raw_retention';
   value := ((v_config.num_partitions - 2) * v_config.rotation_period)::text
     || ' + current partial';
@@ -2615,6 +2840,9 @@ begin
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation';
   value := (now() - v_config.rotated_at)::text;
+  return next;
+  metric := 'consecutive_rotate_failures';
+  value := v_config.consecutive_rotate_failures::text;
   return next;
 
   if v_last_sample_ts is not null then
@@ -5922,10 +6150,10 @@ $$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader e
  * reader-vs-ops split is legible from \df+ alone.
  */
 comment on function ash.status() is
-$$Installation health snapshot (readable by monitoring roles): sampling state and interval, pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start, rollup_1m_retention_start, rollup_1h_retention_start — use these to plan reader windows), error counters (insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
+$$Installation health snapshot (readable by monitoring roles): sampling state and interval, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start, rollup_1m_retention_start, rollup_1h_retention_start — use these to plan reader windows), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
-$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and rotation via pg_cron when available; without pg_cron it enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
+$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
 
 comment on function ash.stop() is
 $$Admin: stop sampling — unschedules the pg_cron jobs created by ash.start() (or disables sampling when pg_cron is absent). Collected data is kept and remains readable. Inverse: ash.start().$$;
@@ -5934,7 +6162,7 @@ comment on function ash.take_sample() is
 $$Admin/internal: take one wait-event sample of pg_stat_activity into the current slot (the every-second worker that ash.start() schedules). Returns the number of active backends captured. Call manually only for testing; continuous sampling belongs to ash.start().$$;
 
 comment on function ash.rotate() is
-$$Admin: rotate to the next partition slot, rolling up and truncating the oldest (the daily job scheduled by ash.start()). Readable raw retention is approximately (num_partitions - 2) * rotation_period. Safe to call manually to force a rotation.$$;
+$$Admin: rotate to the next partition slot, rolling up and truncating the oldest (checked daily by ash.start()). Readable raw retention is roughly (num_partitions - 2) * rotation_period plus the current partial period. The pre-truncation guard requires minute rollups only while they remain inside rollup_1m_retention_days. Failed attempts increment consecutive_rotate_failures in ash.status(); successful rotation resets it. Safe to call manually to force a due rotation.$$;
 
 comment on function ash.rollup_minute(int) is
 $$Admin: fold completed minutes of raw samples into ash.rollup_1m (the every-minute job scheduled by ash.start()); batch_limit caps catch-up minutes per call. Returns minutes processed. Readers pick rollups automatically — this only needs manual calls when pg_cron is absent.$$;
@@ -5943,10 +6171,10 @@ comment on function ash.rollup_hour() is
 $$Admin: fold completed hours of ash.rollup_1m into ash.rollup_1h, preserving per-minute totals in minute_counts so long-window peak/p99 stay minute-grain (the hourly job scheduled by ash.start()). Returns hours processed.$$;
 
 comment on function ash.rollup_cleanup() is
-$$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Returns a summary of rows deleted.$$;
+$$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Rotation deliberately does not require minute rollups that this cleanup is entitled to delete. Returns a summary of rows deleted.$$;
 
 comment on function ash.rebuild_partitions(int, text) is
-$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Readable raw retention is approximately (num_partitions - 2) * rotation_period. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
+$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is roughly (num_partitions - 2) * rotation_period plus the current partial period. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
 
 comment on function ash.set_debug_logging(bool) is
 $$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
@@ -6075,7 +6303,8 @@ as $$
     'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
     '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
-    '_register_wait',
+    '_register_wait', '_validate_rotation_period', '_record_rotate_failure',
+    '_validate_rotation_config', '_validate_config_update',
     /*
      * The privilege helpers and their canonical exclusion-list helper are
      * administrative. Granting grant_reader/revoke_reader to a monitoring
@@ -6214,9 +6443,10 @@ end $$;
  *     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
  *     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
  *     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg,
- *     _register_wait, _admin_funcs). Defining "reader" by exclusion
- *     (rather than enumeration) keeps the helpers correct as new readers
- *     and reader-internal helpers are added.
+ *     _register_wait, _validate_rotation_period, _record_rotate_failure,
+ *     _validate_rotation_config, _validate_config_update, _admin_funcs).
+ *     Defining "reader" by exclusion (rather than enumeration) keeps the
+ *     helpers correct as new readers and reader-internal helpers are added.
  *   - SELECT on ash.sample (+ every sample_N partition), ash.query_map_all
  *     (+ every query_map_N partition), ash.config, ash.wait_event_map,
  *     ash.rollup_1m, ash.rollup_1h.
@@ -6608,6 +6838,37 @@ begin
         v_hourly_job.command
       );
     end loop;
+  end if;
+end $$;
+
+/*
+ * Enforce the day-granular rotation contract last. A legacy install may
+ * already contain a sub-day value that older versions accepted. The
+ * actionable error must still stop that unsupported configuration, but only
+ * after this autocommit-friendly installer has replaced rotate() and the rest
+ * of the operational surface. The operator can set a whole-day value and
+ * re-run the installer to add the declarative CHECK.
+ */
+do $$
+begin
+  perform ash._validate_rotation_period(
+    (select rotation_period from ash.config where singleton)
+  );
+
+  if not exists (
+    select from pg_constraint
+    where conname = 'config_rotation_period_day_check'
+      and conrelid = 'ash.config'::regclass
+  ) then
+    -- Keep this predicate aligned with _validate_rotation_period() above.
+    alter table ash.config
+      add constraint config_rotation_period_day_check
+      check (
+        rotation_period >= interval '1 day'
+        and extract(year from rotation_period) = 0
+        and extract(month from rotation_period) = 0
+        and extract(epoch from rotation_period) % 86400 = 0
+      );
   end if;
 end $$;
 

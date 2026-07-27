@@ -5240,8 +5240,10 @@ jobs:
             set current_slot = 0,
               rotated_at = now() - interval '2 days',
               rotation_period = interval '1 day',
+              rollup_1m_retention_days = 30,
               last_rollup_1m_ts = null,
               last_rollup_1h_ts = null,
+              consecutive_rotate_failures = 0,
               sampling_enabled = true
             where singleton;
             select ash._register_wait('active', 'Issue81', 'RotateLoss');
@@ -5378,9 +5380,41 @@ jobs:
             )
           "
           rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          if [ "$rotate_result" != "failed: pre-truncation rollup busy; slot 2 not truncated" ]; then
+            echo "::error::first busy-rollup failure text mismatch: $rotate_result" >&2
+            exit 1
+          fi
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          if [ "$rotate_result" != "failed: pre-truncation rollup busy; slot 2 not truncated" ]; then
+            echo "::error::second busy-rollup failure text mismatch: $rotate_result" >&2
+            exit 1
+          fi
+          rotate_failures="$("${psql_base[@]}" -tAc "
+            select value
+            from ash.status()
+            where metric = 'consecutive_rotate_failures'
+          ")"
+          if [ "$rotate_failures" != "2" ]; then
+            echo "::error::consecutive rotate failures expected 2, got $rotate_failures" >&2
+            exit 1
+          fi
           wait "$rollup_lock_pid"
           echo "rotate result with busy rollup lock: $rotate_result"
           assert_raw_sample_survived "busy rollup advisory lock"
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          if [ "$rotate_result" != "rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)" ]; then
+            echo "::error::post-failure rotation did not recover: $rotate_result" >&2
+            exit 1
+          fi
+          rotate_failures="$("${psql_base[@]}" -tAc "
+            select value
+            from ash.status()
+            where metric = 'consecutive_rotate_failures'
+          ")"
+          if [ "$rotate_failures" != "0" ]; then
+            echo "::error::successful rotation did not reset failures: $rotate_failures" >&2
+            exit 1
+          fi
 
           echo "=== #81C: rotate must not truncate when pre-rollup hits lock_timeout ==="
           reset_issue_81_state
@@ -5408,12 +5442,96 @@ jobs:
           echo "rotate result with rollup_1m lock_timeout: $rotate_result"
           assert_raw_sample_survived "rollup_1m lock_timeout"
 
+          echo "=== #81D: counter lock timeout must not mask failure text ==="
+          reset_issue_81_state
+          seed_endangered_sample
+          "${psql_base[@]}" -c "
+            begin;
+            select 1 from ash.config where singleton for update;
+            select pg_advisory_xact_lock(
+              hashtext('pg_ash')::int4,
+              hashtext('pg_ash_rollup')::int4
+            );
+            select pg_sleep(5);
+            commit;
+          " &
+          config_lock_pid=$!
+          wait_until_sql_true "combined config and rollup lock" "
+            select exists (
+              select 1
+              from pg_locks
+              where locktype = 'advisory'
+                and classid = hashtext('pg_ash')::int4::oid
+                and objid = hashtext('pg_ash_rollup')::int4::oid
+                and granted
+                and pid <> pg_backend_pid()
+            )
+          "
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          if [ "$rotate_result" != "failed: pre-truncation rollup busy; slot 2 not truncated" ]; then
+            echo "::error::config lock masked rotation failure: $rotate_result" >&2
+            exit 1
+          fi
+          wait "$config_lock_pid"
+          assert_raw_sample_survived "failure-counter config lock_timeout"
+          rotate_failures="$("${psql_base[@]}" -tAc "
+            select value
+            from ash.status()
+            where metric = 'consecutive_rotate_failures'
+          ")"
+          if [ "$rotate_failures" != "0" ]; then
+            echo "::error::timed-out counter update changed value: $rotate_failures" >&2
+            exit 1
+          fi
+
+          echo "=== #81E: outer lock handler must keep bounded failure text ==="
+          reset_issue_81_state
+          "${psql_base[@]}" -c "
+            begin;
+            select 1 from ash.config where singleton for update;
+            select pg_advisory_xact_lock(
+              hashtext('pg_ash')::int4,
+              hashtext('pg_ash_rollup')::int4
+            );
+            select pg_sleep(5);
+            commit;
+          " &
+          config_update_lock_pid=$!
+          wait_until_sql_true "config update lock marker" "
+            select exists (
+              select 1
+              from pg_locks
+              where locktype = 'advisory'
+                and classid = hashtext('pg_ash')::int4::oid
+                and objid = hashtext('pg_ash_rollup')::int4::oid
+                and granted
+                and pid <> pg_backend_pid()
+            )
+          "
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          if [ "$rotate_result" != "failed: lock timeout on partition truncate, will retry next cycle" ]; then
+            echo "::error::outer lock handler result mismatch: $rotate_result" >&2
+            exit 1
+          fi
+          wait "$config_update_lock_pid"
+          rotate_state="$("${psql_base[@]}" -tAc "
+            select current_slot || ' ' || consecutive_rotate_failures
+            from ash.config
+            where singleton
+          ")"
+          if [ "$rotate_state" != "0 0" ]; then
+            echo "::error::outer lock failure changed state: $rotate_state" >&2
+            exit 1
+          fi
+
           echo "Critical bug #81 regression tests PASSED"
 
       - name: "Blocker #162: cleanup/rotation compatibility and config geometry"
         env:
           PGPASSWORD: postgres
         run: |
+          set -euo pipefail
+
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           /*
            * The cleanup deadlock remains covered independently of the
@@ -5631,7 +5749,9 @@ jobs:
               assert v_message = format(
                 'pg_ash: rotation_period must be a whole number of days '
                 '(minimum 1 day); sub-day and fractional-day rotation are '
-                'unsupported because ash.rotate() is scheduled daily; got %s',
+                'unsupported because ash.rotate() is scheduled daily; got %s; '
+                'set ash.config.rotation_period to a whole-day interval '
+                '(for example, 1 day) before retrying',
                 v_input
               ),
                 'rotation_period message mismatch: ' || v_message;
@@ -5757,6 +5877,78 @@ jobs:
           end;
           $$;
           EOF
+
+          # Upgrade regression: older installers accepted sub-day periods.
+          # Reapplication must stop with the actionable validator message,
+          # rather than PostgreSQL's generic CHECK failure.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          alter table ash.config
+            drop constraint config_rotation_period_day_check;
+          alter table ash.config
+            disable trigger config_validate_rotation;
+          update ash.config
+          set rotation_period = interval '12 hours'
+          where singleton;
+          alter table ash.config
+            enable trigger config_validate_rotation;
+          create or replace function ash.rotate()
+          returns text
+          language plpgsql
+          set search_path = pg_catalog, ash
+          as $$
+          begin
+            return 'legacy-upgrade sentinel';
+          end;
+          $$;
+          EOF
+
+          install_sql="$(
+            python3 devel/scripts/ash_sql_chain.py fresh-install-path
+          )"
+          set +e
+          upgrade_output="$(
+            psql -h localhost -U postgres -d postgres \
+              -v ON_ERROR_STOP=1 -f "$install_sql" 2>&1
+          )"
+          upgrade_status=$?
+          set -e
+
+          if [ "$upgrade_status" != "3" ]; then
+            echo "::error::legacy sub-day upgrade expected status 3, got $upgrade_status" >&2
+            exit 1
+          fi
+          upgrade_error="$(
+            printf '%s\n' "$upgrade_output" |
+              sed -n 's/^psql:.*ERROR:  //p' |
+              tail -n 1
+          )"
+          expected_upgrade_error="pg_ash: rotation_period must be a whole number of days "
+          expected_upgrade_error+="(minimum 1 day); sub-day and fractional-day rotation are "
+          expected_upgrade_error+="unsupported because ash.rotate() is scheduled daily; "
+          expected_upgrade_error+="got 12:00:00; set ash.config.rotation_period to a "
+          expected_upgrade_error+="whole-day interval (for example, 1 day) before retrying"
+          if [ "$upgrade_error" != "$expected_upgrade_error" ]; then
+            echo "::error::legacy sub-day upgrade error mismatch: $upgrade_error" >&2
+            exit 1
+          fi
+          upgrade_core_installed="$(
+            psql -h localhost -U postgres -d postgres -tAc "
+              select position(
+                'v_rollup_1m_cutoff'
+                in pg_get_functiondef('ash.rotate()'::regprocedure)
+              ) > 0
+            "
+          )"
+          if [ "$upgrade_core_installed" != "t" ]; then
+            echo "::error::legacy rejection happened before rotate() was replaced" >&2
+            exit 1
+          fi
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "update ash.config set rotation_period = interval '1 day' where singleton"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f "$install_sql" >/dev/null
+          echo "Legacy sub-day upgrade rejection PASSED"
 
       - name: "Test 2.0 readers over rollup sources"
         env:
@@ -6497,6 +6689,16 @@ jobs:
               'status should include skipped_samples';
             assert 'raw_retention' = any(v_metrics),
               'status should include raw_retention';
+            assert 'rotation_period_contract' = any(v_metrics),
+              'status should include rotation_period_contract';
+            assert (
+              select value
+              from ash.status()
+              where metric = 'rotation_period_contract'
+            ) = 'day-granular; minimum 1 day',
+              'status should document the exact rotation-period contract';
+            assert 'consecutive_rotate_failures' = any(v_metrics),
+              'status should include consecutive_rotate_failures';
             assert 'rollup_1m_rows' = any(v_metrics),
               'status should include rollup_1m_rows';
             assert 'rollup_1m_retention' = any(v_metrics),
