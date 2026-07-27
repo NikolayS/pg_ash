@@ -3058,6 +3058,12 @@ jobs:
           end $$;
 
           -- --- raw-retention exception (tie drill before raw retention) ----------------
+          update ash.config
+          set num_partitions = 3,
+              rotation_period = interval '30 minutes',
+              rotated_at = date_trunc('minute', now())
+          where singleton;
+
           do $$
           declare v_base int4; v_raised boolean := false;
           begin
@@ -3080,6 +3086,11 @@ jobs:
             assert v_raised, 'raw-retention exception message mismatch';
             raise notice 'raw-retention exception PASSED';
           end $$;
+
+          update ash.config
+          set rotation_period = interval '1 day',
+              rotated_at = date_trunc('minute', now())
+          where singleton;
 
           -- --- ash.timeline (per-bucket series + no-data bucket) -----------------------
           do $$
@@ -6858,22 +6869,98 @@ jobs:
           -- round down so it does not discard that partial minute.
           begin;
 
+          create temp table b3_start_result (
+            result_order smallint generated always as identity,
+            job_type text,
+            job_id bigint,
+            status text
+          ) on commit drop;
           update ash.config
-          set current_slot = 0,
-              num_partitions = 3,
-              sample_interval = interval '1 second',
-              rotation_period = interval '1 day',
-              rotated_at = date_trunc('minute', now())
-                - interval '1 minute' + interval '50 seconds'
+          set sample_interval = interval '7 seconds',
+              sampling_enabled = false
           where singleton;
-          truncate ash.sample_0, ash.sample_1, ash.sample_2;
-          truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
-          alter table ash.query_map_0 alter column id restart;
+          insert into b3_start_result (job_type, job_id, status)
+          select * from ash.start();
+
+          do $$
+          declare
+            v_job_types text[];
+            v_sampler_status text;
+            v_cron_available boolean := ash._pg_cron_available();
+          begin
+            assert (select sample_interval from ash.config where singleton)
+              = interval '1 second',
+              'B3 precondition: ash.start() default did not replace 7 seconds';
+            assert (select sampling_enabled from ash.config where singleton),
+              'B3 precondition: ash.start() default did not enable sampling';
+
+            select array_agg(job_type order by result_order)
+            into v_job_types
+            from b3_start_result;
+            select status into v_sampler_status
+            from b3_start_result
+            where job_type = 'sampler';
+
+            if v_cron_available then
+              assert v_job_types = array[
+                'sampler', 'rotation', 'rollup_1m', 'rollup_1h', 'rollup_gc'
+              ], 'B3 ash.start() cron result mismatch: '
+                || v_job_types::text;
+              assert not exists (
+                select from b3_start_result
+                where job_id is null or status is null or job_type = 'error'
+              ), 'B3 ash.start() cron result was not successful';
+              assert v_sampler_status in (
+                'created',
+                'already exists — schedule updated to 1 seconds'
+              ), 'B3 ash.start() sampler status mismatch: '
+                || v_sampler_status;
+            else
+              assert v_job_types = array['sampler', 'rotation', 'rollup'],
+                'B3 ash.start() external result mismatch: '
+                  || v_job_types::text;
+              assert (
+                select array_agg(status order by result_order)
+                from b3_start_result
+              ) = array[
+                'interval set to 00:00:01 — schedule externally '
+                  '(pg_cron not available)',
+                (
+                  select format(
+                    'rotation_period is %s — schedule ash.rotate() externally',
+                    rotation_period
+                  )
+                  from ash.config
+                  where singleton
+                ),
+                'schedule ash.rollup_minute() every minute, '
+                  'ash.rollup_hour() at minute 1 every hour, '
+                  'ash.rollup_cleanup() daily'
+              ], 'B3 ash.start() external statuses mismatch';
+              assert not exists (
+                select from b3_start_result
+                where job_id is not null or status is null or job_type = 'error'
+              ), 'B3 ash.start() external result was not successful';
+            end if;
+          end
+          $$;
 
           create temp table b3_anchor (
             anchor timestamptz primary key
           ) on commit drop;
           insert into b3_anchor values (date_trunc('minute', now()));
+
+          update ash.config
+          set current_slot = 0,
+              num_partitions = 3,
+              sample_interval = interval '1 second',
+              rotation_period = interval '1 day',
+              rotated_at = (select anchor from b3_anchor)
+                - interval '1 minute' + interval '59.75 seconds'
+          where singleton;
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+          alter table ash.query_map_0 alter column id restart;
 
           do $$
           declare
@@ -6936,12 +7023,27 @@ jobs:
           end
           $$;
 
-          -- RED 1: README.md's flagship drill, copied verbatim.
+          -- RED 1: README.md's flagship drill, copied verbatim into the
+          -- materialized result below so its error and exact row are assertable.
           do $$
           declare
             v_got text[];
           begin
             begin
+              create temp table b3_readme_result on commit drop as
+              select *
+              from ash.top(
+                'query_id',
+                since => now() - interval '5 minutes',
+                wait_event => 'Lock:tuple',
+                order_by => 'peak',
+                n => 5
+              );
+            exception when others then
+              v_got := array['ERROR', sqlerrm];
+            end;
+
+            if v_got is null then
               select array[
                 count(*)::text,
                 min(key),
@@ -6953,16 +7055,8 @@ jobs:
                 min(pct)::text
               ]
               into v_got
-              from ash.top(
-                'query_id',
-                since => now() - interval '5 minutes',
-                wait_event => 'Lock:tuple',
-                order_by => 'peak',
-                n => 5
-              );
-            exception when others then
-              v_got := array['ERROR', sqlerrm];
-            end;
+              from b3_readme_result;
+            end if;
 
             assert v_got = array[
               '1', '8231004856741017', 'raw', '0.03',
