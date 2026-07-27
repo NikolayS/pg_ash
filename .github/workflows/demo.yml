@@ -12,12 +12,13 @@
 #
 #   demo-refresh  nightly, on demand, and whenever demos/** or sql/** changes.
 #                 ~3 min. Seeds a real PostgreSQL, re-captures every scene, and
-#                 records the reel. `git diff --exit-code demos/fixtures` is the
-#                 demo-rot alarm: a changed capture shape means a reader was
-#                 renamed, a column moved, or the installer path shifted. That
-#                 is the check that would have caught the demo pointing at an
-#                 installer path the release stamp had emptied, and the landing
-#                 page advertising a reader 2.0 removed — both of which shipped.
+#                 records the reel. `make -C demos rot` compares the fresh
+#                 reader contract with fixtures/shape.tsv: a changed capture
+#                 shape means a reader was renamed, a column moved, or the
+#                 installer path shifted. That is the check that would have
+#                 caught the demo pointing at an installer path the release
+#                 stamp had emptied, and the landing page advertising a reader
+#                 2.0 removed — both of which shipped.
 #
 # ZERO container-registry traffic. The previous harness required a Docker Hub
 # pull, and `auth.docker.io` returns 503 in sandboxed runners, which is the root
@@ -32,7 +33,6 @@ name: demo
 
 on:
   push:
-    branches: [main]
   pull_request:
   schedule:
     # 04:20 UTC nightly — after the test matrix, before anyone is awake to be
@@ -56,9 +56,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -111,12 +111,12 @@ jobs:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -134,8 +134,11 @@ jobs:
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
             echo "run=yes" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          git fetch --no-tags --depth=50 origin "$base" 2>/dev/null || true
-          changed="$(git diff --name-only "$base"...HEAD -- demos sql || true)"
+          # A shallow checkout need not contain a merge base. Fetch the exact
+          # base tree and use a two-tree diff; any fetch/diff error must fail
+          # this step, never turn the expensive gate into a false green.
+          git fetch --no-tags --depth=1 origin "$base"
+          changed="$(git diff --name-only "$base" HEAD -- demos sql)"
           if [ -n "$changed" ]; then echo "run=yes" >> "$GITHUB_OUTPUT"
           else echo "run=no" >> "$GITHUB_OUTPUT"; fi
 
@@ -146,19 +149,19 @@ jobs:
         # traffic, which is the whole point.
         run: |
           set -Eeuo pipefail
-          sudo systemctl start postgresql || sudo pg_ctlcluster "$(pg_lsclusters -h | awk 'NR==1{print $1}')" main start
-          for i in $(seq 1 30); do pg_isready -q && break; sleep 1; done
+          sudo systemctl start postgresql.service
+          for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
           pg_isready
           sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
-            "create role \"$USER\" superuser login" || true
+            "create role ash_demo_ci superuser login"
           # pg_stat_statements gives ash.top('query_id') its query text. pg_cron
           # is deliberately NOT installed: the harness drives sampling itself,
           # which is both the portable path and the honest one for the RDS /
           # Cloud SQL / Supabase / Neon users who cannot have pg_cron either.
           sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
             "alter system set shared_preload_libraries = 'pg_stat_statements'"
-          sudo systemctl restart postgresql || true
-          for i in $(seq 1 30); do pg_isready -q && break; sleep 1; done
+          sudo systemctl restart postgresql.service
+          for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
           pg_isready
 
       - name: Install the tier-3 dependencies
@@ -168,16 +171,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux ffmpeg gifsicle postgresql-client
           python -m pip install --quiet asciinema pillow fonttools brotli
-          # agg ships a single static binary in its GitHub release. No cargo
-          # build, no Docker Hub, no registry auth.
+          # agg ships a single release binary. No cargo build, no Docker Hub,
+          # no registry auth. Pin its digest so a changed download fails loud.
           AGG_VER="1.7.0"
-          curl -fsSL -o /usr/local/bin/agg \
+          AGG_SHA256="b72c773c22ef73149540f5728b37290dffe88418f0a16ceab29bc8e43699abf7"
+          agg_tmp="$RUNNER_TEMP/agg"
+          curl -fsSL -o "$agg_tmp" \
             "https://github.com/asciinema/agg/releases/download/v${AGG_VER}/agg-x86_64-unknown-linux-gnu"
-          sudo chmod +x /usr/local/bin/agg
+          printf '%s  %s\n' "$AGG_SHA256" "$agg_tmp" | sha256sum -c -
+          sudo install -m 0755 "$agg_tmp" /usr/local/bin/agg
           agg --version
 
       - name: make doctor
         if: steps.gate.outputs.run == 'yes'
+        env:
+          PGHOST: /var/run/postgresql
+          PGUSER: ash_demo_ci
         run: make -C demos doctor
 
       - name: make all — seed, capture, stills, reel
@@ -185,7 +194,7 @@ jobs:
         env:
           ASH_BACKEND: local
           PGHOST: /var/run/postgresql
-          PGUSER: ${{ github.actor }}
+          PGUSER: ash_demo_ci
         run: make -C demos all
 
       - name: Demo-rot alarm
@@ -205,7 +214,7 @@ jobs:
 
       - name: Upload the artifacts a human can eyeball
         if: steps.gate.outputs.run == 'yes' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: demo-assets
           if-no-files-found: warn
@@ -221,5 +230,8 @@ jobs:
             demos/out/shots/*.ansi
 
       - name: Teardown
-        if: always()
-        run: make -C demos down || true
+        if: always() && steps.gate.outputs.run == 'yes'
+        env:
+          PGHOST: /var/run/postgresql
+          PGUSER: ash_demo_ci
+        run: make -C demos down
