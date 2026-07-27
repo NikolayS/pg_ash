@@ -7088,9 +7088,10 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
           begin;
 
-          -- A wide aggregate read may prefer rollup_1m only when that rollup
-          -- covers the requested end. If raw covers the whole window while the
-          -- rollup worker lags, choosing rollup silently drops the recent load.
+          -- When raw covers a wide aggregate window, rollup_1m may replace it
+          -- only if that rollup covers the requested end. Otherwise a lagging
+          -- worker would silently drop recent raw load. Completeness for a
+          -- stalled rollup older than physical raw coverage remains #122.
           -- Conversely, a healthy rollup must keep the fast path when a
           -- dashboard rounds until up to the next minute boundary.
           do $$
