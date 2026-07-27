@@ -1799,7 +1799,7 @@ begin
     job_id := null;
     status :=
       'schedule ash.rollup_minute() every minute, ash.rollup_hour() '
-      'every hour, ash.rollup_cleanup() daily';
+      'at minute 1 every hour, ash.rollup_cleanup() daily';
     return next;
 
     raise notice
@@ -1817,7 +1817,8 @@ begin
       '(default: daily).';
     raise notice
       'Schedule rollup: ash.rollup_minute() every minute, '
-      'ash.rollup_hour() every hour, ash.rollup_cleanup() daily.';
+      'ash.rollup_hour() at minute 1 every hour, '
+      'ash.rollup_cleanup() daily.';
 
     return;
   end if;
@@ -6427,15 +6428,23 @@ declare
 begin
   if ash._pg_cron_available() then
     for v_hourly_job in
-      select jobid
+      select jobname, command
       from cron.job
       where jobname = 'ash_rollup_1h'
         and database = current_database()
+        and username = current_user
         and schedule = '0 * * * *'
     loop
-      perform cron.alter_job(
-        job_id := v_hourly_job.jobid,
-        schedule := '1 * * * *'
+      /*
+       * Named cron.schedule() updates the caller's existing job in place and
+       * is available to ordinary pg_cron job owners. cron.alter_job() is not:
+       * pg_cron revokes it from PUBLIC by default. Reusing the stored command
+       * also preserves custom command text; pg_cron keeps jobid/active state.
+       */
+      perform cron.schedule(
+        v_hourly_job.jobname,
+        '1 * * * *',
+        v_hourly_job.command
       );
     end loop;
   end if;
