@@ -152,8 +152,11 @@ jobs:
           sudo systemctl start postgresql.service
           for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
           pg_isready
-          sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
-            "create role ash_demo_ci superuser login"
+          # Ubuntu's local socket uses peer authentication. Give the runner's
+          # actual OS user a matching PostgreSQL role, then publish that
+          # connection identity to all later steps.
+          ci_role="$(id -un)"
+          sudo -u postgres createuser --superuser "$ci_role"
           # pg_stat_statements gives ash.top('query_id') its query text. pg_cron
           # is deliberately NOT installed: the harness drives sampling itself,
           # which is both the portable path and the honest one for the RDS /
@@ -163,6 +166,13 @@ jobs:
           sudo systemctl restart postgresql.service
           for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
           pg_isready
+          PGHOST=/var/run/postgresql PGUSER="$ci_role" \
+            psql -v ON_ERROR_STOP=1 -d postgres -Atqc \
+            "select current_user" | grep -Fx "$ci_role"
+          {
+            echo "PGHOST=/var/run/postgresql"
+            echo "PGUSER=$ci_role"
+          } >> "$GITHUB_ENV"
 
       - name: Install the tier-3 dependencies
         if: steps.gate.outputs.run == 'yes'
@@ -184,17 +194,12 @@ jobs:
 
       - name: make doctor
         if: steps.gate.outputs.run == 'yes'
-        env:
-          PGHOST: /var/run/postgresql
-          PGUSER: ash_demo_ci
         run: make -C demos doctor
 
       - name: make all — seed, capture, stills, reel
         if: steps.gate.outputs.run == 'yes'
         env:
           ASH_BACKEND: local
-          PGHOST: /var/run/postgresql
-          PGUSER: ash_demo_ci
         run: make -C demos all
 
       - name: Demo-rot alarm
@@ -231,7 +236,4 @@ jobs:
 
       - name: Teardown
         if: always() && steps.gate.outputs.run == 'yes'
-        env:
-          PGHOST: /var/run/postgresql
-          PGUSER: ash_demo_ci
         run: make -C demos down
