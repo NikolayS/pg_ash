@@ -105,8 +105,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PG19 is still beta, so the official image tag is 19beta1 until GA.
-        postgres: [14, 15, 16, 17, 18, 19beta1]
+        # PG19 is still beta, so the official image tag is 19beta2 until GA.
+        postgres: [14, 15, 16, 17, 18, 19beta2]
         # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
         # compares these as strings in the step-level `if`/conditionals.
         cron: ["on"]
@@ -2627,36 +2627,8 @@ jobs:
           # Give the sleepers a moment to register in pg_stat_activity.
           sleep 2
 
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Clean slate: stop any prior sampler, truncate raw partitions
-          -- so the post-baseline count is unambiguous.
-          select ash.stop();
-          truncate ash.sample_0, ash.sample_1, ash.sample_2;
-
-          -- Capture pre-start baseline (should be 0 across all slots).
-          do $$
-          declare
-            v_baseline bigint;
-          begin
-            select count(*) into v_baseline from ash.sample;
-            assert v_baseline = 0,
-              format('expected 0 samples after truncate, got %s', v_baseline);
-          end $$;
-
-          -- Schedule sampling at 1 Hz via pg_cron.
-          select ash.start('1 second');
-
-          -- Sanity: cron.job has the ash row.
-          do $$
-          declare
-            v_jobs int;
-          begin
-            select count(*) into v_jobs
-            from cron.job where jobname like 'ash_%';
-            assert v_jobs >= 1,
-              format('expected ash_* job(s) in cron.job, got %s', v_jobs);
-          end $$;
-          EOF
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f devel/tests/cron_path.sql
 
           # Poll for actual job runs. With cron.use_background_workers=on
           # the jobs fire as bgworkers — but cron.job_run_details is only
@@ -11020,67 +10992,6 @@ jobs:
             --dbname=postgres
           )
 
-          cat > /tmp/ash_schema_snapshot.sql << 'SNAPSQL'
-          \pset tuples_only on
-          \pset format unaligned
-          select 'FUNC', p.proname,
-                 pg_get_function_identity_arguments(p.oid),
-                 pg_get_function_result(p.oid),
-                 md5(p.prosrc)
-          from pg_proc p
-          join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'ash'
-          order by p.proname, pg_get_function_identity_arguments(p.oid);
-
-          select 'COL', c.relname, a.attname,
-                 pg_catalog.format_type(a.atttypid, a.atttypmod),
-                 a.attnotnull,
-                 pg_get_expr(d.adbin, d.adrelid)
-          from pg_class c
-          join pg_namespace n on n.oid = c.relnamespace
-          join pg_attribute a on a.attrelid = c.oid
-          left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
-          where n.nspname = 'ash' and c.relkind in ('r','p') and a.attnum > 0 and not a.attisdropped
-          order by c.relname, a.attname;
-
-          select 'IDX', c.relname, pg_get_indexdef(i.indexrelid)
-          from pg_index i
-          join pg_class c on c.oid = i.indexrelid
-          join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = 'ash'
-          order by c.relname;
-
-          select 'VIEW', viewname, md5(definition)
-          from pg_views
-          where schemaname = 'ash'
-          order by viewname;
-
-          -- Issue #66: include CHECK / NOT NULL / PK / UNIQUE / FK constraints.
-          -- Covers parent partitioned tables AND their partitions (relkind r,p).
-          -- pg_get_constraintdef gives a stable canonical text form, so any
-          -- divergence (e.g. sample_data_check `>= 2` vs `>= 3` from #49)
-          -- surfaces here.
-          select 'CON', c.relname, con.conname, pg_get_constraintdef(con.oid)
-          from pg_constraint con
-          join pg_class c on c.oid = con.conrelid
-          join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = 'ash' and c.relkind in ('r','p')
-          order by c.relname, con.conname;
-
-          -- Issue #107: privilege state must be equivalent too. proacl is
-          -- NULL until the first GRANT/REVOKE touches a function; the
-          -- installer's REVOKE-from-PUBLIC hardening always runs, so a fresh
-          -- install and the full upgrade chain must converge to identical
-          -- explicit function ACLs.
-          select 'FACL', p.proname,
-                 pg_get_function_identity_arguments(p.oid),
-                 coalesce(p.proacl::text, '<default>')
-          from pg_proc p
-          join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'ash'
-          order by p.proname, pg_get_function_identity_arguments(p.oid);
-          SNAPSQL
-
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
           git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
 
@@ -11091,7 +11002,7 @@ jobs:
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
-            --file=/tmp/ash_schema_snapshot.sql \
+            --file=devel/tests/schema_snapshot.sql \
             > /tmp/fresh_schema.txt
           "${psql_base[@]}" \
             --command="select ash.uninstall('yes')" \
@@ -11104,7 +11015,7 @@ jobs:
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
-            --file=/tmp/ash_schema_snapshot.sql \
+            --file=devel/tests/schema_snapshot.sql \
             > /tmp/upgraded_schema.txt
           "${psql_base[@]}" \
             --command="select ash.uninstall('yes')" \
@@ -11124,7 +11035,7 @@ jobs:
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
-            --file=/tmp/ash_schema_snapshot.sql \
+            --file=devel/tests/schema_snapshot.sql \
             > /tmp/upgraded_v15_schema.txt
           "${psql_base[@]}" \
             --command="select ash.uninstall('yes')" \
@@ -11201,71 +11112,8 @@ jobs:
             -c "drop extension if exists pg_stat_statements"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Degraded mode: pg_ash freshly installed WITHOUT pg_stat_statements.
-          -- Every 2.0 reader must work; query_text degrades to NULL and is never spoofed
-          -- by a user-created public.pg_stat_statements relation (#87).
-          insert into ash.wait_event_map (state, type, event) values
-            ('active', 'CPU*', 'CPU*') on conflict do nothing;
-          insert into ash.query_map_0 (query_id) values (999999) on conflict do nothing;
-
-          do $$
-          declare
-            v_cpu smallint; v_q1 int4; v_ts int4; v_from timestamptz;
-            n int; tcnt int; j jsonb;
-          begin
-            select id into v_cpu from ash.wait_event_map where type = 'CPU*';
-            select id into v_q1 from ash.query_map_0 where query_id = 999999;
-            -- Minute-aligned 3 minutes back so a window from here reads raw.
-            v_ts := (ash.ts_from_timestamptz(date_trunc('minute', now() - interval '3 minutes')) / 60) * 60;
-            v_from := ash.ts_to_timestamptz(v_ts);
-            insert into ash.sample (sample_ts, datid, active_count, data, slot)
-              values (v_ts, 1, 1, array[-v_cpu, 1, v_q1]::integer[], 0);
-            perform ash.rollup_minute();
-
-            -- Every reader runs without pgss; query_text is NULL, no error, no WARNING.
-            perform ash.periods();
-            perform * from ash.aas(v_from, now());
-            perform * from ash.timeline(v_from, now());
-            perform * from ash.compare(v_from, now(), v_from, now());
-            perform * from ash.summary(v_from, now());
-            perform * from ash.chart(v_from, now());
-            assert (select query_text from ash.top('query_id', v_from, now()) limit 1) is null,
-              'top query_text should be NULL without pgss';
-            assert (select query_text from ash.samples(v_from, now()) limit 1) is null,
-              'samples query_text should be NULL without pgss';
-
-            -- report still produces query ids (they come from samples, not pgss).
-            j := ash.report(v_from, now());
-            assert j is not null, 'report should work without pgss';
-            assert j->'top_queryids_worst1m' ? 'total', 'report top_queryids total should be present';
-
-            perform ash.take_sample();
-            perform ash.status();
-            perform ash.set_debug_logging();
-
-            -- #87: a user-made public.pg_stat_statements must NOT be trusted as the real
-            -- extension — no row fan-out, no spoofed query_text.
-            create table public.pg_stat_statements (
-              queryid bigint, query text, calls bigint,
-              total_exec_time double precision, mean_exec_time double precision, dbid oid);
-            insert into public.pg_stat_statements values
-              (999999, 'select same from user_a', 10, 100.0, 10.0, 1::oid),
-              (999999, 'select same from user_b', 20, 400.0, 20.0, 2::oid);
-
-            select count(*), count(query_text) into n, tcnt
-              from ash.top('query_id', v_from, now()) where key = '999999';
-            assert n = 1 and tcnt = 0,
-              format('top must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s', n, tcnt);
-            select count(*), count(query_text) into n, tcnt
-              from ash.samples(v_from, now()) where query_id = 999999;
-            assert n = 1 and tcnt = 0,
-              format('samples must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s', n, tcnt);
-
-            drop table public.pg_stat_statements;
-            raise notice 'All degraded-mode (no pgss) 2.0 reader tests PASSED';
-          end $$;
-          EOF
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f devel/tests/degraded_no_pgss.sql
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "select ash.uninstall('yes')"
 
@@ -11287,65 +11135,8 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
           cronless_out="$(
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 2>&1 << 'EOF'
-          do $$
-          declare
-            v_rec record;
-            v_status_val text;
-          begin
-            -- start() should work without pg_cron (no error, prints hints)
-            select status into v_status_val
-            from ash.start('1 second')
-            where job_type = 'sampler';
-            assert v_status_val like '%schedule externally%',
-              'start() without pg_cron should say schedule externally, got: ' || v_status_val;
-
-            /*
-             * A preloaded pg_cron registers cron.database_name as
-             * postmaster-only even after DROP EXTENSION. Exercise mutable
-             * placeholder values only on the dedicated cron-off axis, where
-             * the setting starts absent.
-             */
-            if current_setting('cron.database_name', true) is null then
-              perform set_config(
-                'cron.database_name', current_database(), false
-              );
-              perform * from ash.start('1 second');
-              perform set_config(
-                'cron.database_name', 'cron_control', false
-              );
-              perform * from ash.start('1 second');
-            end if;
-
-            -- stop() should work without pg_cron
-            select status into v_status_val
-            from ash.stop()
-            limit 1;
-            assert v_status_val like '%external scheduler%',
-              'stop() without pg_cron should mention external scheduler, got: ' || v_status_val;
-
-            -- status() should show pg_cron_available = no
-            select value into v_status_val
-            from ash.status()
-            where metric = 'pg_cron_available';
-            assert v_status_val like '%no%',
-              'status() should show pg_cron not available, got: ' || v_status_val;
-
-            -- take_sample() should work without pg_cron
-            perform ash.take_sample();
-
-            -- All 2.0 reader functions should work
-            perform ash.periods();
-            perform * from ash.top('wait_event', now() - interval '1 hour', now());
-            perform * from ash.samples(now() - interval '1 hour', now());
-            perform * from ash.chart(now() - interval '1 hour', now());
-
-            raise notice 'All degraded-mode (no pg_cron) tests PASSED';
-          end;
-          $$;
-
-          select ash.uninstall('yes');
-          EOF
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -f devel/tests/degraded_no_cron.sql 2>&1
           )"
           printf '%s\n' "$cronless_out"
           if ! printf '%s\n' "$cronless_out" | grep -Fq \
@@ -11380,7 +11171,6 @@ jobs:
             echo "FAIL: ash.start emitted the old cluster-wide pg_cron claim" >&2
             exit 1
           fi
-
       - name: Final summary
         env:
           PGPASSWORD: postgres
