@@ -365,10 +365,24 @@ This requires a restart because `cron.log_run` is postmaster-context.
 Raw samples use a PGQ-style ring of partitions. Defaults:
 
 - `num_partitions = 3`
-- `rotation_period = '1 day'`
+- `rotation_period = '1 day'` (whole days only; minimum 1 day)
 - readable raw retention is roughly `(num_partitions - 2) * rotation_period`
 - `rollup_1m` retention is 30 days
 - `rollup_1h` retention is 5 years
+
+`ash.start()` checks rotation once a day. Multi-day periods work because early
+checks skip until the configured period is due; sub-day and fractional-day
+periods are rejected. The minute rollup must outlive the raw slot that rotation
+is about to truncate:
+
+```text
+(num_partitions - 1) * rotation_period <= rollup_1m_retention_days
+```
+
+Configuration changes and `ash.rebuild_partitions()` reject unsafe geometry
+with the full arithmetic and name the knobs to adjust. For example, 32
+one-day partitions require at least 31 days of `rollup_1m` retention; the
+default 30-day retention supports at most 31 partitions.
 
 Increase raw retention:
 
