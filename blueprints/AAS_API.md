@@ -27,18 +27,17 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
    `database`) are uniform named parameters across all readers.
 4. **Data ≠ presentation.** Data functions return typed columns only. ASCII
    bars/charts/colors live in exactly two human helpers (§5).
-5. **Source honesty (the trust property).** Every reader auto-selects its data
-   source by window (raw → `rollup_1m` → `rollup_1h`). Every over-time /
-   breakdown reader (`periods`, `aas`, `timeline`, `top`, `chart`) reports the
-   chosen source in a `source` column (`samples` reads raw only, by definition).
-   `compare()` and `report()`
-   surface provenance differently: `compare()` has no `source` column — a window
-   with no coverage yields NULL columns plus a NOTICE (never a fake zero
-   baseline, see §2.5); `report()` returns `jsonb`, so its source and coverage
-   live inside a `coverage` object (`coverage.source`, always `rollup_1m` — see
-   §4). When a request *cannot* be answered (the event↔query tie needs raw
-   samples but the window exceeds raw retention), the reader raises a clear
-   exception naming the boundary — never a silent empty result.
+5. **Source honesty (the trust property).** Aggregate readers auto-select their
+   data source by window (raw → `rollup_1m` → `rollup_1h`). `periods`, `aas`,
+   `timeline`, and `top` report it in `source`; `compare` reports
+   `source_1` / `source_2`; `report` embeds it in `coverage.source`; and the
+   presentation-only `chart` emits a `NOTICE` when hour grain widens its plan.
+   `samples` is raw-only by definition, while `summary` includes a `source`
+   metric. `rollup_1h_flat` marks legacy/incomplete detail only when a
+   minute-capable plan must degrade to hour grain. When a request *cannot* be
+   answered (the event↔query tie needs raw samples but the window exceeds raw
+   retention), the reader raises a clear exception naming the boundary—never a
+   silent empty result.
 6. **Self-describing.** Every function carries a catalog `comment` stating the
    unit, the column contract, and the recommended next call, so an AI agent
    can navigate via `\df+` / `obj_description()` alone.
@@ -77,50 +76,74 @@ bucket          interval    default '1 minute'  -- sub-bucket grain for peak/p99
 
 `peak_aas` = max per-`bucket` AAS over the window; `p99_aas` =
 `percentile_cont(0.99)` over the same per-bucket AAS values, **zero-filled**
-for buckets with no activity within data coverage. Buckets with *no data*
-(sampler off) are excluded from percentiles and reported via coverage columns.
+for stored buckets with no matching activity. When retained grain is coarser
+than the requested `bucket`, both extrema are **NULL** rather than presenting
+an hour average as a minute peak/percentile. A missing stored row does not say
+why it is missing: `take_sample()` writes no row when no backend qualifies, so
+a sampled-idle minute and an uncovered minute are indistinguishable until
+sampling cadence/coverage is persisted by issue #137.
 
 ### 2.1 `ash.periods(until timestamptz default null)`
 
-One row per standard trailing window (1m, 5m, 1h, 1d, 1w, 1mo) ending at
-`until` (default `now()`). The zero-argument "start here" call.
+One row per standard trailing window (1m, 5m, 1h, 1d, 1w, 1mo) requested to
+end at `until` (default `now()`). The zero-argument "start here" call.
 
 Returns:
 `(period text, period_start timestamptz, period_end timestamptz, source text,
 bucket interval, buckets_with_data bigint, avg_aas numeric, peak_aas numeric,
 p99_aas numeric)`
 
-`buckets_with_data` (renamed from `minutes_with_data`, to match `aas()`) counts
-the covered buckets at the grain named by the new `bucket` column. Every
-unfiltered read is minute-grain after the `rollup_1h` seam fix, so `bucket` is
-always `'1 minute'` here — `43200 @ 1 minute` reads without cross-referencing.
+`period_start` / `period_end` are the effective returned bounds. They normally
+match the requested trailing window, but an hour-only plan snaps them outward,
+so `period_end` can be later than `until`. `buckets_with_data` (renamed from
+`minutes_with_data`, to match `aas()`) counts covered buckets at the effective
+grain named by `bucket`. Genuine `rollup_1h.minute_counts` keeps unfiltered
+reads at one minute. If a minute-capable plan encounters legacy/incomplete
+detail, the row reports `source = 'rollup_1h_flat'`, `bucket = '1 hour'`, and
+NULL sub-hour extrema instead of synthesizing 60 measured minutes.
 
 ### 2.2 `ash.aas(since, until, wait_event_type, wait_event, query_id, database, bucket)`
 
-Scalar load summary for one window, optionally filtered. This is also the
-US-4 "leaf summary": `ash.aas(wait_event => 'DataFileRead')` returns that
-event's avg/peak/p99.
+Scalar load summary for one effective window, optionally filtered. This is
+also the US-4 "leaf summary":
+`ash.aas(wait_event => 'DataFileRead')` returns that event's avg/peak/p99.
 
 Returns one row:
 `(period_start timestamptz, period_end timestamptz, source text,
+effective_bucket interval,
 buckets_expected bigint, buckets_with_data bigint,
 avg_aas numeric, peak_aas numeric, p99_aas numeric, backend_seconds numeric)`
 
 The per-`bucket` peak/p99 buckets are **calendar-aligned** (§2.3): floored to
-`bucket` on UTC/epoch boundaries, not anchored to `since`, so the same
-absolute window always yields the same buckets regardless of when the call runs.
+`bucket` on UTC/epoch boundaries, not anchored to `since`. `effective_bucket`
+reports the bucket actually used after retained-grain widening. A bucket that
+is not a whole multiple of retained grain is rounded **up** to the next
+multiple, so the effective bucket is never finer than the request. On
+`rollup_1h`, wait/query-filtered reads have only hour arrays; partial bounds
+snap outward to complete hours and are disclosed by `period_start` /
+`period_end`. Their average/backend seconds are exact for that disclosed
+effective window, while
+peak/p99 requested below one hour are NULL. Unfiltered/database-only reads use
+per-`(ts, datid)` `minute_counts` when valid. Legacy/incomplete detail reports
+`rollup_1h_flat` and follows the honest hour-grain behavior.
 
 ### 2.3 `ash.timeline(since, until, bucket interval default null, filters…)`
 
 Time series. `bucket => null` auto-selects grain by span (≤ 6 h → 1 minute,
 ≤ 7 d → 1 hour, else 1 day) and is always safely bounded. Emits a row for
-**every** bucket in the window: `data_points = 0` with null AAS marks
-"no data", distinguishing it from measured-zero load. When ranking buckets to
-find a spike, use `order by peak_aas desc nulls last` — no-data buckets carry
-null `peak_aas`, which sorts first under a bare `desc` and would hide the spike. An **explicit**
+**every** effective bucket in the window. `data_points = 0` with NULL AAS
+means there is no stored observation. It cannot distinguish sampled-idle from
+uncovered time because both states store no row; issue #137 tracks the
+coverage/cadence architecture needed to do that. When ranking buckets to find
+a spike, use `order by peak_aas desc nulls last` — no-observation buckets carry
+NULL `peak_aas`, which sorts first under a bare `desc` and would hide the spike. An **explicit**
 `bucket` that would emit more than 100 000 buckets (e.g. `'1 minute'` over a
 year) raises rather than materialize an unbounded result — pass `null` for
 auto-grain or a coarser bucket.
+
+An explicit bucket that is not a whole multiple of retained grain widens to
+the next multiple (for example, 90 seconds over minute data becomes 2
+minutes); it never rounds down to a finer bucket.
 
 **Calendar-aligned buckets.** `bucket_start` is floored to `bucket` on
 UTC/epoch boundaries — a 1-minute bucket starts on the minute, a 1-hour bucket
@@ -135,11 +158,14 @@ Returns:
 `(bucket_start timestamptz, source text, data_points bigint,
 avg_aas numeric, peak_aas numeric, p99_aas numeric)`
 
-`peak_aas` and `p99_aas` are **per-minute even on `rollup_1h`-backed windows**:
-`rollup_hour()` preserves per-minute totals in `rollup_1h.minute_counts`, so a
-long-window read keeps minute-grain extremes across the hourly seam (US-6). The
-only case that returns null `p99_aas` is a **wait/query-filtered**
-`rollup_1h`-backed bucket, where the surviving grain is the hour.
+`peak_aas` and `p99_aas` stay per-minute on a `rollup_1h`-backed window only
+when valid `minute_counts` preserves that detail. Wait/query-filtered reads and
+legacy/incomplete `rollup_1h_flat` reads have hour grain. Their partial bounds
+and sub-hour buckets widen outward to complete hours instead of falling
+through to unavailable `rollup_1m`; both extrema are NULL when the requested
+bucket is finer than that retained grain. `data_points` counts retained-grain
+rows contributing to the effective bucket (for example, about 60 minute rows
+in a covered one-hour bucket), not one-second samples.
 
 ### 2.4 `ash.top(dimension text, since, until, filters…, n int default 10, bucket, order_by text default 'avg')`
 
@@ -157,17 +183,21 @@ select * from ash.top('query_id', wait_event => 'DataFileRead');          -- US-
 
 Returns:
 `(key text, query_text text, source text,
+period_start timestamptz, period_end timestamptz, effective_bucket interval,
 avg_aas numeric, peak_aas numeric, p99_aas numeric,
 backend_seconds numeric, pct numeric)`
 
-- **Every row carries avg + peak + p99** (US-3). `pct` is the row's share of
-  the window's total AAS.
+- Every row carries exact avg/backend seconds and `pct`, plus effective bounds
+  and bucket. `peak_aas` / `p99_aas` are NULL when retained grain exceeds the
+  requested bucket.
 - **`order_by` ∈ `'avg' | 'peak' | 'p99'` (default `'avg'`)** picks the
   ranking metric applied **before** the `n` cut. This is how you surface a
   spiky-but-low-average row: `order_by => 'peak'` ranks by the per-bucket
   spike, so a query that spiked for one minute outranks steady background rows
-  that a mean would keep on top (the spike-first triage recipe). An unknown
-  value raises `ash.top: unknown order_by <v>; use avg|peak|p99`.
+  that a mean would keep on top (the spike-first triage recipe). If the
+  requested extreme is unavailable, ordering falls back to average/total
+  rather than ranking on an undisclosed hourly surrogate. An unknown value
+  raises `ash.top: unknown order_by <v>; use avg|peak|p99`.
 - `query_text` is non-null only for `dimension = 'query_id'` with
   pg_stat_statements present **and** a caller that can read other roles'
   pgss text — i.e. holding `pg_read_all_stats` (e.g. via `pg_monitor`
@@ -195,11 +225,12 @@ backend_seconds numeric, pct numeric)`
     the exact boundary to move to: *"…raw retention starts at `<ts>` but the
     requested window starts at `<ts>`. Narrow the window to start at or after
     `<ts>` … or drill without the query/event tie."*
-- On a `rollup_1h`-backed window (`source = rollup_1h`), each row's `peak_aas`
-  and `p99_aas` collapse to **hour** grain — the per-dimension arrays are stored
-  per hour, so a one-minute spike is averaged into its hour. For a minute-grain
-  peak over a long window use `ash.timeline()`, whose unfiltered `peak_aas` stays
-  per-minute across the `rollup_1h` seam (§2.3).
+- On a `rollup_1h`-backed window, wait/query dimensions and any database
+  breakdown carrying a wait/query filter have hour grain. Partial bounds snap
+  outward, and minute-requested extrema are NULL. Plain
+  `dimension = 'database'` is the exception: `minute_counts` is stored per
+  `(ts, datid)`, so it retains minute precision. Legacy/incomplete database
+  detail reports `rollup_1h_flat`.
 
 ### 2.5 `ash.compare(since_1, until_1, since_2, until_2, dimension text default null, n int default 10, filters…, bucket)`
 
@@ -208,7 +239,10 @@ dimension: top rows by `abs(avg_delta)` (full outer across the two windows —
 a wait/query present in only one window still appears).
 
 Returns:
-`(key text, query_text text,
+`(key text, query_text text, source_1 text, source_2 text,
+period_start_1 timestamptz, period_end_1 timestamptz,
+period_start_2 timestamptz, period_end_2 timestamptz,
+effective_bucket_1 interval, effective_bucket_2 interval,
 avg_aas_1 numeric, avg_aas_2 numeric, avg_delta numeric,
 peak_aas_1 numeric, peak_aas_2 numeric,
 p99_aas_1 numeric, p99_aas_2 numeric,
@@ -222,6 +256,13 @@ pct_1 numeric, pct_2 numeric)`
   the empty window and pointing at `ash.status()`. This is consistent across
   **both** modes: the overall row and every per-dimension row. Within a
   *covered* window, an absent key is a true zero.
+- **Grain visibility.** `source_1` / `source_2`, effective bounds, and
+  `effective_bucket_1` / `_2` are constant per window. If the two retained
+  read grains differ, both peak values and both p99 values are NULL as
+  incomparable—even when an explicit coarse request makes the two effective
+  bucket labels equal. Exact averages and `avg_delta` remain available.
+  Different physical sources can still be comparable—for example valid
+  `rollup_1h.minute_counts` and `rollup_1m` are both minute grain.
 - **Validation from `compare`'s own frame.** An unknown `dimension` raises
   `ash.compare: unknown dimension <v>; use wait_event_type|wait_event|query_id|database (or null for one overall row)` —
   named `ash.compare`, not `ash.top`.
@@ -372,7 +413,10 @@ pg_ash never uses it in computation.
   wait events **UNION any event that is top-1 in at least one bucket**, plus
   `Other` — so a single-bucket spike culprit always appears in the legend even
   if it never makes the window-wide top-N. Buckets are calendar-aligned exactly
-  like `ash.timeline()` (§2.3).
+  like `ash.timeline()` (§2.3). When only hour arrays can answer a partial
+  window, the chart snaps the bounds outward and the bucket up to hour grain,
+  then emits a `NOTICE` with the effective source, bounds, and bucket instead
+  of silently falling through to missing minute data.
 - `ash.summary(since, until)` — key/value overview (v1.x `activity_summary`,
   AAS units, plus top waits/queries), the human companion to `periods`.
 
@@ -393,12 +437,16 @@ function does any of that.
   `top('wait_event', query_id => …)`) and `samples` — force `raw`, because
   rollups don't preserve that association; past raw retention they raise (§1
   rule 5) rather than return empty.
-- Each reader reports the source it used in the `source` column
-  (`raw` | `rollup_1m` | `rollup_1h` | `none`). Scalar readers and `top` pick a
-  single source per result (never mixing — no double-counting); `timeline`
-  reports its source per bucket, so a long series may show different sources
-  across rows. A window with no data at all reports `source = 'none'`
-  uniformly across readers.
+- Typed aggregate readers report `source`
+  (`raw` | `rollup_1m` | `rollup_1h` | `rollup_1h_flat` | `none`);
+  `compare` reports `source_1` / `source_2`, `report` uses JSON coverage,
+  `summary` uses a key/value metric, `samples` is raw-only, and `chart`
+  discloses hour-grain widening by `NOTICE`. `rollup_1h_flat` is a
+  conservative window-level marker for a minute-capable plan: at least one
+  contributing legacy or incomplete hour lacks trustworthy minute detail.
+  Scalar readers and `top` pick a single source/effective grain per result
+  (never mixing grains under one undisclosed label). A typed aggregate window
+  with no data reports `source = 'none'`.
 - `ash.status()` gains rows for `raw_retention_start`,
   `rollup_1m_retention_start`, `rollup_1h_retention_start` so callers can
   plan windows before querying.
@@ -417,9 +465,9 @@ Unchanged from [AAS_USER_STORIES.md §6](AAS_USER_STORIES.md) except:
   → `query_id`, …). Positional calls are unaffected; only callers passing
   named arguments need to update. This is a breaking change for v1.x named-arg
   callers.
-- **Performance budgets:** rollup-backed reads < 100 ms for a 1-day window;
-  raw-backed reads (incl. `report` over 1 day and US-4 leaf drills
-  over 1 hour) < 1 s on a default-config instance.
+- **Performance budgets:** rollup-backed reads (including `report`) < 100 ms
+  for a 1-day window; raw-backed US-4 leaf drills over 1 hour < 1 s on a
+  default-config instance.
 
 ## 8. Removed in 2.0
 
