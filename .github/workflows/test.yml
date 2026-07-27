@@ -4693,6 +4693,30 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          begin;
+
+          update ash.config
+          set num_partitions = 6,
+              current_slot = 2
+          where singleton;
+
+          do $$
+          declare
+            v_slots smallint[];
+          begin
+            select ash._active_slots() into v_slots;
+
+            assert v_slots = array[2, 1, 0, 5, 4]::smallint[],
+              format(
+                '_active_slots() for N=6/current=2: '
+                'expected {2,1,0,5,4}, got %s',
+                v_slots
+              );
+          end
+          $$;
+
+          rollback;
+
           do $$
           declare
             v_wait smallint;
