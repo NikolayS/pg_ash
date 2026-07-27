@@ -1,8 +1,8 @@
-status	c255a82e0d718b8ad5f7d015ee95c5e948f39c91edabb5fea068ea2e476ee777	pg_ash 2.0 — is it collecting?
-periods	c7dfa42c16ede4f5fd670933264cfb369ce5491cbff6a8a9c3adaba2d268be13	ash.periods() — what do I even have?
-chart	b8c7189e07e9c3f87a6a602888a86ffd8b2e354ef6eb118b1d6a3efd9dfb6cf0	ash.chart() — AAS by wait event
-top_event	9e1d7be8c0f1bfc11b22d5111bd05b41fe8f3561b618cb473bf43aaa4d255903	ash.top('wait_event') — the exact wait
-top_query	d73c7da604bd46c97781058da4c54daebefefee7dccd7747c27ad55626755b2b	ash.top('query_id') — which statement?
-compare	ec3cb2007ee75e592c6b34de718b6a497cf660fb646c289fef4a6cba7e0f4159	ash.compare() — incident vs baseline
-summary	3a00aa57ca7ac02a1e313abc364bcc1302deb2a067df5bfdd909c8ecda89a135	ash.summary() — the one-paragraph verdict
-report	94429729d5ff89192a8f043738713e9e25791dfe68c61f11098142615b62ca83	ash.report() — hand this to an LLM
+status	3748c60347e6acaa5f39007eb6f1157bbbf0bdb9d5db6b353cc4cb5241df7f0e	pg_ash 2.0 — is it collecting?
+periods	a5cabf0292e8ac69a074457e3b87ffc8213979857f90d86ec1face432f6bca3e	ash.periods() — what do I even have?
+chart	7adec15902200c480e7ed002b4153bb961ee2cfbe1827838045d5394e2bc9e54	ash.chart() — AAS by wait event
+top_event	9625128ed0917ad59f41aa5b624fe747afe0bec4e39941d46c7ba68cd4b8c229	ash.top('wait_event') — the exact wait
+top_query	d8843bcda15a8bc498f312a37c8e2c7f3db9fa7bfe40ec8a21512684bb1ebc1c	ash.top('query_id') — which statement?
+compare	995bfc462998f289bc4b9a5518162a6312857e9cfb2321e74b36c26e0eb4e64a	ash.compare() — incident vs baseline
+summary	816a7f61ce72c19acf440b8c69bcdb0a1f07ee304d2547fc65269ae7dbaeb8f1	ash.summary() — the one-paragraph verdict
+report	7ace646609377622c617810ad131ab3cfb289826799976b7553ed90563784c06	ash.report() — hand this to an LLM

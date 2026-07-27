@@ -1,42 +1,43 @@
 [38;2;80;250;123mash [38;2;98;114;164m▸ [38;2;230;237;243mselect jsonb_pretty(ash.report(since => $STORM_SINCE, until => $STORM_UNTIL, n => 2) -[0m
-[38;2;230;237;243m      array['aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m', 'top_queryids_p999',[0m
-[38;2;230;237;243m       'top_queryids_worst1m']) as report;[0m
+[38;2;230;237;243m      array['cluster_name', 'aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m',[0m
+[38;2;230;237;243m      'top_queryids_p999', 'top_queryids_worst1m']) as report;[0m
 
 {
     "aas_avg": {
-        "io": 0.37,
-        "cpu": 2.15,
-        "ipc": 0.03,
-        "lock": 11.02,
-        "total": 13.74,
+        "io": 0.68,
+        "cpu": 1.20,
+        "ipc": 0.07,
+        "lock": 11.08,
+        "total": 13.20,
         "lwlock": 0.17
     },
     "aas_p99": {
-        "io": 0.58,
-        "cpu": 2.41,
-        "ipc": 0.16,
+        "io": 0.91,
+        "cpu": 1.49,
+        "ipc": 0.08,
         "lock": 11.16,
-        "total": 14.00,
-        "lwlock": 0.25
+        "total": 13.49,
+        "lwlock": 0.33
     },
     "coverage": {
-        "to": "2026-07-27T00:49:00-07:00",
-        "from": "2026-07-27T00:44:00-07:00",
+        "to": "2026-07-27T22:49:00+00:00",
+        "from": "2026-07-27T22:44:00+00:00",
         "source": "rollup_1m",
         "minutes_expected": 5,
         "minutes_with_data": 5,
-        "raw_retention_start": "2026-07-27T00:32:00-07:00"
+        "raw_retention_start": "2026-07-26T23:36:00+00:00"
     },
     "top_events_p99": {
         "io": [
-            "WalWrite(0.6)"
+            "WalSync(0.8)",
+            "DataFileRead(0.1)"
         ],
         "ipc": [
-            "BgworkerShutdown(0.2)"
+            "BgworkerShutdown(0.1)"
         ],
         "lock": [
-            "transactionid(8.8)",
-            "tuple(2.3)"
+            "transactionid(10.5)",
+            "tuple(0.7)"
         ],
         "lwlock": [
             "WALWrite(0.3)"
@@ -44,23 +45,22 @@
     },
     "top_queryids_p99": {
         "io": [
-            "3886912043147135675(0.3)",
-            "-6796648778530205384(0.1)"
+            "-2835399305386018931(0.3)",
+            "-7079852731576173083(0.2)"
         ],
         "ipc": [
-            "-2538398869712507982(0.2)"
+            "6627483964256586084(0.1)"
         ],
         "lock": [
-            "-6796648778530205384(11.0)",
-            "3886912043147135675(0.1)"
+            "-1236273962537500931(11.0)",
+            "-7185852639686726986(0.1)"
         ],
         "total": [
-            "-6796648778530205384(11.5)",
-            "-2538398869712507982(1.0)"
+            "-1236273962537500931(11.1)",
+            "-2835399305386018931(1.1)"
         ],
         "lwlock": [
-            "-1980831870093258527(0.1)",
-            "3886912043147135675(0.1)"
+            "-2835399305386018931(0.3)"
         ]
     },
     "top_queryids_available": true
