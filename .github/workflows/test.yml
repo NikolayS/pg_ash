@@ -446,6 +446,34 @@ jobs:
           end $$;
           EOF
 
+          # A caller's interactive psql configuration must not turn each
+          # installer statement into a savepoint and make a partial install
+          # committable after the first error.
+          printf '\\set ON_ERROR_ROLLBACK on\n\\i %s\ncommit;\n\\q\n' \
+            "${install_path}" |
+            script --quiet --return \
+              --command \
+              "psql --no-psqlrc --host=localhost --username=postgres --dbname=ash_atomic_failure_test" \
+              /dev/null \
+              >"${failure_log_dir}/on-error-rollback.log" 2>&1
+          if ! grep -Fq \
+              "forced mid-install failure at ash.rollup_1m" \
+              "${failure_log_dir}/on-error-rollback.log"; then
+            cat "${failure_log_dir}/on-error-rollback.log" >&2
+            echo "interactive installer did not reach the forced failure" >&2
+            exit 1
+          fi
+
+          "${psql_base[@]}" \
+            --dbname=ash_atomic_failure_test \
+            --set=ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            assert to_regnamespace('ash') is null,
+              'ON_ERROR_ROLLBACK allowed a partial installer commit';
+          end $$;
+          EOF
+
       - name: Test schema and infrastructure
         env:
           PGPASSWORD: postgres
