@@ -39,6 +39,14 @@ surface has been replaced by the AAS-oriented 2.0 API:
   official `postgres:19beta1` image until the GA `postgres:19` image exists.
 - **Docs refreshed.** README examples now use the 2.0 named-argument API.
 
+## Fixes since 2.0 beta 1
+
+- **Malformed decoder input is rejected consistently.** `ash.decode_sample()`
+  now returns zero rows with a position-specific warning when a packed sample
+  array contains a NULL wait marker, count, or query-map id, matching the
+  storage validator instead of emitting a fabricated row or raising an
+  internal PL/pgSQL error. (issue #143)
+
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
 [SECURITY.md](SECURITY.md#advisory-lock-squat-dos).

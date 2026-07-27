@@ -1137,7 +1137,7 @@ begin
    */
   v_idx := 1;
   while v_idx <= v_len loop
-    if data[v_idx] >= 0 then
+    if data[v_idx] is null or data[v_idx] >= 0 then
       raise warning
         'ash.decode_sample: expected negative wait_id at position %', v_idx;
       return;
@@ -1151,7 +1151,7 @@ begin
       return;
     end if;
     v_count := data[v_idx];
-    if v_count <= 0 then
+    if v_count is null or v_count <= 0 then
       raise warning
         'ash.decode_sample: non-positive count % at position %',
         v_count, v_idx;
@@ -1166,7 +1166,7 @@ begin
       return;
     end if;
     for v_qid_idx in 1..v_count loop
-      if data[v_idx] < 0 then
+      if data[v_idx] is null or data[v_idx] < 0 then
         raise warning
           'ash.decode_sample: expected non-negative query_id at position %',
           v_idx;
