@@ -1982,7 +1982,7 @@ begin
   status := 'created';
   return next;
 
-  -- rollup_hour: every hour at minute 0
+  -- rollup_hour: every hour at minute 1, after the minute-0 rollup finishes
   begin
     perform cron.unschedule('ash_rollup_1h');
   exception when others then
@@ -1991,7 +1991,7 @@ begin
 
   select cron.schedule(
     'ash_rollup_1h',
-    '0 * * * *',
+    '1 * * * *',
     'select ash.rollup_hour()'
   ) into v_rotation_job;
 

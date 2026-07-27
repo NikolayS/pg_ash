@@ -1451,6 +1451,11 @@ jobs:
             assert v_job_id is not null, '1 second should work';
             select schedule into v_schedule from cron.job where jobid = v_job_id;
             assert v_schedule = '1 seconds', '1 second should be 1 seconds, got: ' || v_schedule;
+            select schedule into v_schedule
+            from cron.job
+            where jobname = 'ash_rollup_1h';
+            assert v_schedule = '1 * * * *',
+              'hourly rollup should run at minute 1, got: ' || v_schedule;
             perform ash.stop();
 
             select job_id into v_job_id
