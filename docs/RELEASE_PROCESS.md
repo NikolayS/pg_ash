@@ -2,23 +2,23 @@
 
 ## Version identity and prereleases
 
-Release tags use three-part semantic versions. The payload version is the tag
-with its leading `v` removed:
+Release tags use the repository's two-part version scheme. Prerelease stages
+append the stage name and counter directly to that version. The payload version
+is the tag with its leading `v` removed:
 
 | Stage | Git tag | `ash.config.version` |
 |---|---|---|
-| Development snapshot | `vX.Y.Z-dev.N` | `X.Y.Z-dev.N` |
-| Alpha | `vX.Y.Z-alpha.N` | `X.Y.Z-alpha.N` |
-| Beta | `vX.Y.Z-beta.N` | `X.Y.Z-beta.N` |
-| Release candidate | `vX.Y.Z-rc.N` | `X.Y.Z-rc.N` |
-| Final release | `vX.Y.Z` | `X.Y.Z` |
+| Alpha | `vX.Y-alphaN` | `X.Y-alphaN` |
+| Beta | `vX.Y-betaN` | `X.Y-betaN` |
+| Release candidate | `vX.Y-rcN` | `X.Y-rcN` |
+| Final release | `vX.Y` | `X.Y` |
 
-The progression is dev, alpha, beta, release candidate, then final. Alpha,
-beta, and release-candidate tags are releases, not mutable development
-markers. Their tags and payloads are immutable, and `sql/` freezes after each
-one just as it does after a final release. If SQL changes after a prerelease,
-the changed payload is staged under `devel/sql/` and receives a new identity in
-the next release-stamp PR; it must not be published under the old tag.
+The progression is alpha, beta, release candidate, then final. Alpha, beta,
+and release-candidate tags are releases, not mutable development markers.
+Their tags and payloads are immutable, and `sql/` freezes after each one just
+as it does after a final release. If SQL changes after a prerelease, the
+changed payload is staged under `devel/sql/` and receives a new identity in the
+next release-stamp PR; it must not be published under the old tag.
 
 Every release-stamp PR must make all release-identity surfaces agree:
 
@@ -32,12 +32,9 @@ Only the git tag has the leading `v`. CI runs
 `devel/scripts/check_release_stamp.py` in a manual pre-tag workflow and again
 for every `v*` tag. It rejects a tag whose syntax is not one of the forms
 above, whose identity differs from the released installer, or whose three
-`ash.config.version` stamp sites disagree.
-
-The historical `v2.0-alphaN` and `v2.0-beta1` tags predate the three-part,
-dotted-stage syntax. They remain immutable but are not templates for new tags.
-In particular, the final 2.0 identity is `v2.0.0` in git and `2.0.0` in the
-payload.
+`ash.config.version` stamp sites disagree. This preserves the scheme used by
+all existing tags, including `v1.0` through `v1.5`, `v2.0-alpha1`, and
+`v2.0-beta1`. The final 2.0 identity is `v2.0` in git and `2.0` in the payload.
 
 ## Between releases
 
@@ -125,30 +122,29 @@ current line's cumulative migration path for the next stamp.
 
 A prerelease-to-final release-stamp promotes the final development installer,
 keeps the current line's cumulative migration entry point, replaces
-`X.Y.Z-stage.N` with `X.Y.Z` on every release-identity surface, and leaves all
+`X.Y-stageN` with `X.Y` on every release-identity surface, and leaves all
 older finalized migrations unchanged. The current-line migration must accept:
 
 - the preceding stable release;
-- every earlier prerelease of its target release, including a historical
-  nonconforming stamp;
+- every earlier prerelease of its target release, including `2.0-beta1`;
 - the final stamp itself, so re-application remains safe.
 
-Migration filenames name stable release lines (`X.Y`); `ash.config.version`
-carries the complete `X.Y.Z-stage.N` or `X.Y.Z` payload identity. For the 2.0
-line, beta and stable users therefore use the same canonical migration:
+Migration filenames and `ash.config.version` both use the `X.Y` release line;
+prerelease payloads add `-stageN` to the version stamp. For the 2.0 line, beta
+and stable users therefore use the same canonical migration:
 
 ```sql
 \i sql/migrations/ash-1.5-to-2.0.sql
 ```
 
 The root `sql/ash-1.5-to-2.0.sql` file remains a compatibility wrapper. A user
-with the historical `2.0-beta1` payload checks out the final `v2.0.0` release
+with the `2.0-beta1` payload checks out the final `v2.0` release
 and runs the canonical migration above. Its re-apply-safe installer accepts the
-beta stamp as a valid source, stores `2.0.0` in both the config row and column
+beta stamp as a valid source, stores `2.0` in both the config row and column
 default, and makes the diagnostic report:
 
 ```text
- version | 2.0.0
+ version | 2.0
 ```
 
 from `select * from ash.status() where metric = 'version';`. No separate
@@ -164,5 +160,5 @@ backport/re-release decision.
 
 The current-line `sql/migrations/ash-1.5-to-2.0.sql` migration is provisional
 across 2.0 prereleases and becomes finalized and immutable at the stable
-`v2.0.0` tag. Each prerelease tag still freezes its checked-in copy; changes
+`v2.0` tag. Each prerelease tag still freezes its checked-in copy; changes
 are allowed only in a subsequent release-stamp PR.

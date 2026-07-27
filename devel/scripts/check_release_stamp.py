@@ -13,8 +13,7 @@ import ash_sql_chain
 RELEASE_TAG_RE = re.compile(
     r"v(?:0|[1-9][0-9]*)"
     r"\.(?:0|[1-9][0-9]*)"
-    r"\.(?:0|[1-9][0-9]*)"
-    r"(?:-(?:dev|alpha|beta|rc)\.(?:0|[1-9][0-9]*))?$"
+    r"(?:-(?:alpha|beta|rc)[1-9][0-9]*)?$"
 )
 
 
@@ -35,8 +34,8 @@ def check_release_stamp(tag: str, payload: Path) -> str:
 
     if not RELEASE_TAG_RE.fullmatch(tag):
         raise ValueError(
-            f"release tag {tag!r} must use vX.Y.Z or "
-            "vX.Y.Z-{dev,alpha,beta,rc}.N"
+            f"release tag {tag!r} must use vX.Y or "
+            "vX.Y-{alpha,beta,rc}N"
         )
 
     return (

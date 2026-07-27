@@ -13,10 +13,7 @@ CI via GitHub Actions:
 - **test.yml**: runs on pushes, PRs, and manual pre-tag dispatches — tests
   across PostgreSQL 14, 15, 16, 17, 18, 19 beta
 - Tests: fresh development install, discovered full upgrade chain up to the in-progress release, schema equivalence between fresh install and upgrade chain, idempotent re-apply of discovered re-apply-safe upgrade scripts, degraded mode (no pgss/pg_cron)
-- Version schema: three-part semantic versions with dotted stage suffixes:
-  `vX.Y.Z-dev.N`, `vX.Y.Z-alpha.N`, `vX.Y.Z-beta.N`, `vX.Y.Z-rc.N`, then
-  stable `vX.Y.Z`. Tag on main after all PRs merge. Historical two-part tags
-  remain immutable; see `docs/RELEASE_PROCESS.md`.
+- Version schema: `vMAJOR.MINOR` (e.g. `v1.3`). Tag on main after all PRs merged.
 
 After a release tag, keep `sql/` frozen at the latest released baseline until the next release-stamp PR. During a development cycle, SQL changes live under `devel/sql/`: the future final installer and, for a new stable release line, the future cumulative upgrade script. After a prerelease, the discovery helper appends a lone development installer to upgrade paths as the current-line overlay. CI must discover version chains from files via `devel/scripts/ash_sql_chain.py`, not hardcode concrete version numbers. At release stamp time, promote the development installer into `sql/ash-install.sql`, promote or update the current-line upgrade script under `sql/migrations/`, keep a root-level compatibility wrapper, bump `ash.config.version`, and remove or recreate `devel/sql/` for the next cycle. See `docs/RELEASE_PROCESS.md`.
 

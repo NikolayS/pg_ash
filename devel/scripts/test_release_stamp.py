@@ -23,9 +23,8 @@ class ReleaseStampTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.payload_path = ash_sql_chain.ROOT / "sql" / "ash-install.sql"
         cls.payload_version = ash_sql_chain.install_version(cls.payload_path)
-        core_parts = cls.payload_version.split("-", 1)[0].split(".")
-        cls.final_version = ".".join(core_parts + ["0"] * (3 - len(core_parts)))
-        cls.prerelease_version = f"{cls.final_version}-rc.1"
+        cls.final_version = cls.payload_version.split("-", 1)[0]
+        cls.prerelease_version = f"{cls.final_version}-rc1"
 
     def run_checker(
         self,
@@ -68,9 +67,9 @@ class ReleaseStampTest(unittest.TestCase):
         self.assertIn(self.payload_version, result.stderr)
 
     def test_matching_prerelease_stamps_pass(self) -> None:
-        for stage in ("dev", "alpha", "beta", "rc"):
+        for stage in ("alpha", "beta", "rc"):
             with self.subTest(stage=stage):
-                version = f"{self.final_version}-{stage}.1"
+                version = f"{self.final_version}-{stage}1"
                 with tempfile.TemporaryDirectory() as temp_dir:
                     payload = self.stamped_payload(temp_dir, version)
                     tag = f"v{version}"
@@ -90,14 +89,31 @@ class ReleaseStampTest(unittest.TestCase):
         self.assertIn(tag, result.stdout)
         self.assertIn(self.final_version, result.stdout)
 
+    def test_existing_prerelease_payload_tag_passes(self) -> None:
+        tag = f"v{self.payload_version}"
+        result = self.run_checker(tag)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(tag, result.stdout)
+        self.assertIn(self.payload_version, result.stdout)
+
     def test_matching_nonstandard_tag_is_rejected(self) -> None:
-        nonstandard_version = f"{self.final_version}-preview.1"
+        nonstandard_version = f"{self.final_version}-preview1"
         with tempfile.TemporaryDirectory() as temp_dir:
             payload = self.stamped_payload(temp_dir, nonstandard_version)
             result = self.run_checker(f"v{nonstandard_version}", payload)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must use vX.Y.Z", result.stderr)
+        self.assertIn("must use vX.Y", result.stderr)
+
+    def test_three_part_tag_is_rejected(self) -> None:
+        three_part_version = f"{self.final_version}.0"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = self.stamped_payload(temp_dir, three_part_version)
+            result = self.run_checker(f"v{three_part_version}", payload)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must use vX.Y", result.stderr)
 
     def test_numeric_identifiers_reject_leading_zeroes(self) -> None:
         leading_zero_version = f"0{self.final_version}"
@@ -106,7 +122,7 @@ class ReleaseStampTest(unittest.TestCase):
             result = self.run_checker(f"v{leading_zero_version}", payload)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must use vX.Y.Z", result.stderr)
+        self.assertIn("must use vX.Y", result.stderr)
 
     def test_inconsistent_payload_stamps_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
