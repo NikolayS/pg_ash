@@ -414,8 +414,9 @@ run_upgrade_chain() {
 
   if [[ "${major}" == "17" ]]; then
     run_ci_selection \
-      step \
-      "Release upgrade path: actual v1.4 tag to v1.5"
+      range \
+      "Release upgrade path: actual v1.4 tag to v1.5" \
+      "Release upgrade path: v1.5 rollup_1h backfill honesty (#161, #168)"
   fi
 
   run_ci_selection \
