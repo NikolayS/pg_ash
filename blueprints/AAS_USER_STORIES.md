@@ -133,8 +133,9 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
   5. Callable by the least-privilege reader role, and degrades gracefully when pg_stat_statements is absent.
 - **Primary API:** cross-cutting across the whole family.
 - **Coverage:** ✅ Covered by design — typed aggregate readers expose `source`
-  fields, while `report` uses JSON coverage, `summary` a metric, `chart` a
-  planning `NOTICE`, and `samples` is raw-only; retention rows live in
+  fields, while `report` uses JSON coverage, `summary` has separate headline
+  and wait/query drill provenance metrics, `chart` a planning `NOTICE`, and
+  `samples` is raw-only; retention rows live in
   `ash.status()`, with a raise-don't-return-empty rule for unanswerable drills
   ([AAS_API.md §5–§6](AAS_API.md)).
 - **Drivable from the catalog alone.** pg_ash self-documents in-DB, which is what

@@ -18,7 +18,9 @@ Conventions that repeat below, stated once:
   (`avg_aas` / `peak_aas` / `p99_aas`), with `backend_seconds` as a secondary
   column. Typed aggregate readers expose source columns; `report`, `summary`,
   `samples`, and `chart` disclose provenance in the forms documented in
-  [AAS_API.md](AAS_API.md).
+  [AAS_API.md](AAS_API.md). `summary` uses separate headline and wait/query
+  drill source/bounds metrics because the two plans can have different
+  effective windows.
 
 ---
 
@@ -60,7 +62,9 @@ select * from ash.periods();
 ```
 
 Reading: the last hour peaked at 41 while the average is 3.2 — a spike, not a
-sustained shift. (`ash.summary()` renders the same picture for humans.) The
+sustained shift. (`ash.summary()` renders the same picture for humans and
+labels a widened wait/query plan with `drill_source`, `drill_period_start`,
+`drill_period_end`, and `drill_effective_bucket`.) The
 `buckets_with_data` column (renamed from `minutes_with_data`) counts covered
 buckets at the effective grain named by `bucket`. Valid `minute_counts` keeps
 one-minute grain; a legacy/incomplete hour reports `rollup_1h_flat` and an
