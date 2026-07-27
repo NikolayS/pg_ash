@@ -2734,12 +2734,17 @@ begin
   v_raw_retention := (v_num_partitions - 2) * v_rotation_period;
   /*
    * Use the same stable, minute-aligned planning boundary as status() and the
-   * tie guard. With no samples, keep the historical range-NOTICE behavior by
-   * deriving the same boundary directly from the ring geometry.
-  */
-  v_retention_start := ash.ts_to_timestamptz(
-    ash.ts_from_timestamptz(
-      date_trunc('minute', v_rotated_at - v_raw_retention)
+   * tie guard. Delayed rotation can leave readable evidence older than the
+   * nominal ring horizon, so never reject it: the usable boundary is the older
+   * of physical coverage and configured capacity. With no samples, retain the
+   * geometry fallback solely for the historical out-of-range NOTICE.
+   */
+  v_retention_start := coalesce(
+    ash._raw_retention_start(),
+    ash.ts_to_timestamptz(
+      ash.ts_from_timestamptz(
+        date_trunc('minute', v_rotated_at - v_raw_retention)
+      )
     )
   );
 
@@ -2935,9 +2940,10 @@ begin
   end if;
 
   /*
-   * Retention-start boundaries (2.0): the earliest timestamp each source can
-   * answer, so a caller can plan a window before querying and knows where the
-   * raw wait<->query drill stops. NULL when the source holds no data yet.
+   * Retention-start boundaries (2.0): raw_retention_start is the reusable,
+   * minute-aligned loss boundary (the older of ring capacity and retained
+   * evidence); rollup starts are their physical oldest rows. Callers can plan
+   * windows before querying. NULL when the source holds no data yet.
    */
   metric := 'raw_retention_start';
   value := coalesce(ash._raw_retention_start()::text, 'no samples'); return next;
@@ -3810,9 +3816,10 @@ $$;
 /*
  * Physical raw coverage and logical raw retention are deliberately separate.
  * The oldest sample is exact retained evidence (and follows the active slot
- * set fixed by #128). The retention start is the minute-aligned ring boundary:
- * it advances with rotation/rebuild, not with the timestamp of the first sample
- * after install or an outage. Null when raw holds no data.
+ * set fixed by #128). The retention start is a usable minute boundary: never
+ * newer than the configured ring horizon or than older evidence preserved by
+ * a delayed rotation. It therefore does not jump to the first post-install or
+ * post-outage sample. Null when raw holds no data.
  */
 create or replace function ash._raw_oldest_sample()
 returns timestamptz
@@ -3836,12 +3843,15 @@ as $$
   )
   select case
     when raw_coverage.oldest_sample is null then null
-    else ash.ts_to_timestamptz(
-      ash.ts_from_timestamptz(
-        date_trunc(
-          'minute',
-          config_row.rotated_at
-          - (config_row.num_partitions - 2) * config_row.rotation_period
+    else least(
+      date_trunc('minute', raw_coverage.oldest_sample),
+      ash.ts_to_timestamptz(
+        ash.ts_from_timestamptz(
+          date_trunc(
+            'minute',
+            config_row.rotated_at
+            - (config_row.num_partitions - 2) * config_row.rotation_period
+          )
         )
       )
     )
@@ -6198,7 +6208,7 @@ comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigin
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is null. Reads ash.sample directly (raw retention only).$$;
 
 comment on function ash.report(timestamptz, timestamptz, int, int) is
-$$Machine-readable load report as one jsonb (US-8) for [since, until) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution. vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage; never raises. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
+$$Machine-readable load report as one jsonb (US-8) for [since, until) (default last 1 day). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution; raw_retention_start is the logical planning/loss boundary, not the physical query-attribution cutoff. vcpus (echoed, never used) and cluster_name are pass-throughs. Returns null when the window has no coverage; never raises. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
 
 comment on function ash.chart(timestamptz, timestamptz, interval, int, int, boolean) is
 $$Human render helper: stacked ASCII per-bucket AAS chart over [since, until) (default last 1 hour). Series/legend = the window-wide top n wait events PLUS any event that is top-1 in at least one bucket (so a single-bucket spike culprit is always visible), plus Other. bucket => null auto-selects grain by span; buckets are calendar-aligned like ash.timeline(). Presentation-only (columns bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with color => true or "set ash.color = on".$$;
@@ -6218,7 +6228,7 @@ $$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader e
  * reader-vs-ops split is legible from \df+ alone.
  */
 comment on function ash.status() is
-$$Installation health snapshot (readable by monitoring roles): sampling state and interval, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start, rollup_1m_retention_start, rollup_1h_retention_start — use these to plan reader windows), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
+$$Installation health snapshot (readable by monitoring roles): sampling state and interval, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
 $$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
