@@ -48,7 +48,7 @@ set local default_tablespace = '';
  * the fresh-install order so row types, SELECT * consumers, and schema
  * snapshots agree.
  *
- * The swap is atomic inside this migration transaction. ACCESS EXCLUSIVE
+ * The swap is atomic inside this normalization transaction. ACCESS EXCLUSIVE
  * serializes it with samplers and readers. DROP RESTRICT is deliberate:
  * an unexpected external dependency aborts and rolls back the migration
  * instead of being destroyed. Shipped pg_ash functions use string-bodied SQL
