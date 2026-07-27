@@ -4688,6 +4688,94 @@ jobs:
           end $$;
           EOF
 
+      - name: "Test 2.0: raw retention ignores the excluded ring slot"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          begin;
+
+          update ash.config
+          set num_partitions = 6,
+              current_slot = 2
+          where singleton;
+
+          do $$
+          declare
+            v_slots smallint[];
+          begin
+            select ash._active_slots() into v_slots;
+
+            assert v_slots = array[2, 1, 0, 5, 4]::smallint[],
+              format(
+                '_active_slots() for N=6/current=2: '
+                'expected {2,1,0,5,4}, got %s',
+                v_slots
+              );
+          end
+          $$;
+
+          rollback;
+
+          do $$
+          declare
+            v_wait smallint;
+            v_old_ts int4 := ash.ts_from_timestamptz(
+              date_trunc('minute', now()) - interval '2 days');
+            v_recent_ts int4 := ash.ts_from_timestamptz(
+              date_trunc('minute', now()) - interval '10 minutes');
+            v_start timestamptz;
+            v_status_start timestamptz;
+            v_slots smallint[];
+            v_raised boolean := false;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            update ash.config
+            set current_slot = 0, num_partitions = 3,
+                rotation_period = interval '1 day'
+            where singleton;
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait;
+
+            -- For N=3/current=0, readers retain slots {0,2}; slot 1 is the
+            -- excluded oldest ring slot awaiting its next truncate.
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values
+              (v_old_ts, 0::oid, 1, array[-v_wait, 1, 0]::int4[], 1),
+              (v_recent_ts, 0::oid, 1, array[-v_wait, 1, 0]::int4[], 0);
+
+            v_slots := ash._active_slots();
+            assert v_slots = array[0, 2]::smallint[],
+              'retained slot set should be {0,2}, got ' || v_slots::text;
+            v_start := ash._raw_retention_start();
+            assert v_start = ash.ts_to_timestamptz(v_recent_ts),
+              'raw retention start used excluded slot 1: ' || v_start::text;
+            select value::timestamptz into v_status_start
+            from ash.status() where metric = 'raw_retention_start';
+            assert v_status_start = v_start,
+              'status raw_retention_start disagrees with retained slots';
+
+            begin
+              perform * from ash.aas(
+                ash.ts_to_timestamptz(v_old_ts),
+                ash.ts_to_timestamptz(v_old_ts + 60),
+                wait_event => 'CPU*', query_id => 128128
+              );
+            exception when others then
+              if sqlerrm like '%entirely outside raw retention%' then
+                v_raised := true;
+              else
+                raise;
+              end if;
+            end;
+            assert v_raised,
+              'tie drill over the excluded slot must raise past retention';
+
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            raise notice 'raw retention excludes the oldest ring slot PASSED';
+          end $$;
+          EOF
+
       - name: "Test v1.4: status output"
         env:
           PGPASSWORD: postgres
