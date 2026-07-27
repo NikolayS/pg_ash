@@ -24,7 +24,9 @@
  *     with `select ash.revoke_reader('pg_monitor')`), and
  *   * stamps ash.config.version = '2.0-beta1' (and the column default).
  *
- * Sampling, storage, rollups, and admin/lifecycle functions are unchanged.
+ * Sampling and storage are unchanged. Other admin/lifecycle behavior and
+ * rollup scheduling remain compatible; rollup_minute()/rollup_hour() correct
+ * only their return values to count time grains instead of per-database rows.
  * Re-apply-safe: the installer is idempotent (CREATE OR REPLACE / IF NOT
  * EXISTS plus the deterministic drop block), so running this script again is
  * a no-op.

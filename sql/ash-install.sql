@@ -3556,7 +3556,8 @@ begin
       end if;
     end if;
 
-    v_total := v_total + v_count;
+    -- One loop iteration processes one minute, independent of datid row count.
+    v_total := v_total + 1;
 
     -- Advance watermark transactionally.
     update ash.config
@@ -3588,7 +3589,6 @@ declare
   v_hour_end int4;
   v_batch_limit int := 24;
   v_total int := 0;
-  v_count int;
 begin
   /*
    * Wait for the shared rollup lock instead of skipping. The hourly pg_cron
@@ -3677,8 +3677,8 @@ begin
       query_counts = excluded.query_counts,
       minute_counts = excluded.minute_counts;
 
-    get diagnostics v_count = row_count;
-    v_total := v_total + v_count;
+    -- One loop iteration processes one hour, independent of datid row count.
+    v_total := v_total + 1;
 
     update ash.config
     set last_rollup_1h_ts = v_hour_end
