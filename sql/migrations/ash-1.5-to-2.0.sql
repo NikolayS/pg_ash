@@ -81,7 +81,8 @@ declare
     'last_rollup_1m_ts',
     'last_rollup_1h_ts',
     'insert_errors',
-    'register_wait_cap_hits'
+    'register_wait_cap_hits',
+    'consecutive_rotate_failures'
   ]::text[];
   v_canonical_types constant text[] := array[
     'boolean',
@@ -103,6 +104,7 @@ declare
     'smallint',
     'integer',
     'integer',
+    'bigint',
     'bigint',
     'bigint'
   ]::text[];
@@ -126,6 +128,7 @@ declare
     true,
     false,
     false,
+    true,
     true,
     true
   ]::bool[];
@@ -323,14 +326,26 @@ begin
       'cannot normalize ash.config: unsupported custom column storage properties';
   end if;
 
-  if exists (
-    select
+  if (
+    select count(*)
     from pg_catalog.pg_trigger as trigger_row
     where
       trigger_row.tgrelid = v_relation_oid
       and not trigger_row.tgisinternal
-  ) then
-    raise exception 'cannot normalize ash.config: custom triggers are present';
+  ) <> 1
+     or not exists (
+       select
+       from pg_catalog.pg_trigger as trigger_row
+       where
+         trigger_row.tgrelid = v_relation_oid
+         and not trigger_row.tgisinternal
+         and trigger_row.tgname = 'config_validate_rotation'
+         and trigger_row.tgfoid =
+           'ash._validate_config_update()'::regprocedure
+         and trigger_row.tgenabled = 'O'
+     ) then
+    raise exception
+      'cannot normalize ash.config: unsupported custom triggers are present';
   end if;
 
   if exists (
@@ -552,8 +567,9 @@ begin
     rollup_min_backend_seconds smallint,
     last_rollup_1m_ts          int4,
     last_rollup_1h_ts          int4,
-    insert_errors              bigint,
-    register_wait_cap_hits     bigint
+    insert_errors                bigint,
+    register_wait_cap_hits       bigint,
+    consecutive_rotate_failures bigint
   ) using heap;
 
   insert into ash.config (
@@ -577,7 +593,8 @@ begin
     last_rollup_1m_ts,
     last_rollup_1h_ts,
     insert_errors,
-    register_wait_cap_hits
+    register_wait_cap_hits,
+    consecutive_rotate_failures
   )
   select
     singleton,
@@ -600,10 +617,20 @@ begin
     last_rollup_1m_ts,
     last_rollup_1h_ts,
     insert_errors,
-    register_wait_cap_hits
+    register_wait_cap_hits,
+    consecutive_rotate_failures
   from ash.config_ordinal_legacy;
 
   drop table ash.config_ordinal_legacy restrict;
+
+  create trigger config_validate_rotation
+  before insert or update of
+    num_partitions,
+    rotation_period,
+    rollup_1m_retention_days
+  on ash.config
+  for each row
+  execute function ash._validate_config_update();
 
   v_owner_name := pg_catalog.pg_get_userbyid(v_owner_oid);
   execute format(

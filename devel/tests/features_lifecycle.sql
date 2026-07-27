@@ -637,7 +637,7 @@ begin
   v_stale_1m_ts := ash.ts_from_timestamptz(
     pg_catalog.date_trunc(
       'minute',
-      pg_catalog.now() - interval '2 days'
+      pg_catalog.now() - interval '3 days'
     )
   );
   v_recent_1m_ts := ash.ts_from_timestamptz(
@@ -646,7 +646,7 @@ begin
   v_stale_1h_ts := ash.ts_from_timestamptz(
     pg_catalog.date_trunc(
       'hour',
-      pg_catalog.now() - interval '2 days'
+      pg_catalog.now() - interval '3 days'
     )
   );
   v_recent_1h_ts := ash.ts_from_timestamptz(
@@ -655,7 +655,7 @@ begin
 
   update ash.config
   set
-    rollup_1m_retention_days = 1,
+    rollup_1m_retention_days = 2,
     rollup_1h_retention_days = 1
   where singleton;
   insert into ash.rollup_1m (

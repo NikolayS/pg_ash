@@ -138,6 +138,7 @@ require_commands() {
     pg_isready
     psql
     python3
+    script
     sed
     sort
   )
@@ -390,7 +391,7 @@ run_fresh_install() {
   install_fresh
   run_ci_selection \
     range \
-    "Test schema and infrastructure" \
+    "Test SQL entrypoints fail atomically" \
     "Test uninstall" \
     --exclude \
     "H-CI-3: end-to-end pg_cron fires ash.take_sample (#46)"
