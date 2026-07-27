@@ -299,6 +299,9 @@ create table if not exists ash.config (
 -- Insert initial row if not exists.
 insert into ash.config (singleton) values (true) on conflict do nothing;
 
+comment on column ash.config.sample_interval is
+$$Current nominal sampler interval, not a historical record. In 2.0, sample and rollup rows do not persist the interval in force when collected, so AAS readers weight all retained appearances with this current value; changing it rescales history. Intervals greater than one minute can assign the full tick weight to one minute and overstate minute extrema. Successful idle ticks also write no sample row, so activity-row availability cannot distinguish idle sampling from an outage (issues #137 and #175).$$;
+
 /*
  * Migration: add v1.4 columns if upgrading from pre-1.4. Must run before any
  * code reads these columns. Uses per-column IF NOT EXISTS so the block is

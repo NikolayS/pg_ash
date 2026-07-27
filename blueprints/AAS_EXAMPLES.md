@@ -11,8 +11,9 @@ tail behind it.
 Conventions that repeat below, stated once:
 
 - v1.5 has two functions per reader: `f(p_interval, …)` and
-  `f_at(p_start, p_end, …)`. 2.0 has one: `f(since, until, …)`, both
-  defaulting so that a bare call means "the last hour."
+  `f_at(p_start, p_end, …)`. 2.0 has one: `f(since, until, …)`. A bare call
+  means “the last hour” except for `report`, whose no-bounds default is the
+  last day; an `until`-only call means the preceding hour.
 - v1.5 units vary by function — `samples` (raw readers), `backend_seconds`
   (rollup readers), active sessions (chart only). 2.0 always answers in AAS
   (`avg_aas` / `peak_aas` / `p99_aas`), with `backend_seconds` as a secondary
@@ -21,6 +22,12 @@ Conventions that repeat below, stated once:
   [AAS_API.md](AAS_API.md). `summary` uses separate headline and wait/query
   drill source/bounds metrics because the two plans can have different
   effective windows.
+- 2.0 does not persist historical cadence or successful idle ticks. The
+  examples assume one unchanged 1-second interval. Empty source buckets cannot
+  distinguish idle load from a sampler outage (issue #137). The corrected
+  `ash.timeline()` wording and grain semantics do not add heartbeats. Sampling
+  intervals greater than one minute can also overstate one-minute extrema
+  because the full tick weight lands in one minute.
 
 ---
 
@@ -65,12 +72,13 @@ Reading: the last hour peaked at 41 while the average is 3.2 — a spike, not a
 sustained shift. (`ash.summary()` renders the same picture for humans and
 labels a widened wait/query plan with `drill_source`, `drill_period_start`,
 `drill_period_end`, and `drill_effective_bucket`.) The
-`buckets_with_data` column (renamed from `minutes_with_data`) counts covered
-buckets at the effective grain named by `bucket`. Valid `minute_counts` keeps
-one-minute grain; a legacy/incomplete hour reports `rollup_1h_flat` and an
-hour bucket instead of synthetic minute observations. `period_start` /
-`period_end` are effective bounds, so an hour-only row can snap outward and
-end after the requested `until`.
+`buckets_with_data` column (renamed from `minutes_with_data`) counts
+activity-bearing buckets, not successful sampler ticks, at the effective grain
+named by `bucket`. Valid `minute_counts` keeps one-minute grain; a
+legacy/incomplete hour reports `rollup_1h_flat` and an hour bucket instead of
+synthetic minute observations. `period_start` / `period_end` are effective
+bounds, so an hour-only row can snap outward and end after the requested
+`until`.
 
 ## 2. Locate
 
@@ -455,11 +463,12 @@ absence): attribution is decided per extreme minute. `raw_retention_start` is
 the reusable, minute-aligned planning/loss boundary, not the physical
 attribution cutoff; after a fresh install or sampler outage it can predate the
 oldest sample. `coverage` lets the consumer reconcile this payload against
-`ash.aas()` / `ash.top()` for the same window and spot degraded resolution
-(`minutes_with_data < minutes_expected`). When no extreme minute has raw
-evidence, the `top_queryids_*` objects are omitted and
-`top_queryids_available` is `false` — the `aas_*` keys still carry the load
-numbers.
+`ash.aas()` / `ash.top()` for the same window. `minutes_with_data` counts
+activity-bearing rollup minutes; a shortfall
+does not distinguish idle time, a sampler outage, retention, or delayed rollup.
+When no extreme minute has raw evidence, the `top_queryids_*` objects are
+omitted and `top_queryids_available` is `false` — the `aas_*` keys still carry
+the load numbers.
 
 ---
 

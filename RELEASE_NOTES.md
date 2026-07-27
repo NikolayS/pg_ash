@@ -75,6 +75,21 @@ AAS-oriented 2.0 API:
   completion after SQL errors. No maintained 2.0 performance harness replaces
   it yet; validate capacity and WAL on the target workload. (issue #139)
 
+## Known limitations
+
+- **Historical cadence and idle coverage are not persisted.** AAS readers
+  weight stored appearances with the current `ash.config.sample_interval`, so
+  changing it rescales earlier raw and rollup history. Successful idle sampler
+  ticks write no row; consequently `data_points`, `buckets_with_data`, and
+  report `minutes_with_data` are derived from stored activity and do not verify
+  successful sampling; they cannot distinguish sampled zero load from a
+  sampler outage. At sampling intervals greater than one minute, the full tick
+  weight is assigned to one minute, so one-minute peaks and report
+  worst-minute values can exceed observed concurrency. Keep cadence fixed and
+  monitor scheduler health independently. `ash.timeline()` now calls these
+  buckets “no stored observation,” but that catalog correction does not add
+  heartbeat storage. (issues #137 and #175)
+
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
 [SECURITY.md](SECURITY.md#advisory-lock-squat-dos).

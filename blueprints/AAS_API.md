@@ -9,6 +9,20 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
 (`take_sample`, `rotate`, `rollup_*`, `start`/`stop`, `status`,
 `grant_reader`/`revoke_reader`, `uninstall`) are unchanged.
 
+> **2.0 cadence and coverage limitation.** Sampling cadence and successful
+> idle ticks are not persisted. Every AAS reader weights historical
+> appearances with the current `ash.config.sample_interval`, so changing it
+> rescales raw and rollup history. In this document, “data” and
+> `minutes_with_data` are derived from stored activity, not verified sampler
+> coverage: an idle minute, a sampler outage, and a retention gap can have the
+> same stored representation. Keep cadence fixed and monitor the scheduler
+> independently. At intervals greater than one minute, the full tick weight
+> lands in one minute, so minute extrema can exceed observed concurrency.
+> Persisted cadence and heartbeats are tracked in issue #137.
+> `ash.timeline()` now calls these buckets “no stored observation”; its
+> corrected grain semantics do not make idle time distinguishable from an
+> outage.
+
 ---
 
 ## 1. Principles
@@ -17,9 +31,10 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
    `p99_aas` (numeric, in average-active-sessions), with `backend_seconds` as
    a secondary absolute column. The v1.x units `samples` and bare
    `backend_seconds`-as-primary disappear.
-2. **One time convention.** Every reader takes
-   `since timestamptz default null` → `now() - interval '1 hour'` and
-   `until timestamptz default null` → `now()`.
+2. **One time convention.** Reader windows are `[since, until)`. With only
+   `until`, `since` defaults to `until - interval '1 hour'`; with neither bound,
+   the default is the last hour (`report` alone defaults to the last day).
+   Explicit `since > until` raises before the overflow-safe empty-window clamp.
    The `f(interval)` / `f_at(start, end)` twin pattern is dropped — that alone
    halves the surface. "Last 24 hours" is `since => now() - interval '24 hours'`.
 3. **Dimensions are parameters, not function names.** Group-by is an argument
@@ -65,7 +80,7 @@ Seven data functions, two render helpers. (v1.5 shipped ~25 readers × 2 forms.)
 ### Common parameters (uniform everywhere they appear)
 
 ```
-since           timestamptz default null   -- null → now() - '1 hour'
+since           timestamptz default null   -- null → until - '1 hour', else reader default
 until           timestamptz default null   -- null → now()
 wait_event_type text        default null   -- filter, e.g. 'IO', 'Lock', 'CPU*'
 wait_event      text        default null   -- filter, e.g. 'DataFileRead'
@@ -96,11 +111,12 @@ p99_aas numeric)`
 `period_start` / `period_end` are the effective returned bounds. They normally
 match the requested trailing window, but an hour-only plan snaps them outward,
 so `period_end` can be later than `until`. `buckets_with_data` (renamed from
-`minutes_with_data`, to match `aas()`) counts covered buckets at the effective
-grain named by `bucket`. Genuine `rollup_1h.minute_counts` keeps unfiltered
-reads at one minute. If a minute-capable plan encounters legacy/incomplete
-detail, the row reports `source = 'rollup_1h_flat'`, `bucket = '1 hour'`, and
-NULL sub-hour extrema instead of synthesizing 60 measured minutes.
+`minutes_with_data`, to match `aas()`) counts activity-bearing buckets at the
+effective grain named by `bucket`, not successful sampler ticks. Genuine
+`rollup_1h.minute_counts` keeps unfiltered reads at one minute. If a
+minute-capable plan encounters legacy/incomplete detail, the row reports
+`source = 'rollup_1h_flat'`, `bucket = '1 hour'`, and NULL sub-hour extrema
+instead of synthesizing 60 measured minutes.
 
 ### 2.2 `ash.aas(since, until, wait_event_type, wait_event, query_id, database, bucket)`
 
@@ -250,12 +266,14 @@ pct_1 numeric, pct_2 numeric)`
 
 (With `dimension => null` the single row's `key` is `overall`.)
 
-- **Zero-coverage honesty.** A window with no data coverage (e.g. entirely past
-  retention) reports **NULL** on its side and a **NULL `avg_delta`** — never a
-  fake `0.00` baseline that would read as "no change" — plus a `NOTICE` naming
-  the empty window and pointing at `ash.status()`. This is consistent across
-  **both** modes: the overall row and every per-dimension row. Within a
-  *covered* window, an absent key is a true zero.
+- **No-source-row honesty.** A window with no stored activity-bearing source row
+  (for example, entirely past retention) reports **NULL** on its side and a
+  **NULL `avg_delta`** — never a fake `0.00` baseline that would read as “no
+  change” — plus a `NOTICE` naming the empty window and pointing at
+  `ash.status()`. The same representation can also result from sampled idle
+  time or a sampler outage. This is consistent across both modes: the overall
+  row and every per-dimension row. Within a window with recorded activity, an
+  absent key is a true zero relative to that activity.
 - **Grain visibility.** `source_1` / `source_2`, effective bounds, and
   `effective_bucket_1` / `_2` are constant per window. If the two retained
   read grains differ, both peak values and both p99 values are NULL as
@@ -308,12 +326,15 @@ For `report` (and documented for all readers):
 
 ```
 ash.report(
-  since  timestamptz default null,   -- null → now() - '1 day'
-  until    timestamptz default null,   -- null → now()
+  since  timestamptz default null,
+  until  timestamptz default null,
   vcpus int         default null,   -- optional; normalization is the platform's job
   n   int         default 3       -- top-N events/queryids per window
 ) returns jsonb
 ```
+
+With neither bound, `report` uses the last day. With only `until`, it uses the
+preceding hour. Explicit `since > until` raises before the empty-window clamp.
 
 Returns one self-contained `jsonb` load report for the window — designed so
 an external monitoring or health-assessment platform can ingest pg_ash as a
@@ -352,7 +373,10 @@ key (consumers MUST treat them as optional), so a scraper reads
 `top_queryids_available` — additive and **always present** — instead of probing
 for key absence. `coverage` (also additive, always present) lets a consumer
 reconcile the payload against `ash.aas()` / `ash.top()` for the same window and
-detect degraded resolution (`minutes_with_data < minutes_expected`).
+detect incomplete activity-bearing rollups
+(`minutes_with_data < minutes_expected`). `minutes_with_data` does not verify
+sampler heartbeats: a shortfall can reflect idle time, sampler outage,
+retention, or delayed rollup.
 `raw_retention_start` is the reusable, minute-aligned raw loss/planning
 boundary (the older of configured ring capacity and retained evidence), not
 the physical query-attribution cutoff; use `top_queryids_available` and the
@@ -368,10 +392,12 @@ ever added, never renamed or removed.
 Semantics:
 
 - **1-minute resolution.** All per-class series are per-minute AAS,
-  zero-filled over the coverage of the window; hence the `…1m` key names.
-  pg_ash's seconds-grade sampling makes these more accurate than
-  coarse-scrape (e.g. 5-min) monitoring pipelines — peaks will read equal or
-  higher than such sources, which is expected.
+  zero-filled across activity-bearing `rollup_1m` timestamps; hence the
+  `…1m` key names. Minutes without source rows do not enter the series.
+  At the recommended seconds-grade cadence, pg_ash can preserve peaks that
+  coarse-scrape (for example, 5-minute) monitoring pipelines miss. This does
+  not apply to pg_ash intervals greater than one minute, whose full tick weight
+  can overstate one-minute extrema as described above.
 - `aas_worst1m.<class>` = max per-minute AAS of that class;
   `aas_p99` / `aas_p999` = `percentile_cont(0.99 / 0.999)` over the
   zero-filled per-minute series. Per-class extremes are computed
@@ -396,11 +422,13 @@ Semantics:
 - `coverage` (always present): `{from, to, source, minutes_expected,
   minutes_with_data, raw_retention_start}`. `source` is always `rollup_1m`
   (report is exclusively rollup-backed at 1-minute resolution).
+  `minutes_with_data` counts activity-bearing rollup timestamps, not successful
+  sampler ticks.
   `raw_retention_start` is the minute-aligned planning/loss boundary; it can
   predate the oldest physical sample after a fresh install or sampler outage.
 - Never raises for missing data: classes with no samples report `0`; if
-  the whole window has no coverage at all, returns `null` (consumers should
-  skip ingestion for the period).
+  the whole window has no activity-bearing rollup row, returns `null`
+  (consumers should skip ingestion for the period; the cause is not encoded).
 - Callable by the `grant_reader` role; degrades without pg_stat_statements
   (query ids still come from samples; only `query_text` is pgss-dependent and
   is not part of this payload anyway).
