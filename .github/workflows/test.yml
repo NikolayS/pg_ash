@@ -5553,7 +5553,7 @@ jobs:
               hashtext('pg_ash_rollup')::int4
             );
             lock table ash.sample_2 in access share mode;
-            select pg_sleep(1);
+            select pg_sleep(5);
             update ash.config
             set last_rollup_1m_ts = last_rollup_1m_ts
             where singleton;
