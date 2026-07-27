@@ -3058,13 +3058,20 @@ jobs:
           end $$;
 
           -- --- raw-retention exception (tie drill before raw retention) ----------------
+          update ash.config
+          set num_partitions = 3,
+              rotation_period = interval '1 day',
+              rotated_at = date_trunc('minute', now())
+          where singleton;
+
           do $$
           declare v_base int4; v_raised boolean := false;
           begin
             select base_ts into v_base from t2anchor;
             begin
               perform * from ash.top('query_id',
-                ash.ts_to_timestamptz(v_base - 3600), ash.ts_to_timestamptz(v_base - 3000),
+                ash.ts_to_timestamptz(v_base - 172800),
+                ash.ts_to_timestamptz(v_base - 172200),
                 wait_event => 'DataFileRead');
               raise exception 'expected raw-retention exception, none raised';
             exception when others then
@@ -3080,6 +3087,11 @@ jobs:
             assert v_raised, 'raw-retention exception message mismatch';
             raise notice 'raw-retention exception PASSED';
           end $$;
+
+          update ash.config
+          set rotation_period = interval '1 day',
+              rotated_at = date_trunc('minute', now())
+          where singleton;
 
           -- --- ash.timeline (per-bucket series + no-data bucket) -----------------------
           do $$
@@ -6547,8 +6559,14 @@ jobs:
             v_cpu smallint; v_io smallint; v_q1 int4; v_dp oid;
             v_end timestamptz := date_trunc('hour', now());
             j jsonb; r record; n int; v_raised boolean;
-            v_raw timestamptz; v_bound timestamptz; v_passed timestamptz; v_msg text;
+            v_raw timestamptz; v_oldest timestamptz; v_bound timestamptz;
+            v_passed timestamptz; v_msg text; v_mid_msg text;
+            v_slots smallint[];
           begin
+            update ash.config
+            set rotation_period = interval '1 day',
+                rotated_at = v_end
+            where singleton;
             select ash._register_wait('active','CPU*','CPU*') into v_cpu;
             select ash._register_wait('active','IO','DataFileRead') into v_io;
             insert into ash.query_map_0 (query_id) values (424242);
@@ -6565,8 +6583,9 @@ jobs:
                            else array[v_cpu, 60]::int4[] end,
                       case when i = 5 then array[424242::bigint, 540]::int8[] else '{}'::int8[] end);
             end loop;
-            -- raw samples for the last 30 minutes ONLY (raw retention starts at
-            -- v_end-30min); worst minute carries the 424242 tie.
+            -- Raw samples cover the last 30 minutes only (physical coverage);
+            -- the logical planning boundary is v_end-1day. The worst minute
+            -- carries the 424242 tie.
             for i in 1..30 loop
               insert into ash.sample (sample_ts, datid, active_count, data, slot)
               values (ash.ts_from_timestamptz(v_end - (i || ' minutes')::interval), v_dp,
@@ -6593,8 +6612,10 @@ jobs:
             assert (j->'coverage'->>'minutes_with_data')::int = 120, 'coverage.minutes_with_data 120';
             assert (j->'coverage'->>'from')::timestamptz = v_end - interval '2 hours', 'coverage.from';
             assert (j->'coverage'->>'to')::timestamptz = v_end, 'coverage.to';
-            assert (j->'coverage'->>'raw_retention_start')::timestamptz = v_end - interval '30 minutes',
-              'coverage.raw_retention_start -30min, got ' || (j->'coverage'->>'raw_retention_start');
+            assert (j->'coverage'->>'raw_retention_start')::timestamptz
+                = v_end - interval '1 day',
+              'coverage.raw_retention_start -1day, got '
+                || (j->'coverage'->>'raw_retention_start');
 
             -- window whose extremes all predate raw retention: aas_* still present,
             -- attribution keys absent, availability flag false, never raises.
@@ -6611,8 +6632,8 @@ jobs:
             -- entirely past raw retention: unrecoverable, no "narrow" advice.
             v_raised := false;
             begin
-              perform * from ash.top('query_id', v_end - interval '2 hours',
-                                     v_end - interval '1 hour', wait_event => 'DataFileRead');
+              perform * from ash.top('query_id', v_end - interval '2 days',
+                                     v_end - interval '1 day', wait_event => 'DataFileRead');
               raise exception 'entirely-past tie drill should have raised';
             exception when others then
               if sqlerrm like '%entirely outside raw retention%'
@@ -6622,21 +6643,31 @@ jobs:
               else raise; end if;
             end;
             assert v_raised, 'entirely-past retention error mismatch';
-            -- partial overlap (window END inside raw retention, START before it):
+            -- Partial overlap (window END inside raw retention, START before it):
             -- the message must (a) echo the un-floored start the USER passed and
-            -- (b) advise a minute-aligned boundary that, once passed, actually
-            -- clears the guard. Readers floor since to the minute before the
-            -- guard runs, so a mid-minute raw_retention_start otherwise loops:
-            -- narrowing to exactly raw_start re-floors below it and re-raises.
-            -- Give raw retention a mid-minute start with one earlier sample.
+            -- (b) advise the logical, minute-aligned retention boundary.
             insert into ash.sample (sample_ts, datid, active_count, data, slot)
-            values (ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds'),
+            values (ash.ts_from_timestamptz(
+                      v_end - interval '1 day 40 minutes' + interval '37 seconds'
+                    ),
                     v_dp, 1, array[-v_cpu, 1, 0]::integer[], 0);
             v_raw := ash._raw_retention_start();
-            assert date_trunc('minute', v_raw) <> v_raw,
-              'test setup: raw_retention_start must be mid-minute, got ' || v_raw;
-            v_bound := date_trunc('minute', v_raw) + interval '1 minute';
-            v_passed := v_end - interval '2 hours' + interval '23 seconds';  -- mid-minute passed start
+            assert v_raw = v_end - interval '1 day 40 minutes',
+              'logical boundary must preserve delayed-rotation evidence, got '
+                || v_raw;
+            v_oldest := ash._raw_oldest_sample();
+            assert v_oldest
+                = v_end - interval '1 day 40 minutes' + interval '37 seconds',
+              'physical oldest raw sample mismatch: ' || v_oldest;
+            v_slots := ash._active_slots_for_at(
+              v_end - interval '1 day 40 minutes',
+              v_end - interval '1 day 39 minutes'
+            );
+            assert v_slots = array[0, 2]::smallint[],
+              'absolute range guard discarded delayed-rotation evidence: '
+                || v_slots::text;
+            v_bound := v_raw;
+            v_passed := v_end - interval '2 days' + interval '23 seconds';
             v_raised := false;
             begin
               perform * from ash.aas(v_passed, v_end,
@@ -6649,23 +6680,48 @@ jobs:
             -- (a) echoes the un-floored start the user actually passed (not floored v_start_ts)
             assert v_msg like '%' || v_passed::text || '%',
               'message must echo the user''s passed start ' || v_passed || ', got: ' || v_msg;
-            -- (b) advises a minute-aligned boundary >= raw_start (followable, not a loop)
+            -- (b) advises the logical boundary, rounded down to its minute.
             assert v_msg like '%start at or after ' || v_bound::text || '%',
               'hint must print minute-aligned boundary ' || v_bound || ', got: ' || v_msg;
-            -- passing exactly that boundary now SUCCEEDS (the advice is actionable)
+            -- Passing exactly the status/guard boundary succeeds.
             select count(*) into n from ash.top('query_id', v_bound, v_end,
                                                 wait_event => 'DataFileRead');
             assert n = 1, 'following the hint boundary must return the 424242 row, got ' || n;
-            -- and passing raw_start itself re-floors below it and still raises (the loop we fixed)
+            -- Defensive helper contract: if a mid-minute boundary is supplied,
+            -- floor both sides and advise DOWN, preserving its partial minute.
             v_raised := false;
             begin
-              perform * from ash.aas(v_raw, v_end, wait_event => 'DataFileRead', query_id => 424242);
-            exception when others then v_raised := true; end;
-            assert v_raised, 'passing a mid-minute raw_start re-floors below it and still raises';
+              perform ash._raise_tie_retention(
+                v_oldest,
+                ash.ts_from_timestamptz(v_passed) / 60 * 60,
+                ash.ts_from_timestamptz(v_end),
+                v_passed
+              );
+              raise exception 'mid-minute helper guard should have raised';
+            exception when others then
+              if sqlerrm like '%Narrow the window%' then
+                v_raised := true;
+                v_mid_msg := sqlerrm;
+              else
+                raise;
+              end if;
+            end;
+            assert v_raised, 'mid-minute helper retention error mismatch';
+            assert v_mid_msg like '%start at or after '
+              || date_trunc('minute', v_oldest)::text || '%',
+              'mid-minute helper hint must round down, got: ' || v_mid_msg;
+            perform ash._raise_tie_retention(
+              v_oldest,
+              ash.ts_from_timestamptz(date_trunc('minute', v_oldest)),
+              ash.ts_from_timestamptz(v_end),
+              date_trunc('minute', v_oldest)
+            );
             -- restore pre-test raw retention so downstream assertions see original state
             delete from ash.sample
-              where sample_ts = ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds');
-            raise notice 'retention error split PASSED (mid-minute hint is followable, echoes passed start)';
+              where sample_ts = ash.ts_from_timestamptz(
+                v_end - interval '1 day 40 minutes' + interval '37 seconds'
+              );
+            raise notice 'retention error split PASSED (logical boundary + down-rounded helper hint)';
 
             -- ---- compare coverage honesty ----
             -- window 1 uncovered (4..3h back): NULL columns + NULL delta, overall mode.
@@ -6767,15 +6823,19 @@ jobs:
               date_trunc('minute', now()) - interval '2 days');
             v_recent_ts int4 := ash.ts_from_timestamptz(
               date_trunc('minute', now()) - interval '10 minutes');
+            v_oldest timestamptz;
             v_start timestamptz;
             v_status_start timestamptz;
+            v_expected_start timestamptz := date_trunc('minute', now())
+              - interval '1 day';
             v_slots smallint[];
             v_raised boolean := false;
           begin
             truncate ash.sample_0, ash.sample_1, ash.sample_2;
             update ash.config
             set current_slot = 0, num_partitions = 3,
-                rotation_period = interval '1 day'
+                rotation_period = interval '1 day',
+                rotated_at = date_trunc('minute', now())
             where singleton;
             select ash._register_wait('active', 'CPU*', 'CPU*') into v_wait;
 
@@ -6790,13 +6850,16 @@ jobs:
             v_slots := ash._active_slots();
             assert v_slots = array[0, 2]::smallint[],
               'retained slot set should be {0,2}, got ' || v_slots::text;
+            v_oldest := ash._raw_oldest_sample();
+            assert v_oldest = ash.ts_to_timestamptz(v_recent_ts),
+              'oldest raw sample used excluded slot 1: ' || v_oldest::text;
             v_start := ash._raw_retention_start();
-            assert v_start = ash.ts_to_timestamptz(v_recent_ts),
-              'raw retention start used excluded slot 1: ' || v_start::text;
+            assert v_start = v_expected_start,
+              'logical raw retention start mismatch: ' || v_start::text;
             select value::timestamptz into v_status_start
             from ash.status() where metric = 'raw_retention_start';
             assert v_status_start = v_start,
-              'status raw_retention_start disagrees with retained slots';
+              'status raw_retention_start disagrees with logical boundary';
 
             begin
               perform * from ash.aas(
@@ -6817,6 +6880,325 @@ jobs:
             truncate ash.sample_0, ash.sample_1, ash.sample_2;
             raise notice 'raw retention excludes the oldest ring slot PASSED';
           end $$;
+
+          -- B3 / #163: a fresh default-interval install has only a partial first
+          -- minute. The documented five-minute tie drill must still read it,
+          -- status must return a reusable logical boundary, and remediation must
+          -- round down so it does not discard that partial minute.
+          begin;
+
+          create temp table b3_start_result (
+            result_order smallint generated always as identity,
+            job_type text,
+            job_id bigint,
+            status text
+          ) on commit drop;
+          update ash.config
+          set sample_interval = interval '7 seconds',
+              sampling_enabled = false
+          where singleton;
+          insert into b3_start_result (job_type, job_id, status)
+          select * from ash.start();
+
+          do $$
+          declare
+            v_job_types text[];
+            v_sampler_status text;
+            v_cron_available boolean := ash._pg_cron_available();
+          begin
+            assert (select sample_interval from ash.config where singleton)
+              = interval '1 second',
+              'B3 precondition: ash.start() default did not replace 7 seconds';
+            assert (select sampling_enabled from ash.config where singleton),
+              'B3 precondition: ash.start() default did not enable sampling';
+
+            select array_agg(job_type order by result_order)
+            into v_job_types
+            from b3_start_result;
+            select status into v_sampler_status
+            from b3_start_result
+            where job_type = 'sampler';
+
+            if v_cron_available then
+              assert v_job_types = array[
+                'sampler', 'rotation', 'rollup_1m', 'rollup_1h', 'rollup_gc'
+              ], 'B3 ash.start() cron result mismatch: '
+                || v_job_types::text;
+              assert not exists (
+                select from b3_start_result
+                where job_id is null or status is null or job_type = 'error'
+              ), 'B3 ash.start() cron result was not successful';
+              assert v_sampler_status in (
+                'created',
+                'already exists — schedule updated to 1 seconds'
+              ), 'B3 ash.start() sampler status mismatch: '
+                || v_sampler_status;
+            else
+              assert v_job_types = array['sampler', 'rotation', 'rollup'],
+                'B3 ash.start() external result mismatch: '
+                  || v_job_types::text;
+              assert (
+                select array_agg(status order by result_order)
+                from b3_start_result
+              ) = array[
+                'interval set to 00:00:01 — schedule externally '
+                  '(pg_cron not available)',
+                (
+                  select format(
+                    'rotation_period is %s — schedule ash.rotate() externally',
+                    rotation_period
+                  )
+                  from ash.config
+                  where singleton
+                ),
+                'schedule ash.rollup_minute() every minute, '
+                  'ash.rollup_hour() at minute 1 every hour, '
+                  'ash.rollup_cleanup() daily'
+              ], 'B3 ash.start() external statuses mismatch';
+              assert not exists (
+                select from b3_start_result
+                where job_id is not null or status is null or job_type = 'error'
+              ), 'B3 ash.start() external result was not successful';
+            end if;
+          end
+          $$;
+
+          create temp table b3_anchor (
+            anchor timestamptz primary key
+          ) on commit drop;
+          insert into b3_anchor values (date_trunc('minute', now()));
+
+          update ash.config
+          set current_slot = 0,
+              num_partitions = 3,
+              sample_interval = interval '1 second',
+              rotation_period = interval '1 day',
+              rotated_at = (select anchor from b3_anchor)
+                - interval '1 minute' + interval '59.75 seconds'
+          where singleton;
+          truncate ash.sample_0, ash.sample_1, ash.sample_2;
+          truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+          alter table ash.query_map_0 alter column id restart;
+
+          do $$
+          declare
+            v_anchor timestamptz := (select anchor from b3_anchor);
+            v_wait smallint;
+            v_map_id int4;
+            v_datid oid;
+            v_setup text[];
+          begin
+            select ash._register_wait('active', 'Lock', 'tuple') into v_wait;
+            insert into ash.query_map_0 (query_id)
+            values (8231004856741017)
+            returning id into v_map_id;
+            select oid into v_datid
+            from pg_database
+            where datname = current_database();
+
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            )
+            select
+              ash.ts_from_timestamptz(
+                v_anchor - interval '1 minute'
+                + (sample_offset || ' seconds')::interval
+              ),
+              v_datid,
+              1,
+              array[-v_wait, 1, v_map_id]::int4[],
+              0
+            from generate_series(51, 58) as sample_offset;
+
+            select array[
+              count(*)::text,
+              min(ash.ts_to_timestamptz(sample_ts))::text,
+              max(ash.ts_to_timestamptz(sample_ts))::text,
+              (min(sample_ts) % 60)::text
+            ]
+            into v_setup
+            from ash.sample;
+            assert v_setup = array[
+              '8',
+              (v_anchor - interval '1 minute' + interval '51 seconds')::text,
+              (v_anchor - interval '1 minute' + interval '58 seconds')::text,
+              '51'
+            ], 'B3 fixture mismatch: ' || v_setup::text;
+
+            select array[
+              count(*)::text,
+              min(key),
+              min(source),
+              min(backend_seconds)::text
+            ]
+            into v_setup
+            from ash.top(
+              'wait_event',
+              since => now() - interval '5 minutes'
+            );
+            assert v_setup = array['1', 'Lock:tuple', 'raw', '8.00'],
+              'B3 untied control mismatch: ' || v_setup::text;
+          end
+          $$;
+
+          -- RED 1: README.md's flagship drill, copied verbatim into the
+          -- materialized result below so its error and exact row are assertable.
+          do $$
+          declare
+            v_got text[];
+          begin
+            begin
+              create temp table b3_readme_result on commit drop as
+              select *
+              from ash.top(
+                'query_id',
+                since => now() - interval '5 minutes',
+                wait_event => 'Lock:tuple',
+                order_by => 'peak',
+                n => 5
+              );
+            exception when others then
+              v_got := array['ERROR', sqlerrm];
+            end;
+
+            if v_got is null then
+              select array[
+                count(*)::text,
+                min(key),
+                min(source),
+                min(avg_aas)::text,
+                min(peak_aas)::text,
+                min(p99_aas)::text,
+                min(backend_seconds)::text,
+                min(pct)::text
+              ]
+              into v_got
+              from b3_readme_result;
+            end if;
+
+            assert v_got = array[
+              '1', '8231004856741017', 'raw', '0.03',
+              '0.13', '0.13', '8.00', '100.00'
+            ], 'B3 README drill mismatch: ' || v_got::text;
+          end
+          $$;
+
+          -- RED 2: status.raw_retention_start must be directly reusable.
+          do $$
+          declare
+            v_anchor timestamptz := (select anchor from b3_anchor);
+            v_status_start timestamptz;
+            v_result text[];
+            v_got text[];
+          begin
+            select value::timestamptz into v_status_start
+            from ash.status()
+            where metric = 'raw_retention_start';
+
+            begin
+              select array[
+                count(*)::text,
+                min(key),
+                min(source),
+                min(avg_aas)::text,
+                min(peak_aas)::text,
+                min(p99_aas)::text,
+                min(backend_seconds)::text,
+                min(pct)::text
+              ]
+              into v_result
+              from ash.top(
+                'query_id',
+                since => (
+                  select value::timestamptz
+                  from ash.status()
+                  where metric = 'raw_retention_start'
+                ),
+                wait_event => 'Lock:tuple'
+              );
+            exception when others then
+              v_result := array['ERROR', sqlerrm];
+            end;
+            v_got := array[v_status_start::text] || v_result;
+
+            assert v_got = array[
+              (v_anchor - interval '1 day' - interval '1 minute')::text,
+              '1', '8231004856741017', 'raw', '0.00',
+              '0.13', '0.13', '8.00', '100.00'
+            ], 'B3 status boundary mismatch: ' || v_got::text;
+          end
+          $$;
+
+          -- RED 3: the guard's printed boundary must round down, and following
+          -- that exact advice must preserve all eight partial-minute samples.
+          do $$
+          declare
+            v_anchor timestamptz := (select anchor from b3_anchor);
+            v_raw_start timestamptz :=
+              (select min(ash.ts_to_timestamptz(sample_ts)) from ash.sample);
+            v_passed timestamptz := v_anchor - interval '5 minutes'
+              + interval '23 seconds';
+            v_message text;
+            v_advised timestamptz;
+            v_direction text;
+            v_result text[];
+            v_got text[];
+          begin
+            begin
+              perform ash._raise_tie_retention(
+                v_raw_start,
+                ash.ts_from_timestamptz(v_passed) / 60 * 60,
+                ash.ts_from_timestamptz(v_anchor),
+                v_passed
+              );
+              raise exception 'B3 guard should have raised for partial overlap';
+            exception when others then
+              if sqlerrm like '%Narrow the window%' then
+                v_message := sqlerrm;
+              else
+                raise;
+              end if;
+            end;
+
+            v_advised := split_part(
+              split_part(v_message, 'start at or after ', 2),
+              ' (the window end',
+              1
+            )::timestamptz;
+            v_direction := case
+              when v_advised = date_trunc('minute', v_raw_start) then 'down'
+              when v_advised = date_trunc('minute', v_raw_start)
+                + interval '1 minute' then 'up'
+              else 'other'
+            end;
+
+            select array[
+              count(*)::text,
+              min(key),
+              min(source),
+              min(avg_aas)::text,
+              min(peak_aas)::text,
+              min(p99_aas)::text,
+              min(backend_seconds)::text,
+              min(pct)::text
+            ]
+            into v_result
+            from ash.top(
+              'query_id',
+              since => v_advised,
+              until => v_anchor,
+              wait_event => 'Lock:tuple'
+            );
+            v_got := array[v_direction] || v_result;
+
+            assert v_got = array[
+              'down', '1', '8231004856741017', 'raw', '0.13',
+              '0.13', '0.13', '8.00', '100.00'
+            ], 'B3 down-rounded advice mismatch: ' || v_got::text;
+          end
+          $$;
+
+          rollback;
           EOF
 
       - name: "Test v1.4: status output and admin catalog contracts"

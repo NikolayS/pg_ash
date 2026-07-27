@@ -401,14 +401,15 @@ select ash.report(since => '2026-07-04 00:00', until => '2026-07-05 00:00');
 ```
 
 `top_queryids_available` is **always present** (branch on it, not on key
-absence): here the worst/percentile minutes are inside raw retention even though
-the 1-day window *starts* at `2026-07-04 00:00` and `raw_retention_start` is
-`18:11` — attribution is decided per extreme minute. `coverage` lets the
-consumer reconcile this payload against `ash.aas()` / `ash.top()` for the same
-window and spot degraded resolution (`minutes_with_data < minutes_expected`).
-When the extremes themselves predate raw retention, the `top_queryids_*` objects
-are omitted and `top_queryids_available` is `false` — the `aas_*` keys still
-carry the load numbers.
+absence): attribution is decided per extreme minute. `raw_retention_start` is
+the reusable, minute-aligned planning/loss boundary, not the physical
+attribution cutoff; after a fresh install or sampler outage it can predate the
+oldest sample. `coverage` lets the consumer reconcile this payload against
+`ash.aas()` / `ash.top()` for the same window and spot degraded resolution
+(`minutes_with_data < minutes_expected`). When no extreme minute has raw
+evidence, the `top_queryids_*` objects are omitted and
+`top_queryids_available` is `false` — the `aas_*` keys still carry the load
+numbers.
 
 ---
 

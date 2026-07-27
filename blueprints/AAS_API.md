@@ -311,8 +311,11 @@ key (consumers MUST treat them as optional), so a scraper reads
 `top_queryids_available` — additive and **always present** — instead of probing
 for key absence. `coverage` (also additive, always present) lets a consumer
 reconcile the payload against `ash.aas()` / `ash.top()` for the same window and
-detect degraded resolution (`minutes_with_data < minutes_expected`) or a reduced
-attribution window (`raw_retention_start` inside the window).
+detect degraded resolution (`minutes_with_data < minutes_expected`).
+`raw_retention_start` is the reusable, minute-aligned raw loss/planning
+boundary (the older of configured ring capacity and retained evidence), not
+the physical query-attribution cutoff; use `top_queryids_available` and the
+optional `top_queryids_*` keys for attribution.
 
 **Boundary:** pg_ash is **only the data source**. Consumer-side scoring —
 thresholds, health zoning, normalization against vCPU counts, display labels,
@@ -352,6 +355,8 @@ Semantics:
 - `coverage` (always present): `{from, to, source, minutes_expected,
   minutes_with_data, raw_retention_start}`. `source` is always `rollup_1m`
   (report is exclusively rollup-backed at 1-minute resolution).
+  `raw_retention_start` is the minute-aligned planning/loss boundary; it can
+  predate the oldest physical sample after a fresh install or sampler outage.
 - Never raises for missing data: classes with no samples report `0`; if
   the whole window has no coverage at all, returns `null` (consumers should
   skip ingestion for the period).
