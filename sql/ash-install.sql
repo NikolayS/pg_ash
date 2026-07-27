@@ -1572,18 +1572,24 @@ begin
     into v_endangered_rows
     using v_rollup_1m_cutoff;
 
-    if v_endangered_rows > 0 then
-      if not pg_try_advisory_xact_lock(
-           hashtext('pg_ash')::int4,
-           hashtext('pg_ash_rollup')::int4
-         ) then
-        perform ash._record_rotate_failure();
-        return format(
-          'failed: pre-truncation rollup busy; slot %s not truncated',
-          v_truncate_slot
-        );
-      end if;
+    /*
+     * Every truncate must serialize with rollup_minute(), even when the
+     * target contains only expired rows. Otherwise rotate() can lock config
+     * and wait for rollup's sample-table lock while rollup waits for config,
+     * creating a deadlock on the cleanup/rotation escape path (#162).
+     */
+    if not pg_try_advisory_xact_lock(
+         hashtext('pg_ash')::int4,
+         hashtext('pg_ash_rollup')::int4
+       ) then
+      perform ash._record_rotate_failure();
+      return format(
+        'failed: pre-truncation rollup busy; slot %s not truncated',
+        v_truncate_slot
+      );
+    end if;
 
+    if v_endangered_rows > 0 then
       v_rotation_minutes :=
         greatest(extract(epoch from v_rotation_period)::int / 60, 1);
 
@@ -2271,7 +2277,9 @@ begin
   -- Check for existing rotation job (idempotent)
   select jobid into v_rotation_job
   from cron.job
-  where jobname = 'ash_rotation';
+  where jobname = 'ash_rotation'
+    and username = current_user
+    and database = current_database();
 
   if v_rotation_job is not null then
     /*

@@ -5491,7 +5491,7 @@ jobs:
             select 1 from ash.config where singleton for update;
             select pg_advisory_xact_lock(
               hashtext('pg_ash')::int4,
-              hashtext('pg_ash_rollup')::int4
+              hashtext('pg_ash_config_test')::int4
             );
             select pg_sleep(5);
             commit;
@@ -5503,7 +5503,7 @@ jobs:
               from pg_locks
               where locktype = 'advisory'
                 and classid = hashtext('pg_ash')::int4::oid
-                and objid = hashtext('pg_ash_rollup')::int4::oid
+                and objid = hashtext('pg_ash_config_test')::int4::oid
                 and granted
                 and pid <> pg_backend_pid()
             )
@@ -5521,6 +5521,86 @@ jobs:
           ")"
           if [ "$rotate_state" != "0 0" ]; then
             echo "::error::outer lock failure changed state: $rotate_state" >&2
+            exit 1
+          fi
+
+          echo "=== #81F: expired-only rotation must serialize with rollup ==="
+          reset_issue_81_state
+          "${psql_base[@]}" << 'SQL'
+          begin;
+          set local session_replication_role = replica;
+          update ash.config
+          set rollup_1m_retention_days = 1
+          where singleton;
+          insert into ash.sample (
+            sample_ts, datid, active_count, data, slot
+          )
+          values (
+            ash.ts_from_timestamptz(
+              date_trunc('minute', now()) - interval '36 hours'
+            ),
+            0::oid,
+            1::smallint,
+            array[-1,1,0]::integer[],
+            2::smallint
+          );
+          commit;
+          SQL
+          "${psql_base[@]}" -c "
+            begin;
+            select pg_advisory_xact_lock(
+              hashtext('pg_ash')::int4,
+              hashtext('pg_ash_rollup')::int4
+            );
+            lock table ash.sample_2 in access share mode;
+            select pg_sleep(1);
+            update ash.config
+            set last_rollup_1m_ts = last_rollup_1m_ts
+            where singleton;
+            commit;
+          " &
+          expired_rollup_pid=$!
+          wait_until_sql_true "rollup advisory and sample_2 locks" "
+            select exists (
+              select 1
+              from pg_locks advisory_lock
+              where advisory_lock.locktype = 'advisory'
+                and advisory_lock.classid = hashtext('pg_ash')::int4::oid
+                and advisory_lock.objid = hashtext('pg_ash_rollup')::int4::oid
+                and advisory_lock.granted
+                and advisory_lock.pid <> pg_backend_pid()
+                and exists (
+                  select 1
+                  from pg_locks sample_lock
+                  where sample_lock.pid = advisory_lock.pid
+                    and sample_lock.locktype = 'relation'
+                    and sample_lock.relation = 'ash.sample_2'::regclass
+                    and sample_lock.mode = 'AccessShareLock'
+                    and sample_lock.granted
+                )
+            )
+          "
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          if [ "$rotate_result" != "failed: pre-truncation rollup busy; slot 2 not truncated" ]; then
+            echo "::error::expired-only busy-rollup result mismatch: $rotate_result" >&2
+            exit 1
+          fi
+          wait "$expired_rollup_pid"
+          assert_raw_sample_survived "expired-only rollup race"
+          rotate_result="$("${psql_base[@]}" -tAc "select ash.rotate()")"
+          if [ "$rotate_result" != "rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)" ]; then
+            echo "::error::expired-only rotation did not recover: $rotate_result" >&2
+            exit 1
+          fi
+          expired_state="$("${psql_base[@]}" -tAc "
+            select current_slot || ' ' ||
+                   (select count(*) from ash.sample_2) || ' ' ||
+                   consecutive_rotate_failures
+            from ash.config
+            where singleton
+          ")"
+          if [ "$expired_state" != "1 0 0" ]; then
+            echo "::error::expired-only recovery state mismatch: $expired_state" >&2
             exit 1
           fi
 
@@ -5649,6 +5729,7 @@ jobs:
             v_enabled boolean;
             v_input interval;
             v_message text;
+            v_other_rotation_job bigint;
             v_raised boolean;
             v_rotation_job bigint;
             v_sqlstate text;
@@ -5808,8 +5889,49 @@ jobs:
                 select schedule
                 from cron.job
                 where jobname = 'ash_rotation'
+                  and username = current_user
+                  and database = current_database()
               ) = '0 0 * * *',
                 'ash_rotation must keep its daily schedule';
+
+              /*
+               * A superuser can see every pg_cron row despite its RLS
+               * policy. An unrelated user's same-named job must therefore
+               * neither satisfy our idempotency lookup nor be repaired.
+               */
+              perform cron.unschedule(v_rotation_job);
+              insert into cron.job (
+                schedule,
+                command,
+                database,
+                username,
+                jobname
+              )
+              values (
+                '*/7 * * * *',
+                'select 1',
+                current_database(),
+                'ash_issue162_other',
+                'ash_rotation'
+              )
+              returning jobid into v_other_rotation_job;
+
+              perform 1 from ash.start();
+              assert (
+                select schedule
+                from cron.job
+                where jobid = v_other_rotation_job
+              ) = '*/7 * * * *',
+                'ash.start changed another user''s rotation schedule';
+              assert (
+                select count(*)
+                from cron.job
+                where jobname = 'ash_rotation'
+                  and username = current_user
+                  and database = current_database()
+                  and schedule = '0 0 * * *'
+              ) = 1,
+                'ash.start did not create the caller''s daily rotation job';
             end if;
           end;
           $$;
