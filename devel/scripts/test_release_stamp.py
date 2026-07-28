@@ -176,11 +176,16 @@ class SQLChainOverlayTest(unittest.TestCase):
             released_migrations.mkdir(parents=True)
             development_sql.mkdir(parents=True)
             (root / "sql" / "ash-1.0.sql").write_text("-- released installer\n")
+            self.write_stamped_installer(
+                root / "sql" / "ash-install.sql",
+                "1.1-beta1",
+            )
             (released_migrations / "ash-1.0-to-1.1.sql").write_text(
                 "-- released migration\n"
             )
-            (development_sql / "ash-install.sql").write_text(
-                "-- development installer\n"
+            self.write_stamped_installer(
+                development_sql / "ash-install.sql",
+                "1.1",
             )
 
             full_output = io.StringIO()
@@ -254,6 +259,94 @@ class SQLChainOverlayTest(unittest.TestCase):
             reapply_output.getvalue().splitlines(),
             [r"\i devel/sql/ash-1.1-to-1.2.sql"],
         )
+
+    def test_next_release_line_installer_requires_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            released_migrations = root / "sql" / "migrations"
+            development_sql = root / "devel" / "sql"
+            released_migrations.mkdir(parents=True)
+            development_sql.mkdir(parents=True)
+            (root / "sql" / "ash-1.5.sql").write_text(
+                "-- released installer\n"
+            )
+            self.write_stamped_installer(
+                root / "sql" / "ash-install.sql",
+                "2.0",
+            )
+            (released_migrations / "ash-1.5-to-2.0.sql").write_text(
+                "-- released migration\n"
+            )
+            self.write_stamped_installer(
+                development_sql / "ash-install.sql",
+                "2.1",
+            )
+
+            full_output = io.StringIO()
+            with (
+                mock.patch.object(ash_sql_chain, "ROOT", root),
+                mock.patch.object(
+                    ash_sql_chain,
+                    "UPGRADE_DIRS",
+                    (released_migrations, development_sql),
+                ),
+                contextlib.redirect_stdout(full_output),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    (
+                        r"^development installer targets release line 2\.1, "
+                        r"but the upgrade graph stops at 2\.0; add a connected "
+                        r"development migration$"
+                    ),
+                ):
+                    ash_sql_chain.emit_full_upgrade_chain("1.5")
+
+        self.assertEqual(full_output.getvalue(), "")
+
+    def test_final_release_requires_migration_for_same_line_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            released_migrations = root / "sql" / "migrations"
+            development_sql = root / "devel" / "sql"
+            released_migrations.mkdir(parents=True)
+            development_sql.mkdir(parents=True)
+            (root / "sql" / "ash-1.5.sql").write_text(
+                "-- released installer\n"
+            )
+            self.write_stamped_installer(
+                root / "sql" / "ash-install.sql",
+                "2.0",
+            )
+            (released_migrations / "ash-1.5-to-2.0.sql").write_text(
+                "-- released migration\n"
+            )
+            self.write_stamped_installer(
+                development_sql / "ash-install.sql",
+                "2.0",
+            )
+
+            full_output = io.StringIO()
+            with (
+                mock.patch.object(ash_sql_chain, "ROOT", root),
+                mock.patch.object(
+                    ash_sql_chain,
+                    "UPGRADE_DIRS",
+                    (released_migrations, development_sql),
+                ),
+                contextlib.redirect_stdout(full_output),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    (
+                        r"^a lone development installer is valid only after "
+                        r"a prerelease; the released payload 2\.0 is final, "
+                        r"so add a connected development migration$"
+                    ),
+                ):
+                    ash_sql_chain.emit_full_upgrade_chain("1.5")
+
+        self.assertEqual(full_output.getvalue(), "")
 
     def test_pinned_upgrade_chain_applies_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

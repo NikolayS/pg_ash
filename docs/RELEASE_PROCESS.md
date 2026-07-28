@@ -70,11 +70,15 @@ CI must test all supported development paths discovered by that helper:
 After a prerelease, when a candidate development installer exists without a
 new current-line migration, the helper first verifies that the released
 migrations connect the requested starting version to the released head. It
-then appends that installer to the full-upgrade, pinned public-wrapper, and
-re-apply chains as a re-apply-safe overlay. This makes the beta-to-final path
+then verifies that both installers remain on that prerelease's `X.Y` line and
+appends the candidate to the full-upgrade, pinned public-wrapper, and re-apply
+chains as a re-apply-safe overlay. A lone installer for another release line is
+rejected before any SQL is emitted. Once the shipped payload is final, a
+connected development migration is mandatory even when the candidate has not
+yet received its next release identity. This makes the beta-to-final path
 exercise the same candidate as a fresh install without allowing the overlay to
-hide a missing released migration or inventing a prerelease-specific migration
-filename. Schema-equivalence CI must compare those paths.
+hide a missing migration or inventing a prerelease-specific migration filename.
+Schema-equivalence CI must compare those paths.
 
 ## CI guard
 

@@ -25,6 +25,10 @@ VERSION_ALTER_DEFAULT_RE = re.compile(
     r"set\s+default\s+'([^']+)'",
     re.IGNORECASE | re.MULTILINE,
 )
+PAYLOAD_VERSION_RE = re.compile(
+    r"(?P<release_line>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+    r"(?:-(?P<stage>alpha|beta|rc)[1-9][0-9]*)?$"
+)
 
 
 def version_key(version: str) -> tuple[int, int]:
@@ -133,6 +137,15 @@ def fresh_install_version() -> str:
     return install_version(ROOT / fresh_install_path())
 
 
+def payload_version_parts(version: str, *, label: str) -> tuple[str, bool]:
+    match = PAYLOAD_VERSION_RE.fullmatch(version)
+    if match is None:
+        raise SystemExit(
+            f"{label} stamps unsupported two-part version {version!r}"
+        )
+    return match.group("release_line"), match.group("stage") is not None
+
+
 def emit_psql_include(path: Path) -> None:
     print(rf"\i {rel(path)}")
 
@@ -209,6 +222,45 @@ def validate_upgrade_graph(
     return graph_head
 
 
+def validate_development_overlay(paths: list[Path], graph_head: str) -> None:
+    dev_install = development_install_path()
+    development_migration_seen = any(
+        path.parent == dev_install.parent for path in paths
+    )
+    if not dev_install.exists() or development_migration_seen:
+        return
+
+    dev_version = install_version(dev_install)
+    dev_release_line, _dev_is_prerelease = payload_version_parts(
+        dev_version,
+        label="development installer",
+    )
+    if dev_release_line != graph_head:
+        raise SystemExit(
+            f"development installer targets release line {dev_release_line}, "
+            f"but the upgrade graph stops at {graph_head}; add a connected "
+            "development migration"
+        )
+
+    released_install = ROOT / "sql" / "ash-install.sql"
+    released_version = install_version(released_install)
+    released_line, released_is_prerelease = payload_version_parts(
+        released_version,
+        label="released installer",
+    )
+    if released_line != graph_head:
+        raise SystemExit(
+            f"released installer targets release line {released_line}, but "
+            f"the upgrade graph stops at {graph_head}"
+        )
+    if not released_is_prerelease:
+        raise SystemExit(
+            "a lone development installer is valid only after a prerelease; "
+            f"the released payload {released_version} is final, so add a "
+            "connected development migration"
+        )
+
+
 def upgrade_chain_paths(start: str, *, label: str = "upgrade") -> list[Path]:
     released_by_source = upgrades(include_devel=False, required=False)
     released_head = validate_upgrade_graph(
@@ -238,6 +290,7 @@ def upgrade_chain_paths(start: str, *, label: str = "upgrade") -> list[Path]:
             f"expected to reach {graph_head}"
         )
 
+    validate_development_overlay(paths, graph_head)
     return paths
 
 
