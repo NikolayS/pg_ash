@@ -10,11 +10,12 @@ SQL style guide: https://gitlab.com/postgres-ai/rules/-/blob/main/rules/developm
 
 CI via GitHub Actions:
 
-- **test.yml**: runs on push and PRs — tests across PostgreSQL 14, 15, 16, 17, 18, 19 beta
+- **test.yml**: runs on pushes, PRs, and manual pre-tag dispatches — tests
+  across PostgreSQL 14, 15, 16, 17, 18, 19 beta
 - Tests: fresh development install, discovered full upgrade chain up to the in-progress release, schema equivalence between fresh install and upgrade chain, idempotent re-apply of discovered re-apply-safe upgrade scripts, degraded mode (no pgss/pg_cron)
 - Version schema: `vMAJOR.MINOR` (e.g. `v1.3`). Tag on main after all PRs merged.
 
-After a release tag, keep `sql/` frozen at the latest released baseline until the next release-stamp PR. During a development cycle, SQL changes live under `devel/sql/`: the future final installer and the future upgrade script. CI must discover version chains from files via `devel/scripts/ash_sql_chain.py`, not hardcode concrete version numbers. At release stamp time, promote the development installer into `sql/ash-install.sql`, promote the upgrade script into `sql/migrations/`, keep a root-level compatibility wrapper, bump `ash.config.version`, and remove or recreate `devel/sql/` for the next cycle. See `docs/RELEASE_PROCESS.md`.
+After a release tag, keep `sql/` frozen at the latest released baseline until the next release-stamp PR. During a development cycle, SQL changes live under `devel/sql/`: the future final installer and, for a new stable release line, the future cumulative upgrade script. After a prerelease, the discovery helper validates released-chain reachability and same-line payload identity before appending a lone development installer to full, re-apply, and pinned public-wrapper upgrade paths as the current-line overlay; after a final release, a connected development migration is mandatory. CI must discover version chains from files via `devel/scripts/ash_sql_chain.py`, not hardcode concrete version numbers. At release stamp time, promote the development installer into `sql/ash-install.sql`, promote or update the current-line upgrade script under `sql/migrations/`, keep a root-level compatibility wrapper, bump `ash.config.version`, and remove or recreate `devel/sql/` for the next cycle. See `docs/RELEASE_PROCESS.md`.
 
 ## Testing
 
