@@ -4,10 +4,12 @@ Decided design for the 2.0 reader surface. Supersedes the per-function growth
 of v1.x and the intermediate `aas_*` drafts (PR #106, PR #112 first iteration).
 Design discussion: issue #113. User stories: [AAS_USER_STORIES.md](AAS_USER_STORIES.md).
 
-**2.0 is a breaking release.** The reader API is redesigned; v1.x readers are
-removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
-(`take_sample`, `rotate`, `rollup_*`, `start`/`stop`, `status`,
-`grant_reader`/`revoke_reader`, `uninstall`) are unchanged.
+**2.0 is a breaking release.** The v1.x reader API is removed and replaced by
+the surface below. Operational entry points remain available, but 2.0 also
+changes named arguments, scheduling diagnostics, privilege bundles, retention
+geometry, rollup storage, and return-value semantics. Named calls to surviving
+functions must use the de-prefixed 2.0 parameter names—for example,
+`ash.start(every => ...)`, not `p_interval => ...`.
 
 > **2.0 cadence and coverage limitation.** Sampling cadence and successful
 > idle ticks are not persisted. Every AAS reader weights historical
@@ -19,18 +21,20 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
 > independently. At intervals greater than one minute, the full tick weight
 > lands in one minute, so minute extrema can exceed observed concurrency.
 > Persisted cadence and heartbeats are tracked in issue #137.
-> `ash.timeline()` now calls these buckets “no stored observation”; its
-> corrected grain semantics do not make idle time distinguishable from an
-> outage.
+> The `ash.timeline()` catalog comment describes these buckets as “no stored
+> observation”; its corrected grain semantics do not make idle time
+> distinguishable from an outage.
 
 ---
 
 ## 1. Principles
 
-1. **AAS is the only load unit.** Every reader reports `avg_aas`, `peak_aas`,
-   `p99_aas` (numeric, in average-active-sessions), with `backend_seconds` as
-   a secondary absolute column. The v1.x units `samples` and bare
-   `backend_seconds`-as-primary disappear.
+1. **AAS is the aggregate load unit.** Typed aggregate readers report AAS
+   using the metrics their shape supports. `aas` and `top` also expose
+   `backend_seconds`; `compare` exposes paired AAS; `periods` and `timeline`
+   expose AAS without `backend_seconds`; `samples` returns decoded raw
+   evidence; `report` returns JSONB; and `chart`/`summary` are presentation
+   helpers.
 2. **One time convention.** Reader windows are `[since, until)`. With only
    `until`, `since` defaults to `until - interval '1 hour'`; with neither bound,
    the default is the last hour (`report` alone defaults to the last day).
@@ -345,10 +349,10 @@ For `report` (and documented for all readers):
   occurred; instead `total` is the extreme of the **summed per-minute series**
   (its own worst minute / percentile). This matches how `top_queryids_*.total`
   is computed and how downstream consumers derive a total-load series.
-  `Activity`, `Client`, `Timeout`, `Extension`, `BufferPin` are *excluded from
-  `total`* (idle internal workers, client waits, and timeout artifacts are not
-  real load) but still visible in `top('wait_event_type')`, which reports every
-  recorded type.
+  `Activity`, `Client`, `Timeout`, `Extension`, and `BufferPin` are *excluded
+  from `total`* but remain visible in `top('wait_event_type')`, which reports
+  every recorded type. Exclusion from this fixed payload is not evidence that
+  an activity type is harmless.
 
 ## 4. `ash.report` — machine-readable load report (JSON)
 
@@ -388,7 +392,7 @@ Shape produced:
   "coverage": {
     "from": "2026-07-04T00:00:00+00:00",
     "to":   "2026-07-05T00:00:00+00:00",
-    "source": "rollup_1m",              // report reads rollup_1m only; coverage.source is always this
+    "source": "rollup_1m",              // base metrics/events read rollup_1m; eligible query attribution also reads raw
     "minutes_expected": 1440,
     "minutes_with_data": 1438,
     "raw_retention_start": "2026-07-04T18:11:00+00:00"
@@ -399,11 +403,11 @@ Shape produced:
 The `top_queryids_*` objects are present only when they attributed at least one
 key (consumers MUST treat them as optional), so a scraper reads
 `top_queryids_available` — additive and **always present** — instead of probing
-for key absence. `coverage` (also additive, always present) lets a consumer
-reconcile the payload against `ash.aas()` / `ash.top()` for the same window and
-detect incomplete activity-bearing rollups
-(`minutes_with_data < minutes_expected`). `minutes_with_data` does not verify
-sampler heartbeats: a shortfall can reflect idle time, sampler outage,
+for key absence. `coverage` (also additive, always present) describes the
+stored-minute density used by the base report series. It is not a sampler
+completeness measure and does not establish numeric equivalence with
+`ash.aas()` or `ash.top()`. `minutes_with_data` counts activity-bearing
+`rollup_1m` timestamps; a shortfall can reflect idle time, sampler outage,
 retention, or delayed rollup.
 `raw_retention_start` is the reusable, minute-aligned raw loss/planning
 boundary (the older of configured ring capacity and retained evidence), not
@@ -412,10 +416,10 @@ optional `top_queryids_*` keys for attribution.
 
 **Boundary:** pg_ash is **only the data source**. Consumer-side scoring —
 thresholds, health zoning, normalization against vCPU counts, display labels,
-ingestion pipelines — is entirely the consumer's concern. pg_ash emits raw
-AAS numbers in the payload shape above and knows nothing about how they are
-scored. This payload contract is frozen per 2.0 minor line: keys are only
-ever added, never renamed or removed.
+ingestion pipelines — is entirely the consumer's concern. pg_ash emits
+unscored AAS numbers in the payload shape above and knows nothing about how
+they are scored. This payload contract is frozen per 2.0 minor line: keys are
+only ever added, never renamed or removed.
 
 Semantics:
 
@@ -445,18 +449,21 @@ Semantics:
   while the worst minute is well inside it — dropping attribution wholesale used
   to throw away exactly the answer the report exists to give). Percentile sets
   attribute over their **raw-covered subset**. `top_queryids_available`
-  (boolean, **always present**) says whether any attribution was possible —
-  branch on it, not on key absence.
+  (boolean, **always present**) says whether this invocation produced at least
+  one attributed query-ID result—branch on it, not on key absence.
 - `coverage` (always present): `{from, to, source, minutes_expected,
   minutes_with_data, raw_retention_start}`. `source` is always `rollup_1m`
-  (report is exclusively rollup-backed at 1-minute resolution).
+  because the base metrics and top events read minute rollups. Top query IDs
+  additionally read raw samples for eligible extreme minutes.
   `minutes_with_data` counts activity-bearing rollup timestamps, not successful
   sampler ticks.
   `raw_retention_start` is the minute-aligned planning/loss boundary; it can
   predate the oldest physical sample after a fresh install or sampler outage.
-- Never raises for missing data: classes with no samples report `0`; if
-  the whole window has no activity-bearing rollup row, returns `null`
-  (consumers should skip ingestion for the period; the cause is not encoded).
+- Never raises for missing data: a class absent from otherwise stored
+  activity-bearing timestamps is zero-filled relative to those observations;
+  that zero is not proof of true inactivity. If the whole window has no
+  activity-bearing rollup row, the function returns `null` (consumers should
+  skip ingestion for the period; the cause is not encoded).
 - Callable by the `grant_reader` role; degrades without pg_stat_statements
   (query ids still come from samples; only `query_text` is pgss-dependent and
   is not part of this payload anyway).
@@ -540,9 +547,10 @@ Unchanged from [AAS_USER_STORIES.md §6](AAS_USER_STORIES.md) except:
   → `query_id`, …). Positional calls are unaffected; only callers passing
   named arguments need to update. This is a breaking change for v1.x named-arg
   callers.
-- **Performance budgets:** rollup-backed reads (including `report`) < 100 ms
-  for a 1-day window; raw-backed US-4 leaf drills over 1 hour < 1 s on a
-  default-config instance.
+- **Performance expectations:** latency is hardware-, data-, retention-, and
+  workload-dependent. No portable latency guarantee is part of the 2.0 API
+  contract; benchmark representative retained data before setting an
+  operational SLO.
 
 ## 8. Removed in 2.0
 
@@ -574,6 +582,6 @@ fresh installer). Replacements:
 | US-3 Drill (avg+peak+p99 per row) | `top` |
 | US-4 Leaf (event → queries) | `aas(wait_event=>…)` + `top('query_id', wait_event=>…)` |
 | US-5 Programmatic honesty | `source` column + retention rows in `status()` + exception rule |
-| US-6 Capacity | `timeline` (auto `rollup_1h`, per-bucket peak/p99) |
+| US-6 Capacity | `timeline` (auto source selection: minute rollups while retained, then hourly; per-bucket peak/p99 where supported) |
 | US-7 Before/after | `compare` |
 | US-8 Machine load-report ingest | `report` |

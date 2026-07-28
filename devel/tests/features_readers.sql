@@ -1306,7 +1306,15 @@ begin
   from ash.status() as status_row;
 
   assert v_status ->> 'current_slot' = '0'
-    and v_status ->> 'sampling_enabled' = 'true'
+    and v_status ->> 'sampling_config_enabled' = 'true'
+    and v_status ->> 'sampling_evidence' =
+      'no heartbeat is stored; idle ticks and scheduler outages are indistinguishable'
+    and v_status ? 'last_activity_sample_ts'
+    and v_status ? 'time_since_last_activity_sample'
+    and not (v_status ? 'last_sample_ts')
+    and not (v_status ? 'time_since_last_sample')
+    and not (v_status ? 'sampling_enabled')
+    and not (v_status ? 'missed_samples')
     and v_status ->> 'sample_interval' = '00:01:00'
     and v_status ->> 'samples_in_current_slot' = '4'
     and v_status ->> 'samples_total' = '4'
@@ -1542,7 +1550,11 @@ begin
     v_future_start,
     v_future_end
   ) as summary_row;
-  assert v_summary = '{"status": "no data in this time range"}'::jsonb,
+  assert v_summary = jsonb_build_object(
+      'status',
+      'no stored activity observations in this time range '
+      || '(idle time and sampler gaps are indistinguishable)'
+    ),
     format(
       '[%s] ash.summary future window: expected exact no-data status, got %s',
       pg_catalog.current_setting('ash.feature_mode'),

@@ -1,8 +1,20 @@
 # pg_ash — Active Session History for Postgres
 
+> **Historical design record (non-normative).** This file documents a pre-2.0
+> proposal and is retained only for design history. Its schemas, function
+> names, argument names, operational commands, performance figures, and
+> implementation status may not match the shipped release. Do not use it as an
+> install, upgrade, or API guide. Use `README.md`, `RELEASE_NOTES.md`,
+> `AAS_API.md`, and the catalog comments in `sql/ash-install.sql` for current
+> behavior.
+
 ## 1. Goal
 
-Provide lightweight, always-on wait event history for Postgres — the equivalent of Oracle's ASH (Active Session History) — using only pure SQL and `pg_cron`. No C extensions, no `shared_preload_libraries` changes, no external agents.
+Provide lightweight wait-event history for Postgres using SQL and PL/pgSQL.
+pg_ash itself needs no C extension or `shared_preload_libraries` entry.
+`pg_cron` is optional: it supplies built-in scheduling when available, while an
+external scheduler can invoke the same sampler and maintenance functions.
+Optional integrations retain their own installation and preload requirements.
 
 Target: small-to-medium Postgres clusters running on the primary, where installing `pg_wait_sampling` or similar C extensions is impractical or not allowed.
 
@@ -11,8 +23,12 @@ Target: small-to-medium Postgres clusters running on the primary, where installi
 Postgres's `pg_stat_activity` shows what's happening *right now*, but the moment you look away, the data is gone. (Technically, it reads from shared memory row by row — not an atomic snapshot — but it's the best we have.) This makes it nearly impossible to answer basic observability questions:
 
 - **"What was the database waiting on at 3am?"** — You can't know unless you were watching.
-- **"Which queries cause the most lock contention?"** — `pg_stat_statements` gives you timing totals but no wait event breakdown per query.
-- **"Is IO or CPU the bottleneck?"** — Requires continuous sampling to see the ratio over time.
+- **"Which queries were observed while backends waited on locks?"** —
+  `pg_stat_statements` gives timing totals but no sampled wait-event
+  association per query.
+- **"Was sampled activity dominated by IO waits or CPU*/uninstrumented active
+  work?"** — Requires continuous sampling to compare the observed categories;
+  `CPU*` does not prove that a backend was executing on a CPU.
 - **"Did something change after Tuesday's deploy?"** — No historical baseline to compare against.
 
 Existing solutions:
@@ -148,9 +164,11 @@ on `id = 0` (the sentinel for NULL/unknown `query_id`). Return `NULL` for
 
 ### 3.3 Single install, all databases
 
-pg_ash is installed once (in the pg_cron database, typically `postgres`) and
-samples all active backends across all databases. Each sample row includes `datid`
-so you can filter by database or view server-wide load.
+pg_ash is installed once in the database chosen to own its history. When
+pg_cron supplies scheduling, that must be the pg_cron database (typically
+`postgres`); otherwise an external scheduler invokes it there. It samples
+active backends across all databases, and each row includes `datid` for
+database filtering or server-wide aggregation.
 
 This is essential for "is the server overloaded?" analysis — you need all backends
 in one place, not scattered across per-database installs.
@@ -295,15 +313,16 @@ This keeps pg_ash useful even in locked-down environments.
   idle in a transaction, not waiting on anything specific. Mapped to
   `idle in transaction|IdleTx` in `wait_event_map`.
 
-### 3.11 pg_cron >= 1.5 required
+### 3.11 Optional scheduling
 
-Requires pg_cron >= 1.5 for second-granularity scheduling. This version
-introduced interval-based scheduling (`'1 second'`) and
-`cron.schedule_in_database()`. Available on most managed providers
-(RDS, Cloud SQL, AlloyDB, Crunchy Bridge, Neon, Supabase).
+pg_cron is optional. With pg_cron available, `ash.start()` creates sampler and
+maintenance jobs. Without it, `ash.start()` enables sampling and prints the
+commands an external scheduler must execute.
 
-`ash.start()` checks the installed pg_cron version and raises an error
-if < 1.5.
+Built-in sub-minute scheduling requires pg_cron 1.5 or newer because that
+version introduced interval-based schedules such as `'1 second'`. Older
+versions can schedule whole-minute cadences; an external scheduler can provide
+the configured cadence when pg_cron is absent or unsuitable.
 
 pg_cron interprets cron expressions in UTC. The midnight rotation
 (`0 0 * * *`) fires at midnight UTC, not local time. This is fine for
@@ -392,8 +411,8 @@ range scans. Worth benchmarking at Step 6, but B-tree is the safe default.
 | `ash._register_query(int8)` | Auto-inserts unknown query_ids, returns int4 id |
 | `ash.decode_sample(integer[])` | Decodes array → `TABLE(state text, type text, event text, query_id int8, count int)` |
 | `ash.rotate()` | Advances the current slot and truncates the recycled partition |
-| `ash.start(interval)` | Creates pg_cron jobs, returns job IDs |
-| `ash.stop()` | Removes pg_cron jobs, returns removed job IDs |
+| `ash.start(interval)` | Enables sampling; creates pg_cron jobs when available or emits external-scheduler instructions |
+| `ash.stop()` | Disables sampling and removes pg_cron jobs when present |
 | `ash.uninstall()` | Calls `stop()` then `DROP SCHEMA ash CASCADE` |
 | `ash.status()` | Diagnostic dashboard: last sample ts, samples in current partition, current slot, time since last rotation, pg_cron job status, dictionary utilization (wait_event_map count vs smallint max, query_map count) |
 
@@ -502,9 +521,10 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - Log rotation event (optional: raise notice)
 
 ### Step 4: Start/stop/uninstall functions
-- `ash.start(interval default '1 second')` — schedule pg_cron jobs (sampler + rotation).
-  Returns the pg_cron job IDs so the user can verify in `cron.job`.
-  Checks pg_cron version >= 1.5 and raises error if not met.
+- `ash.start(interval default '1 second')` — enable sampling and schedule
+  sampler/maintenance jobs through pg_cron when available. Without pg_cron,
+  print exact external-scheduler instructions. Built-in sub-minute scheduling
+  requires pg_cron 1.5 or newer.
   **Idempotent:** If jobs already exist, returns existing IDs instead of
   creating duplicates. Duplicate samplers would double storage and cause
   dictionary insert races.
@@ -512,25 +532,17 @@ Row count depends only on sampling frequency, not backend count. Size scales wit
 - `ash.uninstall()` — calls `ash.stop()` then `DROP SCHEMA ash CASCADE`.
   Plain `DROP SCHEMA` without `ash.stop()` first leaves orphaned pg_cron jobs
   that fire errors every second — `ash.uninstall()` prevents this.
-- Validate pg_cron is installed before attempting schedule
-- Install pg_ash in the same database as pg_cron (typically `postgres`).
-  The sampler reads `pg_stat_activity` which shows all backends across all databases.
+- If pg_cron is used, install pg_ash in the pg_cron database (typically
+  `postgres`). Otherwise invoke its functions from the one database chosen to
+  retain the cluster history.
 
 ### Step 5: Reader + diagnostic functions
-- `ash.status()` — first thing you run when debugging "why isn't ASH working?"
-  Returns: last sample timestamp, samples in current partition, current slot,
-  time since last rotation, pg_cron job status (joined to `cron.job`),
-  dictionary utilization (wait_event_map rows / 32767, query_map rows)
-- `ash.decode_sample(integer[])` — set-returning function, turns encoded array
-  into human-readable `TABLE(state, type, event, query_id, count)`. Isolates
-  the encoding format so users/views never reimplement it.
-- `ash.top_waits(interval default '1 hour', int default 20)` — top wait events with %, human-readable
-- `ash.wait_timeline(interval default '1 hour', interval default '1 minute')` — time-bucketed wait event breakdown
-- `ash.top_queries(interval default '1 hour', int default 20)` — queries with most wait samples, joined to `pg_stat_statements` for query text
-- `ash.waits_by_type(interval default '1 hour')` — wait event type distribution
-- `ash.report(interval default '1 hour')` — full text report combining all of the above, Oracle ASHREPORT-style
-- All functions return `SETOF record` or `TABLE(...)` for easy `\x` display or programmatic consumption
-- All translate `int4` timestamps to human-readable `timestamptz` and dictionary IDs to human-readable text
+
+The readers originally listed in this step were removed in 2.0. The shipped
+surface is `ash.periods`, `ash.aas`, `ash.timeline`, `ash.top`, `ash.compare`,
+`ash.samples`, `ash.report`, `ash.chart`, and `ash.summary`; see
+`AAS_API.md`. `ash.status()` is the installation-health entry point, while
+`ash.decode_sample(...)` remains a low-level decoder.
 
 ### Step 6: Benchmarks — simulated long-running production
 Simulate realistic production workloads without waiting real time:
@@ -541,30 +553,29 @@ Simulate realistic production workloads without waiting real time:
 - ~20 distinct query_ids with realistic repetition patterns (zipf-like)
 - Generate directly via `INSERT ... SELECT generate_series()`
 
-**Scenarios (50 active backends, 1s sampling, 1 database):**
+**Historical fixture scenarios (50 active backends, 1s sampling, 1 database):**
 - **1 day:** 86,400 rows, ~33 MiB — the realistic production scenario. This is
-  what one partition actually holds. Reader functions must be **sub-100ms** here.
+  what the proposal expected one partition to hold.
 - **1 month:** 2,592,000 rows, ~1 GiB — stress test for long-retention configs.
-  Reader functions should still be <500ms for 1-hour windows (index-backed).
+
+These were benchmark targets for the retired harness, not portable performance
+claims. Latency is hardware-, data-, retention-, and workload-dependent;
+benchmark the current schema and readers before setting an operational SLO.
 
 The "1 year" and "10 year" scenarios are not realistic — no single partition
 would ever hold that much data in normal operation. They're only useful to
 verify that `TRUNCATE` is instant regardless of partition size (it will be —
 `TRUNCATE` doesn't depend on row count).
 
-**Sampler performance benchmark:** Measure `take_sample()` execution time
-with 50, 100, 200, 500 active backends. Target: <100ms for 200 backends.
-If it creeps toward 500ms+ (unlikely but possible with dictionary inserts
-on first encounter), that's a signal to optimize the caching strategy.
+**Sampler performance benchmark:** Measure `take_sample()` execution time with
+50, 100, 200, and 500 active backends. Treat the results as measurements of
+that fixture, not a product guarantee.
 
 **What to measure:**
 - Table + index size at each scale
-- `ash.top_waits('1 hour')` query time (target: sub-100ms for 1-day partition)
-- `ash.top_queries('1 hour')` query time
-- `ash.wait_timeline('1 hour', '1 minute')` query time
-- `ash.report('24 hours')` query time
+- current `ash.top(...)`, `ash.timeline(...)`, and `ash.report(...)` query time
 - `take_sample()` execution time at various backend counts
-- `TRUNCATE` time on a full partition (should be <1ms regardless of size)
+- `TRUNCATE` time on a full partition
 - Index scan performance for time-range queries
 
 **Rotation simulation:**
@@ -602,12 +613,18 @@ on first encounter), that's a signal to optimize the caching strategy.
 
 ## 7. Limitations
 
-- **1s minimum sampling** — pg_cron limit. Sub-second requires `pg_wait_sampling` (C extension).
+- **1s minimum sampling** — the pg_ash contract does not support sub-second
+  sampling. Sub-second collection requires another tool such as
+  `pg_wait_sampling`.
 - **Primary only** — `pg_stat_activity` on replicas doesn't show replica query wait events in the same way.
 - **No per-PID tracking** — aggregated by database per sample. Can't trace one backend's journey across time. (By design — keeps storage tiny.)
 - **No query text** — join `query_id` to `pg_stat_statements`.
-- **Requires `compute_query_id = on`** — default since Postgres 14, but can be turned off.
-- **Requires pg_cron >= 1.5** — for second-granularity scheduling. Most managed providers ship this or newer.
+- **Query-ID attribution requires PostgreSQL to compute query IDs** — use
+  `compute_query_id = on`, or retain `auto` when a preloaded module such as
+  pg_stat_statements requests them.
+- **pg_cron is optional** — built-in sub-minute scheduling requires pg_cron
+  1.5 or newer; without it, use an external scheduler at the configured
+  cadence.
 - **Requires `pg_read_all_stats`** — sampler role must see all backends in `pg_stat_activity`.
 - **Legacy upgrade-script idempotency is bounded** — finalized legacy upgrade scripts are idempotent only on the version just below them. `ash-1.1-to-1.2.sql` may be re-applied on a 1.2 install; `ash-1.0.sql`, `ash-1.0-to-1.1.sql`, and `ash-1.1.sql` may NOT be re-applied on a 1.4+ install. Example: between 1.1 and 1.4 the OUT-column list of `ash.top_queries_with_text` was extended (`mean_time_ms` → `total_exec_time_ms, mean_exec_time_ms`), and `CREATE OR REPLACE FUNCTION` cannot change OUT parameters, so re-applying any of those three on a 1.4 install fails with `ERROR: cannot change return type of existing function` (`ash-1.0-to-1.1.sql` just `\ir`s `ash-1.1.sql`, and `ash-1.0.sql` hits the same path). Forward upgrade (`1.0 → 1.1 → 1.2 → 1.3 → 1.4`) IS supported and exercised in CI. CI's "Dev workflow: re-apply migrations (idempotent)" re-applies only `ash-1.1-to-1.2.sql` and later on a fresh 1.4 install. See issue [#50](https://github.com/NikolayS/pg_ash/issues/50).
 

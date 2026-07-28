@@ -70,8 +70,12 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 - **Acceptance criteria:**
   1. One call returns one row per standard window.
   2. Each row exposes `avg_aas`, `peak_aas`, **and** `p99_aas`, so spike-vs-sustained is legible without a second query.
-  3. Works across full rollup retention: the wide windows (1h and up) answer from rollups — no raw dependency — while the narrow 1m/5m windows read raw (cheap and freshest at that size). Aggregate readers prefer `rollup_1m` for any >1h window it fully covers, so triage never pays raw-decode cost.
-  4. Meets the performance budget for a rollup read (see §6).
+  3. Source and output grain are separate decisions. Windows through exactly
+     one hour normally read raw while raw retention covers them. Wider
+     aggregate windows prefer `rollup_1m` while its retention covers the
+     requested start, then fall back to `rollup_1h`.
+  4. Is designed to keep wide-window reads on compact rollups; operators must
+     benchmark representative retained data before setting a latency SLO.
 - **Primary API:** `ash.periods(until)`.
 - **Coverage:** 🟡 Partial. The API shape is implemented, but historical AAS
   assumes the current cadence applies to every retained row (issue #137).
@@ -80,13 +84,17 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 
 > **As an** engineer investigating a past incident ("slow around 2am"),
 > **I want** a time series of AAS across a broad window with a peak per bucket,
-> **so that** I can pinpoint exactly when load spiked and select a precise window to drill into.
+> **so that** I can identify the retained bucket with the highest observed
+> load and select a precise window to drill into.
 
 - **Trigger:** a vague time reference for a past problem.
 - **Acceptance criteria:**
   1. Returns one row per time bucket (bucket size configurable).
   2. Includes `peak_aas` per bucket (not just `avg_aas`), so short spikes are not averaged away; orderable by peak to surface the worst buckets.
-  3. Auto-selects rollup granularity by span — per-minute for short spans, per-hour for long spans — and reaches back across the relevant rollup retention.
+  3. Selects output buckets independently from storage source: auto output is
+     one minute through six hours, one hour through seven days, then one day;
+     source selection follows raw → `rollup_1m` → `rollup_1h` according to
+     span and retained coverage.
   4. Marks buckets with no stored observation; sampled-idle and uncovered
      time remain indistinguishable until issue #137 persists cadence/coverage.
 - **Primary API:** `ash.timeline(since, until, bucket)`.
@@ -142,19 +150,30 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 
 - **Trigger:** scheduled metric scrape, or an autonomous investigation prompt.
 - **Acceptance criteria:**
-  1. All readers return typed columns with no ASCII/presentation columns in the data path (any human rendering lives in a separate helper).
+  1. Typed aggregate readers report AAS using the metrics their shape supports.
+     `aas` and `top` also expose `backend_seconds`; `compare` exposes paired
+     AAS; `periods` and `timeline` expose AAS without `backend_seconds`;
+     `samples` returns decoded raw evidence; `report` returns JSONB; and
+     `chart`/`summary` are presentation helpers.
   2. A documented, stable column contract (names + types) suitable for BI tools.
-  3. An explicit `source` (`raw` | `rollup`) and/or coverage indicator, plus discoverable retention metadata, so a caller can tell when a drill is unavailable for a given window.
+  3. Aggregate source values are `raw`, `rollup_1m`, `rollup_1h`,
+     `rollup_1h_flat`, or `none`. `report` and `summary` disclose provenance
+     through JSON or metric rows. `samples` is raw-only and has no source
+     column. `chart` emits a source/effective-plan `NOTICE` only when
+     `rollup_1h` widens its plan; otherwise it does not distinguish raw from
+     `rollup_1m`.
   4. Self-describing catalog comments (`obj_description`) covering the term, the columns, and the recommended next call.
-  5. Callable by the least-privilege reader role, and degrades gracefully when pg_stat_statements is absent.
+  5. Callable through the supported complete `grant_reader` privilege bundle,
+     and degrades gracefully when pg_stat_statements is absent.
 - **Primary API:** cross-cutting across the whole family.
 - **Coverage:** 🟡 Partial. Typed aggregate readers expose source fields;
   `compare` exposes per-window provenance, `report` uses JSON coverage,
-  `summary` has separate headline and drill provenance, `chart` emits a
-  planning `NOTICE`, and `samples` is raw-only. Retention rows live in
-  `ash.status()`, with a raise-don't-return-empty rule for unanswerable drills.
-  Availability fields still derive from stored activity rather than verified
-  sampler coverage ([AAS_API.md §5–§6](AAS_API.md), issue #137).
+  and `summary` has separate headline and drill provenance. `samples` is
+  raw-only without a source column. `chart` identifies its source only when a
+  `rollup_1h` plan widens the request. Retention rows live in `ash.status()`,
+  with a raise-don't-return-empty rule for unanswerable drills. Availability
+  fields still derive from stored activity rather than verified sampler
+  coverage ([AAS_API.md §5–§6](AAS_API.md), issue #137).
 - **Drivable from the catalog alone.** pg_ash self-documents in-DB, which is what
   lets an agent navigate it without external docs: `COMMENT ON SCHEMA ash` names
   the reader entry points and the reader-vs-ops split, and **every** function —
@@ -173,12 +192,15 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 
 - **Trigger:** periodic capacity review.
 - **Acceptance criteria:**
-  1. Long-window timeline (weeks) reads `rollup_1h` efficiently.
+  1. Long-window timelines use `rollup_1m` while minute-rollup retention
+     covers the requested start, then fall back to `rollup_1h`; output bucket
+     size is chosen independently.
   2. Per-bucket `peak_aas` (and ideally `p99_aas`) preserved at hour/day grain.
   3. Works to the limit of `rollup_1h` retention and signals that horizon.
 - **Primary API:** `ash.timeline` over long spans.
-- **Coverage:** 🟡 Partial. Auto `rollup_1h` selection and valid
-  `rollup_1h.minute_counts` preserve unfiltered/database-only minute totals.
+- **Coverage:** 🟡 Partial. Auto source selection uses minute rollups while
+  retained and then hourly rollups; valid `rollup_1h.minute_counts` preserve
+  unfiltered/database-only minute totals.
   Wait/query dimensions and legacy/incomplete `rollup_1h_flat` data retain
   hour grain and NULL extrema requested below that grain. Explicit query
   filters force raw samples for exact attribution. Long-term AAS still assumes
@@ -202,18 +224,29 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 ### US-8 — Machine load-report ingest
 
 > **As an** external monitoring / health-assessment platform,
-> **I want** one call that returns a complete load report — per-wait-class avg, worst-1-minute, p99, p99.9 AAS plus top wait events and top query ids per extreme window — as a single JSON document,
-> **so that** a lightweight collector can ingest pg_ash as a data source with one query per period, with pg_ash being the only thing installed on the target database.
+> **I want** one call that returns a fixed-shape report for CPU*, IO, IPC, Lock,
+> and LWLock—avg, worst-1-minute, p99, and p99.9 AAS plus top wait events and
+> top query IDs for extreme windows—as a single JSON document,
+> **so that** a lightweight collector can ingest pg_ash as its activity-history
+> data source with one query per period.
 
 - **Trigger:** periodic collection (per assessment run or scheduled).
 - **Acceptance criteria:**
   1. One call returns a single `jsonb` matching the documented payload contract exactly: `aas_avg` / `aas_worst1m` / `aas_p99` / `aas_p999` keyed by `total, cpu, io, ipc, lock, lwlock`; `top_events_*` (no `cpu`/`total` keys, entries `"Event(aas)"`); `top_queryids_*` (int64-safe string entries).
-  2. `total` = cpu+io+ipc+lock+lwlock; `Activity`/`Client`/`Timeout` excluded (not real load).
-  3. All series at 1-minute resolution, zero-filled.
-  4. The payload carries raw AAS only — scoring/normalization (e.g. against vCPUs) is the consumer's job; a caller-supplied `vcpus` is echoed, never used.
-  5. Degrades honestly: `top_queryids_*` omitted when the needed raw samples
-     are gone; `null` when the window has no activity-bearing rollup row;
-     callable by `grant_reader`.
+  2. `total` = cpu+io+ipc+lock+lwlock. Other recorded activity types are
+     excluded from this fixed payload but remain queryable; exclusion is not
+     evidence that they are harmless.
+  3. Base series use `rollup_1m` and zero-fill missing classes only within
+     stored activity-bearing timestamps. Top-query attribution additionally
+     reads raw samples for eligible extreme minutes.
+  4. The payload carries unscored AAS only — scoring/normalization (e.g.
+     against vCPUs) is the consumer's job; a caller-supplied `vcpus` is
+     echoed, never used.
+  5. Degrades honestly: `top_queryids_*` is omitted unless this invocation
+     produces at least one attributed query ID, and
+     `top_queryids_available` reports that result; the payload is `null` when
+     the window has no activity-bearing rollup row; callable by
+     `grant_reader`.
 - **Primary API:** `ash.report(since, until, vcpus, n)` ([AAS_API.md §4](AAS_API.md)).
 - **Coverage:** 🟡 Partial. The payload shape is implemented, but its
   `minutes_with_data` field is not verified sampler coverage (issue #137).
@@ -233,14 +266,18 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 | US-7 Before/after | `compare` | 🟡 | Cross-cadence comparisons rescale history (#137) |
 | US-8 Load report | `report` | 🟡 | `minutes_with_data` derives from stored activity (#137) |
 
-Coverage above is **by design** ([AAS_API.md](AAS_API.md)); implementation
-tracks in the 2.0 branch.
+Coverage above describes shipped 2.0 behavior at this revision; the remaining
+cadence/coverage gap is tracked by issue #137.
 
 ## 6. Cross-cutting (non-functional) requirements
 
 These apply to every story above.
 
-- **Unit consistency.** AAS is the primary unit (`avg_aas` / `peak_aas` / `p99_aas`); `backend_seconds` may appear as a secondary column. No third unit.
+- **Unit consistency.** Typed aggregate metrics use AAS as their primary unit
+  (`avg_aas` / `peak_aas` / `p99_aas`); `backend_seconds` appears only where
+  the reader shape supports it. `samples` returns decoded raw evidence,
+  `report` returns JSONB, and `chart`/`summary` are presentation helpers rather
+  than introducing a third aggregate unit.
 - **Percentile definition.** `p99_aas` = the 99th percentile of per-sub-bucket AAS. The sub-bucket grain is a parameter (default `'1 minute'`). `peak_aas` is the max over the same sub-buckets.
 - **Raw-vs-rollup honesty (trust property).** Aggregate readers select or
   declare their source by window. Rollup query breakdowns expose
@@ -255,8 +292,13 @@ These apply to every story above.
   the single convention halves the surface. ([AAS_API.md §1](AAS_API.md))
 - **Naming.** Function and column names use full domain terms — no abbreviations in user-facing names. Drill dimensions and filters spell out `wait_event_type` / `wait_event` / `query_id` / `database`, as the `dimension` values and parameter names of `top`. The on-CPU class is spelled `CPU*` — the asterisk marks "on CPU *or* uninstrumented wait" and must not be dropped.
 - **Dual audience.** Data functions are typed and presentation-free; ASCII bars/charts live only in dedicated rendering helpers.
-- **Privileges & degradation.** Every reader is callable by the `grant_reader` role and degrades gracefully without pg_stat_statements (show `query_id`, NULL `query_text`) and without pg_cron.
-- **Performance budgets.** Align with [SPEC.md §6](SPEC.md): rollup-backed reads target sub-100ms for a 1-day window; raw-backed leaf reads (US-4) stay within the budget for a 1-hour window on a 1-day partition.
+- **Privileges & degradation.** Every reader is callable through the supported
+  complete `grant_reader` bundle and degrades gracefully without
+  pg_stat_statements (show `query_id`, NULL `query_text`) and without pg_cron.
+- **Performance expectations.** Latency is hardware-, data-, retention-, and
+  workload-dependent. No portable latency guarantee is part of the API
+  contract; benchmark representative retained data before setting an
+  operational SLO.
 
 ## 7. Out of scope (for now)
 

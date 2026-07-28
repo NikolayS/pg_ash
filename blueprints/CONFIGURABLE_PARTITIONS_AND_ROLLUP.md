@@ -1,5 +1,13 @@
 # Configurable N-partitions + Rollup tables
 
+> **Historical design record (non-normative).** This file documents a pre-2.0
+> proposal and is retained only for design history. Its schemas, function
+> names, argument names, operational commands, performance figures, and
+> implementation status may not match the shipped release. Do not use it as an
+> install, upgrade, or API guide. Use `README.md`, `RELEASE_NOTES.md`,
+> `AAS_API.md`, and the catalog comments in `sql/ash-install.sql` for current
+> behavior.
+
 - **Spec version**: 0.6 (2026-04-06)
 - **Target**: pg_ash v1.5
 - **Status**: Reviewed — ready for implementation
@@ -172,7 +180,11 @@ execute format(
 ) using v_include_bg;
 ```
 
-**Performance note**: Dynamic SQL adds ~0.1ms overhead per `take_sample()` call. At 1s sampling interval, this is negligible (<0.01% overhead). The plan cache won't help with partition routing anyway since the slot changes. Ensure `v_current_slot` is strictly typed as `smallint` before format concatenation to prevent any string coercion overhead.
+**Performance note**: This design adds dynamic SQL to each `take_sample()`
+call. Its cost is hardware- and workload-dependent; no portable latency or
+overhead guarantee is part of the shipped contract. Benchmark representative
+sampler load before setting an operational SLO. Ensure `v_current_slot` is
+strictly typed as `smallint` before format concatenation.
 
 #### `rotate()` — dynamic truncation
 
@@ -210,14 +222,17 @@ Modular arithmetic changes from `% 3` to `% v_num_partitions` everywhere.
 
 **Why before config update**: If `rotate()` updates `current_slot` first (locking the config row), then calls `rollup_minute()`, any concurrent `take_sample()` that reads config will block. Calling rollup *before* the slot advance avoids this contention. The rollup is idempotent (upsert), so double-processing is safe.
 
-#### `rebuild_partitions(p_num int default null)` — hardened
+#### `rebuild_partitions(num_partitions int, confirm text default null)` — hardened
 
 New admin function. **Destructive** — all raw sample data is lost. Rollup tables survive.
 
 The v0.1 spec was too simple — it called `stop()` then immediately dropped tables. This races with in-flight `take_sample()` calls and external schedulers. The hardened protocol:
 
 ```sql
-create or replace function ash.rebuild_partitions(p_num int default null)
+create or replace function ash.rebuild_partitions(
+  num_partitions int,
+  confirm text default null
+)
 returns text
 language plpgsql
 as $$
@@ -225,8 +240,16 @@ declare
   v_old_n int;
   v_new_n int;
 begin
-  select num_partitions into v_old_n from ash.config where singleton;
-  v_new_n := coalesce(p_num, v_old_n);
+  if confirm is distinct from 'yes' then
+    raise exception 'rebuild_partitions is destructive — all raw sample data '
+      'will be lost. To proceed, call: '
+      'select ash.rebuild_partitions(%, ''yes'')', num_partitions;
+  end if;
+
+  select config_row.num_partitions into v_old_n
+  from ash.config as config_row
+  where config_row.singleton;
+  v_new_n := coalesce(rebuild_partitions.num_partitions, v_old_n);
 
   if v_new_n < 3 or v_new_n > 32 then
     raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
@@ -312,7 +335,12 @@ begin
 end $$;
 ```
 
-> **WARNING — failure leaves sampling disabled**: If `rebuild_partitions()` raises an exception after acquiring the rebuild lock (e.g., disk full during partition creation, constraint violation), the xact rolls back — but `sampling_enabled = false` was committed in a prior statement and is **not rolled back**. The schema may be in an unknown intermediate state. **Manual recovery required**: inspect `ash.status()`, verify partition count and table existence, fix the root cause, then `UPDATE ash.config SET sampling_enabled = true WHERE singleton; SELECT ash.start();`. This is intentional fail-safe behavior — an unknown schema state should never silently resume sampling. Document in the upgrade runbook and operator guide.
+> **Transaction and restart semantics:** An uncaught exception from
+> `rebuild_partitions()` rolls back the function statement, including its
+> `sampling_enabled` update and DDL. A successful rebuild deliberately leaves
+> sampling disabled. Inspect `ash.status()`, verify the new partitions, and
+> explicitly resume with `ash.start()` using the previously configured
+> interval.
 
 **Config change**: add `sampling_enabled bool not null default true` and `skipped_samples int4 not null default 0` to `ash.config`. The `skipped_samples` counter is incremented by `take_sample()` whenever sampling is skipped (rebuild in progress). It resets to 0 on `ash.start()`. Mandatory: silent skips must be visible in `status()` output.
 
@@ -330,7 +358,11 @@ The `sampling_enabled` flag controls which functions check it and how:
 | `start()` | Sets `sampling_enabled = true`, then schedules jobs |
 | `stop()` | Sets `sampling_enabled = false`, then unschedules jobs |
 
-**Recovery from catastrophic rebuild failure**: If `rebuild_partitions()` fails after setting `sampling_enabled = false` but before completing (connection drop, OOM), the flag persists with no automatic recovery. `status()` should flag `sampling_enabled = false` with no active pg_cron jobs as an anomalous state. Recovery: `UPDATE ash.config SET sampling_enabled = true WHERE singleton; SELECT ash.start();`
+**Recovery after rebuild**: An uncaught function error rolls back the statement.
+After a successful rebuild, `sampling_enabled = false` and no sampler job is
+expected until the owner verifies `ash.status()` and explicitly calls
+`ash.start()` using the previously configured interval. Manually force the
+flag only if committed state actually shows an unexpected disabled value.
 
 #### Advisory locking contract
 
@@ -486,7 +518,13 @@ alter table ash.config
 
 - `rollup_1m_retention_days`: how long to keep per-minute rollups (default 30 days).
 - `rollup_1h_retention_days`: how long to keep per-hour rollups (default 1825 = 5 years).
-- `rollup_min_backend_seconds`: minimum backend-seconds a query must have in an aggregation window to be stored in `query_counts` (default 3). Queries below this threshold are noise — not useful for trend analysis. See `PARTITIONED_QUERYMAP_DESIGN.md` for rationale.
+- `rollup_min_backend_seconds`: minimum number of stored query appearances in
+  each minute before that query is stored in `rollup_1m.query_counts` (default
+  3). `rollup_hour()` merges the already-retained minute query counts and does
+  not apply a new threshold across the hour. The count equals backend-seconds
+  only at an unchanged one-second sampling interval; it does not prove query
+  runtime at another cadence. See `PARTITIONED_QUERYMAP_DESIGN.md` for
+  rationale.
 - `last_rollup_1m_ts` / `last_rollup_1h_ts`: watermark timestamps for catch-up execution (see below).
 
 #### Epoch and timestamp helpers
@@ -523,11 +561,17 @@ $$;
 
 #### Tables
 
+The definitions below record the original proposal. The shipped
+`ash.rollup_1h` additionally carries `minute_counts int4[]` so readers can
+retain valid minute-level totals inside an hourly row. In both rollup levels,
+`samples` counts stored activity-bearing source rows; it is not a count of
+successful sampler ticks, because idle ticks are not persisted.
+
 ```sql
 create table if not exists ash.rollup_1m (
   ts              int4 not null,     -- minute-aligned epoch offset
   datid           oid not null,
-  samples         smallint not null, -- count of raw samples in this minute (max 60)
+  samples         smallint not null, -- activity-bearing raw rows contributing
   peak_backends   smallint not null, -- max per-database active backends in any
                                      -- single sample within this minute
   wait_counts     int4[] not null,   -- [wait_id, count, wait_id, count, ...]
@@ -542,13 +586,19 @@ create table if not exists ash.rollup_1h (
   peak_backends   smallint not null, -- max per-database peak across the hour
   wait_counts     int4[] not null,
   query_counts    int8[] not null,
+  minute_counts   int4[],            -- 60-slot per-minute total activity;
+                                     -- NULL slot = no stored observation
   primary key (ts, datid)
 );
 ```
 
 B-tree on `(ts, datid)` via PK — sufficient for all access patterns.
 
-No partitioning on rollup tables. They're small (see storage estimates below) and `DELETE` + autovacuum handles retention fine. **Note for heavy multi-database deployments**: with 50+ databases, `rollup_1m` could reach 2M+ rows and the daily `DELETE` + autovacuum cycle becomes noticeable. Monthly range partitioning on `rollup_1m` could help in the future but is not needed initially.
+The design leaves rollup tables unpartitioned and uses `DELETE` plus
+autovacuum for retention. Table size and bloat behavior depend on database
+count, activity density, retention, and workload, so monitor them on the target
+system. With 50+ active databases, `rollup_1m` can reach millions of rows;
+monthly range partitioning may be worth evaluating.
 
 **`peak_backends` semantics**: This is the **per-database** peak active backend count, not a cluster-wide number. Computed by counting decoded rows per `(sample_ts, datid)` and taking the max. The raw `active_count` column in `ash.sample` is also per-database (one sample row per datid per tick), so `max(active_count)` grouped by `datid` gives the correct per-database peak.
 
@@ -924,9 +974,14 @@ end $$;
 
 #### Reader functions
 
-Reader functions follow existing pg_ash convention: interval-based default + `_at()` variants for absolute timestamps. All readers use `ash.ts_from_timestamptz()` / `ash.ts_to_timestamptz()` for epoch conversion.
+The functions in this subsection were a historical v1.5 proposal and are not
+the shipped reader API. The current 2.0 surface is `ash.periods`, `ash.aas`,
+`ash.timeline`, `ash.top`, `ash.compare`, `ash.samples`, `ash.report`,
+`ash.chart`, and `ash.summary`; see `AAS_API.md`.
 
-Readers hit **rollup tables only**, not raw samples. Raw sample readers (`top_waits`, `top_queries`, etc.) already exist and cover short-term analysis. Rollup readers are for historical trends.
+The proposed readers below used interval defaults plus `_at()` twins and read
+rollup tables only. That convention was replaced by 2.0's `since`/`until`
+arguments and automatic source selection.
 
 ```sql
 -- Wait event trends from minute rollups
@@ -1103,7 +1158,7 @@ last_rollup_1h_ts      | 2026-04-03 05:00:00+00
 | 3 | 1 day | 1 day + current partial | ~30 MiB/day |
 | 5 | 1 day | 3 days + current partial | ~30 MiB/day |
 | 9 | 1 day | 7 days + current partial | ~30 MiB/day |
-| 3 | 1 hour | 1 hour + current partial | ~1.25 MiB/hr |
+| 17 | 1 day | 15 days + current partial | ~30 MiB/day |
 
 N doesn't change daily storage — it changes how many days you keep.
 
@@ -1111,12 +1166,14 @@ N doesn't change daily storage — it changes how many days you keep.
 
 Per `ROLLUP_DESIGN.md`:
 
-| Level | Retention | Rows/db | Storage/db |
-|-------|----------|---------|-----------|
+| Level | Retention | Rows/db at full activity-bearing coverage | Historical fixture storage/db |
+|-------|----------|-------------------------------------------|-------------------------------|
 | 1-minute | 30 days | ~43,200 | ~43 MiB |
 | 1-hour | 5 years | ~43,800 | ~77 MiB |
 
-Total: ~120 MiB per database for 5 years of trend data. Negligible for any production system.
+The historical fixture estimated about 120 MiB per database for five years of
+trend data. Actual storage depends on database count and retained array
+cardinality; measure the target workload.
 
 ---
 
@@ -1191,16 +1248,19 @@ create table if not exists ash.rollup_1h (...);
 --     CREATE OR REPLACE adds the rollup_minute() pre-truncation call.
 --     Safe because rollup_minute() now exists.
 
--- 14. Install reader functions
---     minute_waits(), minute_waits_at(), hourly_queries(),
---     hourly_queries_at(), daily_peak_backends(),
---     daily_peak_backends_at()
+-- 14. Historical proposal: install minute_waits()/hourly_queries()/
+--     daily_peak_backends() and _at twins.
+--     Shipped 2.0 instead installs periods(), aas(), timeline(), top(),
+--     compare(), samples(), report(), chart(), and summary().
 
 -- 15. Update version
 update ash.config set version = '{next}' where singleton;
 ```
 
-Existing 3-partition installations continue working unchanged. `num_partitions = 3` by default. Users call `rebuild_partitions(N)` to change.
+Existing 3-partition installations continue working unchanged.
+`num_partitions = 3` by default. To change it, the owner calls
+`select ash.rebuild_partitions(N, 'yes');`; the explicit confirmation is
+required because all raw samples are destroyed.
 
 ### REVOKE inventory
 
@@ -1220,7 +1280,10 @@ All new functions that should be REVOKE'd from PUBLIC:
 | `rollup_hour()` | Same |
 | `rollup_cleanup()` | Same |
 
-Reader functions (`minute_waits`, `hourly_queries`, `daily_peak_backends` and `_at` variants) should be accessible to any user who can read `ash.sample`.
+Reader access requires the supported complete `ash.grant_reader(role)` bundle:
+schema USAGE, EXECUTE on reader functions and their internal dependencies, and
+SELECT on reader relations. Direct access to `ash.sample` alone is
+insufficient because readers are `SECURITY INVOKER`.
 
 **pg_cron role note**: All rollup functions (`rollup_minute`, `rollup_hour`, `rollup_cleanup`) call internal helpers (`_merge_wait_counts`, etc.) that are REVOKE'd from PUBLIC. If pg_cron is configured to run jobs as a less-privileged role (not the schema owner), those calls will fail with `permission denied`. Either grant EXECUTE on internal helpers to the pg_cron role, or ensure all pg_cron ash jobs run as the database owner / schema owner. Document this in the installation guide.
 
@@ -1264,7 +1327,9 @@ The upgrade SQL script alone is not sufficient. The release notes must include:
 6. Implement `rollup_hour()` with watermark-based catch-up
 7. Implement `rollup_cleanup()` (config-driven retention)
 8. Add rollup integration to `rotate()` (pre-truncation rollup call)
-9. Reader functions (`minute_waits`, `hourly_queries`, `daily_peak_backends`) with `_at` variants
+9. Historical reader proposal (`minute_waits`, `hourly_queries`,
+   `daily_peak_backends`, plus `_at` variants); shipped 2.0 replaces this with
+   the surface documented in `AAS_API.md`
 10. Update `start()`/`stop()` for idempotent rollup cron scheduling
 11. Update `status()` with rollup metrics and watermarks
 12. Update `uninstall()` to drop rollup tables and functions
@@ -1292,13 +1357,19 @@ These were open in v0.1. All reviewers converged on the same answers:
 
 1. **`rollup_gaps` table**: *(Resolved — WARNING logs for v1.5.)* Round 3 consensus (R1 + R3): WARNING logs sufficient for now; schema surface area not worth it. Trivial to add a gaps table in a future version if users ask.
 
-2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: *(Resolved — skip for v1.5.)* `rollup_1m_retention_days = 0` is the escape hatch; cleanup clears all rows immediately. Semantics of retention=0: `rollup_minute()` still populates rows transiently but `rollup_cleanup()` deletes them on next run. Not a compute-disable, just a storage escape hatch.
+2. **`rollup_1m_enabled` / `rollup_1h_enabled` flags**: No enable flags
+exist. Both retention settings must be at least one day; zero is rejected and
+there is no retention-based compute-disable escape hatch.
 
 3. **Duplicate `sample_ts` handling**: *(Resolved by locking protocol — no DDL constraint.)* `pg_try_advisory_xact_lock` on `ash_operation` prevents concurrent `take_sample()` calls — the second call fails the lock and returns 0. Therefore `(sample_ts, datid)` duplicates are impossible. A `UNIQUE (sample_ts, datid)` constraint on the parent is not enforceable — PostgreSQL requires unique constraints on partitioned tables to include the partition key (`slot`), and `UNIQUE (sample_ts, datid, slot)` does not prevent the same `(sample_ts, datid)` in different slots. The advisory lock is the sole protection; document this clearly.
 
 4. **Reader function time-range routing**: *(Resolved — keep separate functions.)* No auto-routing in v1.5.
 
-5. **`rollup_min_samples` column naming**: *(Resolved — rename to `rollup_min_backend_seconds`.)* Round 3 majority (R1 rounds 1+3). The threshold is on the `count` field in `[query_id, count]` pairs = backend-seconds at 1s sampling interval. Column comment should note: "minimum backend-seconds a query must accumulate in an aggregation window to be stored in query_counts. At 1s sampling interval, 1 backend-second = 1 raw sample appearance." This rename must propagate everywhere in the spec and upgrade script.
+5. **`rollup_min_samples` column naming**: *(Resolved — rename to
+`rollup_min_backend_seconds`.)* The implementation thresholds stored query
+appearances. Those equal backend-seconds only at an unchanged one-second
+sampling interval; the name must not be read as proof of elapsed runtime at
+another cadence.
 
 ---
 
@@ -1309,16 +1380,16 @@ These were open in v0.1. All reviewers converged on the same answers:
 | # | Decision | Rationale |
 |---|----------|-----------|
 | 1 | Denormalized `query_id` in rollups | `query_counts` stores raw `query_id` (int8), not `query_map_id`. Eliminates GC coordination — rollups are self-contained. |
-| 2 | Backend-seconds as count unit | Consistent with Oracle ASH. `count / samples` gives average backends. |
+| 2 | Stored appearances as count unit | Counts equal backend-seconds only at an unchanged one-second cadence; current-interval AAS weighting remains subject to #137. |
 | 3 | Upsert for idempotency | `ON CONFLICT DO UPDATE` handles double-fires, late execution, manual re-runs. |
-| 4 | No partitioning on rollup tables | Too small to benefit. DELETE + autovacuum sufficient. |
+| 4 | No partitioning on rollup tables | The design uses DELETE + autovacuum; monitor table size and bloat on the target workload. |
 | 5 | All wait events kept; queries top 100 | Waits bounded by PG source (~600 max). Queries need truncation. |
 
 ### New in this spec
 
 | # | Decision | Rationale |
 |---|----------|-----------|
-| 6 | Dynamic SQL for partition routing | `execute format(...)` in `take_sample()` and `rotate()`. ~0.1ms overhead at 1s interval. Eliminates duplicated code. |
+| 6 | Dynamic SQL for partition routing | `execute format(...)` in `take_sample()` and `rotate()` eliminates duplicated code; overhead is workload-dependent and must be benchmarked on the target system. |
 | 7 | `rebuild_partitions()` disable/lock/restart | Destructive operation requires explicit disable, advisory lock, brief drain, and manual restart. Prevents races with in-flight operations and external schedulers. |
 | 8 | Minimum 3 partitions | Ring buffer needs: current + previous + truncate target. |
 | 9 | Maximum 32 partitions | Implementation ceiling chosen to contain UNION ALL view planning overhead; it is not currently performance-validated by CI. Revisit with a maintained N=16/N=32 benchmark and fall back to a real partitioned parent if exceeded. |
@@ -1328,7 +1399,7 @@ These were open in v0.1. All reviewers converged on the same answers:
 | 13 | Epoch stays 2026-01-01 | Already deployed and `IMMUTABLE`. Changing it corrupts all existing timestamps. Rollups use the same epoch. |
 | 14 | ts↔timestamptz helper functions | Single source of truth for epoch arithmetic. Prevents off-by-one bugs across reader and rollup functions. |
 | 15 | Retention config columns from day one | Avoids schema migration later. First thing serious users ask to tune. |
-| 16 | `rollup_min_backend_seconds` threshold | Noise filtering for trend analysis (default: 3+ backend-seconds). Configurable per `PARTITIONED_QUERYMAP_DESIGN.md`. |
+| 16 | `rollup_min_backend_seconds` threshold | Filters query attribution at three stored appearances per minute by default; this equals backend-seconds only at an unchanged one-second cadence. Configurable per `PARTITIONED_QUERYMAP_DESIGN.md`. |
 | 17 | `peak_backends` is per-database | Computed from decoded rows per `(sample_ts, datid)`, not from cluster-wide `active_count`. |
 | 18 | Pure SQL array merge helpers | jsonb approach discarded — CPU burn for type conversion. Set-based unnest + group by + array_agg stays in typed integer domain. |
 | 19 | Catalog-based cleanup for uninstall/rebuild | Enumerate actual objects from `pg_class`/`pg_inherits` instead of trusting config count. Catches orphaned tables from failed operations. |
@@ -1350,4 +1421,7 @@ This spec was reviewed by 4 independent reviewers. Key contributions:
 
 ---
 
-*Supersedes*: This spec supersedes the reader function signatures in `ROLLUP_DESIGN.md` (which used absolute-timestamp-only signatures). The new signatures use interval + `_at()` variants, consistent with existing pg_ash API convention (`top_waits`/`top_waits_at`, etc.).
+*Historical relationship*: This pre-2.0 spec superseded the reader signatures
+in `ROLLUP_DESIGN.md`. Both are now superseded by the 2.0 surface:
+`ash.periods`, `ash.aas`, `ash.timeline`, `ash.top`, `ash.compare`,
+`ash.samples`, `ash.report`, `ash.chart`, and `ash.summary`.

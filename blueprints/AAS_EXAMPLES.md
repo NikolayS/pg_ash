@@ -15,13 +15,17 @@ Conventions that repeat below, stated once:
   means “the last hour” except for `report`, whose no-bounds default is the
   last day; an `until`-only call means the preceding hour.
 - v1.5 units vary by function — `samples` (raw readers), `backend_seconds`
-  (rollup readers), active sessions (chart only). 2.0 always answers in AAS
-  (`avg_aas` / `peak_aas` / `p99_aas`), with `backend_seconds` as a secondary
-  column. Typed aggregate readers expose source columns; `report`, `summary`,
-  `samples`, and `chart` disclose provenance in the forms documented in
-  [AAS_API.md](AAS_API.md). `summary` uses separate headline and wait/query
-  drill source/bounds metrics because the two plans can have different
-  effective windows.
+  (rollup readers), active sessions (chart only). In 2.0, typed aggregate
+  readers report AAS using the metrics their shape supports: `aas` and `top`
+  also expose `backend_seconds`; `compare` exposes paired AAS; and `periods`
+  and `timeline` expose AAS without `backend_seconds`. `samples` returns
+  decoded raw evidence, `report` returns JSONB, and `chart`/`summary` are
+  presentation helpers. Typed aggregate readers expose source columns;
+  `report` uses coverage JSON, and `summary` uses separate headline and
+  wait/query drill source/bounds metrics because the two plans can have
+  different effective windows. `samples` is raw-only and has no source column.
+  `chart` emits a source/effective-plan `NOTICE` only when `rollup_1h` widens
+  its plan; otherwise it does not distinguish raw from `rollup_1m`.
 - 2.0 does not persist historical cadence or successful idle ticks. The
   examples assume one unchanged 1-second interval. Empty source buckets cannot
   distinguish idle load from a sampler outage (issue #137). The corrected
@@ -60,11 +64,11 @@ select * from ash.periods();
 ```
  period | period_start        | period_end          | source    | bucket   | buckets_with_data | avg_aas | peak_aas | p99_aas
 --------+---------------------+---------------------+-----------+----------+-------------------+---------+----------+---------
- 1m     | 2026-07-04 14:44:00 | 2026-07-04 14:45:00 | raw       | 00:01:00 |                 1 |    2.9  |     3.4  |    3.4
+ 1m     | 2026-07-04 14:44:00 | 2026-07-04 14:45:00 | raw       | 00:01:00 |                 1 |    2.9  |     2.9  |    2.9
  5m     | 2026-07-04 14:40:00 | 2026-07-04 14:45:00 | raw       | 00:01:00 |                 5 |    3.1  |     4.0  |    3.9
- 1h     | 2026-07-04 13:45:00 | 2026-07-04 14:45:00 | rollup_1m | 00:01:00 |                60 |    3.2  |    41.0  |   12.7
+ 1h     | 2026-07-04 13:45:00 | 2026-07-04 14:45:00 | raw       | 00:01:00 |                60 |    3.2  |    41.0  |   12.7
  1d     | 2026-07-03 14:45:00 | 2026-07-04 14:45:00 | rollup_1m | 00:01:00 |              1440 |    2.8  |    41.0  |    6.3
- 1w     | 2026-06-27 14:45:00 | 2026-07-04 14:45:00 | rollup_1h | 00:01:00 |             10080 |    2.6  |    41.0  |    5.9
+ 1w     | 2026-06-27 14:45:00 | 2026-07-04 14:45:00 | rollup_1m | 00:01:00 |             10080 |    2.6  |    41.0  |    5.9
  1mo    | 2026-06-04 14:45:00 | 2026-07-04 14:45:00 | rollup_1h | 00:01:00 |             43200 |    2.5  |    41.0  |    5.7
 ```
 
@@ -125,8 +129,8 @@ UTC/epoch boundaries, not anchored to `since`), so this same absolute window
 returns these same labels on every call — even if the first bucket precedes
 `since` and edge buckets average over their in-window part only.
 
-`ash.chart()` is the human rendering of the same series (stacked by wait
-class, colors optional) — unchanged in spirit from `timeline_chart`.
+`ash.chart()` is the human rendering of the same series, stacked by wait event
+with optional color.
 
 ## 3. Drill
 
@@ -366,17 +370,17 @@ select * from ash.daily_peak_backends('7 days');
  2026-06-29 |            41 |          2.9
 ```
 
-**After** — one series function; grain and source are chosen from the window
-(and reported), unit is AAS everywhere:
+**After** — one series function; output grain and storage source are selected
+independently and both are disclosed. Unit is AAS everywhere:
 
 ```sql
-select * from ash.timeline(since => now() - interval '7 days');  -- auto: 1-hour buckets, rollup_1h
+select * from ash.timeline(since => now() - interval '7 days');  -- auto: 1-hour buckets backed by rollup_1m while retained
 ```
 ```
     bucket_start     |  source   | data_points | avg_aas | peak_aas | p99_aas
 ---------------------+-----------+-------------+---------+----------+---------
- 2026-06-28 00:00:00 | rollup_1h |          60 |    2.1  |     4.0  |    3.8
- 2026-06-28 01:00:00 | rollup_1h |          60 |    2.3  |     5.0  |    4.6
+ 2026-06-28 00:00:00 | rollup_1m |          60 |    2.1  |     4.0  |    3.8
+ 2026-06-28 01:00:00 | rollup_1m |          60 |    2.3  |     5.0  |    4.6
  …
 ```
 
@@ -393,8 +397,8 @@ from ash.top('database', since => now() - interval '1 hour');
 ```
    key    | query_text | source    | avg_aas | peak_aas | p99_aas | backend_seconds |  pct
 ----------+------------+-----------+---------+----------+---------+-----------------+------
- shop     |            | rollup_1m |    2.9  |    39.0  |   11.8  |           10440 | 90.6
- metrics  |            | rollup_1m |    0.3  |     2.0  |    1.2  |            1080 |  9.4
+ shop     |            | raw       |    2.9  |    39.0  |   11.8  |           10440 | 90.6
+ metrics  |            | raw       |    0.3  |     2.0  |    1.2  |            1080 |  9.4
 ```
 
 ## 6. Raw evidence
@@ -417,7 +421,7 @@ select * from ash.aas();   -- the last hour, one row
 ```
     period_start     |      period_end      | source    | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds
 ---------------------+----------------------+-----------+------------------+------------------+-------------------+---------+----------+---------+-----------------
- 2026-07-04 13:45:00 | 2026-07-04 14:45:00  | rollup_1m | 00:01:00         |               60 |                59 |    3.2  |    41.0  |   12.7  |           11520
+ 2026-07-04 13:45:00 | 2026-07-04 14:45:00  | raw       | 00:01:00         |               60 |                59 |    3.2  |    41.0  |   12.7  |           11520
 ```
 
 ### `ash.compare()` — before/after a deploy

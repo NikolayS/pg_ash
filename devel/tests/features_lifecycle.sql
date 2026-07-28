@@ -17,7 +17,9 @@ begin
   select ash.set_debug_logging(true)
   into v_actual;
   assert v_actual =
-    'debug_logging enabled — each sampled session will emit RAISE LOG'
+    'Debug logging enabled—each observed active session will issue a '
+    || 'LOG-level message; visibility depends on log_min_messages and '
+    || 'client_min_messages.'
     and (
       select debug_logging
       from ash.config
@@ -395,11 +397,11 @@ begin
     assert v_start_rows = '{
         "sampler": [
           null,
-          "interval set to 00:00:02 — schedule externally (pg_cron not available)"
+          "pg_cron unavailable — configure an external scheduler to execute SELECT ash.take_sample() exactly every 00:00:02; using another cadence makes AAS values inaccurate"
         ],
         "rotation": [
           null,
-          "rotation_period is 1 day — schedule ash.rotate() externally"
+          "call ash.rotate() daily; it skips until at least 90% of rotation_period has elapsed"
         ],
         "rollup": [
           null,

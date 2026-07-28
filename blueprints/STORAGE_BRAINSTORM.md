@@ -1,5 +1,10 @@
 # Storage Brainstorm
 
+> **Historical benchmark/design notebook (non-normative).** The shipped format
+> uses `integer[]`, not the prototype `smallint[]`. The prototype's 221-byte /
+> approximately 19 MiB-per-day result is not a current capacity guarantee.
+> Measure the current schema on the target workload.
+
 Design exploration for pg_ash sample row format. All benchmarks run on Postgres 17,
 8,640 samples (1 day at 10s), 50 active + idle-in-transaction backends per sample,
 15 distinct wait events.
@@ -157,19 +162,21 @@ functions for all operations — loses native array operators (`unnest`,
 | 4 | JSONB → `bytea` (pglz) | 381 | 3.1 | 31 | Good ratio, bad read perf |
 | 5 | `smallint[]` + `smallint[]` (dict) | 292 | 2.5 | 25 | Dictionary-encoded qids |
 | 6 | Interleaved `smallint[]` | 264 | 2.2 | 22 | Single array, stride-2 |
-| **7** | **Encoded `smallint[]`** | **221** | **1.9** | **19** | **Best balance** |
+| **7** | **Encoded `integer[]`** | **~378** | **~3.0** | **~30** | **Shipped element width; workload estimate only** |
 | 8 | Encoded `bytea` (compact) | 190 | 1.6 | 16 | Smallest, hardest to query |
 
-## Decision: Encoded `smallint[]` (#7)
+## Decision implemented: Encoded `integer[]` (#7)
 
-**221 bytes/row. ~19 MiB/day for 50 active + idle-in-transaction backends at 1s sampling (default).**
+The shipped array uses four-byte `integer` elements because query-map IDs are
+`int4`; the 221-byte / approximately 19 MiB-per-day `smallint[]` prototype is
+not the implemented format. This notebook estimated about 378 bytes per row
+and 30 MiB/day for its fixture, not a portable capacity guarantee.
 
 Rationale:
-- **5.4× compression** vs flat rows
 - **Native array operations** — can still use `unnest()`, `array_length()`, etc.
 - **Grouped by wait event** — reader functions get natural structure without extra work
 - **One array, one column** — simpler schema, one array header
-- **Only 14% larger than `bytea`** — not worth the decode complexity
+- **`int4` dictionary capacity** — avoids the 32,767-ID ceiling of `smallint`
 
 The `bytea` approach (#8) is left as a future optimization if storage becomes
 a real concern at extreme scale.
@@ -211,8 +218,10 @@ encoded format (#7) — the `query_ids` in the array are dictionary references.
 
 `datid` (oid, 4 bytes/row) is kept in the schema. Cross-database analysis
 ("is the server overloaded?") requires seeing all backends in one place.
-pg_ash is installed once (in the pg_cron database) and samples all databases
-via `pg_stat_activity`.
+pg_ash is installed once in the database chosen to retain cluster history. If
+pg_cron supplies scheduling, that is the pg_cron database; otherwise an
+external scheduler invokes the same functions there. Sampling reads
+`pg_stat_activity` across databases.
 
 ### Sampled sessions
 

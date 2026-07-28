@@ -357,7 +357,7 @@ sleep 1.5
 # Act 2 — status: already sampling, version 2.0, pg_cron wired. status() is
 # (metric, value), so `select *` IS the full projection — we keep a WHERE only
 # to trim the ~30-row diagnostic dump to the five that matter for the intro.
-human_type_and_send "select * from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','pg_cron_available');"
+human_type_and_send "select * from ash.status() where metric in ('version','sampling_config_enabled','sample_interval','samples_total','pg_cron_available');"
 sleep 3.8
 
 # Act 3 — triage: is it bad right now, and is it a spike or sustained? periods()
