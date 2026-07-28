@@ -28,7 +28,8 @@ rollup storage, and return-value semantics:
   `samples`, `report`, `chart`, and `summary` form the 2.0 surface. Filters use
   consistent names where supported. Aggregate readers disclose provenance
   through typed source/effective-plan columns, report coverage JSON, summary
-  metrics, or a chart planning `NOTICE`; `samples()` is raw-only.
+  metrics, or—only when hour grain widens—a chart planning `NOTICE`;
+  `samples()` is raw-only and has no source column.
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.
@@ -84,6 +85,10 @@ rollup storage, and return-value semantics:
   `time_since_last_activity_sample` makes the same distinction for its age. A
   `sampling_evidence` row states that idle ticks and scheduler outages remain
   indistinguishable.
+- **Debug logging diagnostics disclose message routing.**
+  `ash.set_debug_logging(true)` now describes observed active sessions
+  precisely and reports that `LOG` visibility follows `log_min_messages` and
+  `client_min_messages`.
 - **Wide aggregate readers now reject stale rollup coverage without losing the
   fast path.** When raw is the canonical source for a wide window, readers fall
   back to it if `rollup_1m` has not reached the requested end, clamped at the
@@ -100,10 +105,11 @@ rollup storage, and return-value semantics:
 ## Retired tooling
 
 - **The unmaintained pre-2.0 benchmark suite has been removed.** Several
-  entrypoints referenced a 1.0 installer path absent from the 2.0 tree, queried
-  obsolete storage objects and readers absent from 2.0, and could report
-  completion after SQL errors. No maintained 2.0 performance harness replaces
-  it yet; validate capacity and WAL on the target workload. (issue #139)
+  entrypoints referenced the `sql/ash--1.0.sql` path absent from the current
+  2.0 tree, queried obsolete storage objects and readers absent from 2.0, and
+  could report completion after SQL errors. No maintained 2.0 performance
+  harness replaces it yet; validate capacity and WAL on the target workload.
+  (issue #139)
 
 ## Known limitations
 
@@ -116,15 +122,20 @@ rollup storage, and return-value semantics:
   sampler outage. At sampling intervals greater than one minute, the full tick
   weight is assigned to one minute, so one-minute peaks and report
   worst-minute values can exceed observed concurrency. Keep cadence fixed and
-  monitor scheduler health independently. `ash.timeline()` now calls these
-  buckets “no stored observation,” but that catalog correction does not add
-  heartbeat storage. (issues #137 and #175)
+  monitor scheduler health independently. The `ash.timeline()` catalog comment
+  describes these buckets as “no stored observation,” but that catalog
+  correction does not add heartbeat storage. (issues #137 and #175)
 
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
 [SECURITY.md](SECURITY.md#advisory-lock-squat-dos).
 
 ---
+
+**Historical-note scope:** The sections below describe tagged 1.x releases.
+Their SQL paths, readers, examples, benchmark figures, and defaults are not
+current 2.0 guidance. Check out the corresponding `v1.x` tag before running a
+command; use the 2.0 instructions above for a current checkout.
 
 # pg_ash 1.5 release notes
 
@@ -263,11 +274,16 @@ Three new bigint columns on `ash.config`, all surfaced by `ash.status()`:
 
 ## Demo
 
-README's hero visual is a [short animated GIF](demos/) of pg_ash investigating a row-lock spike on Postgres 18. Reproducible via `make -C demos record`. Human-paced typing, colored bar charts, vanilla psql in tmux. ([PR #64](https://github.com/NikolayS/pg_ash/pull/64), [PR #68](https://github.com/NikolayS/pg_ash/pull/68))
+The v1.4 README used a short animated GIF of pg_ash investigating a row-lock
+spike on Postgres 18. The recorder remains reproducible via
+`make -C demos record`, although the current README does not embed the GIF.
+([PR #64](https://github.com/NikolayS/pg_ash/pull/64),
+[PR #68](https://github.com/NikolayS/pg_ash/pull/68))
 
 ## Functions
 
-This release adds a substantial number of functions; the README's Function reference table is the canonical list. Highlights:
+This release adds a substantial number of functions. The Function reference
+in the README at tag `v1.4` is the canonical list for that release. Highlights:
 
 | New function | Purpose |
 |---|---|
@@ -295,7 +311,11 @@ This release adds a substantial number of functions; the README's Function refer
 
 ### New: set_debug_logging()
 
-`ash.set_debug_logging(true)` enables per-session `RAISE LOG` in `take_sample()` — each sampled backend emits a log line with pid, state, wait event, backend type, and query_id. Useful for diagnosing connection pooler behavior. Goes to server log only, independent of `client_min_messages`. (#8, refs #4)
+`ash.set_debug_logging(true)` enables installation-wide sampler `RAISE LOG`
+output for subsequent `take_sample()` calls — each sampled backend emits a log
+line with pid, state, wait event, backend type, and query_id. Useful for
+diagnosing connection pooler behavior. Server-log and client delivery follow
+`log_min_messages` and `client_min_messages`, respectively. (#8, refs #4)
 
 ### New: pgss-dependent functions fail fast
 
@@ -333,9 +353,10 @@ PG18 added to standard test matrix (dropped pgxn-tools workaround). `pg_stat_sta
 
 | Function | Description |
 |---|---|
-| `set_debug_logging(bool)` | **New** — enable/disable per-session RAISE LOG in take_sample() |
+| `set_debug_logging(bool)` | **New** — enable/disable installation-wide sampler `RAISE LOG` output for subsequent `take_sample()` calls |
 
-All other functions unchanged from 1.2. See README for the full reference.
+All other functions are unchanged from 1.2. The Function reference in the
+README at tag `v1.3` is the canonical list for that release.
 
 ---
 
@@ -443,7 +464,8 @@ Both `event_queries()` and `event_queries_at()` would crash on Postgres instance
 | `start(interval)` | **Enhanced** — statement_timeout in cron command |
 | `status()` | **Enhanced** — shows version, color state |
 
-All other functions unchanged from 1.1. See README for the full reference.
+All other functions are unchanged from 1.1. The Function reference in the
+README at tag `v1.2` is the canonical list for that release.
 
 ---
 
@@ -480,7 +502,7 @@ Version check now uses `string_to_array()::int[]` comparison instead of lexicogr
 
 Minimum valid encoded array is 3 elements (`[-wid, count, qid]`), not 2. The CHECK constraint and sampler guard now enforce `array_length >= 3`.
 
-### Improved: 100% test coverage
+### Improved: direct function coverage
 
 CI expanded from 16 assertions to 151. All 32 functions are directly tested across Postgres 14–18.
 
@@ -494,7 +516,8 @@ CI expanded from 16 assertions to 151. All 32 functions are directly tested acro
 | `top_waits(interval, limit, width)` | Top wait events with bar chart (was without `width` in 1.0) |
 | `top_waits_at(start, end, limit, width)` | Absolute-time variant with bar chart |
 
-All other functions unchanged from 1.0. See README for the full reference.
+All other functions are unchanged from 1.0. The Function reference in the
+README at tag `v1.1` is the canonical list for that release.
 
 ---
 
@@ -515,7 +538,7 @@ Key design decisions:
 - **Skytools PGQ-style 3-partition ring buffer** — TRUNCATE-based rotation, zero bloat, zero vacuum overhead on sample data
 - **Partitioned query_map** — three per-partition dictionary tables that TRUNCATE in lockstep with sample partitions, eliminating all GC logic
 - **Encoded integer arrays** — wait events and query IDs packed into `integer[]` columns (~106 bytes per row for 6 active backends), with TOAST LZ4 compression
-- **Inline SQL decode** — reader functions use `generate_subscripts` and array subscript access instead of plpgsql loops, achieving ~30 ms response times on 1-hour windows
+- **Inline SQL decode** — reader functions use `generate_subscripts` and array subscript access instead of plpgsql loops, which the retired v1.0 harness measured at roughly 30 ms on its one-hour fixture
 - **Per-function `set jit = off`** — prevents 10x overhead from JIT compilation on OLTP servers without affecting other workloads
 
 ## Reader functions
@@ -605,7 +628,8 @@ select * from ash.samples('10 minutes', 20);
 
 ## Storage characteristics
 
-Measured with representative workloads (see [benchmarks](https://github.com/NikolayS/pg_ash/issues/1)):
+Historical v1.0 measurements from the now-retired harness—not 2.0 sizing or WAL
+guidance:
 
 - **Row size:** ~106 bytes for 6 active backends (measured with `pg_column_size`)
 - **Daily storage:** ~30 MiB for typical workloads at 1-second sampling
@@ -639,7 +663,7 @@ Negative values are wait event dictionary IDs (markers), followed by a backend c
 All objects live in the `ash` schema:
 
 - `ash.config` — singleton configuration table
-- `ash.wait_event_map` — wait event dictionary (~600 entries max)
+- `ash.wait_event_map` — wait-event dictionary; seed size varies by PostgreSQL release and current releases hard-cap it at 32,000 rows
 - `ash.query_map_0`, `query_map_1`, `query_map_2` — per-partition query ID dictionaries
 - `ash.query_map_all` — unified view (planner eliminates non-matching partitions)
 - `ash.sample` — partitioned sample table (3 partitions, ring buffer)

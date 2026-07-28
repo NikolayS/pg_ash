@@ -168,7 +168,9 @@ On a system with 5,000 distinct query_ids per minute:
 - Without filter: top 100 stored = 100 × 2 × 8 = 1,600 bytes
 - With 3+ filter: maybe 200-500 qualify, top 100 stored = same 1,600 bytes
 
-The filter doesn't change storage size (top-N truncation already bounds it), but it **improves quality** — the top 100 are now the top 100 *meaningful* queries, not polluted by one-off noise.
+The filter does not change worst-case array size because top-N already bounds
+it. It changes which query IDs compete for the top 100 by excluding IDs below
+the configured per-minute appearance threshold.
 
 ### Impact on hourly rollup
 
@@ -183,9 +185,10 @@ three-appearance threshold across the hour.
 rollup_min_backend_seconds smallint DEFAULT 3
 ```
 
-Users can set it to 1 (keep every attributed appearance up to top-N) or higher
-(stricter filtering in each minute). Despite the historical column name,
-interpret it as stored appearances unless sampling stayed at one second.
+Users can set it to 1 (keep every query ID observed at least once, subject to
+the top-100 cap) or higher (stricter filtering in each minute). Despite the
+historical column name, interpret it as stored appearances unless sampling
+stayed at one second.
 
 ---
 
@@ -217,6 +220,7 @@ Raw layer: maximum compression (int4 map_ids), zero bloat (partitioned
 everything), and roughly one completed day plus the current partial period at
 the default geometry.
 
-Rollup layer: self-contained (int8 query_ids), noise-filtered (3+ threshold), bounded (top-N), long retention.
+Rollup layer: self-contained (int8 query_ids), appearance-threshold-filtered,
+bounded (top-N), long retention.
 
 No GC coordination between layers. Each is independent.

@@ -21,18 +21,20 @@ functions must use the de-prefixed 2.0 parameter names—for example,
 > independently. At intervals greater than one minute, the full tick weight
 > lands in one minute, so minute extrema can exceed observed concurrency.
 > Persisted cadence and heartbeats are tracked in issue #137.
-> `ash.timeline()` now calls these buckets “no stored observation”; its
-> corrected grain semantics do not make idle time distinguishable from an
-> outage.
+> The `ash.timeline()` catalog comment describes these buckets as “no stored
+> observation”; its corrected grain semantics do not make idle time
+> distinguishable from an outage.
 
 ---
 
 ## 1. Principles
 
-1. **AAS is the only load unit.** Every reader reports `avg_aas`, `peak_aas`,
-   `p99_aas` (numeric, in average-active-sessions), with `backend_seconds` as
-   a secondary absolute column. The v1.x units `samples` and bare
-   `backend_seconds`-as-primary disappear.
+1. **AAS is the aggregate load unit.** Typed aggregate readers report AAS
+   using the metrics their shape supports. `aas` and `top` also expose
+   `backend_seconds`; `compare` exposes paired AAS; `periods` and `timeline`
+   expose AAS without `backend_seconds`; `samples` returns decoded raw
+   evidence; `report` returns JSONB; and `chart`/`summary` are presentation
+   helpers.
 2. **One time convention.** Reader windows are `[since, until)`. With only
    `until`, `since` defaults to `until - interval '1 hour'`; with neither bound,
    the default is the last hour (`report` alone defaults to the last day).
@@ -414,10 +416,10 @@ optional `top_queryids_*` keys for attribution.
 
 **Boundary:** pg_ash is **only the data source**. Consumer-side scoring —
 thresholds, health zoning, normalization against vCPU counts, display labels,
-ingestion pipelines — is entirely the consumer's concern. pg_ash emits raw
-AAS numbers in the payload shape above and knows nothing about how they are
-scored. This payload contract is frozen per 2.0 minor line: keys are only
-ever added, never renamed or removed.
+ingestion pipelines — is entirely the consumer's concern. pg_ash emits
+unscored AAS numbers in the payload shape above and knows nothing about how
+they are scored. This payload contract is frozen per 2.0 minor line: keys are
+only ever added, never renamed or removed.
 
 Semantics:
 
