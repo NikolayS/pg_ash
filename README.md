@@ -354,6 +354,14 @@ renamed or removed.
 
 Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` confirmation token.
 
+Lifecycle job changes are statement-atomic. If an existing managed pg_cron job
+cannot be replaced or unscheduled, `ash.start()` / `ash.stop()` raise;
+`ash.rebuild_partitions()` and `ash.uninstall()` propagate that error and roll
+back instead of reporting success. A genuinely absent job remains idempotent.
+Call these lifecycle functions as the `ash` schema owner (`SET ROLE` to it
+first when administering as another superuser); foreign-owned managed jobs make
+stop/rebuild/uninstall fail closed rather than leave an orphan.
+
 ## Scheduling
 
 pg_cron is optional. For pg_cron scheduling, install pg_ash in the database

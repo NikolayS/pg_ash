@@ -1031,47 +1031,67 @@ set jit = off;
 
 #### pg_cron scheduling — idempotent
 
-`start()` and `stop()` must handle repeated calls and pre-existing jobs gracefully:
+`start()` and `stop()` must handle repeated calls and genuinely absent jobs
+gracefully without treating every unschedule failure as absence. Lifecycle
+calls run as the `ash` schema owner. Resolve an existing named job in that
+owner's pg_cron namespace, unschedule its exact job ID, and require a true
+result before scheduling the replacement:
 
 ```sql
--- In ash.start():
--- Unschedule by known name BEFORE scheduling (idempotent).
--- This handles: repeated start() calls, name collisions from
--- older versions, or stale jobs from a prior install.
-begin
-  perform cron.unschedule('ash_rollup_1m');
-exception when others then null;
-end;
+select jobid into v_job_id
+from cron.job
+where jobname = 'ash_rollup_1m'
+  and username = current_user;
+
+if v_job_id is not null then
+  select cron.unschedule(v_job_id) into v_unscheduled;
+  if v_unscheduled is distinct from true then
+    raise exception 'could not unschedule ash_rollup_1m (jobid %)', v_job_id;
+  end if;
+end if;
 perform cron.schedule('ash_rollup_1m', '* * * * *',
   'select ash.rollup_minute()');
 
-begin
-  perform cron.unschedule('ash_rollup_1h');
-exception when others then null;
-end;
-perform cron.schedule('ash_rollup_1h', '0 * * * *',
+-- Apply the same exact-ID / true-result rule to both remaining rollup jobs.
+perform cron.schedule('ash_rollup_1h', '1 * * * *',
   'select ash.rollup_hour()');
-
-begin
-  perform cron.unschedule('ash_rollup_gc');
-exception when others then null;
-end;
 perform cron.schedule('ash_rollup_gc', '0 3 * * *',
   'select ash.rollup_cleanup()');
 ```
+
+Any lookup, permission, lock, or unschedule error other than proven absence
+must propagate, rolling back the whole `start()` statement.
 
 When pg_cron is unavailable, emit NOTICE with external scheduler instructions (consistent with existing behavior for `take_sample` and `rotate`).
 
 #### `ash.stop()` changes
 
-Also unschedule rollup jobs. Tolerate missing jobs (idempotent):
+Also unschedule rollup jobs. Pre-resolve absence for idempotency, remove each
+existing job by exact ID, and return a `removed` row only after
+`cron.unschedule()` returns true:
 
 ```sql
 -- In ash.stop():
-begin perform cron.unschedule('ash_rollup_1m'); exception when others then null; end;
-begin perform cron.unschedule('ash_rollup_1h'); exception when others then null; end;
-begin perform cron.unschedule('ash_rollup_gc'); exception when others then null; end;
+for v_job in
+  select jobid, jobname
+  from cron.job
+  where jobname = any(array[
+    'ash_rollup_1m', 'ash_rollup_1h', 'ash_rollup_gc'
+  ])
+    and username = current_user
+loop
+  select cron.unschedule(v_job.jobid) into v_unscheduled;
+  if v_unscheduled is distinct from true then
+    raise exception 'could not unschedule % (jobid %)',
+      v_job.jobname, v_job.jobid;
+  end if;
+  return next; -- report this proven removal
+end loop;
 ```
+
+An error aborts the statement and rolls back earlier removals. Teardown must
+also refuse to report success while a visible managed-name job owned by another
+role still targets this database.
 
 #### `ash.status()` additions
 
