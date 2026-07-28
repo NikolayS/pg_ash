@@ -134,6 +134,7 @@ require_commands() {
     bash
     diff
     docker
+    git
     grep
     pg_isready
     psql
@@ -141,6 +142,7 @@ require_commands() {
     script
     sed
     sort
+    tar
   )
 
   for command_name in "${commands[@]}"; do

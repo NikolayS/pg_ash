@@ -1,8 +1,8 @@
 /*
- * pg_ash: upgrade from 1.5 to 2.0 beta 1
+ * pg_ash: upgrade from 1.5 to 2.0
  *
  * 2.0 is a breaking release: the reader API is redesigned (issue #113,
- * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 beta 1
+ * blueprints/AAS_API.md). This upgrade wrapper replays the final 2.0
  * installer, which:
  *   * snapshots existing reader-role EXECUTE grants, then drops every removed
  *     v1.x reader and draft aas_* function (all overloads / _at twins), the
@@ -22,7 +22,7 @@
  *   * grants the default reader bundle to pg_monitor (best-effort, new in
  *     2.0 — see the block at the end of the installer; opt out afterwards
  *     with `select ash.revoke_reader('pg_monitor')`), and
- *   * stamps ash.config.version = '2.0-beta1' (and the column default), and
+ *   * stamps ash.config.version = '2.0' (and the column default), and
  *   * normalizes ash.config's physical column order to match a fresh 2.0
  *     install while preserving its singleton row and catalog properties.
  *
@@ -32,12 +32,23 @@
  * Re-apply-safe: the installer is idempotent (CREATE OR REPLACE / IF NOT
  * EXISTS plus the deterministic drop block), and the config normalization
  * exits without replacing the table once the canonical order is present.
+ *
+ * One migration-owned transaction covers both phases. The installer normally
+ * owns and commits its transaction; the transaction-local setting below makes
+ * it participate in this wider transaction instead. A finite preflight cannot
+ * prove that normalization will finish: the explicit catalog checks reject
+ * known unsupported table shapes, but a permitted dependent view can still
+ * make DROP RESTRICT fail, and event triggers, concurrent DDL, permissions,
+ * cancellation, or resource/commit failures can arise later. Keeping every
+ * statement in one transaction guarantees that any such failure rolls back
+ * the 2.0 version stamp together with all installer and normalization changes.
  */
 
 \set ON_ERROR_STOP on
+begin;
+set local pg_ash.install_in_migration_transaction = 'on';
 \ir ../ash-install.sql
 
-begin;
 set local search_path = pg_catalog, pg_temp;
 set local default_tablespace = '';
 

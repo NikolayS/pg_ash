@@ -1,6 +1,6 @@
 /*
  * pg_ash: Active Session History for Postgres
- * Version: 2.0 beta 1
+ * Version: 2.0
  * Fresh install: \i sql/ash-install.sql
  * Upgrade from 1.0: \i sql/migrations/ash-1.0-to-1.1.sql, then \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.1: \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
@@ -9,16 +9,38 @@
  * Upgrade from 1.4: \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.5: \i sql/migrations/ash-1.5-to-2.0.sql
  *
- * Transaction behavior: this entrypoint disables ON_ERROR_ROLLBACK, enables
- * ON_ERROR_STOP, and owns its transaction. ON_ERROR_ROLLBACK would reduce
- * statement failures to savepoint rollbacks and permit a partial install to
- * be committed. When invoked with \i inside an existing transaction, the
- * final COMMIT also commits the caller's outer work.
+ * Transaction behavior: when invoked directly, this entrypoint disables
+ * ON_ERROR_ROLLBACK, enables ON_ERROR_STOP, and owns its transaction.
+ * ON_ERROR_ROLLBACK would reduce statement failures to savepoint rollbacks
+ * and permit a partial install to be committed. When invoked directly with
+ * \i inside an existing transaction, the final COMMIT also commits the
+ * caller's outer work.
+ *
+ * The current cumulative migration sets an internal transaction-local setting
+ * so it can include this installer inside the migration's wider transaction.
+ * That keeps the 2.0 stamp and the migration's physical convergence work
+ * atomic. The setting, unlike a psql variable, cannot leak after a failed
+ * migration is rolled back in an interactive session.
  */
 
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP on
+select case
+  when coalesce(
+    pg_catalog.current_setting(
+      'pg_ash.install_in_migration_transaction',
+      true
+    ),
+    ''
+  ) = 'on' then 'true'
+  else 'false'
+end as pg_ash_install_in_migration_transaction
+\gset
+\if :pg_ash_install_in_migration_transaction
+\else
 begin;
+\endif
+\unset pg_ash_install_in_migration_transaction
 
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
@@ -279,7 +301,7 @@ create table if not exists ash.config (
   include_bg_workers         bool not null default false,
   debug_logging              bool not null default false,
   encoding_version           smallint not null default 1,
-  version                    text not null default '2.0-beta1',
+  version                    text not null default '2.0',
   rotated_at                 timestamptz not null default clock_timestamp(),
   installed_at               timestamptz not null default clock_timestamp(),
   rollup_1m_retention_days   smallint not null default 30
@@ -492,8 +514,8 @@ $$Internal trigger enforcing rotation and retention geometry whenever its ash.co
  * fresh 2.0 install and an upgrade chain landing on 2.0 (the CI
  * schema-equivalence check).
  */
-update ash.config set version = '2.0-beta1' where singleton;
-alter table ash.config alter column version set default '2.0-beta1';
+update ash.config set version = '2.0' where singleton;
+alter table ash.config alter column version set default '2.0';
 
 /*
  * Wait event dictionary.
@@ -7875,4 +7897,19 @@ begin
   end if;
 end $$;
 
+select case
+  when coalesce(
+    pg_catalog.current_setting(
+      'pg_ash.install_in_migration_transaction',
+      true
+    ),
+    ''
+  ) = 'on' then 'true'
+  else 'false'
+end as pg_ash_install_in_migration_transaction
+\gset
+\if :pg_ash_install_in_migration_transaction
+\else
 commit;
+\endif
+\unset pg_ash_install_in_migration_transaction

@@ -1,10 +1,13 @@
-# pg_ash 2.0 beta 1 release notes
+# pg_ash 2.0 release notes
 
-2.0 beta 1 promotes the rewritten reader API from `devel/sql/` into the normal
-release SQL path. Fresh installs use `\i sql/ash-install.sql`; upgrades from
-1.5 use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any missing 1.x
-migrations. Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for
-compatibility.
+pg_ash 2.0 finalizes the AAS-oriented reader API introduced in 2.0 beta 1. The
+final payload identity is `2.0`; the release tag scheme remains two-part, so
+the corresponding tag is `v2.0`, not `v2.0.0`.
+
+Fresh installs use `\i sql/ash-install.sql`. Upgrades from 1.5 or 2.0 beta 1
+use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any missing 1.x
+migrations. There is no separate beta-to-final migration. Root-level
+`sql/ash-X.Y-to-A.B.sql` wrappers remain for compatibility.
 
 This is a breaking reader-API release. Sampling, storage, rollups, scheduler
 functions, and lifecycle/admin function signatures are unchanged; parameter
@@ -24,87 +27,209 @@ AAS-oriented 2.0 API:
 
 ## 2.0 highlights
 
-- **AAS-first readers.** `periods`, `aas`, `timeline`, `top`, `compare`,
-  `samples`, `report`, `chart`, and `summary` use consistent named filters and
-  report whether data came from raw samples, 1-minute rollups, or 1-hour rollups.
+- **AAS-first readers.** Typed aggregate readers report `raw`, `rollup_1m`,
+  `rollup_1h`, `rollup_1h_flat`, or `none`; `compare()` reports `source_1` /
+  `source_2`, `report()` embeds provenance in JSON coverage, and `summary()`
+  includes separate headline and wait/query drill source/bounds metrics.
+  `samples()` is raw-only, and `chart()` emits a planning `NOTICE` when hour
+  grain widens the request. Named filters are consistent where they apply.
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.
-- **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the finalized 2.0
-  installer, removes stale 1.x and earlier draft reader functions, and restores
-  eligible explicit reader-function grants. Roles that held the full
-  reader-function bundle receive the full current reader bundle; the installer
-  warns that this can re-grant operator-narrowed table privileges.
+- **Upgrade convergence.** A successful cumulative 1.5-to-2.0 path replays the
+  final installer, removes stale 1.x and draft readers, normalizes `ash.config`
+  to fresh-install column order, and restores eligible complete reader bundles
+  in one transaction. A failure cannot publish the 2.0 stamp without physical
+  convergence. Restoring a complete bundle can re-grant
+  operator-narrowed table privileges. Root compatibility wrappers remain
+  available.
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
-  `select ash.revoke_reader('pg_monitor');`.
-- **Postgres 19 beta support.** CI now covers Postgres 14 through 19, using the
-  official `postgres:19beta1` image until the GA `postgres:19` image exists.
-- **Docs refreshed.** README examples now use the 2.0 named-argument API.
+  `select ash.revoke_reader('pg_monitor');` and note that a later installer
+  re-apply restores the default bundle.
+- **PostgreSQL 14–19 coverage.** CI and the release gate cover six server
+  majors, using `postgres:19beta2` until PostgreSQL 19 reaches GA.
+  ([PR #119](https://github.com/NikolayS/pg_ash/pull/119),
+  [PR #192](https://github.com/NikolayS/pg_ash/pull/192))
+- **Behavioral release gate.** The release runner exercises every installed
+  public surface with both optional extensions, without pg_cron, without
+  pg_stat_statements, and without either; it also checks fresh,
+  development-upgrade, and actual-v1.5-upgrade schema equivalence, including
+  column order. (issue #160;
+  [PR #192](https://github.com/NikolayS/pg_ash/pull/192))
 
-## Fixes since 2.0 beta 1
+## Corrections since 2.0 beta 1
 
-- **Reader windows and diagnostics are now explicit.** Reader functions reject
-  inverted windows and anchor an `until`-only call to the preceding hour.
-  Installer re-apply, report coverage, and pg_cron availability messages now
-  describe their actual behavior. (issues #165, #170, #171, #172, #173, #174)
-- **Malformed decoder input is rejected consistently.** `ash.decode_sample()`
-  now returns zero rows with a position-specific warning when a packed sample
-  array contains a NULL wait marker, count, or query-map id, matching the
-  storage validator instead of emitting a fabricated row or raising an
-  internal PL/pgSQL error. (issue #143)
-- **Installer failures now roll back partial schemas.** The fresh installer
-  enables `ON_ERROR_STOP` and owns a transaction; the 1.3-to-1.4,
-  1.4-to-1.5, and 1.5-to-2.0 paths inherit that behavior when they delegate to
-  it. The three earlier legacy migration legs remain unchanged. Invoking the
-  installer with `\i` inside an existing transaction commits the caller's outer
-  work when the installer reaches its final `COMMIT`. (issue #124)
-- **Reader upgrades remove a legacy admin-helper grant.** Reapplying or
-  upgrading intentionally revokes reader-role `EXECUTE` on
-  `ash._admin_funcs()` (including delegated grants), because it is an
-  administrative implementation detail used by `grant_reader()` and
-  `revoke_reader()`. Other reader-function grants remain preserved, and
-  complete reader bundles still gain newly introduced reader helpers.
-  (issue #166; [PR #181](https://github.com/NikolayS/pg_ash/pull/181))
-- **Rollup return values now count time grains.** `ash.rollup_minute()` and
+### Pre-release audit blockers
+
+All six blockers found by the 2.0 audit are fixed:
+
+- **B1 — hourly history is grain-honest.** Readers disclose effective source,
+  bounds, and bucket grain. When retained hourly data cannot support sub-hour
+  peak or percentile claims, extrema are `NULL` rather than fabricated;
+  legacy/incomplete hours are labelled `rollup_1h_flat`, database reads use
+  valid per-database minute counts, and cross-grain comparisons suppress
+  incomparable extrema. (issues #161, #168, and #175;
+  [PR #182](https://github.com/NikolayS/pg_ash/pull/182))
+- **B2 — cleanup can no longer wedge rotation.** `rollup_cleanup()` and
+  `rotate()` use compatible locking and retention rules, expired rollup rows
+  no longer make the raw ring fail forever, and `ash.status()` reports
+  `consecutive_rotate_failures`. Supported geometry now requires
+  `(num_partitions - 1) * rotation_period <= rollup_1m_retention_days`;
+  `rotation_period` is whole days only, with a one-day minimum. (issue #162;
+  [PR #185](https://github.com/NikolayS/pg_ash/pull/185))
+- **B3 — raw-retention boundaries match reader semantics.** The public
+  planning/loss boundary is minute-aligned and separate from exact physical
+  evidence, so a young install's partial first minute remains readable and
+  remediation advice can be fed back into readers without discarding it.
+  Active-slot accounting also excludes the unreadable ring slot. (issue #163;
+  [PR #129](https://github.com/NikolayS/pg_ash/pull/129),
+  [PR #189](https://github.com/NikolayS/pg_ash/pull/189))
+- **B4 — partition rebuilds preserve reader access.**
+  `ash.rebuild_partitions()` snapshots and restores complete direct reader
+  bundles across recreated partitions and the query-map view, including the
+  installer-default `pg_monitor` bundle. (issue #164;
+  [PR #181](https://github.com/NikolayS/pg_ash/pull/181))
+- **B5 — reader windows are explicit.** Readers reject inverted bounds and
+  interpret an `until`-only call as the preceding hour. Report and pg_cron
+  diagnostics now state their actual coverage and database-scope contracts.
+  (issues #165 and #170–#174;
+  [PR #180](https://github.com/NikolayS/pg_ash/pull/180))
+- **B6 — reader revocation is safe and narrower.** `ash.revoke_reader()` refuses
+  the schema owner, current user, and superusers before changing privileges.
+  Upgrading from 1.5 or reapplying 2.0 intentionally removes reader-role
+  `EXECUTE` on `ash._admin_funcs()`—including delegated grants—because it is
+  an administrative helper; other reader grants remain preserved and complete
+  bundles gain new reader-visible helpers dynamically. (issue #166;
+  [PR #181](https://github.com/NikolayS/pg_ash/pull/181))
+
+### Rollups, readers, and reports
+
+- **Hourly rollup waits for complete minute coverage.** `ash.rollup_hour()` no
+  longer seals a partial hour, waits behind an in-flight minute rollup, and is
+  scheduled at minute 1 rather than minute 0; installer re-apply migrates the
+  old default pg_cron schedule in place. A NULL minute watermark still makes
+  the hourly rollup a no-op. (issue #132;
+  [PR #133](https://github.com/NikolayS/pg_ash/pull/133))
+- **Rollup return values count time grains.** `ash.rollup_minute()` and
   `ash.rollup_hour()` return processed minutes and hours rather than
-  per-database rows upserted, so activity from multiple databases no longer
-  inflates scheduler-visible results. (issue #191)
-- **Wide aggregate readers now reject stale rollup coverage without losing the
-  fast path.** When raw is the canonical source for a wide window, readers fall
-  back to it if `rollup_1m` has not reached the requested end, clamped at the
-  latest complete-minute boundary; a dashboard `until` rounded up to the next
-  minute no longer makes a healthy rollup fall back to raw. Completeness when a
-  window starts before physical raw coverage remains tracked by issue #122.
-  ([PR #199](https://github.com/NikolayS/pg_ash/pull/199))
-- **Report windows now floor subsecond endpoints before epoch conversion.**
-  `ash.report()` no longer shifts a request made in the final half-second of a
-  minute into the next minute, so its coverage bounds and data-bearing minute
-  count remain aligned with the documented minute floor.
+  per-database rows upserted. Empty processed grains count once; an
+  already-caught-up call returns zero. This is a user-visible return-contract
+  correction. (issue #191;
+  [PR #194](https://github.com/NikolayS/pg_ash/pull/194))
+- **Report totals remain internally consistent.** Total query attribution uses
+  the same five wait classes as the report total, high AAS values render
+  numerically rather than as `###.#`, and average totals come from the summed
+  minute series instead of independently rounded class fields. The JSON key
+  structure is unchanged. (issue #126;
+  [PR #127](https://github.com/NikolayS/pg_ash/pull/127))
+- **Report bounds handle fractional seconds correctly.** `ash.report()` floors
+  subsecond endpoints before integer-epoch conversion, so calls in a minute's
+  final half-second no longer shift both coverage bounds into the next minute.
   ([PR #192](https://github.com/NikolayS/pg_ash/pull/192))
+- **Compacted query attribution is explicit.** Rollup-backed, unfiltered query
+  rankings include a positive NULL-key residual for compacted-away load, and it
+  competes in top-N ranking. Exact `query_id` filters use raw samples and raise
+  when older compacted history makes exact attribution impossible; young
+  same-minute rollups do not falsely block raw reads. (issue #136;
+  [PR #198](https://github.com/NikolayS/pg_ash/pull/198))
+- **Stale rollups no longer hide newer raw data.** Wide aggregate readers fall
+  back to raw when the canonical raw source is newer than the `rollup_1m`
+  watermark, clamped at
+  `least(until, date_trunc('minute', now()))`; a dashboard end rounded up to
+  the next minute retains the healthy rollup fast path. The
+  older-than-physical-raw completeness case remains open in issue #122.
+  ([PR #199](https://github.com/NikolayS/pg_ash/pull/199))
+- **Malformed decoder input is rejected consistently.** `ash.decode_sample()`
+  returns zero rows with a position-specific warning for NULL wait markers,
+  counts, or query-map IDs, matching the storage validator instead of
+  fabricating a row or raising an internal PL/pgSQL error. (issue #143;
+  [PR #151](https://github.com/NikolayS/pg_ash/pull/151))
+- **Sampler intervals are validated exactly.** `ash.start()` accepts 1–59 whole
+  seconds, whole minutes, or whole hours through 23 hours, and rejects
+  fractional-second or oversized intervals before rounding or integer overflow
+  can change their meaning. (issue #141;
+  [PR #142](https://github.com/NikolayS/pg_ash/pull/142))
+- **Sample/query-map attribution survives rotation races.**
+  `ash.take_sample()` stamps each row with the already captured slot, so a
+  concurrent rotation cannot pair packed query-map IDs with a different slot.
+  (issue #169; [PR #181](https://github.com/NikolayS/pg_ash/pull/181))
+
+### Installer and upgrades
+
+- **Installer failures roll back partial schemas.** The fresh installer enables
+  `ON_ERROR_STOP` and owns a transaction; the 1.3-to-1.4 and 1.4-to-1.5 paths
+  inherit that behavior when they delegate to it. The 1.5-to-2.0 path instead
+  owns one transaction across both installer replay and config normalization,
+  so no failure can leave a 2.0 stamp on an unconverged schema. The three
+  earlier finalized migration legs remain unchanged. Invoking the installer
+  directly with `\i` inside an existing transaction still commits the caller's
+  outer work when the installer reaches its final `COMMIT`. (issues #124 and
+  #202;
+  [PR #184](https://github.com/NikolayS/pg_ash/pull/184),
+  [PR #200](https://github.com/NikolayS/pg_ash/pull/200))
+- **Actual 1.5 upgrades are continuously verified.** CI again installs the
+  immutable v1.5 payload, runs the public cumulative wrapper, verifies preserved
+  state and reader grants, and compares the result with a fresh install.
+  ([PR #135](https://github.com/NikolayS/pg_ash/pull/135))
+- **Upgrade schemas converge physically as well as logically.** The
+  1.5-to-2.0 migration normalizes `ash.config` to the canonical 22-column order
+  while preserving its singleton row, defaults, constraints, indexes,
+  ownership, ACLs, comments, and supported dependencies; unsupported catalog
+  customizations and later dependency/replay failures roll back the whole
+  upgrade, including its version stamp. (issue #202;
+  [PR #192](https://github.com/NikolayS/pg_ash/pull/192),
+  [PR #200](https://github.com/NikolayS/pg_ash/pull/200))
+
+## Release engineering and documentation
+
+- **Release identity is enforced.** Final tags use `vX.Y` and payloads use
+  `X.Y`; prereleases use `vX.Y-alphaN`, `-betaN`, or `-rcN`. The checker
+  requires exact identity at all three stamp sites and validates
+  released/development migration graphs before emitting SQL. (issue #146;
+  [PR #179](https://github.com/NikolayS/pg_ash/pull/179))
+- **Canonical migration paths live under `sql/migrations/`.** Root-level
+  wrappers remain compatible, and the installer's dynamic drop path now uses
+  formatted SQL without changing signatures.
+- **CI was hardened without changing product behavior.** Readiness and rotation
+  fixtures were made deterministic, wait-pair validation now inspects only ID
+  positions, the real v1.5 gate was restored, two timing-sensitive upgrade
+  fixtures were isolated without weakening their `minutes_with_data = 1`
+  assertions, and `actions/checkout` was updated at an immutable SHA.
+  ([PR #145](https://github.com/NikolayS/pg_ash/pull/145),
+  [PR #154](https://github.com/NikolayS/pg_ash/pull/154),
+  [PR #159](https://github.com/NikolayS/pg_ash/pull/159),
+  [PR #193](https://github.com/NikolayS/pg_ash/pull/193),
+  [PR #197](https://github.com/NikolayS/pg_ash/pull/197))
+- **Documentation was refreshed.** Broken and legacy 1.x image references were
+  removed, admin/catalog contracts were corrected, and README/docs copy was
+  aligned with the final 2.0 API.
+  ([PR #120](https://github.com/NikolayS/pg_ash/pull/120),
+  [PR #149](https://github.com/NikolayS/pg_ash/pull/149),
+  [PR #152](https://github.com/NikolayS/pg_ash/pull/152),
+  [PR #158](https://github.com/NikolayS/pg_ash/pull/158))
 
 ## Retired tooling
 
 - **The unmaintained pre-2.0 benchmark suite has been removed.** Several
-  entrypoints referenced a 1.0 installer path absent from the 2.0 tree, queried
-  obsolete storage objects and readers absent from 2.0, and could report
-  completion after SQL errors. No maintained 2.0 performance harness replaces
-  it yet; validate capacity and WAL on the target workload. (issue #139)
+  entrypoints used an absent 1.0 installer path and obsolete storage/readers,
+  and could report completion after SQL errors. No maintained 2.0 performance
+  harness replaces it yet; validate capacity and WAL on the target workload.
+  (issue #139; [PR #187](https://github.com/NikolayS/pg_ash/pull/187))
 
 ## Known limitations
 
 - **Historical cadence and idle coverage are not persisted.** AAS readers
   weight stored appearances with the current `ash.config.sample_interval`, so
   changing it rescales earlier raw and rollup history. Successful idle sampler
-  ticks write no row; consequently `data_points`, `buckets_with_data`, and
-  report `minutes_with_data` are derived from stored activity and do not verify
-  successful sampling; they cannot distinguish sampled zero load from a
-  sampler outage. At sampling intervals greater than one minute, the full tick
-  weight is assigned to one minute, so one-minute peaks and report
-  worst-minute values can exceed observed concurrency. Keep cadence fixed and
-  monitor scheduler health independently. `ash.timeline()` now calls these
-  buckets “no stored observation,” but that catalog correction does not add
-  heartbeat storage. (issues #137 and #175)
+  ticks write no row; `data_points`, `buckets_with_data`, and report
+  `minutes_with_data` therefore cannot distinguish sampled zero load from a
+  sampler outage. At intervals greater than one minute, a whole tick is
+  assigned to one minute, so minute peaks and report worst-minute values can
+  exceed observed concurrency. Keep cadence fixed and monitor scheduler health
+  independently. `ash.timeline()` calls these buckets “no stored observation,”
+  but that wording does not add heartbeat storage. (issues #137 and #175;
+  [PR #186](https://github.com/NikolayS/pg_ash/pull/186))
 
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
