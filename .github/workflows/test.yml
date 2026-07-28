@@ -105,8 +105,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PG19 is still beta, so the official image tag is 19beta1 until GA.
-        postgres: [14, 15, 16, 17, 18, 19beta1]
+        # PG19 is still beta, so the official image tag is 19beta2 until GA.
+        postgres: [14, 15, 16, 17, 18, 19beta2]
         # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
         # compares these as strings in the step-level `if`/conditionals.
         cron: ["on"]
@@ -2619,44 +2619,40 @@ jobs:
 
           # Background workload so take_sample() has active sessions to capture.
           # In a quiescent container, ash.take_sample() returns 0 (no active
-          # backends to sample). Start a couple of long-running pg_sleep
+          # backends to sample). Start a few long-running pg_sleep
           # connections in the background so each cron tick sees activity.
-          (psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
-           psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
-           psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &) || true
+          hci3_workload_pids=()
+          cleanup_hci3_workload() {
+            psql -h localhost -U postgres -d postgres -tAc \
+              "select pg_terminate_backend(pid)
+               from pg_stat_activity
+               where pid <> pg_backend_pid()
+                 and datname = current_database()
+                 and application_name = 'pg_ash_h_ci_3_workload'" \
+              >/dev/null 2>&1 || true
+            for hci3_pid in "${hci3_workload_pids[@]}"; do
+              kill "$hci3_pid" >/dev/null 2>&1 || true
+            done
+            for hci3_pid in "${hci3_workload_pids[@]}"; do
+              wait "$hci3_pid" >/dev/null 2>&1 || true
+            done
+          }
+          trap cleanup_hci3_workload EXIT
+
+          PGAPPNAME=pg_ash_h_ci_3_workload \
+            psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
+          hci3_workload_pids+=("$!")
+          PGAPPNAME=pg_ash_h_ci_3_workload \
+            psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
+          hci3_workload_pids+=("$!")
+          PGAPPNAME=pg_ash_h_ci_3_workload \
+            psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" >/dev/null 2>&1 &
+          hci3_workload_pids+=("$!")
           # Give the sleepers a moment to register in pg_stat_activity.
           sleep 2
 
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Clean slate: stop any prior sampler, truncate raw partitions
-          -- so the post-baseline count is unambiguous.
-          select ash.stop();
-          truncate ash.sample_0, ash.sample_1, ash.sample_2;
-
-          -- Capture pre-start baseline (should be 0 across all slots).
-          do $$
-          declare
-            v_baseline bigint;
-          begin
-            select count(*) into v_baseline from ash.sample;
-            assert v_baseline = 0,
-              format('expected 0 samples after truncate, got %s', v_baseline);
-          end $$;
-
-          -- Schedule sampling at 1 Hz via pg_cron.
-          select ash.start('1 second');
-
-          -- Sanity: cron.job has the ash row.
-          do $$
-          declare
-            v_jobs int;
-          begin
-            select count(*) into v_jobs
-            from cron.job where jobname like 'ash_%';
-            assert v_jobs >= 1,
-              format('expected ash_* job(s) in cron.job, got %s', v_jobs);
-          end $$;
-          EOF
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f devel/tests/cron_path.sql
 
           # Poll for actual job runs. With cron.use_background_workers=on
           # the jobs fire as bgworkers — but cron.job_run_details is only
@@ -2697,6 +2693,8 @@ jobs:
 
           # Tear down: stop the sampler, leave state consistent for later steps.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "select ash.stop();"
+          cleanup_hci3_workload
+          trap - EXIT
 
       - name: Test set_debug_logging
         env:
@@ -3669,7 +3667,7 @@ jobs:
                and (j->'coverage'->>'minutes_expected')::int = 60
                and (j->'coverage'->>'minutes_with_data')::int = 1,
               'report until-only coverage must be exactly the preceding hour: '
-              || j->'coverage';
+              || (j->'coverage')::text;
             j := ash.report();
             assert (j->'coverage'->>'from')::timestamptz
                      = date_trunc('minute', now() - interval '1 day')
@@ -3678,7 +3676,7 @@ jobs:
                and (j->'coverage'->>'minutes_expected')::int = 1440
                and (j->'coverage'->>'minutes_with_data')::int = 2,
               'report() no-argument default must remain the preceding day: '
-              || j->'coverage';
+              || (j->'coverage')::text;
 
             select value into v_value
             from ash.summary(until => v_until) where metric = 'avg_aas';
@@ -7085,118 +7083,7 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          begin;
-
-          -- When raw covers a wide aggregate window, rollup_1m may replace it
-          -- only if that rollup covers the requested end. Otherwise a lagging
-          -- worker would silently drop recent raw load. Completeness for a
-          -- stalled rollup older than physical raw coverage remains #122.
-          -- Conversely, a healthy rollup must keep the fast path when a
-          -- dashboard rounds until up to the next minute boundary.
-          do $$
-          declare
-            v_wait smallint;
-            v_start timestamptz := date_trunc('minute', now()) - interval '2 hours';
-            v_end timestamptz := date_trunc('minute', now());
-            v_historical_end timestamptz := v_end - interval '30 minutes';
-            v_start_ts int4;
-            v_recent_ts int4;
-            a record;
-          begin
-            truncate ash.sample_0, ash.sample_1, ash.sample_2;
-            truncate ash.rollup_1m, ash.rollup_1h;
-            update ash.config
-            set current_slot = 0,
-                num_partitions = 3,
-                sample_interval = interval '1 second',
-                rotation_period = interval '1 day',
-                rollup_1m_retention_days = 30,
-                rotated_at = v_end,
-                last_rollup_1m_ts = ash.ts_from_timestamptz(
-                  v_start + interval '1 minute'
-                ),
-                last_rollup_1h_ts = null
-            where singleton;
-
-            select ash._register_wait('active', 'IO', 'StaleRollupProof')
-            into v_wait;
-            v_start_ts := ash.ts_from_timestamptz(v_start);
-            v_recent_ts := ash.ts_from_timestamptz(v_end - interval '1 minute');
-
-            insert into ash.rollup_1m (
-              ts, datid, samples, peak_backends, wait_counts, query_counts
-            ) values (
-              v_start_ts, 0::oid, 1, 1,
-              array[v_wait, 1]::int4[], '{}'::int8[]
-            );
-            insert into ash.sample (
-              sample_ts, datid, active_count, data, slot
-            ) values
-              (v_start_ts, 0::oid, 1, array[-v_wait, 1, 0]::int4[], 0),
-              (v_recent_ts, 0::oid, 1, array[-v_wait, 1, 0]::int4[], 0);
-
-            select * into a from ash.aas(v_start, v_end);
-            assert a.source = 'raw',
-              'stale rollup must fall back to raw, got ' || a.source;
-            assert a.buckets_with_data = 2,
-              'raw fallback should retain both covered minutes, got '
-              || a.buckets_with_data;
-            assert a.backend_seconds = 2.00,
-              'raw fallback should retain both backend-seconds, got '
-              || a.backend_seconds;
-
-            truncate ash.rollup_1m;
-            insert into ash.rollup_1m (
-              ts, datid, samples, peak_backends, wait_counts, query_counts
-            )
-            select
-              ash.ts_from_timestamptz(minute_ts),
-              0::oid,
-              1,
-              1,
-              array[v_wait, 1]::int4[],
-              '{}'::int8[]
-            from generate_series(
-              v_start,
-              v_end - interval '1 minute',
-              interval '1 minute'
-            ) as minute_ts;
-            update ash.config
-            set last_rollup_1m_ts = ash.ts_from_timestamptz(v_historical_end)
-            where singleton;
-
-            select * into a from ash.aas(v_start, v_historical_end);
-            assert a.source = 'rollup_1m',
-              'healthy historical rollup must use its covered watermark, got '
-              || a.source;
-            assert a.buckets_with_data = 90,
-              'historical rollup should cover 90 complete minutes, got '
-              || a.buckets_with_data;
-            assert a.backend_seconds = 90.00,
-              'historical rollup should retain 90 backend-seconds, got '
-              || a.backend_seconds;
-
-            update ash.config
-            set last_rollup_1m_ts = ash.ts_from_timestamptz(v_end)
-            where singleton;
-            select * into a
-            from ash.aas(v_start, v_end + interval '1 minute');
-            assert a.source = 'rollup_1m',
-              'healthy rollup must keep the fast path for a rounded-up until, '
-              'got ' || a.source;
-            assert a.buckets_with_data = 120,
-              'healthy rollup should cover 120 complete minutes, got '
-              || a.buckets_with_data;
-            assert a.backend_seconds = 120.00,
-              'healthy rollup should retain 120 backend-seconds, got '
-              || a.backend_seconds;
-
-            raise notice 'stale/rounded-up rollup source selection PASSED';
-          end $$;
-
-          rollback;
-          EOF
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/stale_rollup_source.sql
 
       - name: "Test 2.0: minute-grain peak/p99 survive the rollup_1h seam"
         env:
@@ -10160,6 +10047,48 @@ jobs:
           select ash.uninstall('yes');
           EOF
 
+      - name: "Upgrade path: ash.config canonical column order and preservation"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
+          sed '$d' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_before_latest.sql
+          tail -n 1 /tmp/ash_full_upgrade_chain.sql > /tmp/ash_latest_upgrade.sql
+          test -s /tmp/ash_chain_before_latest.sql
+          test -s /tmp/ash_latest_upgrade.sql
+
+          cat > /tmp/ash_config_ordinal_driver.sql << 'EOF'
+          \i /tmp/ash_chain_before_latest.sql
+          \i devel/tests/config_ordinal_setup.sql
+          \i /tmp/ash_latest_upgrade.sql
+          \i devel/tests/config_ordinal_assert.sql
+
+          create temporary table config_ordinal_oid_after
+          on commit preserve rows
+          as
+          select 'ash.config'::regclass::oid as relation_oid;
+
+          -- The released migration remains safe to re-apply after normalization.
+          \i /tmp/ash_latest_upgrade.sql
+          \i devel/tests/config_ordinal_assert.sql
+
+          do $$
+          begin
+            assert 'ash.config'::regclass::oid = (
+              select relation_oid from config_ordinal_oid_after
+            ), 'canonical ash.config was rebuilt during migration re-apply';
+          end $$;
+
+          select ash.uninstall('yes');
+          drop owned by config_ordinal_owner, config_ordinal_reader;
+          drop role config_ordinal_owner;
+          drop role config_ordinal_reader;
+          EOF
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" \
+            -f /tmp/ash_config_ordinal_driver.sql
+
       - name: "Issue #49: sample_data_check tightened by discovered upgrade chain"
         env:
           PGPASSWORD: postgres
@@ -11020,67 +10949,6 @@ jobs:
             --dbname=postgres
           )
 
-          cat > /tmp/ash_schema_snapshot.sql << 'SNAPSQL'
-          \pset tuples_only on
-          \pset format unaligned
-          select 'FUNC', p.proname,
-                 pg_get_function_identity_arguments(p.oid),
-                 pg_get_function_result(p.oid),
-                 md5(p.prosrc)
-          from pg_proc p
-          join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'ash'
-          order by p.proname, pg_get_function_identity_arguments(p.oid);
-
-          select 'COL', c.relname, a.attname,
-                 pg_catalog.format_type(a.atttypid, a.atttypmod),
-                 a.attnotnull,
-                 pg_get_expr(d.adbin, d.adrelid)
-          from pg_class c
-          join pg_namespace n on n.oid = c.relnamespace
-          join pg_attribute a on a.attrelid = c.oid
-          left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
-          where n.nspname = 'ash' and c.relkind in ('r','p') and a.attnum > 0 and not a.attisdropped
-          order by c.relname, a.attname;
-
-          select 'IDX', c.relname, pg_get_indexdef(i.indexrelid)
-          from pg_index i
-          join pg_class c on c.oid = i.indexrelid
-          join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = 'ash'
-          order by c.relname;
-
-          select 'VIEW', viewname, md5(definition)
-          from pg_views
-          where schemaname = 'ash'
-          order by viewname;
-
-          -- Issue #66: include CHECK / NOT NULL / PK / UNIQUE / FK constraints.
-          -- Covers parent partitioned tables AND their partitions (relkind r,p).
-          -- pg_get_constraintdef gives a stable canonical text form, so any
-          -- divergence (e.g. sample_data_check `>= 2` vs `>= 3` from #49)
-          -- surfaces here.
-          select 'CON', c.relname, con.conname, pg_get_constraintdef(con.oid)
-          from pg_constraint con
-          join pg_class c on c.oid = con.conrelid
-          join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = 'ash' and c.relkind in ('r','p')
-          order by c.relname, con.conname;
-
-          -- Issue #107: privilege state must be equivalent too. proacl is
-          -- NULL until the first GRANT/REVOKE touches a function; the
-          -- installer's REVOKE-from-PUBLIC hardening always runs, so a fresh
-          -- install and the full upgrade chain must converge to identical
-          -- explicit function ACLs.
-          select 'FACL', p.proname,
-                 pg_get_function_identity_arguments(p.oid),
-                 coalesce(p.proacl::text, '<default>')
-          from pg_proc p
-          join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'ash'
-          order by p.proname, pg_get_function_identity_arguments(p.oid);
-          SNAPSQL
-
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
           git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
 
@@ -11091,7 +10959,7 @@ jobs:
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
-            --file=/tmp/ash_schema_snapshot.sql \
+            --file=devel/tests/schema_snapshot.sql \
             > /tmp/fresh_schema.txt
           "${psql_base[@]}" \
             --command="select ash.uninstall('yes')" \
@@ -11104,7 +10972,7 @@ jobs:
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
-            --file=/tmp/ash_schema_snapshot.sql \
+            --file=devel/tests/schema_snapshot.sql \
             > /tmp/upgraded_schema.txt
           "${psql_base[@]}" \
             --command="select ash.uninstall('yes')" \
@@ -11124,7 +10992,7 @@ jobs:
             > /dev/null 2>&1
           "${psql_base[@]}" \
             --set=ON_ERROR_STOP=1 \
-            --file=/tmp/ash_schema_snapshot.sql \
+            --file=devel/tests/schema_snapshot.sql \
             > /tmp/upgraded_v15_schema.txt
           "${psql_base[@]}" \
             --command="select ash.uninstall('yes')" \
@@ -11201,71 +11069,8 @@ jobs:
             -c "drop extension if exists pg_stat_statements"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
-          -- Degraded mode: pg_ash freshly installed WITHOUT pg_stat_statements.
-          -- Every 2.0 reader must work; query_text degrades to NULL and is never spoofed
-          -- by a user-created public.pg_stat_statements relation (#87).
-          insert into ash.wait_event_map (state, type, event) values
-            ('active', 'CPU*', 'CPU*') on conflict do nothing;
-          insert into ash.query_map_0 (query_id) values (999999) on conflict do nothing;
-
-          do $$
-          declare
-            v_cpu smallint; v_q1 int4; v_ts int4; v_from timestamptz;
-            n int; tcnt int; j jsonb;
-          begin
-            select id into v_cpu from ash.wait_event_map where type = 'CPU*';
-            select id into v_q1 from ash.query_map_0 where query_id = 999999;
-            -- Minute-aligned 3 minutes back so a window from here reads raw.
-            v_ts := (ash.ts_from_timestamptz(date_trunc('minute', now() - interval '3 minutes')) / 60) * 60;
-            v_from := ash.ts_to_timestamptz(v_ts);
-            insert into ash.sample (sample_ts, datid, active_count, data, slot)
-              values (v_ts, 1, 1, array[-v_cpu, 1, v_q1]::integer[], 0);
-            perform ash.rollup_minute();
-
-            -- Every reader runs without pgss; query_text is NULL, no error, no WARNING.
-            perform ash.periods();
-            perform * from ash.aas(v_from, now());
-            perform * from ash.timeline(v_from, now());
-            perform * from ash.compare(v_from, now(), v_from, now());
-            perform * from ash.summary(v_from, now());
-            perform * from ash.chart(v_from, now());
-            assert (select query_text from ash.top('query_id', v_from, now()) limit 1) is null,
-              'top query_text should be NULL without pgss';
-            assert (select query_text from ash.samples(v_from, now()) limit 1) is null,
-              'samples query_text should be NULL without pgss';
-
-            -- report still produces query ids (they come from samples, not pgss).
-            j := ash.report(v_from, now());
-            assert j is not null, 'report should work without pgss';
-            assert j->'top_queryids_worst1m' ? 'total', 'report top_queryids total should be present';
-
-            perform ash.take_sample();
-            perform ash.status();
-            perform ash.set_debug_logging();
-
-            -- #87: a user-made public.pg_stat_statements must NOT be trusted as the real
-            -- extension — no row fan-out, no spoofed query_text.
-            create table public.pg_stat_statements (
-              queryid bigint, query text, calls bigint,
-              total_exec_time double precision, mean_exec_time double precision, dbid oid);
-            insert into public.pg_stat_statements values
-              (999999, 'select same from user_a', 10, 100.0, 10.0, 1::oid),
-              (999999, 'select same from user_b', 20, 400.0, 20.0, 2::oid);
-
-            select count(*), count(query_text) into n, tcnt
-              from ash.top('query_id', v_from, now()) where key = '999999';
-            assert n = 1 and tcnt = 0,
-              format('top must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s', n, tcnt);
-            select count(*), count(query_text) into n, tcnt
-              from ash.samples(v_from, now()) where query_id = 999999;
-            assert n = 1 and tcnt = 0,
-              format('samples must ignore spoofed pg_stat_statements, got rows=%s text_rows=%s', n, tcnt);
-
-            drop table public.pg_stat_statements;
-            raise notice 'All degraded-mode (no pgss) 2.0 reader tests PASSED';
-          end $$;
-          EOF
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f devel/tests/degraded_no_pgss.sql
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "select ash.uninstall('yes')"
 
@@ -11287,65 +11092,8 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
           cronless_out="$(
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 2>&1 << 'EOF'
-          do $$
-          declare
-            v_rec record;
-            v_status_val text;
-          begin
-            -- start() should work without pg_cron (no error, prints hints)
-            select status into v_status_val
-            from ash.start('1 second')
-            where job_type = 'sampler';
-            assert v_status_val like '%schedule externally%',
-              'start() without pg_cron should say schedule externally, got: ' || v_status_val;
-
-            /*
-             * A preloaded pg_cron registers cron.database_name as
-             * postmaster-only even after DROP EXTENSION. Exercise mutable
-             * placeholder values only on the dedicated cron-off axis, where
-             * the setting starts absent.
-             */
-            if current_setting('cron.database_name', true) is null then
-              perform set_config(
-                'cron.database_name', current_database(), false
-              );
-              perform * from ash.start('1 second');
-              perform set_config(
-                'cron.database_name', 'cron_control', false
-              );
-              perform * from ash.start('1 second');
-            end if;
-
-            -- stop() should work without pg_cron
-            select status into v_status_val
-            from ash.stop()
-            limit 1;
-            assert v_status_val like '%external scheduler%',
-              'stop() without pg_cron should mention external scheduler, got: ' || v_status_val;
-
-            -- status() should show pg_cron_available = no
-            select value into v_status_val
-            from ash.status()
-            where metric = 'pg_cron_available';
-            assert v_status_val like '%no%',
-              'status() should show pg_cron not available, got: ' || v_status_val;
-
-            -- take_sample() should work without pg_cron
-            perform ash.take_sample();
-
-            -- All 2.0 reader functions should work
-            perform ash.periods();
-            perform * from ash.top('wait_event', now() - interval '1 hour', now());
-            perform * from ash.samples(now() - interval '1 hour', now());
-            perform * from ash.chart(now() - interval '1 hour', now());
-
-            raise notice 'All degraded-mode (no pg_cron) tests PASSED';
-          end;
-          $$;
-
-          select ash.uninstall('yes');
-          EOF
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -f devel/tests/degraded_no_cron.sql 2>&1
           )"
           printf '%s\n' "$cronless_out"
           if ! printf '%s\n' "$cronless_out" | grep -Fq \
@@ -11380,6 +11128,264 @@ jobs:
             echo "FAIL: ash.start emitted the old cluster-wide pg_cron claim" >&2
             exit 1
           fi
+      - name: "Behavioral feature coverage across extension modes"
+        env:
+          PGPASSWORD: postgres
+          CRON: ${{ matrix.cron }}
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
+          psql_base=(
+            psql
+            --no-psqlrc
+            --host=localhost
+            --username=postgres
+            --dbname=postgres
+            --set=ON_ERROR_STOP=1
+          )
+          sleeper_pid=""
+          sleeper_backend_pid=""
+          sleeper_application=""
+
+          stop_feature_sleeper() {
+            local pid="${sleeper_pid}"
+            local backend_pid="${sleeper_backend_pid}"
+            local application="${sleeper_application}"
+
+            sleeper_backend_pid=""
+            sleeper_application=""
+            if [[ "${backend_pid}" =~ ^[0-9]+$ ]]; then
+              "${psql_base[@]}" \
+                --command="
+                  select pg_terminate_backend(pid)
+                  from pg_stat_activity
+                  where pid = ${backend_pid}
+                    and application_name = '${application}';
+                " >/dev/null 2>&1 || true
+            fi
+            sleeper_pid=""
+            if [[ -n "${pid}" ]]; then
+              kill -TERM "${pid}" >/dev/null 2>&1 || true
+              wait "${pid}" >/dev/null 2>&1 || true
+            fi
+          }
+
+          cleanup_feature_step() {
+            local exit_code=$?
+
+            trap - EXIT INT TERM
+            stop_feature_sleeper
+            exit "${exit_code}"
+          }
+
+          signal_feature_step() {
+            local exit_code=$1
+
+            trap - INT TERM
+            exit "${exit_code}"
+          }
+
+          uninstall_ash_if_present() {
+            local ash_present
+
+            ash_present="$("${psql_base[@]}" \
+              --tuples-only \
+              --no-align \
+              --command="
+                select (
+                  pg_catalog.to_regnamespace('ash') is not null
+                )::text;
+              ")"
+            if [[ "${ash_present//$'\r'/}" == "true" ]]; then
+              "${psql_base[@]}" \
+                --command="select ash.uninstall('yes');"
+            fi
+          }
+
+          assert_ash_absent() {
+            local ash_absent
+
+            ash_absent="$("${psql_base[@]}" \
+              --tuples-only \
+              --no-align \
+              --command="
+                select (
+                  pg_catalog.to_regnamespace('ash') is null
+                )::text;
+              ")"
+            if [[ "${ash_absent//$'\r'/}" != "true" ]]; then
+              printf '%s\n' \
+                "feature driver left the ash schema installed" >&2
+              return 1
+            fi
+          }
+
+          configure_extensions() {
+            local expected_cron=$1
+            local expected_pgss=$2
+            local actual
+
+            "${psql_base[@]}" \
+              --command="
+                drop extension if exists pg_cron cascade;
+                drop extension if exists pg_stat_statements cascade;
+              "
+            if [[ "${expected_cron}" == "true" ]]; then
+              "${psql_base[@]}" \
+                --command="create extension pg_cron;"
+            fi
+            if [[ "${expected_pgss}" == "true" ]]; then
+              "${psql_base[@]}" \
+                --command="create extension pg_stat_statements;"
+              # The full workflow has already exercised hundreds of distinct
+              # statements before this shared feature step. DROP/CREATE does
+              # not clear pg_stat_statements' preloaded shared state, so reset
+              # it explicitly before asserting exact marker-query enrichment.
+              "${psql_base[@]}" \
+                --command="select pg_stat_statements_reset();"
+            fi
+
+            actual="$("${psql_base[@]}" \
+              --tuples-only \
+              --no-align \
+              --command="
+                select
+                  (
+                    select count(*) = 1
+                    from pg_extension
+                    where extname = 'pg_cron'
+                  )::text
+                  || '|'
+                  || (
+                    select count(*) = 1
+                    from pg_extension
+                    where extname = 'pg_stat_statements'
+                  )::text;
+              ")"
+            actual="${actual//$'\r'/}"
+            if [[ "${actual}" != "${expected_cron}|${expected_pgss}" ]]; then
+              printf '%s\n' \
+                "extension mode mismatch: expected ${expected_cron}|${expected_pgss}, got ${actual}" >&2
+              return 1
+            fi
+          }
+
+          wait_for_feature_sleeper() {
+            local attempt
+            local backend_pids
+
+            for ((attempt = 1; attempt <= 50; attempt++)); do
+              backend_pids="$("${psql_base[@]}" \
+                --tuples-only \
+                --no-align \
+                --command="
+                  select string_agg(pid::text, ',' order by pid)
+                  from pg_stat_activity
+                  where application_name = '${sleeper_application}'
+                    and state = 'active'
+                    and query = 'select pg_sleep(300);';
+                ")"
+              backend_pids="${backend_pids//$'\r'/}"
+              if [[ "${backend_pids}" =~ ^[0-9]+$ ]]; then
+                sleeper_backend_pid="${backend_pids}"
+                return 0
+              fi
+              if [[ -n "${backend_pids}" ]]; then
+                printf '%s\n' \
+                  "expected exactly one feature sleeper, found backend PIDs ${backend_pids}" >&2
+                return 1
+              fi
+              sleep 0.1
+            done
+
+            printf '%s\n' \
+              "feature sleeper did not become active" >&2
+            return 1
+          }
+
+          run_feature_mode() {
+            local feature_mode=$1
+            local expected_cron=$2
+            local expected_pgss=$3
+            local install_path
+
+            printf 'Feature mode: %s (pg_cron=%s pg_stat_statements=%s)\n' \
+              "${feature_mode}" "${expected_cron}" "${expected_pgss}"
+            uninstall_ash_if_present
+            assert_ash_absent
+            configure_extensions "${expected_cron}" "${expected_pgss}"
+
+            install_path="$(
+              python3 devel/scripts/ash_sql_chain.py fresh-install-path
+            )"
+            if [[ "${install_path}" == /* || ! -f "${install_path}" ]]; then
+              printf 'Invalid fresh-install path: %s\n' \
+                "${install_path}" >&2
+              return 1
+            fi
+            "${psql_base[@]}" --file="${install_path}" >/dev/null
+
+            sleeper_application="pg_ash_features_${feature_mode}"
+            PGAPPNAME="${sleeper_application}" \
+              "${psql_base[@]}" \
+              --command="select pg_sleep(300);" >/dev/null 2>&1 &
+            sleeper_pid=$!
+            wait_for_feature_sleeper
+
+            "${psql_base[@]}" \
+              -v "expected_cron=${expected_cron}" \
+              -v "expected_pgss=${expected_pgss}" \
+              -v "feature_mode=${feature_mode}" \
+              --file=devel/tests/features.sql
+
+            stop_feature_sleeper
+            assert_ash_absent
+          }
+
+          trap cleanup_feature_step EXIT
+          trap 'signal_feature_step 130' INT
+          trap 'signal_feature_step 143' TERM
+
+          cron_available="$("${psql_base[@]}" \
+            --tuples-only \
+            --no-align \
+            --command="
+              select exists (
+                select
+                from pg_available_extensions
+                where name = 'pg_cron'
+              )::text;
+            ")"
+          cron_available="${cron_available//$'\r'/}"
+
+          if [[ -n "${PG_ASH_FEATURE_MODE_ROWS:-}" ]]; then
+            mapfile -t feature_modes \
+              <<<"${PG_ASH_FEATURE_MODE_ROWS}"
+          elif [[ "${CRON}" == "on" && "${cron_available}" == "true" ]]; then
+            feature_modes=(
+              $'both\ttrue\ttrue'
+              $'no-cron\tfalse\ttrue'
+              $'no-pgss\ttrue\tfalse'
+              $'neither\tfalse\tfalse'
+            )
+          else
+            feature_modes=(
+              $'no-cron\tfalse\ttrue'
+              $'neither\tfalse\tfalse'
+            )
+          fi
+
+          for feature_mode_row in "${feature_modes[@]}"; do
+            IFS=$'\t' read -r \
+              feature_mode expected_cron expected_pgss \
+              <<<"${feature_mode_row}"
+            run_feature_mode \
+              "${feature_mode}" "${expected_cron}" "${expected_pgss}"
+          done
+
+          assert_ash_absent
 
       - name: Final summary
         env:
