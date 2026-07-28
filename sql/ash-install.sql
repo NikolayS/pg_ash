@@ -16,23 +16,27 @@
  * \i inside an existing transaction, the final COMMIT also commits the
  * caller's outer work.
  *
- * The current cumulative migration sets an internal transaction-local setting
- * so it can include this installer inside the migration's wider transaction.
- * That keeps the 2.0 stamp and the migration's physical convergence work
- * atomic. The setting, unlike a psql variable, cannot leak after a failed
- * migration is rolled back in an interactive session.
+ * The current cumulative migration sets an internal transaction-local token
+ * to its transaction ID so it can include this installer inside the
+ * migration's wider transaction. The installer accepts include mode only
+ * when that token matches the current assigned transaction ID; an ambient
+ * setting (for example, one supplied through PGOPTIONS) cannot suppress the
+ * installer's transaction boundaries. The decision is cached in a psql
+ * variable through the footer so later SQL cannot change transaction
+ * ownership mid-install. This keeps the 2.0 stamp and the migration's physical
+ * convergence work atomic.
  */
 
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP on
 select case
-  when coalesce(
+  when nullif(
     pg_catalog.current_setting(
       'pg_ash.install_in_migration_transaction',
       true
     ),
     ''
-  ) = 'on' then 'true'
+  ) = pg_catalog.pg_current_xact_id_if_assigned()::text then 'true'
   else 'false'
 end as pg_ash_install_in_migration_transaction
 \gset
@@ -40,7 +44,6 @@ end as pg_ash_install_in_migration_transaction
 \else
 begin;
 \endif
-\unset pg_ash_install_in_migration_transaction
 
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
@@ -7897,17 +7900,6 @@ begin
   end if;
 end $$;
 
-select case
-  when coalesce(
-    pg_catalog.current_setting(
-      'pg_ash.install_in_migration_transaction',
-      true
-    ),
-    ''
-  ) = 'on' then 'true'
-  else 'false'
-end as pg_ash_install_in_migration_transaction
-\gset
 \if :pg_ash_install_in_migration_transaction
 \else
 commit;

@@ -11,8 +11,11 @@ IFS=$'\n\t'
 readonly REQUESTED_CASE="${1:-all}"
 if [[ "${REQUESTED_CASE}" != "all" \
   && "${REQUESTED_CASE}" != "custom-trigger" \
-  && "${REQUESTED_CASE}" != "dependent-view" ]]; then
-  printf 'usage: %s [all|custom-trigger|dependent-view]\n' "$0" >&2
+  && "${REQUESTED_CASE}" != "dependent-view" \
+  && "${REQUESTED_CASE}" != "external-marker" ]]; then
+  printf \
+    'usage: %s [all|custom-trigger|dependent-view|external-marker]\n' \
+    "$0" >&2
   exit 2
 fi
 
@@ -65,6 +68,8 @@ cleanup_database() {
   "${PSQL[@]}" --quiet >/dev/null 2>&1 <<'SQL' || true
 drop event trigger if exists fail_ash_install_transaction_marker;
 drop function if exists public.fail_ash_install_transaction_marker();
+drop event trigger if exists fail_ash_install_external_marker;
+drop function if exists public.fail_ash_install_external_marker();
 do $cleanup$
 begin
   if pg_catalog.to_regprocedure('ash.uninstall(text)') is not null then
@@ -102,6 +107,15 @@ reset_test_database() {
       create database ${TEST_DATABASE}
       with template ${SEED_DATABASE};
     "
+}
+
+reset_empty_test_database() {
+  "${PSQL_MAINTENANCE[@]}" \
+    --quiet \
+    --command="drop database if exists ${TEST_DATABASE} with (force);"
+  "${PSQL_MAINTENANCE[@]}" \
+    --quiet \
+    --command="create database ${TEST_DATABASE} template template0;"
 }
 
 cleanup() {
@@ -168,6 +182,275 @@ snapshot_schema() {
   local output_file=$1
   "${PSQL[@]}" --quiet \
     --file="${REPO_ROOT}/devel/tests/schema_snapshot.sql" >"${output_file}"
+}
+
+optional_config_state() {
+  local config_exists
+  config_exists="$("${PSQL[@]}" \
+    --tuples-only \
+    --no-align \
+    --command="
+      select pg_catalog.to_regclass('ash.config') is not null;
+    ")"
+  if [[ "${config_exists}" == "t" ]]; then
+    config_state
+  else
+    printf '<absent>|<absent>|<absent>\n'
+  fi
+}
+
+config_data_hash() {
+  local config_exists
+  config_exists="$("${PSQL[@]}" \
+    --tuples-only \
+    --no-align \
+    --command="
+      select pg_catalog.to_regclass('ash.config') is not null;
+    ")"
+  if [[ "${config_exists}" == "t" ]]; then
+    "${PSQL[@]}" \
+      --tuples-only \
+      --no-align \
+      --command="
+        select pg_catalog.md5(pg_catalog.to_jsonb(config_row)::text)
+        from ash.config as config_row
+        where singleton;
+      "
+  else
+    printf '<absent>\n'
+  fi
+}
+
+config_relation_oid() {
+  "${PSQL[@]}" \
+    --tuples-only \
+    --no-align \
+    --command="
+      select coalesce(
+        pg_catalog.to_regclass('ash.config')::oid::text,
+        '<absent>'
+      );
+    "
+}
+
+install_external_marker_failure_trigger() {
+  "${PSQL[@]}" --quiet <<'SQL'
+create function public.fail_ash_install_external_marker()
+returns event_trigger
+language plpgsql
+as $event_trigger$
+declare
+  command record;
+begin
+  for command in
+    select *
+    from pg_catalog.pg_event_trigger_ddl_commands()
+  loop
+    if command.object_type = 'function'
+       and command.schema_name = 'ash'
+       and command.object_identity like 'ash.summary(%' then
+      raise exception
+        'forced late installer failure under externally preset marker';
+    end if;
+  end loop;
+end
+$event_trigger$;
+
+create event trigger fail_ash_install_external_marker
+on ddl_command_end
+when tag in ('CREATE FUNCTION')
+execute function public.fail_ash_install_external_marker();
+SQL
+}
+
+assert_external_marker_v15_direct_installer_rolled_back() {
+  local install_log="${TEST_TMP_DIR}/external-marker-v15.install.log"
+  local before_snapshot="${TEST_TMP_DIR}/external-marker-v15.before.snapshot"
+  local after_snapshot="${TEST_TMP_DIR}/external-marker-v15.after.snapshot"
+  local snapshot_diff="${TEST_TMP_DIR}/external-marker-v15.snapshot.diff"
+  local before_state
+  local after_state
+  local before_config_hash
+  local after_config_hash
+  local before_config_oid
+  local after_config_oid
+  local install_exit
+  local blocker_survives
+  local marker_options="${PGOPTIONS:+${PGOPTIONS} }-c pg_ash.install_in_migration_transaction=on"
+
+  reset_test_database
+  install_external_marker_failure_trigger
+
+  before_state="$(config_state)"
+  before_config_hash="$(config_data_hash)"
+  before_config_oid="$(config_relation_oid)"
+  snapshot_schema "${before_snapshot}"
+  printf 'Issue #202 external-marker v1.5 precondition: %s\n' \
+    "${before_state}"
+  if [[ "${before_state}" != "1.5|1.5|11" ]]; then
+    printf 'unexpected external-marker v1.5 precondition: %s\n' \
+      "${before_state}" >&2
+    return 1
+  fi
+
+  set +e
+  env PGOPTIONS="${marker_options}" \
+    "${PSQL[@]}" \
+    --file="${REPO_ROOT}/sql/ash-install.sql" \
+    >"${install_log}" 2>&1
+  install_exit=$?
+  set -e
+
+  printf 'Issue #202 external-marker v1.5 install_exit=%s\n' \
+    "${install_exit}"
+  if ((install_exit != 3)); then
+    sed -n '1,240p' "${install_log}" >&2
+    printf 'external-marker v1.5 install: expected exit 3, got %s\n' \
+      "${install_exit}" >&2
+    return 1
+  fi
+  if ! grep -F -- \
+    "forced late installer failure under externally preset marker" \
+    "${install_log}" >/dev/null; then
+    sed -n '1,240p' "${install_log}" >&2
+    printf 'external-marker v1.5 forced failure was not observed\n' >&2
+    return 1
+  fi
+
+  after_state="$(config_state)"
+  after_config_hash="$(config_data_hash)"
+  after_config_oid="$(config_relation_oid)"
+  printf 'Issue #202 external-marker v1.5 after failure: %s\n' \
+    "${after_state}"
+  if [[ "${after_state}" != "${before_state}" ]]; then
+    sed -n '1,240p' "${install_log}" >&2
+    printf 'external marker published a partial v1.5 upgrade: before=%s after=%s\n' \
+      "${before_state}" "${after_state}" >&2
+    return 1
+  fi
+  if [[ "${after_config_hash}" != "${before_config_hash}" ]]; then
+    printf 'external-marker failure changed ash.config data: before=%s after=%s\n' \
+      "${before_config_hash}" "${after_config_hash}" >&2
+    return 1
+  fi
+  if [[ "${after_config_oid}" != "${before_config_oid}" ]]; then
+    printf 'external-marker failure replaced ash.config: before=%s after=%s\n' \
+      "${before_config_oid}" "${after_config_oid}" >&2
+    return 1
+  fi
+
+  snapshot_schema "${after_snapshot}"
+  if ! diff -u \
+    "${before_snapshot}" "${after_snapshot}" >"${snapshot_diff}"; then
+    sed -n '1,240p' "${snapshot_diff}" >&2
+    printf 'external-marker v1.5 failure changed the ash schema\n' >&2
+    return 1
+  fi
+
+  blocker_survives="$("${PSQL[@]}" \
+    --tuples-only \
+    --no-align \
+    --command="
+      select exists (
+        select
+        from pg_catalog.pg_event_trigger
+        where evtname = 'fail_ash_install_external_marker'
+      );
+    ")"
+  if [[ "${blocker_survives}" != "t" ]]; then
+    printf 'external-marker v1.5 failure removed its blocker\n' >&2
+    return 1
+  fi
+
+  printf 'Issue #202 external-marker v1.5 rollback PASSED\n'
+}
+
+assert_external_marker_fresh_installer_rolled_back() {
+  local install_log="${TEST_TMP_DIR}/external-marker-fresh.install.log"
+  local before_snapshot="${TEST_TMP_DIR}/external-marker-fresh.before.snapshot"
+  local after_snapshot="${TEST_TMP_DIR}/external-marker-fresh.after.snapshot"
+  local snapshot_diff="${TEST_TMP_DIR}/external-marker-fresh.snapshot.diff"
+  local before_state
+  local after_state
+  local before_config_hash
+  local after_config_hash
+  local install_exit
+  local blocker_survives
+  local marker_options="${PGOPTIONS:+${PGOPTIONS} }-c pg_ash.install_in_migration_transaction=on"
+
+  reset_empty_test_database
+  install_external_marker_failure_trigger
+
+  before_state="$(optional_config_state)"
+  before_config_hash="$(config_data_hash)"
+  snapshot_schema "${before_snapshot}"
+  if [[ "${before_state}" != "<absent>|<absent>|<absent>" \
+    || "${before_config_hash}" != "<absent>" ]]; then
+    printf 'unexpected external-marker fresh precondition: state=%s hash=%s\n' \
+      "${before_state}" "${before_config_hash}" >&2
+    return 1
+  fi
+
+  set +e
+  env PGOPTIONS="${marker_options}" \
+    "${PSQL[@]}" \
+    --file="${REPO_ROOT}/sql/ash-install.sql" \
+    >"${install_log}" 2>&1
+  install_exit=$?
+  set -e
+
+  printf 'Issue #202 external-marker fresh install_exit=%s\n' \
+    "${install_exit}"
+  if ((install_exit != 3)); then
+    sed -n '1,240p' "${install_log}" >&2
+    printf 'external-marker fresh install: expected exit 3, got %s\n' \
+      "${install_exit}" >&2
+    return 1
+  fi
+  if ! grep -F -- \
+    "forced late installer failure under externally preset marker" \
+    "${install_log}" >/dev/null; then
+    sed -n '1,240p' "${install_log}" >&2
+    printf 'external-marker fresh forced failure was not observed\n' >&2
+    return 1
+  fi
+
+  after_state="$(optional_config_state)"
+  after_config_hash="$(config_data_hash)"
+  printf 'Issue #202 external-marker fresh after failure: %s\n' \
+    "${after_state}"
+  if [[ "${after_state}" != "${before_state}" \
+    || "${after_config_hash}" != "${before_config_hash}" ]]; then
+    sed -n '1,240p' "${install_log}" >&2
+    printf 'external marker left a partial fresh install: state=%s hash=%s\n' \
+      "${after_state}" "${after_config_hash}" >&2
+    return 1
+  fi
+
+  snapshot_schema "${after_snapshot}"
+  if ! diff -u \
+    "${before_snapshot}" "${after_snapshot}" >"${snapshot_diff}"; then
+    sed -n '1,240p' "${snapshot_diff}" >&2
+    printf 'external-marker fresh failure left a partial ash schema\n' >&2
+    return 1
+  fi
+
+  blocker_survives="$("${PSQL[@]}" \
+    --tuples-only \
+    --no-align \
+    --command="
+      select exists (
+        select
+        from pg_catalog.pg_event_trigger
+        where evtname = 'fail_ash_install_external_marker'
+      );
+    ")"
+  if [[ "${blocker_survives}" != "t" ]]; then
+    printf 'external-marker fresh failure removed its blocker\n' >&2
+    return 1
+  fi
+
+  printf 'Issue #202 external-marker fresh rollback PASSED\n'
 }
 
 assert_failed_upgrade_rolled_back() {
@@ -273,7 +556,7 @@ begin
           true
         ),
         ''
-      ) = 'on' then
+      ) <> '' then
         raise exception 'transaction-local installer marker survived rollback';
       else
         raise exception 'forced direct installer failure after marker rollback';
@@ -297,15 +580,15 @@ SQL
   fi
   snapshot_schema "${before_snapshot}"
 
-  # In one psql process, establish and roll back exactly the transaction-local
-  # marker used by the migration, then invoke the installer directly. The
+  # In one psql process, establish and roll back the transaction-bound token
+  # used by the migration, then invoke the installer directly. The
   # event trigger fails late, after the version stamp and most DDL. If the
   # marker survived, the error text differs; if direct invocation lost its
   # owned transaction, the state/schema checks below expose partial commits.
   set +e
   printf '%s\n' \
     'begin;' \
-    "set local pg_ash.install_in_migration_transaction = 'on';" \
+    "select pg_catalog.set_config('pg_ash.install_in_migration_transaction', pg_catalog.pg_current_xact_id()::text, true);" \
     'rollback;' \
     "\\i '${REPO_ROOT}/sql/ash-install.sql'" |
     "${PSQL[@]}" >"${interactive_log}" 2>&1
@@ -414,6 +697,12 @@ fi
 
 if [[ "${REQUESTED_CASE}" == "all" ]]; then
   assert_transaction_marker_does_not_leak
+fi
+
+if [[ "${REQUESTED_CASE}" == "all" \
+  || "${REQUESTED_CASE}" == "external-marker" ]]; then
+  assert_external_marker_v15_direct_installer_rolled_back
+  assert_external_marker_fresh_installer_rolled_back
 fi
 
 cleanup_database

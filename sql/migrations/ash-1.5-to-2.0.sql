@@ -34,11 +34,12 @@
  * exits without replacing the table once the canonical order is present.
  *
  * One migration-owned transaction covers both phases. The installer normally
- * owns and commits its transaction; the transaction-local setting below makes
- * it participate in this wider transaction instead. A finite preflight cannot
- * prove that normalization will finish: the explicit catalog checks reject
- * known unsupported table shapes, but a permitted dependent view can still
- * make DROP RESTRICT fail, and event triggers, concurrent DDL, permissions,
+ * owns and commits its transaction; the transaction-local token below binds
+ * include mode to this transaction ID so the installer participates in the
+ * wider transaction instead. A finite preflight cannot prove that
+ * normalization will finish: the explicit catalog checks reject known
+ * unsupported table shapes, but a permitted dependent view can still make
+ * DROP RESTRICT fail, and event triggers, concurrent DDL, permissions,
  * cancellation, or resource/commit failures can arise later. Keeping every
  * statement in one transaction guarantees that any such failure rolls back
  * the 2.0 version stamp together with all installer and normalization changes.
@@ -46,7 +47,11 @@
 
 \set ON_ERROR_STOP on
 begin;
-set local pg_ash.install_in_migration_transaction = 'on';
+select pg_catalog.set_config(
+  'pg_ash.install_in_migration_transaction',
+  pg_catalog.pg_current_xact_id()::text,
+  true
+);
 \ir ../ash-install.sql
 
 set local search_path = pg_catalog, pg_temp;
