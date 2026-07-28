@@ -17,7 +17,9 @@ begin
   select ash.set_debug_logging(true)
   into v_actual;
   assert v_actual =
-    'debug_logging enabled — each sampled session will emit RAISE LOG'
+    'Debug logging enabled—each observed active session will issue a '
+    || 'LOG-level message; visibility depends on log_min_messages and '
+    || 'client_min_messages.'
     and (
       select debug_logging
       from ash.config

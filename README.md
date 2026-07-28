@@ -251,13 +251,14 @@ from ash.top(
 ```
 
 Every explicit `query_id` filter reads raw samples: compacted rollups cannot
-prove either an exact count or a true zero. A query breakdown combined with a
-wait filter also needs the raw wait-to-query link. If coarser retained history
-would otherwise cover data before raw retention, pg_ash raises with the
-boundary instead of treating an omitted query as zero. On a young or
-post-reset install with no older rollup history, a default window may begin
-before the first sample and still reads the available raw rows — including
-after the first rollup covers only the same retained minute as raw.
+prove either an exact retained query-attribution count or a true zero. A query
+breakdown combined with a wait filter also needs the raw wait-to-query link.
+If coarser retained history would otherwise cover data before raw retention,
+pg_ash raises with the boundary instead of treating an omitted query as zero.
+On a young or post-reset install with no older rollup history, a default
+window may begin before the first sample; the call still reads the available
+raw rows — including after the first rollup covers only the same retained
+minute as raw.
 
 An unfiltered `ash.top('query_id')` can use rollups efficiently. Rollup query
 IDs are compacted (low-volume IDs may be omitted, and hourly rows retain a top
@@ -583,8 +584,9 @@ Postgres.
   `buckets_with_data`, and report `minutes_with_data` describe
   facts derived from stored activity, not verified sampling coverage; a
   sampled-idle minute and a sampler outage are indistinguishable. Monitor
-  scheduler health independently. `ash.timeline()` calls these buckets “no
-  stored observation”; that wording does not add heartbeat storage.
+  scheduler health independently. The `ash.timeline()` catalog comment
+  describes these buckets as “no stored observation”; that wording does not
+  add heartbeat storage.
 - Sampling generates WAL, but pg_ash does not currently ship a maintained 2.0
   benchmark for a portable per-sample estimate. Measure WAL on the target
   workload.
