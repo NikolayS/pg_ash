@@ -44,7 +44,7 @@ if ! $PSQL -d postgres -tc "select 1 from pg_database where datname='demo'" | gr
   $PSQL -d demo -c "select ash.start('1 second')" >/dev/null
 
   echo "[entry] pg_ash status:"
-  $PSQL -d demo -c "select metric, value from ash.status() where metric in ('version','sampling_enabled','pg_cron_available')"
+  $PSQL -d demo -c "select metric, value from ash.status() where metric in ('version','sampling_config_enabled','pg_cron_available')"
 fi
 
 # Kick off the workload. Send its logs to /tmp/workload.log for debugging;

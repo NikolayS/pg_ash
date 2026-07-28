@@ -7,8 +7,12 @@ begin
   select status into v_status_val
   from ash.start('1 second')
   where job_type = 'sampler';
-  assert v_status_val like '%schedule externally%',
-    'start() without pg_cron should say schedule externally, got: ' || v_status_val;
+  assert v_status_val like
+      'pg_cron unavailable — configure an external scheduler%'
+    and v_status_val like '%exactly every 00:00:01%'
+    and v_status_val like '%another cadence makes AAS values inaccurate',
+    'start() without pg_cron should state the exact external cadence, got: '
+    || v_status_val;
 
   /*
    * A preloaded pg_cron registers cron.database_name as postmaster-only even
