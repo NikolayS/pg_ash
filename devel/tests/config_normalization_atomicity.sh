@@ -24,7 +24,9 @@ TEST_TMP_DIR="$(mktemp -d)"
 readonly TEST_TMP_DIR
 readonly ARCHIVE_ROOT="${TEST_TMP_DIR}/v1.5"
 readonly TEST_DATABASE="ash_config_atomicity_202_${BASHPID}"
-if [[ ! "${TEST_DATABASE}" =~ ^[a-z0-9_]+$ ]]; then
+readonly SEED_DATABASE="${TEST_DATABASE}_seed"
+if [[ ! "${TEST_DATABASE}" =~ ^[a-z0-9_]+$ \
+  || ! "${SEED_DATABASE}" =~ ^[a-z0-9_]+$ ]]; then
   printf 'unsafe generated test database name: %s\n' "${TEST_DATABASE}" >&2
   exit 2
 fi
@@ -49,6 +51,16 @@ readonly -a PSQL=(
   --set=VERBOSITY=terse
 )
 
+readonly -a PSQL_SEED=(
+  psql
+  --no-psqlrc
+  --host="${PGHOST:-localhost}"
+  --username="${PGUSER:-postgres}"
+  --dbname="${SEED_DATABASE}"
+  --set=ON_ERROR_STOP=1
+  --set=VERBOSITY=terse
+)
+
 cleanup_database() {
   "${PSQL[@]}" --quiet >/dev/null 2>&1 <<'SQL' || true
 drop event trigger if exists fail_ash_install_transaction_marker;
@@ -69,26 +81,42 @@ drop schema if exists ash cascade;
 SQL
 }
 
-drop_test_database() {
+drop_owned_databases() {
   "${PSQL_MAINTENANCE[@]}" \
     --quiet \
     --command="drop database if exists ${TEST_DATABASE} with (force);" \
     >/dev/null 2>&1 || true
+  "${PSQL_MAINTENANCE[@]}" \
+    --quiet \
+    --command="drop database if exists ${SEED_DATABASE} with (force);" \
+    >/dev/null 2>&1 || true
+}
+
+reset_test_database() {
+  "${PSQL_MAINTENANCE[@]}" \
+    --quiet \
+    --command="drop database if exists ${TEST_DATABASE} with (force);"
+  "${PSQL_MAINTENANCE[@]}" \
+    --quiet \
+    --command="
+      create database ${TEST_DATABASE}
+      with template ${SEED_DATABASE};
+    "
 }
 
 cleanup() {
   cleanup_database
-  drop_test_database
+  drop_owned_databases
   if [[ -d "${TEST_TMP_DIR}" ]]; then
     rm -rf -- "${TEST_TMP_DIR}"
   fi
 }
 trap cleanup EXIT
 
-drop_test_database
+drop_owned_databases
 "${PSQL_MAINTENANCE[@]}" \
   --quiet \
-  --command="create database ${TEST_DATABASE};"
+  --command="create database ${SEED_DATABASE};"
 
 mkdir -p "${ARCHIVE_ROOT}"
 git -C "${REPO_ROOT}" archive v1.5 -- sql | tar -x -C "${ARCHIVE_ROOT}"
@@ -102,18 +130,22 @@ readonly -a V15_CHAIN=(
   "${ARCHIVE_ROOT}/sql/ash-1.4-to-1.5.sql"
 )
 
-install_actual_v15_chain() {
+install_actual_v15_seed() {
   local chain_log=$1
   local sql_file
 
   : >"${chain_log}"
   for sql_file in "${V15_CHAIN[@]}"; do
-    if ! "${PSQL[@]}" --quiet --file="${sql_file}" >>"${chain_log}" 2>&1; then
+    if ! "${PSQL_SEED[@]}" \
+      --quiet \
+      --file="${sql_file}" >>"${chain_log}" 2>&1; then
       sed -n '1,240p' "${chain_log}" >&2
       return 1
     fi
   done
 }
+
+install_actual_v15_seed "${TEST_TMP_DIR}/v1.5-seed.chain.log"
 
 config_state() {
   "${PSQL[@]}" --tuples-only --no-align --command="
@@ -218,8 +250,7 @@ assert_transaction_marker_does_not_leak() {
   local after_state
   local marker_after
 
-  cleanup_database
-  install_actual_v15_chain "${TEST_TMP_DIR}/transaction-marker.chain.log"
+  reset_test_database
   "${PSQL[@]}" --quiet <<'SQL'
 create function public.fail_ash_install_transaction_marker()
 returns event_trigger
@@ -343,8 +374,7 @@ SQL
 
 if [[ "${REQUESTED_CASE}" == "all" \
   || "${REQUESTED_CASE}" == "custom-trigger" ]]; then
-  cleanup_database
-  install_actual_v15_chain "${TEST_TMP_DIR}/custom-trigger.chain.log"
+  reset_test_database
   "${PSQL[@]}" --quiet <<'SQL'
 create function public.ash_config_atomicity_trigger()
 returns trigger
@@ -374,8 +404,7 @@ fi
 
 if [[ "${REQUESTED_CASE}" == "all" \
   || "${REQUESTED_CASE}" == "dependent-view" ]]; then
-  cleanup_database
-  install_actual_v15_chain "${TEST_TMP_DIR}/dependent-view.chain.log"
+  reset_test_database
   "${PSQL[@]}" --quiet <<'SQL'
 create view public.ash_config_atomicity_dependency as
 select version
