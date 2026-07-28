@@ -395,11 +395,11 @@ begin
     assert v_start_rows = '{
         "sampler": [
           null,
-          "interval set to 00:00:02 — schedule externally (pg_cron not available)"
+          "pg_cron unavailable — configure an external scheduler to execute SELECT ash.take_sample() exactly every 00:00:02; using another cadence makes AAS values inaccurate"
         ],
         "rotation": [
           null,
-          "rotation_period is 1 day — schedule ash.rotate() externally"
+          "call ash.rotate() daily; it skips until at least 90% of rotation_period has elapsed"
         ],
         "rollup": [
           null,

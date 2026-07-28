@@ -6,10 +6,10 @@ release SQL path. Fresh installs use `\i sql/ash-install.sql`; upgrades from
 migrations. Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for
 compatibility.
 
-This is a breaking reader-API release. Sampling, storage, rollups, scheduler
-functions, and lifecycle/admin function signatures are unchanged; parameter
-names were de-prefixed. The 1.x reader surface has been replaced by the
-AAS-oriented 2.0 API:
+This is a breaking release. The v1.x reader API is removed and replaced by the
+surface below. Operational entry points remain available, but 2.0 also changes
+named arguments, scheduling diagnostics, privilege bundles, retention geometry,
+rollup storage, and return-value semantics:
 
 | 1.x | 2.0 |
 |---|---|
@@ -25,8 +25,10 @@ AAS-oriented 2.0 API:
 ## 2.0 highlights
 
 - **AAS-first readers.** `periods`, `aas`, `timeline`, `top`, `compare`,
-  `samples`, `report`, `chart`, and `summary` use consistent named filters and
-  report whether data came from raw samples, 1-minute rollups, or 1-hour rollups.
+  `samples`, `report`, `chart`, and `summary` form the 2.0 surface. Filters use
+  consistent names where supported. Aggregate readers disclose provenance
+  through typed source/effective-plan columns, report coverage JSON, summary
+  metrics, or a chart planning `NOTICE`; `samples()` is raw-only.
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.
@@ -70,6 +72,18 @@ AAS-oriented 2.0 API:
   `ash.rollup_hour()` return processed minutes and hours rather than
   per-database rows upserted, so activity from multiple databases no longer
   inflates scheduler-visible results. (issue #191)
+- **Sampler cadences now preserve uniform spacing.** Whole-minute schedules
+  must divide an hour, and whole-hour schedules must divide a day with a
+  maximum of 12 hours. Calendar-step cadences with short boundary gaps are
+  rejected so `sample_interval` cannot disagree with AAS weighting.
+- **Status distinguishes configuration from sampling evidence.**
+  `sampling_config_enabled` reports the configured switch,
+  `interrupted_sample_calls` names the former `missed_samples` counter, and
+  `last_activity_sample_ts` identifies the newest activity-bearing row rather
+  than implying a sampler heartbeat.
+  `time_since_last_activity_sample` makes the same distinction for its age. A
+  `sampling_evidence` row states that idle ticks and scheduler outages remain
+  indistinguishable.
 - **Wide aggregate readers now reject stale rollup coverage without losing the
   fast path.** When raw is the canonical source for a wide window, readers fall
   back to it if `rollup_1m` has not reached the requested end, clamped at the
@@ -333,10 +347,12 @@ All other functions unchanged from 1.2. See README for the full reference.
 
 ### New: event_queries
 
-`event_queries()` and `event_queries_at()` — find which queries are responsible for a specific wait event. Flexible matching: `'Lock:tuple'` (exact event), `'IO'` (all events of a type), or `'CPU*'` (synthetic). Includes bar column.
+`event_queries()` and `event_queries_at()` — find queries observed in a specific
+wait event. Flexible matching: `'Lock:tuple'` (exact event), `'IO'` (all events
+of a type), or `'CPU*'` (synthetic). Includes bar column.
 
 ```sql
--- which queries are causing Lock:tuple?
+-- queries observed with Lock:tuple
 select * from ash.event_queries('Lock:tuple', '1 hour');
 
 -- all IO-related queries in a time window
