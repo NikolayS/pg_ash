@@ -37,6 +37,7 @@ AAS-oriented 2.0 API:
 - **Upgrade convergence.** The cumulative 1.5-to-2.0 path replays the final
   installer, removes stale 1.x and draft readers, normalizes `ash.config` to
   fresh-install column order, and restores eligible complete reader bundles.
+  Restoring a complete bundle can re-grant operator-narrowed table privileges.
   Root compatibility wrappers remain available.
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
