@@ -23,13 +23,28 @@ readonly REPO_ROOT
 TEST_TMP_DIR="$(mktemp -d)"
 readonly TEST_TMP_DIR
 readonly ARCHIVE_ROOT="${TEST_TMP_DIR}/v1.5"
+readonly TEST_DATABASE="ash_config_atomicity_202_${BASHPID}"
+if [[ ! "${TEST_DATABASE}" =~ ^[a-z0-9_]+$ ]]; then
+  printf 'unsafe generated test database name: %s\n' "${TEST_DATABASE}" >&2
+  exit 2
+fi
+
+readonly -a PSQL_MAINTENANCE=(
+  psql
+  --no-psqlrc
+  --host="${PGHOST:-localhost}"
+  --username="${PGUSER:-postgres}"
+  --dbname="${PGDATABASE:-postgres}"
+  --set=ON_ERROR_STOP=1
+  --set=VERBOSITY=terse
+)
 
 readonly -a PSQL=(
   psql
   --no-psqlrc
   --host="${PGHOST:-localhost}"
   --username="${PGUSER:-postgres}"
-  --dbname="${PGDATABASE:-postgres}"
+  --dbname="${TEST_DATABASE}"
   --set=ON_ERROR_STOP=1
   --set=VERBOSITY=terse
 )
@@ -54,13 +69,26 @@ drop schema if exists ash cascade;
 SQL
 }
 
+drop_test_database() {
+  "${PSQL_MAINTENANCE[@]}" \
+    --quiet \
+    --command="drop database if exists ${TEST_DATABASE} with (force);" \
+    >/dev/null 2>&1 || true
+}
+
 cleanup() {
   cleanup_database
+  drop_test_database
   if [[ -d "${TEST_TMP_DIR}" ]]; then
     rm -rf -- "${TEST_TMP_DIR}"
   fi
 }
 trap cleanup EXIT
+
+drop_test_database
+"${PSQL_MAINTENANCE[@]}" \
+  --quiet \
+  --command="create database ${TEST_DATABASE};"
 
 mkdir -p "${ARCHIVE_ROOT}"
 git -C "${REPO_ROOT}" archive v1.5 -- sql | tar -x -C "${ARCHIVE_ROOT}"
@@ -251,7 +279,7 @@ SQL
     '\q' |
     PGHOST="${PGHOST:-localhost}" \
     PGUSER="${PGUSER:-postgres}" \
-    PGDATABASE="${PGDATABASE:-postgres}" \
+    PGDATABASE="${TEST_DATABASE}" \
     script \
       --quiet \
       --return \
