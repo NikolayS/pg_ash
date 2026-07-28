@@ -1,5 +1,13 @@
 # Partitioned query_map design
 
+> **Historical design record (non-normative).** This file documents a pre-2.0
+> proposal and is retained only for design history. Its schemas, function
+> names, argument names, operational commands, performance figures, and
+> implementation status may not match the shipped release. Do not use it as an
+> install, upgrade, or API guide. Use `README.md`, `RELEASE_NOTES.md`,
+> `AAS_API.md`, and the catalog comments in `sql/ash-install.sql` for current
+> behavior.
+
 ## Problem
 
 The current `query_map` is a single table with DELETE-based GC. This creates dead tuples — the only source of bloat in pg_ash. On PG14-15, volatile SQL comments can flood query_map with unique query_ids, hitting the 50k hard cap.
@@ -116,32 +124,43 @@ The partitioned approach is cleaner. The view abstraction keeps reader changes m
 
 ---
 
-## Rollup query filtering: 3+ samples threshold
+## Minute-rollup query filtering: 3+ stored appearances threshold
 
-For rollup tables (`rollup_1m`, `rollup_1h`), only store query_ids with **3 or more samples** in the aggregation window. Queries seen only 1-2 times are noise — not useful for trend analysis.
+The minute rollup retains a query ID after at least the configured number of
+stored appearances in that minute. The configured column is named
+`rollup_min_backend_seconds`, but appearances equal backend-seconds only at an
+unchanged one-second sampling interval. They do not prove query runtime when
+cadence differs.
 
 ### Why 3+
 
-- **1 sample**: A query that appeared in a single 1-second snapshot out of 60 (1.7% of the minute). Statistically meaningless.
-- **2 samples**: Still <4% of the minute. Could be a quick ad-hoc query.
-- **3+ samples**: Query is running for at least 3 seconds — likely a real workload component worth tracking.
+- **1 appearance**: The query was observed in one stored backend appearance in
+  the minute; it is omitted at the default threshold.
+- **2 appearances**: The query was observed in two stored backend appearances
+  in the minute; it is omitted at the default threshold.
+- **3+ appearances**: The query qualifies for retained rollup attribution by
+  default. At a fixed one-second cadence this corresponds to at least three
+  backend-seconds; at another cadence no elapsed-runtime claim follows.
 
 ### Implementation in minute rollup
 
 ```sql
 -- During rollup_1m aggregation:
 WITH query_totals AS (
-    SELECT query_id, sum(count) as total
+    SELECT query_id, count(*) as total
     FROM decoded_samples
     GROUP BY query_id
-    HAVING sum(count) >= 3    -- ← threshold filter
+    HAVING count(*) >= 3      -- stored-appearance threshold
     ORDER BY total DESC
     LIMIT 100                  -- ← top-N truncation
 )
 -- Encode into query_counts array
 ```
 
-Queries below the threshold are silently aggregated into the "Other" bucket (if desired) or simply dropped. Their backend-seconds are still counted in `wait_counts` (which is by wait event, not query), so the total time accounting remains correct.
+Queries below the threshold are omitted from retained query attribution. Their
+stored appearances remain represented in `wait_counts` (which is by wait
+event), so the retained total is preserved; interpreting that total as elapsed
+backend-seconds still requires an unchanged one-second cadence.
 
 ### Impact on rollup storage
 
@@ -153,19 +172,20 @@ The filter doesn't change storage size (top-N truncation already bounds it), but
 
 ### Impact on hourly rollup
 
-Same principle. When merging 60 minute rollups into 1 hour:
-- A query must have 3+ backend-seconds across the hour to be stored
-- Short-lived queries that briefly appeared in one minute but never again are excluded
-- Reduces noise in long-term trend analysis
+Hourly rollup merges the query counts already retained by the minute rollup
+and re-truncates them to the top 100. It does not apply a new
+three-appearance threshold across the hour.
 
 ### Configurable threshold
 
 ```sql
 -- In ash.config:
-rollup_min_samples smallint DEFAULT 3
+rollup_min_backend_seconds smallint DEFAULT 3
 ```
 
-Users can set to 1 (keep everything up to top-N) or higher (stricter filtering).
+Users can set it to 1 (keep every attributed appearance up to top-N) or higher
+(stricter filtering in each minute). Despite the historical column name,
+interpret it as stored appearances unless sampling stayed at one second.
 
 ---
 
@@ -181,19 +201,21 @@ Users can set to 1 (keep everything up to top-N) or higher (stricter filtering).
 ├─────────────────────────────────────────────────┤
 │              Minute rollup (30 days)             │
 │  rollup_1m: wait_counts (all events)             │
-│             query_counts (top 100, 3+ samples)   │
+│             query_counts (top 100, 3+ stored)    │
 │  Uses raw query_id (int8). Self-contained.       │
-│  DELETE for retention. Autovacuum handles bloat.  │
+│  DELETE retention; monitor autovacuum and bloat. │
 ├─────────────────────────────────────────────────┤
 │              Hourly rollup (5 years)             │
 │  rollup_1h: wait_counts (all events)             │
-│             query_counts (top 100, 3+ samples)   │
+│             query_counts (merged minute top 100) │
 │  Uses raw query_id (int8). Self-contained.       │
-│  DELETE for retention. Minimal bloat.             │
+│  DELETE retention; monitor autovacuum and bloat. │
 └─────────────────────────────────────────────────┘
 ```
 
-Raw layer: maximum compression (int4 map_ids), zero bloat (partitioned everything), 1-2 day retention.
+Raw layer: maximum compression (int4 map_ids), zero bloat (partitioned
+everything), and roughly one completed day plus the current partial period at
+the default geometry.
 
 Rollup layer: self-contained (int8 query_ids), noise-filtered (3+ threshold), bounded (top-N), long retention.
 

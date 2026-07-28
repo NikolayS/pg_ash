@@ -113,10 +113,14 @@ jobs:
           grep -Fq \
             'named by `cron.database_name`; it still observes activity from every database.' \
             README.md
-          grep -Fq '`ash.report()` reads `ash.rollup_1m` only.' README.md
+          grep -Fq 'Base metrics and top events read `ash.rollup_1m`.' README.md
+          grep -Fq 'Top query IDs additionally' README.md
+          grep -Fq 'read raw samples for eligible extreme minutes.' README.md
           grep -Fq 'it returns SQL `NULL` and emits a NOTICE' README.md
-          grep -Fq "function signatures are unchanged; parameter" RELEASE_NOTES.md
-          grep -Fq "names were de-prefixed." RELEASE_NOTES.md
+          grep -Fq "This is a breaking release." RELEASE_NOTES.md
+          grep -Fq \
+            "named arguments, scheduling diagnostics, privilege bundles, retention geometry," \
+            RELEASE_NOTES.md
           if grep -Fq "lifecycle/admin functions remain compatible" RELEASE_NOTES.md; then
             echo "Release notes must disclose de-prefixed parameter names" >&2
             exit 1
@@ -2482,10 +2486,16 @@ jobs:
           declare
             v_val text;
           begin
-            select value into v_val from ash.status() where metric = 'missed_samples';
-            assert v_val is not null, 'status() should show missed_samples metric';
-            assert v_val::int >= 1, 'missed_samples in status should be >= 1';
-            raise notice 'TEST 4 PASSED: status() shows missed_samples (value = %)', v_val;
+            select value into v_val
+            from ash.status()
+            where metric = 'interrupted_sample_calls';
+            assert v_val is not null,
+              'status() should show interrupted_sample_calls metric';
+            assert v_val::int >= 1,
+              'interrupted_sample_calls in status should be >= 1';
+            raise notice
+              'TEST 4 PASSED: status() shows interrupted_sample_calls (value = %)',
+              v_val;
           end;
           $$;
 
@@ -2757,7 +2767,11 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          fresh_install_path="$(
+            python3 devel/scripts/ash_sql_chain.py fresh-install-path
+          )"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v fresh_install_path="${fresh_install_path}" << 'EOF'
           select case
                    when exists (
                      select from pg_extension where extname = 'pg_cron'
@@ -2776,7 +2790,7 @@ jobs:
               job_id := (select jobid from _legacy_hourly_job),
               active := false
             );
-            \i sql/ash-install.sql
+            \i :fresh_install_path
             do $migration$
             declare
               v_job_id bigint;
@@ -2852,7 +2866,7 @@ jobs:
             assert v_schedule = '*/1 * * * *', '60 seconds should be */1 * * * *, got: ' || v_schedule;
             perform ash.stop();
 
-            -- Test 1-59 minutes range
+            -- Test supported whole-minute divisors of one hour.
             select job_id into v_job_id
             from ash.start('1 minute')
             where job_type = 'sampler';
@@ -2870,12 +2884,35 @@ jobs:
             perform ash.stop();
 
             select job_id into v_job_id
-            from ash.start('59 minutes')
+            from ash.start('30 minutes')
             where job_type = 'sampler';
-            assert v_job_id is not null, '59 minutes should work';
+            assert v_job_id is not null, '30 minutes should work';
             select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '*/59 * * * *', '59 minutes should be */59 * * * *, got: ' || v_schedule;
+            assert v_schedule = '*/30 * * * *',
+              '30 minutes should be */30 * * * *, got: ' || v_schedule;
             perform ash.stop();
+
+            declare
+              v_before interval;
+              v_error_msg text;
+            begin
+              select sample_interval into v_before
+              from ash.config
+              where singleton;
+              select status into v_error_msg
+              from ash.start('59 minutes')
+              where job_type = 'error';
+              assert v_error_msg like '%must divide one hour evenly%',
+                '59 minutes should be rejected as non-uniform, got: '
+                || v_error_msg;
+              assert (
+                select sample_interval = v_before and not sampling_enabled
+                from ash.config
+                where singleton
+              ) and not exists (
+                select from cron.job where jobname like 'ash_%'
+              ), 'rejected 59-minute cadence changed config or jobs';
+            end;
 
             -- Test boundary: 60 minutes = 1 hour (cron format)
             select job_id into v_job_id
@@ -2903,23 +2940,49 @@ jobs:
             assert v_schedule = '0 */2 * * *', '2 hours should be 0 */2 * * *, got: ' || v_schedule;
             perform ash.stop();
 
-            -- Test 23 hours (maximum allowed)
+            -- Test the largest supported whole-hour divisor of one day.
             select job_id into v_job_id
-            from ash.start('23 hours')
+            from ash.start('12 hours')
             where job_type = 'sampler';
-            assert v_job_id is not null, '23 hours should work';
+            assert v_job_id is not null, '12 hours should work';
             select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '0 */23 * * *', '23 hours should be 0 */23 * * *, got: ' || v_schedule;
+            assert v_schedule = '0 */12 * * *',
+              '12 hours should be 0 */12 * * *, got: ' || v_schedule;
             perform ash.stop();
 
-            -- Test 24 hours should ERROR (exceeds 23h limit)
+            -- Test a non-divisor whole-hour cadence below the upper bound.
+            declare
+              v_before interval;
+              v_error_msg text;
+            begin
+              select sample_interval into v_before
+              from ash.config
+              where singleton;
+              select status into v_error_msg
+              from ash.start('5 hours')
+              where job_type = 'error';
+              assert v_error_msg like '%must divide one day evenly%',
+                '5 hours should be rejected as non-uniform, got: '
+                || v_error_msg;
+              assert (
+                select sample_interval = v_before and not sampling_enabled
+                from ash.config
+                where singleton
+              ) and not exists (
+                select from cron.job where jobname like 'ash_%'
+              ), 'rejected 5-hour cadence changed config or jobs';
+            end;
+
+            -- Test 13 hours should ERROR (exceeds supported 12h maximum).
             declare
               v_error_msg text;
             begin
               select status into v_error_msg
-              from ash.start('24 hours')
+              from ash.start('13 hours')
               where job_type = 'error';
-              assert v_error_msg like '%23 hours%', '24 hours should error with 23 hours limit, got: ' || v_error_msg;
+              assert v_error_msg like '%maximum supported cadence of 12 hours%',
+                '13 hours should error with 12-hour limit, got: '
+                || v_error_msg;
             end;
 
             -- Test error case: non-round interval
@@ -3894,7 +3957,9 @@ jobs:
             from ash.summary('1000-01-01'::timestamptz,
                              '3000-01-01'::timestamptz)
             where metric = 'status';
-            assert v_value = 'no data in this time range',
+            assert v_value =
+              'no stored activity observations in this time range '
+              || '(idle time and sampler gaps are indistinguishable)',
               'cross-horizon summary must report no data';
             select * into r from ash.compare(
               '1000-01-01'::timestamptz, '3000-01-01'::timestamptz,
@@ -3926,8 +3991,15 @@ jobs:
                 'ash.report(timestamptz,timestamptz,integer,integer)'::regprocedure);
           begin
             assert position(
-              'pg_cron is not available in this database.' in v_start_def
-            ) > 0, 'ash.start must say pg_cron is unavailable in this database';
+              'pg_cron is unavailable. Configure an external scheduler' in
+              v_start_def
+            ) > 0, 'ash.start must disclose the external-scheduler contract';
+            assert position(
+              'exactly every %' in v_start_def
+            ) > 0
+              and position('using another cadence ' in v_start_def) > 0
+              and position('makes AAS values inaccurate' in v_start_def) > 0,
+              'ash.start must require the configured external cadence';
             assert position(
               'current_setting(''cron.database_name'', true)' in v_start_def
             ) > 0, 'ash.start must hint cron.database_name';
@@ -3935,11 +4007,18 @@ jobs:
               'ash.start must not claim pg_cron is absent from the cluster';
 
             assert position(
-              'Reads ash.rollup_1m only.' in v_report_comment
-            ) > 0, 'ash.report catalog comment must disclose rollup_1m-only input';
+              'Base metrics and top events read ash.rollup_1m.' in
+              v_report_comment
+            ) > 0, 'ash.report must disclose its rollup-backed base series';
             assert position(
-              'raw or rollup_1h has coverage' in v_report_comment
-            ) > 0, 'ash.report comment must distinguish alternate coverage';
+              'Query attribution additionally uses raw samples' in
+              v_report_comment
+            ) > 0, 'ash.report must disclose raw query attribution';
+            assert position(
+              'raw or rollup_1h has rows' in v_report_comment
+            ) > 0, 'ash.report comment must distinguish alternate observations';
+            assert position('Reads ash.rollup_1m only.' in v_report_comment) = 0,
+              'ash.report must not claim that every payload component is rollup-only';
             assert position(
               'Returns null when the window has no coverage' in v_report_comment
             ) = 0, 'ash.report comment must remove the ambiguous old NULL wording';
@@ -4060,23 +4139,23 @@ jobs:
           )"
           printf '%s\n' "$n5_out"
           if ! printf '%s\n' "$n5_out" | grep -Fq \
-              "raw has coverage, but report reads rollup_1m only and returns NULL"; then
+              "raw has stored activity rows, but report reads rollup_1m for base metrics and returns NULL"; then
             echo "FAIL: ash.report raw-only NOTICE missing" >&2
             exit 1
           fi
           if [ "$(printf '%s\n' "$n5_out" | grep -Fc \
-              "raw has coverage, but report reads rollup_1m only and returns NULL")" \
+              "raw has stored activity rows, but report reads rollup_1m for base metrics and returns NULL")" \
               -ne 1 ]; then
             echo "FAIL: ash.report raw-only NOTICE must occur exactly once" >&2
             exit 1
           fi
           if ! printf '%s\n' "$n5_out" | grep -Fq \
-              "rollup_1h has coverage, but report reads rollup_1m only and returns NULL"; then
+              "rollup_1h has stored activity rows, but report reads rollup_1m for base metrics and returns NULL"; then
             echo "FAIL: ash.report rollup_1h-only NOTICE missing" >&2
             exit 1
           fi
           if [ "$(printf '%s\n' "$n5_out" | grep -Fc \
-              "rollup_1h has coverage, but report reads rollup_1m only and returns NULL")" \
+              "rollup_1h has stored activity rows, but report reads rollup_1m for base metrics and returns NULL")" \
               -ne 1 ]; then
             echo "FAIL: ash.report must not claim sparse rollup_1h coverage" >&2
             exit 1
@@ -4911,7 +4990,8 @@ jobs:
             from ash.start(interval '100000000 days');
             assert v_errors = 1,
               format('ash.start(oversized): expected one error row, got %s', v_errors);
-            assert v_status like 'interval exceeds maximum 23 hours%',
+            assert v_status like
+              'interval exceeds maximum supported cadence of 12 hours%',
               format('ash.start(oversized): unexpected status: %s', v_status);
 
             select sample_interval into v_after
@@ -8691,16 +8771,11 @@ jobs:
                 select array_agg(status order by result_order)
                 from b3_start_result
               ) = array[
-                'interval set to 00:00:01 — schedule externally '
-                  '(pg_cron not available)',
-                (
-                  select format(
-                    'rotation_period is %s — schedule ash.rotate() externally',
-                    rotation_period
-                  )
-                  from ash.config
-                  where singleton
-                ),
+                'pg_cron unavailable — configure an external scheduler to '
+                  'execute SELECT ash.take_sample() exactly every 00:00:01; '
+                  'using another cadence makes AAS values inaccurate',
+                'call ash.rotate() daily; it skips until at least 90% of '
+                  'rotation_period has elapsed',
                 'schedule ash.rollup_minute() every minute, '
                   'ash.rollup_hour() at minute 1 every hour, '
                   'ash.rollup_cleanup() daily'
@@ -8968,8 +9043,12 @@ jobs:
             -- Check new metrics exist
             assert 'num_partitions' = any(v_metrics),
               'status should include num_partitions';
-            assert 'sampling_enabled' = any(v_metrics),
-              'status should include sampling_enabled';
+            assert 'sampling_config_enabled' = any(v_metrics),
+              'status should include sampling_config_enabled';
+            assert 'sampling_evidence' = any(v_metrics),
+              'status should include sampling_evidence';
+            assert 'interrupted_sample_calls' = any(v_metrics),
+              'status should include interrupted_sample_calls';
             assert 'skipped_samples' = any(v_metrics),
               'status should include skipped_samples';
             assert 'raw_retention' = any(v_metrics),
@@ -10073,8 +10152,22 @@ jobs:
           PGPASSWORD: postgres
         run: |
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
-          sed '$d' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_before_latest.sql
-          tail -n 1 /tmp/ash_full_upgrade_chain.sql > /tmp/ash_latest_upgrade.sql
+          python3 devel/scripts/ash_sql_chain.py reapply-chain \
+            > /tmp/ash_reapply_chain.sql
+          full_chain_lines="$(wc -l < /tmp/ash_full_upgrade_chain.sql)"
+          reapply_chain_lines="$(
+            awk 'NF { count++ } END { print count + 0 }' \
+              /tmp/ash_reapply_chain.sql
+          )"
+          # The ordinal migration is the final released edge immediately
+          # before the helper-discovered development/re-apply suffix.
+          latest_upgrade_lines="$((reapply_chain_lines + 1))"
+          prefix_lines="$((full_chain_lines - latest_upgrade_lines))"
+          test "${prefix_lines}" -gt 0
+          head -n "${prefix_lines}" /tmp/ash_full_upgrade_chain.sql \
+            > /tmp/ash_chain_before_latest.sql
+          tail -n "${latest_upgrade_lines}" /tmp/ash_full_upgrade_chain.sql \
+            > /tmp/ash_latest_upgrade.sql
           test -s /tmp/ash_chain_before_latest.sql
           test -s /tmp/ash_latest_upgrade.sql
 

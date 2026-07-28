@@ -1,5 +1,11 @@
 # Task: Implement pg_ash Steps 3-7 + CI
 
+> **Archived implementation task (non-normative).** This task records work for
+> a pre-2.0 implementation and is retained only for project history. Do not
+> execute its SQL paths, function names, or CI instructions against a current
+> checkout. Use `README.md`, `RELEASE_NOTES.md`, `AAS_API.md`, and the catalog
+> comments in `sql/ash-install.sql` for current behavior.
+
 You already completed Steps 1-2. The schema is installed on PG17 at localhost:5433 user postgres.
 
 Read SPEC.md for all design details. Add to the existing sql/ash--1.0.sql file.
