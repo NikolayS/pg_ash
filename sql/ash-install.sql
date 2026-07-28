@@ -1,6 +1,6 @@
 /*
  * pg_ash: Active Session History for Postgres
- * Version: 2.0 beta 1
+ * Version: 2.0
  * Fresh install: \i sql/ash-install.sql
  * Upgrade from 1.0: \i sql/migrations/ash-1.0-to-1.1.sql, then \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.1: \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
@@ -279,7 +279,7 @@ create table if not exists ash.config (
   include_bg_workers         bool not null default false,
   debug_logging              bool not null default false,
   encoding_version           smallint not null default 1,
-  version                    text not null default '2.0-beta1',
+  version                    text not null default '2.0',
   rotated_at                 timestamptz not null default clock_timestamp(),
   installed_at               timestamptz not null default clock_timestamp(),
   rollup_1m_retention_days   smallint not null default 30
@@ -492,8 +492,8 @@ $$Internal trigger enforcing rotation and retention geometry whenever its ash.co
  * fresh 2.0 install and an upgrade chain landing on 2.0 (the CI
  * schema-equivalence check).
  */
-update ash.config set version = '2.0-beta1' where singleton;
-alter table ash.config alter column version set default '2.0-beta1';
+update ash.config set version = '2.0' where singleton;
+alter table ash.config alter column version set default '2.0';
 
 /*
  * Wait event dictionary.

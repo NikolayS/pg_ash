@@ -30,7 +30,7 @@ Use pg_ash when you need:
 
 ## Quick start
 
-The current `main` branch contains the 2.0 beta 1 SQL in `sql/`.
+The current `main` branch contains the 2.0 SQL in `sql/`.
 
 ```sql
 create extension if not exists pg_stat_statements;
@@ -59,7 +59,7 @@ from ash.chart(
 );
 ```
 
-For the latest stable v1.5 tag, check out `v1.5` first and use:
+For the previous stable v1.5 release, check out `v1.5` first and use:
 
 ```sql
 \i sql/ash-install.sql
@@ -79,7 +79,7 @@ missing scripts in order.
 \i sql/migrations/ash-1.5-to-2.0.sql
 
 select * from ash.status() where metric = 'version';
--- version | 2.0-beta1
+-- version | 2.0
 ```
 
 The old root-level upgrade paths, such as `sql/ash-1.5-to-2.0.sql`, are kept as

@@ -1,8 +1,8 @@
 /*
- * pg_ash: upgrade from 1.5 to 2.0 beta 1
+ * pg_ash: upgrade from 1.5 to 2.0
  *
  * 2.0 is a breaking release: the reader API is redesigned (issue #113,
- * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 beta 1
+ * blueprints/AAS_API.md). This upgrade wrapper replays the final 2.0
  * installer, which:
  *   * snapshots existing reader-role EXECUTE grants, then drops every removed
  *     v1.x reader and draft aas_* function (all overloads / _at twins), the
@@ -22,7 +22,7 @@
  *   * grants the default reader bundle to pg_monitor (best-effort, new in
  *     2.0 — see the block at the end of the installer; opt out afterwards
  *     with `select ash.revoke_reader('pg_monitor')`), and
- *   * stamps ash.config.version = '2.0-beta1' (and the column default), and
+ *   * stamps ash.config.version = '2.0' (and the column default), and
  *   * normalizes ash.config's physical column order to match a fresh 2.0
  *     install while preserving its singleton row and catalog properties.
  *
