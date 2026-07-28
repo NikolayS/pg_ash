@@ -249,6 +249,7 @@ assert_transaction_marker_does_not_leak() {
   local before_state
   local after_state
   local marker_after
+  local marker_test_exit
 
   reset_test_database
   "${PSQL[@]}" --quiet <<'SQL'
@@ -273,9 +274,9 @@ begin
         ),
         ''
       ) = 'on' then
-        raise exception 'forced migration installer-phase failure';
+        raise exception 'transaction-local installer marker survived rollback';
       else
-        raise exception 'forced direct installer retry failure';
+        raise exception 'forced direct installer failure after marker rollback';
       end if;
     end if;
   end loop;
@@ -296,46 +297,38 @@ SQL
   fi
   snapshot_schema "${before_snapshot}"
 
-  # A pseudo-terminal makes psql follow its interactive ON_ERROR_STOP rule:
-  # each failed \i returns to the prompt, so ROLLBACK and the direct retry run
-  # in the same client process. The first failure must not leave client state
-  # that makes the direct installer lose its owned transaction.
+  # In one psql process, establish and roll back exactly the transaction-local
+  # marker used by the migration, then invoke the installer directly. The
+  # event trigger fails late, after the version stamp and most DDL. If the
+  # marker survived, the error text differs; if direct invocation lost its
+  # owned transaction, the state/schema checks below expose partial commits.
+  set +e
   printf '%s\n' \
-    '\echo ISSUE202_MIGRATION_PHASE' \
-    "\\i '${REPO_ROOT}/sql/ash-1.5-to-2.0.sql'" \
+    'begin;' \
+    "set local pg_ash.install_in_migration_transaction = 'on';" \
     'rollback;' \
-    '\echo ISSUE202_DIRECT_PHASE' \
-    "\\i '${REPO_ROOT}/sql/ash-install.sql'" \
-    'rollback;' \
-    '\q' |
-    PGHOST="${PGHOST:-localhost}" \
-    PGUSER="${PGUSER:-postgres}" \
-    PGDATABASE="${TEST_DATABASE}" \
-    script \
-      --quiet \
-      --return \
-      --command "psql --no-psqlrc" \
-      /dev/null >"${interactive_log}" 2>&1
+    "\\i '${REPO_ROOT}/sql/ash-install.sql'" |
+    "${PSQL[@]}" >"${interactive_log}" 2>&1
+  marker_test_exit=$?
+  set -e
 
-  if ! grep -F -- \
-    "forced migration installer-phase failure" \
-    "${interactive_log}" >/dev/null; then
+  if ((marker_test_exit != 3)); then
     sed -n '1,240p' "${interactive_log}" >&2
-    printf 'interactive migration did not reach the installer-phase failure\n' \
-      >&2
+    printf 'marker rollback/direct installer exit: expected 3, got %s\n' \
+      "${marker_test_exit}" >&2
     return 1
   fi
   if ! grep -F -- \
-    "forced direct installer retry failure" \
+    "forced direct installer failure after marker rollback" \
     "${interactive_log}" >/dev/null; then
     sed -n '1,240p' "${interactive_log}" >&2
-    printf 'same-session direct installer retry did not reach its failure\n' \
+    printf 'direct installer did not observe the marker rollback\n' \
       >&2
     return 1
   fi
 
   after_state="$(config_state)"
-  printf 'Issue #202 same-session installer failures: %s\n' "${after_state}"
+  printf 'Issue #202 same-client marker rollback: %s\n' "${after_state}"
   if [[ "${after_state}" != "${before_state}" ]]; then
     sed -n '1,240p' "${interactive_log}" >&2
     printf 'installer transaction marker leaked: before=%s after=%s\n' \
@@ -347,7 +340,8 @@ SQL
   if ! diff -u \
     "${before_snapshot}" "${after_snapshot}" >"${snapshot_diff}"; then
     sed -n '1,240p' "${snapshot_diff}" >&2
-    printf 'same-session installer failures changed the ash schema\n' >&2
+    printf 'marker rollback/direct installer failure changed the ash schema\n' \
+      >&2
     return 1
   fi
 
@@ -369,7 +363,7 @@ SQL
     return 1
   fi
 
-  printf 'Issue #202 same-session transaction-marker rollback PASSED\n'
+  printf 'Issue #202 same-client transaction-marker rollback PASSED\n'
 }
 
 if [[ "${REQUESTED_CASE}" == "all" \
