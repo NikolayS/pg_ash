@@ -10110,6 +10110,12 @@ jobs:
             -v expected_version="$(python3 devel/scripts/ash_sql_chain.py fresh-install-version)" \
             -f /tmp/ash_config_ordinal_driver.sql
 
+      - name: "Issue #202: failed config normalization cannot publish 2.0"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          bash devel/tests/config_normalization_atomicity.sh
+
       - name: "Issue #49: sample_data_check tightened by discovered upgrade chain"
         env:
           PGPASSWORD: postgres

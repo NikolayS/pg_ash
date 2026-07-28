@@ -27,18 +27,22 @@ AAS-oriented 2.0 API:
 
 ## 2.0 highlights
 
-- **AAS-first readers.** `periods`, `aas`, `timeline`, `top`, `compare`,
-  `samples`, `report`, `chart`, and `summary` use consistent named filters and
-  disclose whether data came from raw samples, 1-minute rollups, or 1-hour
-  rollups.
+- **AAS-first readers.** Typed aggregate readers report `raw`, `rollup_1m`,
+  `rollup_1h`, `rollup_1h_flat`, or `none`; `compare()` reports `source_1` /
+  `source_2`, `report()` embeds provenance in JSON coverage, and `summary()`
+  includes separate headline and wait/query drill source/bounds metrics.
+  `samples()` is raw-only, and `chart()` emits a planning `NOTICE` when hour
+  grain widens the request. Named filters are consistent where they apply.
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.
-- **Upgrade convergence.** The cumulative 1.5-to-2.0 path replays the final
-  installer, removes stale 1.x and draft readers, normalizes `ash.config` to
-  fresh-install column order, and restores eligible complete reader bundles.
-  Restoring a complete bundle can re-grant operator-narrowed table privileges.
-  Root compatibility wrappers remain available.
+- **Upgrade convergence.** A successful cumulative 1.5-to-2.0 path replays the
+  final installer, removes stale 1.x and draft readers, normalizes `ash.config`
+  to fresh-install column order, and restores eligible complete reader bundles
+  in one transaction. A failure cannot publish the 2.0 stamp without physical
+  convergence. Restoring a complete bundle can re-grant
+  operator-narrowed table privileges. Root compatibility wrappers remain
+  available.
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
   `select ash.revoke_reader('pg_monitor');` and note that a later installer
@@ -154,12 +158,16 @@ All six blockers found by the 2.0 audit are fixed:
 ### Installer and upgrades
 
 - **Installer failures roll back partial schemas.** The fresh installer enables
-  `ON_ERROR_STOP` and owns a transaction; the 1.3-to-1.4, 1.4-to-1.5, and
-  1.5-to-2.0 paths inherit that behavior when they delegate to it. The three
+  `ON_ERROR_STOP` and owns a transaction; the 1.3-to-1.4 and 1.4-to-1.5 paths
+  inherit that behavior when they delegate to it. The 1.5-to-2.0 path instead
+  owns one transaction across both installer replay and config normalization,
+  so no failure can leave a 2.0 stamp on an unconverged schema. The three
   earlier finalized migration legs remain unchanged. Invoking the installer
-  with `\i` inside an existing transaction commits the caller's outer work when
-  the installer reaches its final `COMMIT`. (issue #124;
-  [PR #184](https://github.com/NikolayS/pg_ash/pull/184))
+  directly with `\i` inside an existing transaction still commits the caller's
+  outer work when the installer reaches its final `COMMIT`. (issues #124 and
+  #202;
+  [PR #184](https://github.com/NikolayS/pg_ash/pull/184),
+  [PR #200](https://github.com/NikolayS/pg_ash/pull/200))
 - **Actual 1.5 upgrades are continuously verified.** CI again installs the
   immutable v1.5 payload, runs the public cumulative wrapper, verifies preserved
   state and reader grants, and compares the result with a fresh install.
@@ -168,8 +176,10 @@ All six blockers found by the 2.0 audit are fixed:
   1.5-to-2.0 migration normalizes `ash.config` to the canonical 22-column order
   while preserving its singleton row, defaults, constraints, indexes,
   ownership, ACLs, comments, and supported dependencies; unsupported catalog
-  customizations abort transactionally.
-  ([PR #192](https://github.com/NikolayS/pg_ash/pull/192))
+  customizations and later dependency/replay failures roll back the whole
+  upgrade, including its version stamp. (issue #202;
+  [PR #192](https://github.com/NikolayS/pg_ash/pull/192),
+  [PR #200](https://github.com/NikolayS/pg_ash/pull/200))
 
 ## Release engineering and documentation
 

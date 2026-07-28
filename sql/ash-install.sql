@@ -9,16 +9,38 @@
  * Upgrade from 1.4: \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.5: \i sql/migrations/ash-1.5-to-2.0.sql
  *
- * Transaction behavior: this entrypoint disables ON_ERROR_ROLLBACK, enables
- * ON_ERROR_STOP, and owns its transaction. ON_ERROR_ROLLBACK would reduce
- * statement failures to savepoint rollbacks and permit a partial install to
- * be committed. When invoked with \i inside an existing transaction, the
- * final COMMIT also commits the caller's outer work.
+ * Transaction behavior: when invoked directly, this entrypoint disables
+ * ON_ERROR_ROLLBACK, enables ON_ERROR_STOP, and owns its transaction.
+ * ON_ERROR_ROLLBACK would reduce statement failures to savepoint rollbacks
+ * and permit a partial install to be committed. When invoked directly with
+ * \i inside an existing transaction, the final COMMIT also commits the
+ * caller's outer work.
+ *
+ * The current cumulative migration sets an internal transaction-local setting
+ * so it can include this installer inside the migration's wider transaction.
+ * That keeps the 2.0 stamp and the migration's physical convergence work
+ * atomic. The setting, unlike a psql variable, cannot leak after a failed
+ * migration is rolled back in an interactive session.
  */
 
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP on
+select case
+  when coalesce(
+    pg_catalog.current_setting(
+      'pg_ash.install_in_migration_transaction',
+      true
+    ),
+    ''
+  ) = 'on' then 'true'
+  else 'false'
+end as pg_ash_install_in_migration_transaction
+\gset
+\if :pg_ash_install_in_migration_transaction
+\else
 begin;
+\endif
+\unset pg_ash_install_in_migration_transaction
 
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
@@ -7875,4 +7897,19 @@ begin
   end if;
 end $$;
 
+select case
+  when coalesce(
+    pg_catalog.current_setting(
+      'pg_ash.install_in_migration_transaction',
+      true
+    ),
+    ''
+  ) = 'on' then 'true'
+  else 'false'
+end as pg_ash_install_in_migration_transaction
+\gset
+\if :pg_ash_install_in_migration_transaction
+\else
 commit;
+\endif
+\unset pg_ash_install_in_migration_transaction
