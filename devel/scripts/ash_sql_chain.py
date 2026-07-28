@@ -222,7 +222,28 @@ def validate_upgrade_graph(
     return graph_head
 
 
-def validate_development_overlay(paths: list[Path], graph_head: str) -> None:
+def validate_released_payload(released_head: str) -> tuple[str, bool]:
+    released_version = install_version(ROOT / "sql" / "ash-install.sql")
+    released_line, released_is_prerelease = payload_version_parts(
+        released_version,
+        label="released installer",
+    )
+    if released_line != released_head:
+        raise SystemExit(
+            f"released installer targets release line {released_line}, but "
+            f"the released upgrade graph stops at {released_head}; add or "
+            "promote a connected migration"
+        )
+    return released_version, released_is_prerelease
+
+
+def validate_development_overlay(
+    paths: list[Path],
+    graph_head: str,
+    *,
+    released_version: str,
+    released_is_prerelease: bool,
+) -> None:
     dev_install = development_install_path()
     development_migration_seen = any(
         path.parent == dev_install.parent for path in paths
@@ -242,17 +263,6 @@ def validate_development_overlay(paths: list[Path], graph_head: str) -> None:
             "development migration"
         )
 
-    released_install = ROOT / "sql" / "ash-install.sql"
-    released_version = install_version(released_install)
-    released_line, released_is_prerelease = payload_version_parts(
-        released_version,
-        label="released installer",
-    )
-    if released_line != graph_head:
-        raise SystemExit(
-            f"released installer targets release line {released_line}, but "
-            f"the upgrade graph stops at {graph_head}"
-        )
     if not released_is_prerelease:
         raise SystemExit(
             "a lone development installer is valid only after a prerelease; "
@@ -266,6 +276,9 @@ def upgrade_chain_paths(start: str, *, label: str = "upgrade") -> list[Path]:
     released_head = validate_upgrade_graph(
         released_by_source,
         label="released upgrade",
+    )
+    released_version, released_is_prerelease = validate_released_payload(
+        released_head
     )
     _released_paths, released_end = trace_upgrade_chain(
         start,
@@ -290,7 +303,12 @@ def upgrade_chain_paths(start: str, *, label: str = "upgrade") -> list[Path]:
             f"expected to reach {graph_head}"
         )
 
-    validate_development_overlay(paths, graph_head)
+    validate_development_overlay(
+        paths,
+        graph_head,
+        released_version=released_version,
+        released_is_prerelease=released_is_prerelease,
+    )
     return paths
 
 

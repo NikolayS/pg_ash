@@ -78,7 +78,9 @@ connected development migration is mandatory even when the candidate has not
 yet received its next release identity. This makes the beta-to-final path
 exercise the same candidate as a fresh install without allowing the overlay to
 hide a missing migration or inventing a prerelease-specific migration filename.
-Schema-equivalence CI must compare those paths.
+The helper also requires the promoted released installer to name the head of
+the released migration graph, so promotion cannot make compatibility shims hide
+an omitted edge. Schema-equivalence CI must compare those paths.
 
 ## CI guard
 

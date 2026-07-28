@@ -224,6 +224,10 @@ class SQLChainOverlayTest(unittest.TestCase):
             released_migrations.mkdir(parents=True)
             development_sql.mkdir(parents=True)
             (root / "sql" / "ash-1.0.sql").write_text("-- released installer\n")
+            self.write_stamped_installer(
+                root / "sql" / "ash-install.sql",
+                "1.1",
+            )
             (released_migrations / "ash-1.0-to-1.1.sql").write_text(
                 "-- released migration\n"
             )
@@ -342,6 +346,46 @@ class SQLChainOverlayTest(unittest.TestCase):
                         r"^a lone development installer is valid only after "
                         r"a prerelease; the released payload 2\.0 is final, "
                         r"so add a connected development migration$"
+                    ),
+                ):
+                    ash_sql_chain.emit_full_upgrade_chain("1.5")
+
+        self.assertEqual(full_output.getvalue(), "")
+
+    def test_promoted_installer_requires_released_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            released_migrations = root / "sql" / "migrations"
+            development_sql = root / "devel" / "sql"
+            released_migrations.mkdir(parents=True)
+            development_sql.mkdir(parents=True)
+            (root / "sql" / "ash-1.5.sql").write_text(
+                "-- released installer\n"
+            )
+            self.write_stamped_installer(
+                root / "sql" / "ash-install.sql",
+                "2.1",
+            )
+            (released_migrations / "ash-1.5-to-2.0.sql").write_text(
+                "-- released migration\n"
+            )
+
+            full_output = io.StringIO()
+            with (
+                mock.patch.object(ash_sql_chain, "ROOT", root),
+                mock.patch.object(
+                    ash_sql_chain,
+                    "UPGRADE_DIRS",
+                    (released_migrations, development_sql),
+                ),
+                contextlib.redirect_stdout(full_output),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    (
+                        r"^released installer targets release line 2\.1, "
+                        r"but the released upgrade graph stops at 2\.0; "
+                        r"add or promote a connected migration$"
                     ),
                 ):
                     ash_sql_chain.emit_full_upgrade_chain("1.5")
