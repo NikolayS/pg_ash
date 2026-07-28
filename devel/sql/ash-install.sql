@@ -1004,15 +1004,15 @@ begin
    * No temp tables — avoids pg_class/pg_attribute catalog churn per tick.
    */
 
-  -- Read 1: register new wait events; optionally log each sampled session.
+  -- Read 1: register new wait events; optionally log observed active sessions.
   /*
    * CPU* means the backend is active with no wait event reported. This is
    * either genuine CPU work or an uninstrumented code path in Postgres.
    * The asterisk signals this ambiguity. See https://gaps.wait.events
    *
    * Debug logging (when v_debug_logging = true):
-   *   Uses RAISE LOG — goes to server log only, never to the client.
-   *   Independent of log_min_messages and client_min_messages.
+   *   Uses RAISE LOG. Server-log and client delivery depend on
+   *   log_min_messages and client_min_messages, respectively.
    *   Enable:  select ash.set_debug_logging(true);
    *   Disable: select ash.set_debug_logging(false);
    *
@@ -1066,8 +1066,8 @@ begin
     end if;
 
     /*
-     * Debug logging: RAISE LOG goes to server log only, never to the client.
-     * Independent of log_min_messages and client_min_messages.
+     * Debug logging uses RAISE LOG. Server-log and client delivery depend on
+     * log_min_messages and client_min_messages, respectively.
      */
     if v_debug_logging then
       raise log
@@ -1366,9 +1366,9 @@ begin
       else
         /*
          * No slot context — search all partitions (less efficient).
-         * WARNING: after rotation, the same id may exist in multiple
-         * partitions with different query_ids (independent sequences).
-         * Result is nondeterministic. Always pass slot when available.
+         * The same local id may exist in multiple partitions with different
+         * query_ids because their sequences are independent. The result is
+         * nondeterministic. Always pass slot when available.
          */
         select query_map.query_id into v_query_id
         from ash.query_map_all as query_map
@@ -1395,8 +1395,8 @@ $$;
  * Walks all datids/slots and returns decoded rows annotated with datid so the
  * caller can distinguish them. Implemented as a SQL LATERAL JOIN over the
  * 2-arg decode_sample(data, slot) SRF (passes slot for unambiguous lookup,
- * avoiding the "search-all-partitions" branch that can return stale ids
- * after rotation).
+ * avoiding the "search-all-partitions" branch that can resolve the wrong
+ * slot).
  */
 create or replace function ash.decode_sample(sample_ts int4)
 returns table (
@@ -1424,9 +1424,8 @@ $$;
 /*
  * Wall-clock convenience: convert timestamptz to the matching sample_ts via
  * ts_from_timestamptz() and delegate to decode_sample(int4). Same return
- * shape. Named decode_sample_at() (matching the samples_at / top_waits_at
- * naming convention) so we don't create a decode_sample(unknown) ambiguity
- * between int4 and timestamptz overloads.
+ * shape. Named decode_sample_at() so the wall-clock lookup remains distinct
+ * from the integer sample_ts overload.
  *
  * Intentionally NOT routed through _active_slots_for_at() (#69): unlike the
  * range-scan _at readers, decode_sample_at is a point-lookup keyed by an
@@ -1452,13 +1451,13 @@ as $$
 $$;
 
 comment on function ash.decode_sample(integer[], smallint) is
-$$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows. Pass slot (ash.sample.slot) to resolve query_ids unambiguously; omitting it searches all query_map partitions and may return a stale id after rotation.$$;
+$$Decodes a single ash.sample.data array into (wait_event, query_id, count) rows. Pass slot from ash.sample.slot to resolve local query-map IDs unambiguously. Omitting it searches every query-map partition and may resolve the ID against the wrong slot.$$;
 
 comment on function ash.decode_sample(int4) is
 $$Convenience overload: decodes every ash.sample row whose sample_ts equals sample_ts (across all datids/slots) and returns (datid, wait_event, query_id, count). Internally calls decode_sample(data, slot) with the row's slot, so query_id resolution is unambiguous.$$;
 
 comment on function ash.decode_sample_at(timestamptz) is
-$$Wall-clock convenience: same as decode_sample(int4) but accepts timestamptz, converting via ts_from_timestamptz() to find the matching sample_ts. Named with the _at suffix to avoid an unknown-typed decode_sample(123) literal matching both the int4 and timestamptz overloads.$$;
+$$Wall-clock convenience: same as decode_sample(int4) but accepts timestamptz, converting via ts_from_timestamptz() to find the matching sample_ts. Named with the _at suffix to keep the wall-clock lookup distinct from the integer sample_ts overload.$$;
 
 
 --------------------------------------------------------------------------------
@@ -2550,12 +2549,12 @@ $$;
 
 /*
  * Enable or disable debug logging in take_sample().
- * When enabled, every sampled session emits a RAISE LOG message:
+ * When enabled, every observed active session emits a RAISE LOG message:
  *   ash.take_sample: pid=NNN state=active wait_type=Client
  *   wait_event=ClientRead ...
  *
- * RAISE LOG goes to the server log only — never to the client.
- * It is independent of log_min_messages and client_min_messages.
+ * Server-log and client delivery of RAISE LOG depend on log_min_messages and
+ * client_min_messages, respectively.
  *
  * Usage:
  *   select ash.set_debug_logging(true);   -- enable
@@ -2579,7 +2578,9 @@ begin
   update ash.config set debug_logging = enabled where singleton;
 
   if enabled then
-    return 'debug_logging enabled — each sampled session will emit RAISE LOG';
+    return 'Debug logging enabled—each observed active session will issue a '
+      || 'LOG-level message; visibility depends on log_min_messages and '
+      || 'client_min_messages.';
   else
     return 'debug_logging disabled';
   end if;
@@ -7168,7 +7169,7 @@ $$Human render helper: key/value AAS overview for one window [since, until) (def
  * the whole surface (readers vs operations) before any \df spelunking.
  */
 comment on schema ash is
-$$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader entry points (start with ash.periods()): periods, aas, timeline, top, compare, samples, report, chart, summary, status — readers report load in AAS (Average Active Sessions), and their function comments state how provenance is exposed. Operations/admin (owner-only, not granted by grant_reader): start, stop, take_sample, rotate, rollup_minute, rollup_hour, rollup_cleanup, rebuild_partitions, set_debug_logging, uninstall, grant_reader, revoke_reader. Each function documents itself: select obj_description('ash.<name>(<argtypes>)'::regprocedure).$$;
+$$pg_ash: Active Session History for Postgres (pure SQL, no extension). Aggregate readers: periods, aas, timeline, top, compare, report, chart, and summary. Raw evidence: samples. Installation health: status. Inspect overloads with \df+ ash.*, then use obj_description('<exact signature>'::regprocedure) for a selected overload. Operations/admin (owner-only, not granted by grant_reader): start, stop, take_sample, rotate, rollup_minute, rollup_hour, rollup_cleanup, rebuild_partitions, set_debug_logging, uninstall, grant_reader, revoke_reader.$$;
 
 /*
  * Operational / admin surface: obj_description for every entry point, so the

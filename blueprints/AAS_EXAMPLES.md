@@ -15,13 +15,17 @@ Conventions that repeat below, stated once:
   means “the last hour” except for `report`, whose no-bounds default is the
   last day; an `until`-only call means the preceding hour.
 - v1.5 units vary by function — `samples` (raw readers), `backend_seconds`
-  (rollup readers), active sessions (chart only). 2.0 always answers in AAS
-  (`avg_aas` / `peak_aas` / `p99_aas`), with `backend_seconds` as a secondary
-  column. Typed aggregate readers expose source columns; `report`, `summary`,
-  `samples`, and `chart` disclose provenance in the forms documented in
-  [AAS_API.md](AAS_API.md). `summary` uses separate headline and wait/query
-  drill source/bounds metrics because the two plans can have different
-  effective windows.
+  (rollup readers), active sessions (chart only). In 2.0, typed aggregate
+  readers report AAS using the metrics their shape supports: `aas` and `top`
+  also expose `backend_seconds`; `compare` exposes paired AAS; and `periods`
+  and `timeline` expose AAS without `backend_seconds`. `samples` returns
+  decoded raw evidence, `report` returns JSONB, and `chart`/`summary` are
+  presentation helpers. Typed aggregate readers expose source columns;
+  `report` uses coverage JSON, and `summary` uses separate headline and
+  wait/query drill source/bounds metrics because the two plans can have
+  different effective windows. `samples` is raw-only and has no source column.
+  `chart` emits a source/effective-plan `NOTICE` only when `rollup_1h` widens
+  its plan; otherwise it does not distinguish raw from `rollup_1m`.
 - 2.0 does not persist historical cadence or successful idle ticks. The
   examples assume one unchanged 1-second interval. Empty source buckets cannot
   distinguish idle load from a sampler outage (issue #137). The corrected
@@ -125,8 +129,8 @@ UTC/epoch boundaries, not anchored to `since`), so this same absolute window
 returns these same labels on every call — even if the first bucket precedes
 `since` and edge buckets average over their in-window part only.
 
-`ash.chart()` is the human rendering of the same series (stacked by wait
-class, colors optional) — unchanged in spirit from `timeline_chart`.
+`ash.chart()` is the human rendering of the same series, stacked by wait event
+with optional color.
 
 ## 3. Drill
 

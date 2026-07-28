@@ -84,7 +84,8 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 
 > **As an** engineer investigating a past incident ("slow around 2am"),
 > **I want** a time series of AAS across a broad window with a peak per bucket,
-> **so that** I can pinpoint exactly when load spiked and select a precise window to drill into.
+> **so that** I can identify the retained bucket with the highest observed
+> load and select a precise window to drill into.
 
 - **Trigger:** a vague time reference for a past problem.
 - **Acceptance criteria:**
@@ -149,20 +150,30 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 
 - **Trigger:** scheduled metric scrape, or an autonomous investigation prompt.
 - **Acceptance criteria:**
-  1. All readers return typed columns with no ASCII/presentation columns in the data path (any human rendering lives in a separate helper).
+  1. Typed aggregate readers report AAS using the metrics their shape supports.
+     `aas` and `top` also expose `backend_seconds`; `compare` exposes paired
+     AAS; `periods` and `timeline` expose AAS without `backend_seconds`;
+     `samples` returns decoded raw evidence; `report` returns JSONB; and
+     `chart`/`summary` are presentation helpers.
   2. A documented, stable column contract (names + types) suitable for BI tools.
-  3. An explicit `source` (`raw` | `rollup`) and/or coverage indicator, plus discoverable retention metadata, so a caller can tell when a drill is unavailable for a given window.
+  3. Aggregate source values are `raw`, `rollup_1m`, `rollup_1h`,
+     `rollup_1h_flat`, or `none`. `report` and `summary` disclose provenance
+     through JSON or metric rows. `samples` is raw-only and has no source
+     column. `chart` emits a source/effective-plan `NOTICE` only when
+     `rollup_1h` widens its plan; otherwise it does not distinguish raw from
+     `rollup_1m`.
   4. Self-describing catalog comments (`obj_description`) covering the term, the columns, and the recommended next call.
   5. Callable through the supported complete `grant_reader` privilege bundle,
      and degrades gracefully when pg_stat_statements is absent.
 - **Primary API:** cross-cutting across the whole family.
 - **Coverage:** 🟡 Partial. Typed aggregate readers expose source fields;
   `compare` exposes per-window provenance, `report` uses JSON coverage,
-  `summary` has separate headline and drill provenance, `chart` emits a
-  planning `NOTICE`, and `samples` is raw-only. Retention rows live in
-  `ash.status()`, with a raise-don't-return-empty rule for unanswerable drills.
-  Availability fields still derive from stored activity rather than verified
-  sampler coverage ([AAS_API.md §5–§6](AAS_API.md), issue #137).
+  and `summary` has separate headline and drill provenance. `samples` is
+  raw-only without a source column. `chart` identifies its source only when a
+  `rollup_1h` plan widens the request. Retention rows live in `ash.status()`,
+  with a raise-don't-return-empty rule for unanswerable drills. Availability
+  fields still derive from stored activity rather than verified sampler
+  coverage ([AAS_API.md §5–§6](AAS_API.md), issue #137).
 - **Drivable from the catalog alone.** pg_ash self-documents in-DB, which is what
   lets an agent navigate it without external docs: `COMMENT ON SCHEMA ash` names
   the reader entry points and the reader-vs-ops split, and **every** function —
@@ -228,7 +239,9 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
   3. Base series use `rollup_1m` and zero-fill missing classes only within
      stored activity-bearing timestamps. Top-query attribution additionally
      reads raw samples for eligible extreme minutes.
-  4. The payload carries raw AAS only — scoring/normalization (e.g. against vCPUs) is the consumer's job; a caller-supplied `vcpus` is echoed, never used.
+  4. The payload carries unscored AAS only — scoring/normalization (e.g.
+     against vCPUs) is the consumer's job; a caller-supplied `vcpus` is
+     echoed, never used.
   5. Degrades honestly: `top_queryids_*` is omitted unless this invocation
      produces at least one attributed query ID, and
      `top_queryids_available` reports that result; the payload is `null` when
@@ -253,14 +266,18 @@ and US-8 (machine load-report ingest) are cross-cutting or extension stories.
 | US-7 Before/after | `compare` | 🟡 | Cross-cadence comparisons rescale history (#137) |
 | US-8 Load report | `report` | 🟡 | `minutes_with_data` derives from stored activity (#137) |
 
-Coverage above is **by design** ([AAS_API.md](AAS_API.md)); implementation
-tracks in the 2.0 branch.
+Coverage above describes shipped 2.0 behavior at this revision; the remaining
+cadence/coverage gap is tracked by issue #137.
 
 ## 6. Cross-cutting (non-functional) requirements
 
 These apply to every story above.
 
-- **Unit consistency.** AAS is the primary unit (`avg_aas` / `peak_aas` / `p99_aas`); `backend_seconds` may appear as a secondary column. No third unit.
+- **Unit consistency.** Typed aggregate metrics use AAS as their primary unit
+  (`avg_aas` / `peak_aas` / `p99_aas`); `backend_seconds` appears only where
+  the reader shape supports it. `samples` returns decoded raw evidence,
+  `report` returns JSONB, and `chart`/`summary` are presentation helpers rather
+  than introducing a third aggregate unit.
 - **Percentile definition.** `p99_aas` = the 99th percentile of per-sub-bucket AAS. The sub-bucket grain is a parameter (default `'1 minute'`). `peak_aas` is the max over the same sub-buckets.
 - **Raw-vs-rollup honesty (trust property).** Aggregate readers select or
   declare their source by window. Rollup query breakdowns expose
