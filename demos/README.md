@@ -1,213 +1,376 @@
-# pg_ash demo recording
+# pg_ash demo harness
 
-This directory contains the experimental animated GIF recorder for pg_ash demos.
-The generated GIF is not embedded in the top-level README until it renders
-readably on GitHub on both desktop and mobile.
+Every image in `README.md` and `docs/`, plus the animated reel, regenerated from
+**real** pg_ash query output against a **real** PostgreSQL, with one command:
 
-| File | What it is |
-|------|-----------|
-| `ash_demo.gif` | The rendered GIF (committed for iteration; not embedded in the top-level README) |
-| `ash_demo.cast` | asciinema v3 cast file — source of truth for the GIF |
-| `record.sh` | End-to-end recorder: Docker → pg_ash install → workload → tmux/asciinema → agg |
-| `Dockerfile` | Pre-baked `postgres:${PG_MAJOR}` image with pg_cron + `shared_preload_libraries` compiled in — so the container boots preloaded, no runtime apt-get + restart |
-| `container-entrypoint.sh` | Runs inside the container — creates DB, installs pg_ash, starts sampling, launches workload |
-| `workload.sh` | Three-phase mixed workload: baseline pgbench → row-lock spike → tail |
-| `Makefile` | Thin wrapper: `make record`, `make clean`, `make open` |
-
-## What it shows
-
-The demo reproduces the investigation sequence from the README's **LLM-assisted
-investigation** section using the 2.0 reader API, against a real spike (not
-canned output). Every reader reports in AAS (average active sessions):
-
-1. `ash.status()` — sampling active, version 2.0, pg_cron wired up
-2. `ash.periods()` — triage: last-minute `peak_aas` >> `avg_aas` = a spike, not sustained
-3. `ash.chart(since => now() - interval '5 minutes', bucket => '1 minute', color => true)` — colored stacked timeline: when it landed + which wait class (`Lock` in red)
-4. `ash.top('wait_event', ...)` — drill: `Lock:tuple` dominates (AAS + peak + p99 per row)
-5. `ash.top('query_id', wait_event => 'Lock:tuple', ...)` — the leaf: the guilty UPDATE
-6. `ash.top('wait_event', query_id => <top_query_id>, ...)` — full wait profile of that query, closing the loop
-7. Closing frame (held ~3s) so the GIF loops gracefully in the README
-
-`ash.chart` is the only colored step: in 2.0 the data readers (`periods`,
-`top`, `timeline`) return typed columns only, and `ash.chart` is the sole
-reader that emits ANSI color. `ash.summary` is also a render helper but
-returns plain key/value text.
-
-## The spike
-
-Five concurrent `UPDATE pgbench_accounts WHERE aid = 42` workers contend
-against one "holder" transaction that grabs the same row and `pg_sleep()`s for
-three seconds at a time. Every contender queues on `Lock:tuple` (with a smaller
-`Lock:transactionid` tail) behind the holder — guaranteed, reproducible, no
-host-level privileges required.
-
-Everything runs inside a plain `postgres:18` container; no kernel tweaks, no
-cgroup tricks, no custom Postgres build.
-
-## Prerequisites
-
-| Tool | Minimum | Install (macOS / Homebrew) |
-|------|--------|---------------------------|
-| Docker | any recent | [docker.com](https://docs.docker.com/get-docker/) |
-| tmux | 3.x | `brew install tmux` |
-| asciinema | 2.x or 3.x | `brew install asciinema` |
-| agg | 1.5+ (truecolor GIF renderer for asciinema casts) | `brew install agg` |
-| gifsicle | 1.90+ (optional, halves the output GIF size) | `brew install gifsicle` |
-| python3 | 3.8+ (post-processes the `.cast` to drop the blank initial frame) | ships with macOS 12+ / Linux |
-| GNU make | 3.81+ | ships with macOS / Linux |
-
-Pinned versions used to produce the committed GIF:
-
-- Docker 29.0.1
-- tmux 3.6a
-- asciinema 2.4.0
-- agg 1.7.0
-- gifsicle 1.96
-- python3 3.9+
-
-On Linux, use your distro's packages (`apt install tmux gifsicle`, `cargo
-install asciinema`, release tarball for
-[agg](https://github.com/asciinema/agg)).
-
-## Reproduce the GIF
-
-```bash
-cd demos
-make record     # ~8 minutes end-to-end (5.5 min warmup so the AAS windows have
-                # enough history — see WARMUP_SEC below — plus a one-time build
-                # of the pre-baked demos/Dockerfile image on first run)
-make open       # open the produced gif
+```sh
+make -C demos all
 ```
 
-That's it. The container is torn down on exit; the only artifacts kept are
-`ash_demo.cast` and `ash_demo.gif`.
-
-### Tuning knobs
-
-Override via environment variables:
-
-| Var | Default | What it controls |
-|-----|---------|-----------------|
-| `COLS` / `ROWS` | 168 / 32 | Terminal geometry — wide enough for 2.0 `select *` output without wrapping |
-| `AGG_FONT_SIZE` | 10 | Pixel font-size passed to `agg`; lower keeps the wider terminal near 1000 px |
-| `TYPE_MIN_MS` / `TYPE_MAX_MS` | 30 / 120 | Per-character keystroke jitter range (ms) — see "Typing pacing" below |
-| `TYPE_PUNCT_MS` | 180 | Extra pause after `, ; . ( )` characters |
-| `WARMUP_SEC` | 330 | Seconds of workload before recording starts. Long (5.5 min) so the 2.0 readers' 5-minute windows sit inside raw retention — raw retention is data-limited (it starts at the oldest sample), and the leaf drills cross the wait↔query tie, which reads raw and raises if the window predates it |
-| `BASELINE_SEC` | 120 | Phase-1 pgbench duration inside the container — 2 min so the baseline→spike transition falls inside the trailing 5-minute chart window |
-| `SPIKE_SEC` | 480 | Phase-2 lock-contention duration — kept long enough that the spike outlives WARMUP + the ~110 s recording (~440 s) so the closing leaf drills still see fresh `Lock:tuple` samples in their 5-minute window |
-| `TAIL_SEC` | 30 | Phase-3 quiet pgbench coda |
-| `LOCK_WORKERS` | 5 | Contender count — more = more lock waits |
-| `KEEP_CONTAINER` | 0 | Set `1` to leave the container running after recording (for re-takes) |
-| `PG_MAJOR` | 18 | Postgres major version — sets both the base image (`postgres:$PG_MAJOR`) and the pre-baked image tag/build arg |
-
-Example — slower pacing and a larger spike:
-
-```bash
-WARMUP_SEC=360 SPIKE_SEC=540 LOCK_WORKERS=8 make record
-```
-
-### Re-running without recapturing the container
-
-The `.cast` file is the source of truth — once you have one you like, re-render
-the GIF without touching Docker:
-
-```bash
-agg --font-size 10 --theme monokai --speed 1.0 --fps-cap 15 \
-  ash_demo.cast ash_demo.gif
-```
-
-### Typing pacing
-
-The recorder simulates a human at the keyboard rather than pasting commands
-instantly. The `human_type_and_send` helper in `record.sh` walks each command
-string one character at a time, calling `tmux send-keys -l` per character and
-sleeping a randomized interval between keystrokes.
-
-| Region | Delay |
-|--------|-------|
-| Letters / digits | `TYPE_MIN_MS`–`TYPE_MAX_MS` ms (default 30–120 ms) |
-| Spaces | 30–70 ms (slightly faster — words flow) |
-| Punctuation `, ; . ( )` | base + `TYPE_PUNCT_MS` (default +180 ms) — clause-boundary pause |
-
-Bash's `RANDOM` is reseeded from `/dev/urandom` at the start of each run so
-the pacing is non-deterministic. The aggregate effect is roughly 60 cps —
-brisk touch-typing, with visible "thinking" beats at punctuation.
-
-Want it even slower (more cinematic) or faster (shorter GIF)?
-
-```bash
-TYPE_MIN_MS=60 TYPE_MAX_MS=200 TYPE_PUNCT_MS=300 make record   # slower, more deliberate
-TYPE_MIN_MS=10 TYPE_MAX_MS=40  TYPE_PUNCT_MS=80  make record   # faster, breezier
-```
-
-## Design notes
-
-- **Pre-baked image (`Dockerfile`):** pg_cron and the
-  `shared_preload_libraries` / `cron.*` config are baked into a
-  `postgres:${PG_MAJOR}` derivative (the config is appended to
-  `postgresql.conf.sample` so a fresh `initdb` comes up preloaded). The
-  container therefore boots with the extensions already active — no runtime
-  `apt-get install …-cron` and no container restart at record time. This
-  removes the record-time dependency on the PGDG apt mirror (which occasionally
-  lags) and shaves the install + restart round-trip off every run.
-  `record.sh` builds the image automatically when `Dockerfile` is present and
-  falls back to the old runtime-install path if the build fails.
-- **Geometry (168 × 32):** wider than typical README embeds so long wait
-  event names like `Lock:transactionid` / `Client:ClientRead` and the colored
-  bar charts fit on a single line. Compensated by `agg --font-size 10` so the
-  rendered GIF stays near 1000 px and remains readable at GitHub's embed width.
-- **Theme:** `monokai` — dark background lets the pg_ash `_wait_color()` ANSI
-  palette (cyan / red / yellow / pink / purple) pop.
-- **Colors on by default:** `set ash.color = on` is set in the demo's
-  `~/.psqlrc`, *and* the one colored step — `ash.chart(...)` — passes
-  `color => true` so its `chart` column comes back with ANSI codes. (In 2.0
-  the data readers `periods` / `top` / `timeline` are presentation-free;
-  `ash.chart` is the only reader that emits color, and `ash.summary` — also a
-  render helper — returns plain key/value text.) The `:color` psql
-  variable (mirroring the README pattern) re-runs the previous query through
-  `sed` to convert psql's literalised `\x1B` back into real ESC bytes — without
-  this step psql's aligned formatter would mangle the codes. We omit `less -R`
-  from the README pattern here because the recorder cannot drive an interactive
-  pager.
-- **Human-paced typing:** commands are typed one character at a time via
-  `tmux send-keys -l` with a 30–120 ms jitter and an extra ~180 ms beat at
-  punctuation, so the recording feels like a real session. See
-  [Typing pacing](#typing-pacing).
-- **Pacing:** ~1.0–1.2 s between `\echo` banners and commands, ~4–5 s after
-  each result so the viewer can read the colored table output without
-  pausing.
-- **First frame:** the splash banner is set to `t = 0`, so the GitHub still
-  preview shows the colored banner rather than an empty prompt.
-- **Loop:** closes on a held summary frame instead of a terminal exit line, so
-  the auto-loop flows cleanly into the next opening banner.
-- **No faking:** every table comes from `ash.*` reader functions against real
-  samples collected from the live spike. You can set `KEEP_CONTAINER=1`, exec
-  in, and re-run the same queries yourself.
-
-## Troubleshooting
-
-**pre-baked build failed** — `record.sh` builds `demos/Dockerfile` (which
-`apt`-installs `postgresql-$PG_MAJOR-cron` from the PGDG mirror) once at the
-start of a run. If that mirror is unreachable, the build fails and the recorder
-logs a warning and falls back to the plain `postgres:$PG_MAJOR` base with the
-old runtime install + restart — so recording still proceeds. If the runtime
-fallback also can't fetch the package, temporarily set `ASH_CRON_OPTIONAL=1`
-(pg_ash supports a no-cron mode; the demo will skip `ash.start()` and rely on
-manual `ash.take_sample()` calls). Remove `demos/Dockerfile` to force the
-fallback path directly.
-
-**`agg: unknown option --last-frame-duration`** — upgrade to `agg` 1.7+
-(`brew upgrade agg`).
-
-**Colors look washed out** — ensure your terminal / renderer is truecolor.
-`agg` always emits truecolor in the GIF; if re-rendering locally, pass
-`--theme monokai` (default in our script) for the best contrast with the
-pg_ash palette.
-
-**GIF too large for README** — drop the font size (`--font-size 14`) or the
-FPS cap (`--fps-cap 10`) when invoking `agg`. The target for this repo is
-≤ 3 MB.
+No Docker required. No browser required. No hand-cropping, and nothing that only
+works on one laptop.
 
 ---
 
-Copyright 2026 PostgresAI
+## What it produces
+
+| Artifact | Made by | Notes |
+|---|---|---|
+| `assets/<scene>.svg` | `make stills` | the primary still. Vector, byte-deterministic, crisp at any zoom |
+| `assets/<scene>.png` | `make stills` | `ASH_SCALE`× raster of the same SVG (default 2×) |
+| `assets/ash_demo.gif` | `make demo` | the reel |
+| `assets/ash_demo.mp4` | `make demo` | same render, ~40% smaller; what docs sites want |
+
+The scene list is data, not code: `scenes/scenes.tsv`. Adding a documentation
+image means adding one line to that file.
+
+---
+
+## Honesty boundary
+
+Read this before you look at a single number.
+
+> The harness shapes **which** real samples exist and **when** they are
+> considered to have been taken. Every number in every asset is pg_ash
+> aggregating its own stored samples, written by `ash.take_sample()` from real
+> `pg_stat_activity` over real pgbench backends. No reader output is edited.
+
+Concretely, the seeder runs a real workload, samples it with pg_ash's real
+sampler, and then rewrites `ash.sample.sample_ts` so that one real second of
+load is filed as one virtual minute of history. It never invents a row, never
+edits a backend count, and never touches the packed wait/query array. That is
+the whole of the liberty taken, and it lives in one `UPDATE` in
+`lib/seed.sql` (`ash_demo.restamp`).
+
+**Time compression: 1 real second = 1 virtual minute.** 28 minutes of history
+arrives in about 20 seconds. The exact ratio in force for a given run is
+recorded in `out/window.env` as `ASH_COMPRESSION`.
+
+`ASH_REAL_TIME=1` turns compression off entirely: the seeder then samples at the
+declared interval in real wall-clock time and skips the restamp. It takes about
+28 minutes and the assets are indistinguishable, which is the point — the switch
+exists so that claim can be checked rather than believed.
+
+The seeder also keeps only samples for its own database. pg_ash samples the
+whole cluster by design; on a developer machine that would quietly fold every
+other database on the box into the demo and the numbers would stop being
+reproducible.
+
+---
+
+## pg_cron is not required — and this demo deliberately does not use it
+
+The harness drives `ash.take_sample()` itself, from an ordinary session. That is
+the **external scheduler** path, and it is the default here for two reasons:
+
+1. It is what pg_ash users on RDS, Cloud SQL, Supabase, AlloyDB and Neon
+   actually run, because those platforms do not give you pg_cron.
+2. It is the only path that works on an arbitrary CI runner.
+
+So the degraded no-cron mode is not a compromise in this harness — it is the
+mainline. `ash.status()` in the `status` scene says so on screen: the demo shows
+`pg_cron_available` as `no (use external scheduler)`, because that is the truth
+of how it was collected.
+
+If you want a cluster with real pg_cron, use `ASH_BACKEND=docker` with an image
+that has the extension. It is never on the critical path.
+
+---
+
+## Running it
+
+```sh
+make -C demos doctor     # what is installed, what is missing, which backends work
+make -C demos seed       # ~22s: a frozen incident window + its shape assertions
+make -C demos stills     # assets/*.svg (+ *.png)
+make -C demos demo       # assets/ash_demo.gif + .mp4
+make -C demos all        # both, from ONE seed and ONE frozen window
+make -C demos check      # no database at all: renderer regression gate
+make -C demos down       # remove only a database/container this run created
+```
+
+`make help` prints the same list plus every knob.
+
+Measured wall-clock on an M-series MacBook against a local PostgreSQL 18.3:
+`seed` 22 s, `stills` 23 s, `demo` 155 s (75 s of that is the recording itself,
+which runs in real time by construction), `all` about 3 minutes, `check` 1 s.
+
+### Prerequisites, honestly
+
+**Tier 1 — stills. This is the whole list.**
+
+| Need | Why | Install |
+|---|---|---|
+| `python3` ≥ 3.8 | every renderer, and every width measurement | already on macOS and every CI image |
+| `fontTools` | subsets the font into the SVG | `python3 -m pip install fonttools` |
+| `brotli` | woff2 compression for that subset | `python3 -m pip install brotli` |
+| `psql` | runs the scenes | `brew install libpq` / `apt install postgresql-client` |
+| `pgbench` | drives the workload the sampler samples | ships with the client packages |
+| a reachable PostgreSQL ≥ 14 | somewhere to install pg_ash | local cluster, Docker, or remote |
+
+No Docker. No browser. No `ALTER SYSTEM`. No restart. **No pg_cron** — see the
+section above.
+
+**Tier 2 — PNG.** Any SVG rasteriser: `resvg` (`cargo install resvg`, or a
+release binary), `rsvg-convert`, or any Chromium-family browser, including
+`/Applications/Google Chrome.app`, which `make doctor` finds by absolute path.
+Set `ASH_CHROME=/path/to/binary` to pin one. `ASH_SVG_ONLY=1` skips this tier
+entirely — the SVG is the primary artifact and loses nothing.
+
+**Tier 3 — the reel.** `tmux`, `asciinema`, `agg`, `ffmpeg`, `gifsicle` and
+Pillow.
+
+```sh
+# macOS
+brew install tmux ffmpeg gifsicle asciinema
+brew install agg            # or fetch the static binary from its GitHub release
+python3 -m pip install pillow
+
+# Debian / Ubuntu / GitHub Actions
+sudo apt-get install -y tmux ffmpeg gifsicle
+python3 -m pip install asciinema pillow
+# agg ships as a single static binary; take it from
+# https://github.com/asciinema/agg/releases
+```
+
+### The font
+
+JetBrains Mono is **vendored** in `fonts/` (OFL-1.1, redistributable, licence
+included as `fonts/OFL.txt`). There is nothing to install and nothing to
+configure.
+
+That is a deliberate design decision, not convenience. Both renderers consume
+the font *by path* — `agg --font-dir demos/fonts`, `ansi2svg.py --font
+demos/fonts/JetBrainsMono-Regular.ttf` — so fontconfig is never consulted and a
+system-installed "JetBrains Mono" of a different version cannot win. A missing
+or unreadable face is a hard exit 6, never a silent substitution: the previous
+generation of this harness was built with VHS, which quietly fell back to a
+serif face on a machine without the font and produced a demo that looked wrong
+in a way nobody could reproduce.
+
+`bin/record-demo.sh` goes one step further and *proves* the vendored file was
+the one used: it renames a copy of `fonts/JetBrainsMono-Regular.ttf` to a family
+name that exists nowhere on the machine, asks `agg` for that family, and
+requires a byte-identical raster.
+
+### The fast iteration loop
+
+```sh
+ASH_SKIP_SEED=1 make -C demos stills   # ~23s, no reseed
+make -C demos render                   # ~80s, re-render the last recording
+```
+
+`ASH_SKIP_SEED=1` reuses the warm database and the existing `out/window.env`.
+Whether that is still valid is decided by the *data*, not by a clock:
+`window_env_check_fresh` compares the `max(sample_ts)` the seeder recorded
+against what is in the table right now, so a reseed, a stray sampler or a
+dropped database all fail it with exit 3.
+
+`make render` skips the 75-second tmux recording and redoes everything from
+`agg` onwards against the cast already in `out/`. That is the loop for anything
+to do with the theme, the window chrome, the palette or the size budget.
+
+### Running the harness from outside the repo
+
+`lib/env.sh` sources `demos/env.local` if it exists — a gitignored file for
+machine-specific paths, chiefly `ASH_REPO_ROOT` (where `sql/ash-install.sql` is
+read from) and `ASH_ASSETS` (where the deliverables are written to). In a normal
+checkout the file is absent and both resolve from `demos/`'s own location.
+
+---
+
+## Backends
+
+| `ASH_BACKEND` | What it is |
+|---|---|
+| `local` (default) | whatever cluster the ambient `PG*` settings already reach. Needs only `psql` + `pgbench`. No Docker, no image pull, no `ALTER SYSTEM`, no restart. This is also the CI path. |
+| `docker` | optional; for pinning a major version or getting a real pg_cron. The port is probed free from 5500-5599, never hardcoded. |
+| `remote` | standard `PG*` variables, with two guardrails that cannot be switched off: the target database name must match `ash_demo*`, and the harness refuses to seed on top of an `ash.sample` table it did not fill. `make down` never drops a remote database. |
+
+House rules are enforced in code, not in this document: `backend_down` asserts
+the safe `ash_demo*` / `ash_demo_*` name forms and consults an ownership ledger
+before it drops or removes anything. Reused local databases, every remote
+database, and containers without a `created` ledger are left in place. A failed
+owned-resource teardown stays loud and retains the ledger for a retry.
+
+---
+
+## The story the seed tells
+
+28 virtual minutes, of which 24 are the query window and 4 are slack in front of
+it (so the raw-retention guardrail in the drill readers cannot trip as the seed
+ages between `make seed` and `make demo`):
+
+| Virtual minutes | Phase | Load |
+|---|---|---|
+| 1–4 | calm (slack) | read-only range aggregates |
+| 5–12 | calm baseline | read-only range aggregates |
+| 13–17 | **the incident** | 12 clients contending on one row + 3 write clients |
+| 18–20 | recovery | mixed read/write |
+| 21–28 | busy tail | heavier reads |
+
+The incident is a genuine row-lock storm: every client updates the same row and
+then does real work while still holding it. That is the actual Postgres locking
+protocol, so the sampler sees `Lock:transactionid` and `Lock:tuple` alongside the
+holder's own `CPU*` and IO — with a single identifiable statement behind all of
+it. There is no `pg_sleep` anywhere in the workload; an earlier prototype used
+one and shipped `Timeout:PgSleep` as the demo's number-one wait event, which
+would have taught the wrong lesson to everyone who watched it.
+
+The calm phases are read-only on purpose. Default TPC-B at a low scale produces
+several AAS of lock contention all by itself, because every client fights over
+the handful of `pgbench_branches` rows — and then "calm" looks exactly like the
+incident.
+
+### The shape is asserted, not hoped for
+
+`lib/shape.sql` runs after every seed and fails the build (exit 4) unless:
+
+- every one of the 28 virtual minutes carries samples;
+- at least 4 distinct wait event types are present;
+- the storm's `peak_aas` is at least **3×** the median calm minute;
+- the storm's rank-1 wait event is a `Lock:*` event holding ≥ 35% of the window;
+- one query id owns ≥ 50% of that wait, so the drill has somewhere to land;
+- the calm baseline is **not** led by a lock wait;
+- `ash.periods()` returns all 6 rows with no NULL `avg_aas` — which can only
+  happen if the rollup chain and its watermarks are intact;
+- at least **two `Lock:*` events rank in the top four** of the whole chart
+  window. That one is purely about the picture: `ash.chart()` ranks its series
+  over the entire window and folds the rest into a single "Other" dot column, so
+  a calm phase heavy enough to outrank both lock waits would render the
+  five-minute incident as anonymous dots. Nothing else here would notice — it is
+  not an error, it is not empty, it is just a bad hero image. Now it fails the
+  seed and names the two knobs to turn.
+
+That last one is worth its own note. Deleting `ash.rollup_1m` without also
+setting `last_rollup_1m_ts = null` leaves `ash.rollup_minute()` convinced it has
+already processed those minutes. It then refuses to re-roll, the wide readers
+silently prefer the empty rollup source, and the demo ships buckets full of
+nothing with no error anywhere. `ash_demo.reset_state()` nulls the watermarks.
+
+---
+
+## The frozen window
+
+`lib/seed.sh` writes `out/window.env` as its last action:
+
+```sh
+ASH_SINCE='2026-07-26 22:36:00-07'
+ASH_UNTIL='2026-07-26 23:00:00-07'
+ASH_STORM_SINCE='2026-07-26 22:44:00-07'
+ASH_STORM_UNTIL='2026-07-26 22:49:00-07'
+ASH_STORM_EVENT='Lock:transactionid'
+ASH_COMPRESSION='1 real second = 1 virtual minute'
+...
+```
+
+Both capture paths source it, and both refuse to run (exit 3) if it is missing
+or stale. **No scene SQL may call `now()`.** That is what lets the stills pass
+and the animation pass run minutes apart and still agree on every digit — without
+coupling them into a single recording.
+
+`ASH_STORM_EVENT` is *measured* from the seeded data rather than assumed, so
+scene SQL and marker assertions bind to what the storm actually produced.
+
+---
+
+## Verification
+
+There is no way to ship a broken picture quietly.
+
+- **Preflight (§ hard gate).** Before any renderer or recorder starts, every
+  scene is executed scripted and checked: non-empty, no `ERROR:`/`FATAL:`/
+  `PANIC:`, every marker present, and **every line within the 100-column
+  budget**. Markers are what separate "the query ran" from "the query showed the
+  incident" — they are what stops an empty result set shipping as a pretty
+  picture of nothing.
+- **Width is measured in Python**, with East-Asian-width awareness and escape
+  sequences counted as zero. Never `awk length`: that counts UTF-8 bytes and
+  reported 393 for a 131-column table.
+- **Post-render pixel sampling** asserts the exact wait-class RGB values from
+  `docs/COLOR_SCHEME.md` survive into the artifact unquantised.
+- **`make check`** re-renders the committed fixtures with no database at all and
+  byte-compares against `fixtures/expected/`. It proves the *renderer* still
+  works on frozen input. It **cannot** notice that the input no longer reflects
+  what pg_ash does — only the nightly re-capture catches that.
+
+---
+
+## Embedding the results
+
+GitHub's markdown sanitiser strips inline `<svg>`. Use the image form:
+
+```markdown
+![AAS by wait event](assets/chart.svg)
+```
+
+or `<img src="assets/chart.svg">`. Both render in GitHub's secure-static mode,
+and the subsetted font travels inside the file as a data URI, so the picture
+looks the same for everyone.
+
+Do **not** pin a `width=`. The SVG is exactly 100 columns wide and GitHub scales
+it down to the article column; pinning a pixel width only makes it smaller.
+
+Caption the chart. `ash.chart()` varies the **glyph** per series (`█ ▓ ░ ▒ ·`) as
+well as the colour, so the ranking is readable without relying on colour vision.
+
+`report.svg` is correct and useful but roughly 3000 px tall — it belongs on a
+documentation page, not in the README landing area.
+
+`make stills` writes `out/embed.md` with a ready-to-paste block for every scene.
+
+---
+
+## Layout
+
+```
+demos/
+  Makefile               every target; the only entry point
+  bin/ash-demo           subcommand orchestrator
+  bin/capture-stills.sh  scripted capture -> ansi -> svg/png   [--capture-only]
+  bin/record-demo.sh     tmux record -> agg -> chrome -> gif/mp4  [--render-only]
+  bin/check-fixtures.sh  the no-database renderer gate (make check)
+  bin/make-fixtures.sh   refresh fixtures/ from the current capture
+  lib/env.sh             resolves every ASH_* knob; sources demos/env.local
+  lib/doctor.sh          dependency probe by tier
+  lib/backend.sh         local | docker | remote, and the house-rule guardrails
+  lib/seed.sh            the workload phases, the restamp, the frozen window
+  lib/seed.sql           ash_demo.batch / restamp / phase / reset_state
+  lib/workload_lock.sql  the row-lock storm (no pg_sleep)
+  lib/workload_read.sql  the read load (real range aggregates, not point lookups)
+  lib/shape.sql          numeric shape assertions
+  lib/scenes.sh          parse/validate/expand scenes.tsv
+  lib/verify.sh          the shared assertion vocabulary (vfy_*)
+  lib/driver.sh          tmux terminal driver (drv_*)
+  lib/psqlrc.still       psql settings for the scripted path
+  lib/psqlrc.demo        psql settings + the OSC prompt sentinel for the reel
+  render/dwidth.py       THE display-width oracle; every gate calls it
+  render/ansitable.py    ANSI-aware table formatter (alignment psql cannot do)
+  render/ansi2svg.py     ANSI -> SVG, with block-glyph promotion
+  render/chrome.py       the window-chrome plate for the reel composite
+  render/verify_pixels.py post-render colour + non-triviality gate
+  scenes/scenes.tsv      THE scene list
+  scenes/captions.tsv    optional prose for out/embed.md
+  theme/pg_ash.json      THE style file — the only source of colour and geometry
+  fonts/                 vendored JetBrains Mono (OFL-1.1)
+  fixtures/              frozen capture bytes + expected renderer output
+  out/                   gitignored working directory
+```
+
+### Two things that look like duplication and are not
+
+`render/ansi2svg.py` and `render/chrome.py` both draw the window chrome, from
+the same numbers in `theme/pg_ash.json`, because the stills path emits SVG
+primitives and the reel path needs a raster plate for `ffmpeg` to composite
+onto. They must stay in step; a divergence shows up as a still and a frame of
+the reel being visibly different windows. (One did: the plate used to paint the
+title bar twelve pixels past its hairline.)
+
+`bin/capture-stills.sh` and `bin/record-demo.sh` both run every scene scripted
+before doing anything expensive. That is not a redundant check — the still path
+verifies what it is about to render, and the reel path verifies in two seconds
+what would otherwise cost a 75-second recording to discover.
+
+Exit codes are uniform across every script: `1` usage/config, `2` missing
+dependency, `3` backend or frozen-window failure, `4` seed assertion, `5` capture
+verification, `6` render, `7` animation sync.

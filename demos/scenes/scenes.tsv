@@ -1,0 +1,46 @@
+# scenes.tsv — THE scene list. Data, not code. Read by BOTH capture paths:
+# bin/capture-stills.sh (scripted psql -A -> SVG/PNG) and bin/record-demo.sh
+# (tmux + psql -> asciicast -> GIF/MP4). Neither path may hardcode a query.
+#
+# Tab-separated. `#` comments. Columns, in order:
+#   name        [a-z0-9_]+  -> out/ansi/<name>.ansi, assets/<name>.svg / .png
+#   hold        float seconds the reel holds this frame; 0.0 = still-only
+#   reel_order  0 = not in the reel; otherwise ascending position
+#   title       chrome title-bar text for the still
+#   markers     comma-separated literal substrings; ALL must appear in the capture
+#   sql         one line; may use $SINCE $UNTIL $BASE_SINCE $BASE_UNTIL
+#                             $STORM_SINCE $STORM_UNTIL
+#
+# Rules (enforced by lib/scenes.sh and again by bin/record-demo.sh):
+#   * Columns must be projected explicitly. `select *` is banned.
+#   * 2.0 readers only: periods aas timeline top compare samples report chart
+#     summary status. The four v1.x colour-emitting readers that 2.0 removed are
+#     banned by name in lib/scenes.sh; referencing one is a build failure.
+#   * Every line of every capture must fit ASH_COLS (default 100) DISPLAY
+#     columns. rtrim(chart) is NOT cosmetic: pg_ash pads the chart column to a
+#     constant length() INCLUDING its ANSI bytes, so a low-colour row carries
+#     tens of trailing spaces. In a 100-column terminal those spaces wrap onto
+#     the next line and the reel grows a blank line between every bar.
+#   * A REEL scene (reel_order > 0) must also fit ASH_ROWS (default 30) minus
+#     six lines of prompt/narration overhead. bin/record-demo.sh gates this in
+#     preflight. That is why the chart buckets at 2 minutes rather than 1: at
+#     1-minute grain a 24-minute window is 24 bars plus a legend, and the legend
+#     — the row that names the wait events — scrolls off the top of the frame.
+#
+# The window literals come from out/window.env, written by the seeder. No scene
+# SQL may call now() — the whole point of the frozen window is that the stills
+# pass and the animation pass, run minutes apart, agree on every digit.
+#
+# name	hold	reel_order	title	markers	sql
+status	2.5	1	pg_ash 2.0 — is it collecting?	2.0,external scheduler	select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','raw_retention','pg_cron_available');
+periods	3.2	2	ash.periods() — what do I even have?	1m,1h,raw	select period, source, buckets_with_data, avg_aas, peak_aas, p99_aas from ash.periods($UNTIL);
+chart	5.5	3	ash.chart() — AAS by wait event	Lock:transactionid,Lock:tuple,█,▓,▒	select to_char(bucket_start, 'HH24:MI') as bucket, aas, rtrim(chart) as chart from ash.chart(since => $SINCE, until => $UNTIL, bucket => '2 minutes', n => 4, width => 66, color => true);
+top_event	3.5	4	ash.top('wait_event') — the exact wait	Lock:transactionid	select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', since => $STORM_SINCE, until => $STORM_UNTIL, n => 6);
+top_query	4.0	5	ash.top('query_id') — which statement?	pgbench_accounts	select key, left(query_text, 52) as query_text, avg_aas, pct from ash.top('query_id', since => $STORM_SINCE, until => $STORM_UNTIL, n => 3);
+compare	3.5	6	ash.compare() — incident vs baseline	avg_delta,Lock:transactionid	select key, avg_aas_1, avg_aas_2, avg_delta, pct_2 from ash.compare($BASE_SINCE, $BASE_UNTIL, $STORM_SINCE, $STORM_UNTIL, dimension => 'wait_event', n => 5);
+summary	0.0	0	ash.summary() — the one-paragraph verdict	peak_aas,Lock:transactionid,pgbench_accounts	select metric, value from ash.summary(since => $STORM_SINCE, until => $STORM_UNTIL);
+# cluster_name is a host setting and its key is absent when unset; omit it so
+# the scene and its contract fingerprint do not depend on local configuration.
+# Report top events describe each class's single p99 minute, so that minute can
+# legitimately differ from the whole-storm winner asserted by top_event/shape.
+report	0.0	0	ash.report() — hand this to an LLM	top_events_p99,coverage,aas_p99	select jsonb_pretty(ash.report(since => $STORM_SINCE, until => $STORM_UNTIL, n => 2) - array['cluster_name', 'aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m', 'top_queryids_p999', 'top_queryids_worst1m']) as report;

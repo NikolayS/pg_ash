@@ -1,0 +1,18 @@
+# captions.tsv -- the prose that goes UNDER each image in out/embed.md.
+#
+# scenes.tsv's `title` is the window-chrome title and is already a serviceable
+# caption, so this file is entirely optional: a scene with no entry here gets
+# its title. It exists so a doc caption can be a sentence without making the
+# title bar a sentence, and so captions can be edited without touching the
+# six-column scene contract that both capture paths parse.
+#
+# TAB-separated: name<TAB>markdown caption (one line, inline markdown allowed).
+#
+status	`ash.status()` — pg_ash is plain SQL: no extension, no `.control` file, no restart. This is it reporting its own health, including whether an external scheduler is driving sampling (it is — pg_cron is optional).
+periods	`ash.periods()` — one call answers "what history do I actually have?" across every horizon, and names which storage tier (raw samples, 1-minute rollup, 1-hour rollup) answers each one.
+chart	`ash.chart()` — Average Active Sessions per minute, stacked by wait event, in 24-bit colour straight out of `psql`. The lock storm is not subtle. The glyph varies per series (`█ ▓ ░ ▒ ·`) as well as the colour, so the ranking still reads correctly for colourblind viewers and in a monochrome terminal.
+top_event	`ash.top('wait_event')` — the wait-event breakdown for the incident window, ranked by Average Active Sessions, with the share of total active time. When `Lock:transactionid` dominates, the database is not short of capacity — writers are queueing behind one another's row locks.
+top_query	`ash.top('query_id')` — the same window sliced by statement instead of by wait. Query text comes from `pg_stat_statements` when it is installed; without it you still get the query id.
+compare	`ash.compare()` — two windows side by side. `avg_delta` is what changed between them; every other column is context you can stop reading once you have the delta.
+summary	`ash.summary()` — the whole window in fifteen rows: how busy it was, what it waited on, which statements were responsible.
+report	`ash.report()` — the same analysis as `jsonb`, shaped for a machine. Paste it into an LLM, or store it as an incident artifact.

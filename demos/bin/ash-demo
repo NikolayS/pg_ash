@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+#
+# bin/ash-demo — the subcommand orchestrator. The Makefile is a thin wrapper
+# around this; everything a human might want to run by hand lives here.
+#
+#   ash-demo doctor [tier]   dependency probe (tier 1 stills, 2 raster, 3 reel)
+#   ash-demo up              create/reach the database and install pg_ash
+#   ash-demo seed            up + seed a frozen incident window + shape asserts
+#   ash-demo preflight       execute every scene scripted and gate on width
+#   ash-demo capture         seed + preflight + scripted capture -> out/ansi
+#   ash-demo stills          capture + render -> assets/*.svg (+ *.png)
+#   ash-demo demo            seed + record the reel -> assets/ash_demo.gif/.mp4
+#   ash-demo check           no database: fixture re-render + sha256 manifest
+#   ash-demo scenes          print the parsed scene table (debugging)
+#   ash-demo sql <scene>     print one scene's expanded SQL (debugging)
+#   ash-demo down            drop the database / remove the container
+#
+# Exit codes are the §2.6 vocabulary; see lib/env.sh (ash_die).
+
+set -Eeuo pipefail
+
+ASH_BIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+ASH_HOME=$(cd "$ASH_BIN_DIR/.." && pwd -P)
+
+# shellcheck source=lib/seed.sh
+. "$ASH_HOME/lib/seed.sh"      # pulls in env.sh + backend.sh
+# shellcheck source=lib/scenes.sh
+. "$ASH_HOME/lib/scenes.sh"
+# shellcheck source=lib/doctor.sh
+. "$ASH_HOME/lib/doctor.sh"
+
+# lib/verify.sh holds the shared assertion vocabulary — vfy_nonempty,
+# vfy_no_errors, vfy_markers, vfy_width — and BOTH capture paths call it. It is
+# not optional: two implementations of "is this capture correct" is exactly one
+# too many, because they drift and then the stills pass while the reel ships a
+# psql ERROR:.
+[ -f "$ASH_HOME/lib/verify.sh" ] \
+  || ash_die 2 "lib/verify.sh is missing — the shared verification vocabulary"
+# shellcheck source=lib/verify.sh
+. "$ASH_HOME/lib/verify.sh"
+
+# ---------------------------------------------------------------------------
+# Width measurement (§2.5) — ONE oracle, shared with the renderer
+# ---------------------------------------------------------------------------
+#
+# An earlier version of this file modelled the rendered table by hand (per-column
+# maxima plus a three-character gutter). That model was WRONG in both directions:
+# it did not know that render/ansitable.py folds an over-wide text column onto a
+# continuation line, so it rejected scenes the renderer handles perfectly (the
+# ash.summary() `value` column, which is 108 columns of real query text and folds
+# beautifully) — and it would have missed anything the renderer's box drawing
+# adds.
+#
+# So preflight now measures the ACTUAL rendered screen: pipe the capture through
+# the same render/ansitable.py the stills path uses, then measure with the same
+# render/dwidth.py. Preflight and the renderer can no longer disagree, because
+# they are the same code.
+#
+# Width is measured in Python, never awk: `awk length` counts UTF-8 BYTES and
+# reported 393 for a 131-column table in a prototype, which is worse than no
+# check because it looks like one.
+
+# _preflight_width <raw-file> <scene> — echo the rendered display width, exit 5
+# if it does not fit. Leaves the rendered screen next to the raw for debugging.
+_preflight_width() {
+  local raw=$1 scene=$2 rendered="$1.ansi"
+  python3 "$ASH_HOME/render/ansitable.py" \
+      -F $'\x1f' --max-width "$ASH_COLS" --cols "$ASH_COLS" \
+      --theme "$ASH_THEME" --prompt "$(scenes_template "$scene")" \
+      -o "$rendered" <"$raw" \
+    || ash_die 6 "preflight[$scene]: render/ansitable.py failed"
+  vfy_width "$rendered" "$scene" "$ASH_COLS"
+  python3 "$ASH_HOME/render/dwidth.py" --report "$rendered"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_doctor() {
+  if [ -n "${1:-}" ]; then
+    doctor_tier "$1"
+  else
+    doctor_report
+  fi
+}
+
+cmd_up() {
+  doctor_tier 1
+  backend_up
+}
+
+cmd_seed() {
+  doctor_tier 1
+  backend_up
+
+  # ASH_SKIP_SEED is the fast iteration loop: reuse a warm database instead of
+  # paying 22 seconds to rebuild an identical one.
+  #
+  # "Still valid" is decided by the DATA, not by a clock. window_env_check_fresh
+  # compares the max(sample_ts) the seeder recorded against what is in the table
+  # right now, so a re-seed, a stray sampler or a dropped database all fail it.
+  # An earlier version also expired the window after ten wall-clock minutes and
+  # silently re-seeded — which is worse than useless: the stills and the reel
+  # then came from DIFFERENT incidents while both claimed the frozen-window
+  # contract. (Observed: `make stills`, iterate, `make demo` twelve minutes
+  # later, and the flagship chart in the GIF showed different numbers from the
+  # flagship chart in the SVG.)
+  #
+  # The age is still reported, because a very old seed means the raw-retention
+  # guardrail in the drill readers is closer than it looks.
+  if [ "${ASH_SKIP_SEED:-}" = "1" ] && [ -f "$ASH_WINDOW_ENV" ]; then
+    local age
+    age=$(python3 -c "
+import os, time
+print(int(time.time() - os.path.getmtime('$ASH_WINDOW_ENV')))")
+    ash_log "ASH_SKIP_SEED=1: reusing the seed in $ASH_WINDOW_ENV (${age}s old)"
+    window_env_load
+    window_env_check_fresh
+    return 0
+  fi
+
+  seed_main
+}
+
+# cmd_preflight — the hard width gate (§2.5).
+#
+# This runs BEFORE any renderer or recorder starts, and it runs every scene for
+# real. It is what makes an `ash.chart(color => true)` that blows out to 238
+# columns impossible to ship silently, and it is the cheapest possible place to
+# discover that a reader gained a column.
+cmd_preflight() {
+  scenes_validate
+  window_env_load
+  window_env_check_fresh
+
+  local raw_dir="$ASH_OUT/preflight"
+  rm -rf "$raw_dir"; mkdir -p "$raw_dir"
+
+  local scene sql out width
+  while IFS= read -r scene; do
+    sql=$(scenes_sql "$scene")
+    out="$raw_dir/$scene.raw"
+    # stderr merged in: a NOTICE or an ERROR must be part of what we verify,
+    # not something that scrolled past on the terminal.
+    if ! psql -X -v ON_ERROR_STOP=1 -d "$ASH_DEMO_DB" \
+           -A -F $'\x1f' -P footer=off -c "$sql" >"$out" 2>&1; then
+      cat "$out" >&2
+      ash_die 5 "preflight[$scene]: psql exited non-zero"
+    fi
+    # The shared vocabulary (lib/verify.sh) — one implementation, both paths.
+    # Note it is run on the RAW capture: that is where an ERROR:, an empty
+    # result or a missing marker lives. Width is checked separately, below, on
+    # the rendered screen — a raw line is unit-separated and narrower than the
+    # picture drawn from it.
+    vfy_nonempty  "$out" "$scene"
+    vfy_no_errors "$out" "$scene"
+    vfy_markers   "$out" "$scene" "$(scenes_field "$scene" markers)"
+
+    # The width gate, measured on what the renderer actually draws. Same
+    # ansitable.py, same dwidth.py the stills path uses, so preflight cannot
+    # pass something the renderer then overflows — or reject something the
+    # renderer would have folded onto a continuation line.
+    width=$(_preflight_width "$out" "$scene") || exit $?
+    printf '  %-10s %3s/%s cols  %s\n' \
+      "$scene" "$width" "$ASH_COLS" "$(scenes_field "$scene" title)" >&2
+  done <<EOF
+$(scenes_names)
+EOF
+
+  ash_step "preflight passed: every scene fits ${ASH_COLS} display columns"
+}
+
+cmd_capture() {
+  cmd_seed
+  cmd_preflight
+  _run_peer bin/capture-stills.sh --capture-only
+}
+
+cmd_stills() {
+  cmd_seed
+  cmd_preflight
+  _run_peer bin/capture-stills.sh
+}
+
+cmd_demo() {
+  cmd_seed
+  cmd_preflight
+  _run_peer bin/record-demo.sh
+}
+
+cmd_check() {
+  # No database, no seed, no window: this proves the RENDERER still works on
+  # frozen input. It cannot notice that the input no longer reflects what
+  # pg_ash does — only the nightly re-capture can. Says so in `make help`.
+  _run_peer bin/check-fixtures.sh
+}
+
+cmd_fixtures() {
+  _run_peer bin/make-fixtures.sh
+}
+
+cmd_scenes() {
+  scenes_validate
+  local scene
+  while IFS= read -r scene; do
+    printf '%-10s hold=%-4s reel=%s  %s\n' \
+      "$scene" "$(scenes_field "$scene" hold)" \
+      "$(scenes_field "$scene" reel_order)" \
+      "$(scenes_field "$scene" title)"
+  done <<EOF
+$(scenes_names)
+EOF
+  printf '\nreel order: %s\n' "$(scenes_reel_names | tr '\n' ' ')"
+}
+
+cmd_sql() {
+  [ -n "${1:-}" ] || ash_die 1 "usage: ash-demo sql <scene>"
+  window_env_load
+  scenes_sql "$1"
+}
+
+cmd_down() {
+  backend_down
+}
+
+# _run_peer <relative-path> [args...] — invoke a script owned by another plane.
+# A clear exit 2 beats `bash: no such file`.
+_run_peer() {
+  local rel=$1; shift
+  if [ ! -x "$ASH_HOME/$rel" ]; then
+    ash_die 2 "$rel is not present (or not executable) — that half of the harness has not been installed"
+  fi
+  "$ASH_HOME/$rel" "$@"
+}
+
+# ---------------------------------------------------------------------------
+main() {
+  local sub=${1:-}
+  [ $# -gt 0 ] && shift || true
+  case "$sub" in
+    doctor)    cmd_doctor "$@" ;;
+    up)        cmd_up "$@" ;;
+    seed)      cmd_seed "$@" ;;
+    preflight) backend_connect; cmd_preflight "$@" ;;
+    capture)   cmd_capture "$@" ;;
+    stills)    cmd_stills "$@" ;;
+    demo)      cmd_demo "$@" ;;
+    check)     cmd_check "$@" ;;
+    fixtures)  cmd_fixtures "$@" ;;
+    scenes)    cmd_scenes "$@" ;;
+    sql)       cmd_sql "$@" ;;
+    down)      cmd_down "$@" ;;
+    ''|-h|--help|help)
+      sed -n '3,20p' "$ASH_BIN_DIR/ash-demo" | cut -c3-
+      ;;
+    *) ash_die 1 "unknown subcommand '$sub' (try: ash-demo help)" ;;
+  esac
+}
+
+main "$@"

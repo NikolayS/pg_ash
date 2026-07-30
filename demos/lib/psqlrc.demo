@@ -1,0 +1,78 @@
+-- psqlrc.demo — psql startup file for the INTERACTIVE (animation) capture path.
+--
+-- Loaded as `PSQLRC=lib/psqlrc.demo psql ...` and deliberately WITHOUT `-X`.
+-- `-X` suppresses the startup file, which silently disables the whole prompt
+-- synchronisation mechanism below and turns every scene into a 60-second hang.
+-- (The scripted stills path uses lib/psqlrc.still instead.)
+--
+-- ---------------------------------------------------------------------------
+-- The synchronisation mechanism
+-- ---------------------------------------------------------------------------
+-- PROMPT1 opens with a NON-PRINTING OSC-2 "set window title" escape, produced
+-- by psql's back-tick expansion. The payload is `$$` — the PID of the shell
+-- psql popen()s to evaluate the back-ticks. psql forks a fresh shell for every
+-- prompt expansion, so every prompt carries a FRESH nonce.
+--
+-- tmux parses OSC 2 into #{pane_title}, which lib/driver.sh polls at 20 ms with
+-- `tmux display-message -p '#{pane_title}'` (O(1) — never capture the whole
+-- pane in the hot loop). Because the escape rides the same pty byte stream as
+-- the query output, tmux CANNOT observe the new title until it has consumed
+-- every preceding byte. Observing the flip is therefore PROOF that the query
+-- finished and its output is fully drawn — not a timing guess. That is the
+-- entire reason this file exists: no `sleep 4.6` anywhere in a scene.
+--
+-- PROMPT2 emits a DISTINGUISHABLE nonce (`ashcont-`). A scene that loses its
+-- semicolon then fails in ~30 ms with exit 7 instead of hanging for 60 s and
+-- recording a dead pane.
+--
+-- `%[` ... `%]` marks the sequence non-printing so psql's own line editor does
+-- not count it toward the prompt width. `%033` is psql's octal escape (see the
+-- PROMPT1 example in the psql reference page).
+--
+-- ---------------------------------------------------------------------------
+-- The visible prompt
+-- ---------------------------------------------------------------------------
+-- Per spec §3.4 both capture paths show the same prompt shape:
+--     "ash " in ui.prompt_accent (#50FA7B), "> " in ui.prompt_dim (#6272A4),
+--     then the SQL in ui.fg.
+-- PROMPT2 is three spaces, so a wrapped continuation lines up under the SQL
+-- instead of under a `-#` marker.
+--
+-- Colours are the literal 24-bit values from theme/pg_ash.json. They are the
+-- only hardcoded colours outside the theme file, and they are here because a
+-- psqlrc cannot read JSON; bin/record-demo.sh asserts they still agree with
+-- the theme before recording.
+
+\set QUIET on
+
+-- The pager is fatal to an automated recording: less(1) swallows the keystrokes
+-- the driver sends and the pane deadlocks.
+\pset pager off
+
+\pset border 2
+\pset linestyle unicode
+\pset unicode_border_linestyle single
+\pset unicode_column_linestyle single
+\pset unicode_header_linestyle single
+\pset null ''
+\pset format aligned
+\pset tuples_only off
+
+-- ash.chart() is the only 2.0 reader that emits colour. Turning it on at the
+-- session level means the scene SQL does not have to.
+set ash.color = on;
+
+-- Do not echo timing or the "SET" tag noise from this file.
+\timing off
+
+-- PROMPT1: OSC-2 nonce, then "ash > " in the theme colours.
+\set PROMPT1 '%[%`printf "\033]2;ashrdy-$$\007"`%]%[%033[38;2;80;250;123m%]ash %[%033[38;2;98;114;164m%]▸ %[%033[38;2;230;237;243m%]'
+
+-- PROMPT2: a DIFFERENT nonce (so an unterminated statement is detected, not
+-- waited on) and three spaces of visible indent.
+\set PROMPT2 '%[%`printf "\033]2;ashcont-$$\007"`%]%[%033[38;2;98;114;164m%]   %[%033[38;2;230;237;243m%]'
+
+-- Continuation of a quoted string / comment: same nonce family, still detected.
+\set PROMPT3 '%[%`printf "\033]2;ashcont-$$\007"`%]   '
+
+\unset QUIET

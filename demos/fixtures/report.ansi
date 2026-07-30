@@ -1,0 +1,67 @@
+[38;2;80;250;123mash [38;2;98;114;164m▸ [38;2;230;237;243mselect jsonb_pretty(ash.report(since => $STORM_SINCE, until => $STORM_UNTIL, n => 2) -[0m
+[38;2;230;237;243m      array['cluster_name', 'aas_p999', 'aas_worst1m', 'top_events_p999', 'top_events_worst1m',[0m
+[38;2;230;237;243m      'top_queryids_p999', 'top_queryids_worst1m']) as report;[0m
+
+{
+    "aas_avg": {
+        "io": 0.68,
+        "cpu": 1.20,
+        "ipc": 0.07,
+        "lock": 11.08,
+        "total": 13.20,
+        "lwlock": 0.17
+    },
+    "aas_p99": {
+        "io": 0.91,
+        "cpu": 1.49,
+        "ipc": 0.08,
+        "lock": 11.16,
+        "total": 13.49,
+        "lwlock": 0.33
+    },
+    "coverage": {
+        "to": "2026-07-27T22:49:00+00:00",
+        "from": "2026-07-27T22:44:00+00:00",
+        "source": "rollup_1m",
+        "minutes_expected": 5,
+        "minutes_with_data": 5,
+        "raw_retention_start": "2026-07-26T23:36:00+00:00"
+    },
+    "top_events_p99": {
+        "io": [
+            "WalSync(0.8)",
+            "DataFileRead(0.1)"
+        ],
+        "ipc": [
+            "BgworkerShutdown(0.1)"
+        ],
+        "lock": [
+            "transactionid(10.5)",
+            "tuple(0.7)"
+        ],
+        "lwlock": [
+            "WALWrite(0.3)"
+        ]
+    },
+    "top_queryids_p99": {
+        "io": [
+            "-2835399305386018931(0.3)",
+            "-7079852731576173083(0.2)"
+        ],
+        "ipc": [
+            "6627483964256586084(0.1)"
+        ],
+        "lock": [
+            "-1236273962537500931(11.0)",
+            "-7185852639686726986(0.1)"
+        ],
+        "total": [
+            "-1236273962537500931(11.1)",
+            "-2835399305386018931(1.1)"
+        ],
+        "lwlock": [
+            "-2835399305386018931(0.3)"
+        ]
+    },
+    "top_queryids_available": true
+}

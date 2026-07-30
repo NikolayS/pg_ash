@@ -1,0 +1,8 @@
+status	cols=2 head=metric|value labels=pg_cron_available,raw_retention,sample_interval,samples_total,sampling_enabled,version
+periods	cols=6 head=period|source|buckets_with_data|avg_aas|peak_aas|p99_aas labels=1d,1h,1m,1mo,1w,5m
+chart	cols=3 head=bucket|aas|chart
+top_event	cols=5 head=key|avg_aas|peak_aas|p99_aas|pct
+top_query	cols=4 head=key|query_text|avg_aas|pct
+compare	cols=5 head=key|avg_aas_1|avg_aas_2|avg_delta|pct_2
+summary	cols=2 head=metric|value labels=avg_aas,backend_seconds,buckets_with_data,databases_active,drill_effective_bucket,drill_period_end,drill_period_start,drill_source,p99_aas,peak_aas,period_end,period_start,source,top_query_1,top_query_2,top_query_3,top_wait_1,top_wait_2,top_wait_3
+report	cols=1 keys=aas_avg,aas_p99,coverage,cpu,from,io,ipc,lock,lwlock,minutes_expected,minutes_with_data,raw_retention_start,source,to,top_events_p99,top_queryids_available,top_queryids_p99,total
