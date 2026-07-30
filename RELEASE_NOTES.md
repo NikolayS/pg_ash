@@ -82,6 +82,16 @@ AAS-oriented 2.0 API:
   minute into the next minute, so its coverage bounds and data-bearing minute
   count remain aligned with the documented minute floor.
   ([PR #192](https://github.com/NikolayS/pg_ash/pull/192))
+- **Lifecycle job changes now fail atomically.** When an existing pg_cron job
+  cannot be unscheduled, `ash.stop()` propagates the error (ordinary errors
+  also name the job), so `rebuild_partitions()` and `uninstall()` roll back
+  instead of reporting success with a surviving job. With pg_cron available,
+  each `removed` row identifies a job actually removed, including its real job
+  ID; absent jobs remain idempotent. `ash.start()` applies the same rule while
+  replacing rollup jobs and repairs sampler/rotation schedule, command, target
+  database, and active state. Lifecycle calls are bound to the `ash` schema
+  owner, and visible foreign-owned managed jobs targeting the installation
+  database make teardown fail closed. (issue #203)
 
 ## Retired tooling
 
