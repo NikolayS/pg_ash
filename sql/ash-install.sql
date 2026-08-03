@@ -3791,6 +3791,53 @@ begin
 end;
 $$;
 
+/*
+ * Window resolution for every since/until reader (#214).
+ *
+ * The readers used to default the two ends independently — since to
+ * now() - <span>, until to now() — so passing ONLY until answered a window
+ * anchored at now() instead of at until, and since > until was never
+ * checked: the degenerate-window guard below (#63) then rewrote the
+ * inverted window into a one-minute window an arbitrary distance away and
+ * the reader returned a full, plausible profile of the wrong period with no
+ * NOTICE. Resolve both ends here instead, the way ash.periods() already
+ * anchors: until defaults to now(), since defaults to until - default_span
+ * (so the span always hangs off the window END), and an inverted window
+ * raises rather than silently answering a different question.
+ *
+ * The #63 clamp stays in the callers and stays AFTER this call: it exists to
+ * keep start_ts + 60 from wrapping past INT4_MAX near the 2094 epoch
+ * horizon, and it operates on the minute-FLOORED int4 bounds — where a valid
+ * sub-minute window can still collapse to an empty one.
+ */
+create or replace function ash._resolve_window(
+  since timestamptz,
+  until timestamptz,
+  default_span interval default '1 hour',
+  out window_start timestamptz,
+  out window_end timestamptz
+)
+returns record
+language plpgsql
+stable
+set search_path = pg_catalog, ash
+as $$
+begin
+  window_end := coalesce(until, now());
+  window_start := coalesce(since, window_end - default_span);
+  if window_start > window_end then
+    raise exception
+      'pg_ash: since (%) is after until (%) — that window is empty. Pass '
+      'since <= until; to ask for the window ENDING at a point in time, pass '
+      'only until and the default span is taken back from there.',
+      window_start, window_end;
+  end if;
+end;
+$$;
+
+comment on function ash._resolve_window(timestamptz, timestamptz, interval) is
+  'Internal: resolves a reader window. until defaults to now(), since defaults to until - default_span (the window always hangs off its END), and since > until raises instead of silently answering a different window.';
+
 -- ============================================================================
 -- 2.0 DATA FUNCTIONS
 -- ============================================================================
@@ -3829,8 +3876,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
-  v_to timestamptz := coalesce(until, now());
+  v_from timestamptz;
+  v_to timestamptz;
   v_start_ts int4;
   v_end_ts int4;
   v_bucket_secs int4;
@@ -3845,6 +3892,10 @@ begin
   if v_bucket_secs is null or v_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+
+  -- window anchored on until, inverted window rejected (#214).
+  select resolved.window_start, resolved.window_end into v_from, v_to
+  from ash._resolve_window(since, until) as resolved;
 
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
@@ -3976,8 +4027,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
-  v_to timestamptz := coalesce(until, now());
+  v_from timestamptz;
+  v_to timestamptz;
   v_start_ts int4;
   v_end_ts int4;
   v_span int4;
@@ -3989,6 +4040,10 @@ declare
   v_tie boolean;
   v_raw_start timestamptz;
 begin
+  -- window anchored on until, inverted window rejected (#214).
+  select resolved.window_start, resolved.window_end into v_from, v_to
+  from ash._resolve_window(since, until) as resolved;
+
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
@@ -4415,8 +4470,8 @@ set jit = off
 set search_path = pg_catalog, ash, public
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
-  v_to timestamptz := coalesce(until, now());
+  v_from timestamptz;
+  v_to timestamptz;
   v_start_ts int4;
   v_end_ts int4;
   v_bucket_secs int4;
@@ -4443,6 +4498,10 @@ begin
   if v_bucket_secs is null or v_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+
+  -- window anchored on until, inverted window rejected (#214).
+  select resolved.window_start, resolved.window_end into v_from, v_to
+  from ash._resolve_window(since, until) as resolved;
 
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
@@ -4654,6 +4713,13 @@ begin
       '(or null for one overall row)', dimension;
   end if;
 
+  -- Same reason: reject an inverted window here (#214) rather than letting
+  -- the delegated ash.aas() call raise and name itself. Both windows resolve
+  -- identically there, so this only decides which function the user is told
+  -- about.
+  perform ash._resolve_window(since_1, until_1);
+  perform ash._resolve_window(since_2, until_2);
+
   /*
    * Per-window coverage probe (rollup-backed, cheap). buckets_with_data = 0
    * means the window holds no data at all — its side must read NULL, and the
@@ -4808,8 +4874,8 @@ set jit = off
 set search_path = pg_catalog, ash, public
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
-  v_to timestamptz := coalesce(until, now());
+  v_from timestamptz;
+  v_to timestamptz;
   v_start int4;
   v_end int4;
   v_slots smallint[];
@@ -4817,6 +4883,10 @@ declare
   v_has_pgss boolean := false;
   v_pgss_schema text;
 begin
+  -- window anchored on until, inverted window rejected (#214).
+  select resolved.window_start, resolved.window_end into v_from, v_to
+  from ash._resolve_window(since, until) as resolved;
+
   v_start := ash.ts_from_timestamptz(v_from);
   v_end := ash.ts_from_timestamptz(v_to);
   v_slots := ash._active_slots_for_at(v_from, v_to);
@@ -5062,8 +5132,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 day');
-  v_to timestamptz := coalesce(until, now());
+  v_from timestamptz;
+  v_to timestamptz;
   v_start_ts int4;
   v_end_ts int4;
   v_si numeric;
@@ -5098,6 +5168,11 @@ declare
   v_t99_thr numeric;
   v_t999_thr numeric;
 begin
+  -- window anchored on until, inverted window rejected (#214). report's own
+  -- default span is 1 day.
+  select resolved.window_start, resolved.window_end into v_from, v_to
+  from ash._resolve_window(since, until, interval '1 day') as resolved;
+
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
@@ -5459,8 +5534,8 @@ set jit = off
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
-  v_to timestamptz := coalesce(until, now());
+  v_from timestamptz;
+  v_to timestamptz;
   v_start_ts int4;
   v_end_ts int4;
   v_span int4;
@@ -5485,6 +5560,11 @@ declare
   v_char_count int;
 begin
   width := least(greatest(width, 1), 500);
+
+  -- window anchored on until, inverted window rejected (#214).
+  select resolved.window_start, resolved.window_end into v_from, v_to
+  from ash._resolve_window(since, until) as resolved;
+
   v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
   v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
@@ -5689,12 +5769,16 @@ set jit = off
 set search_path = pg_catalog, ash, public
 as $$
 declare
-  v_from timestamptz := coalesce(since, now() - interval '1 hour');
-  v_to timestamptz := coalesce(until, now());
+  v_from timestamptz;
+  v_to timestamptz;
   v_aas record;
   v_rec record;
   v_rank int;
 begin
+  -- window anchored on until, inverted window rejected (#214).
+  select resolved.window_start, resolved.window_end into v_from, v_to
+  from ash._resolve_window(since, until) as resolved;
+
   select * into v_aas from ash.aas(v_from, v_to);
   if v_aas.buckets_with_data = 0 then
     return query select 'status'::text, 'no data in this time range'::text;

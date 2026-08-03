@@ -4337,6 +4337,237 @@ jobs:
           end $$;
           EOF
 
+      - name: "Issue #214: `until` alone must answer the window ending at `until`"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- ============================================================================
+          -- Issue #214: passing only `until` must answer the window ending at `until`.
+          -- since/until used to default independently (since := now() - span, until :=
+          -- now()), so `until => now() - 3 hours` produced since > until; the #63
+          -- degenerate-window guard then rewrote that to [now() - 1h, now() - 1h + 1min)
+          -- and the reader returned a full, plausible profile of a window three hours
+          -- away, with no NOTICE.
+          --
+          -- Two rollup blocks make the difference unmistakable:
+          --   target  [until - 1h, until)      CPU*, AAS 1.00
+          --   decoy   [now() - 1h, now())      Lock:transactionid, AAS 9.00
+          -- The decoy is exactly what the old code answered with.
+          -- ============================================================================
+          begin;
+
+          do $$
+          declare
+            v_now constant timestamptz := date_trunc('minute', now());
+            v_until constant timestamptz := date_trunc('minute', now()) - interval '3 hours';
+            v_cpu smallint;
+            v_lock smallint;
+          begin
+            truncate ash.sample;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config set sample_interval = '1 second' where singleton;
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'Lock', 'transactionid') into v_lock;
+
+            -- target block: 60 backend-seconds per minute = AAS 1.00.
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            select ash.ts_from_timestamptz(v_until - (i || ' minutes')::interval),
+                   0::oid, 60, 1, array[v_cpu, 60]::int4[], '{}'::int8[]
+            from generate_series(1, 60) as gs(i);
+
+            -- decoy block: 540 backend-seconds per minute = AAS 9.00.
+            insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+            select ash.ts_from_timestamptz(v_now - (i || ' minutes')::interval),
+                   0::oid, 60, 9, array[v_lock, 540]::int4[], '{}'::int8[]
+            from generate_series(1, 60) as gs(i);
+
+            raise notice '#214 fixtures seeded';
+          end $$;
+
+          -- ---------------------------------------------------------------------
+          -- until alone anchors the window at until.
+          -- ---------------------------------------------------------------------
+          do $$
+          declare
+            v_until constant timestamptz := date_trunc('minute', now()) - interval '3 hours';
+            a record;
+            v_report jsonb;
+            v_key text;
+            v_pct numeric;
+            v_n bigint;
+            v_min timestamptz;
+            v_max timestamptz;
+            v_val text;
+          begin
+            select * into a from ash.aas(until => v_until);
+            assert a.period_start = v_until - interval '1 hour',
+              format('ash.aas(until => X): period_start must be X - 1h (%s), got %s',
+                     v_until - interval '1 hour', a.period_start);
+            assert a.period_end = v_until,
+              format('ash.aas(until => X): period_end must be X (%s), got %s',
+                     v_until, a.period_end);
+            assert a.avg_aas = 1.00,
+              format('ash.aas(until => X): must read the target block (1.00), got %s '
+                     '(9.00 means it answered the decoy window at now())', a.avg_aas);
+            assert a.buckets_with_data = 60,
+              format('ash.aas(until => X): 60 covered minutes, got %s', a.buckets_with_data);
+
+            select t.key, t.pct into v_key, v_pct
+            from ash.top('wait_event', until => v_until) as t;
+            assert v_key = 'CPU*',
+              format('ash.top(until => X): must rank the target window (CPU*), got %s', v_key);
+            assert v_pct = 100.00,
+              format('ash.top(until => X): single event must be 100.00 pct, got %s', v_pct);
+
+            select count(*), min(t.bucket_start), max(t.bucket_start)
+              into v_n, v_min, v_max
+            from ash.timeline(until => v_until) as t;
+            assert v_n = 60,
+              format('ash.timeline(until => X): 60 minute buckets, got %s', v_n);
+            assert v_min = v_until - interval '1 hour',
+              format('ash.timeline(until => X): first bucket X - 1h (%s), got %s',
+                     v_until - interval '1 hour', v_min);
+            assert v_max = v_until - interval '1 minute',
+              format('ash.timeline(until => X): last bucket X - 1min (%s), got %s',
+                     v_until - interval '1 minute', v_max);
+
+            -- chart appends a trailing legend row with a null bucket_start.
+            select count(*), min(c.bucket_start), max(c.bucket_start)
+              into v_n, v_min, v_max
+            from ash.chart(until => v_until) as c
+            where c.bucket_start is not null;
+            assert v_n = 60,
+              format('ash.chart(until => X): 60 minute buckets, got %s', v_n);
+            assert v_min = v_until - interval '1 hour',
+              format('ash.chart(until => X): first bucket X - 1h, got %s', v_min);
+            assert v_max = v_until - interval '1 minute',
+              format('ash.chart(until => X): last bucket X - 1min, got %s', v_max);
+
+            select value into v_val from ash.summary(until => v_until) where metric = 'avg_aas';
+            assert v_val = '1.00',
+              format('ash.summary(until => X): must summarise the target block (1.00), got %s', v_val);
+            select value into v_val from ash.summary(until => v_until) where metric = 'period_end';
+            assert v_val::timestamptz = v_until,
+              format('ash.summary(until => X): period_end must be X (%s), got %s', v_until, v_val);
+
+            -- report's own default span is 1 day, so its window is [X - 1 day, X).
+            v_report := ash.report(until => v_until);
+            assert (v_report -> 'coverage' ->> 'to')::timestamptz = v_until,
+              format('ash.report(until => X): coverage.to must be X (%s), got %s',
+                     v_until, v_report -> 'coverage' ->> 'to');
+            assert (v_report -> 'coverage' ->> 'from')::timestamptz = v_until - interval '1 day',
+              format('ash.report(until => X): coverage.from must be X - 1 day (%s), got %s',
+                     v_until - interval '1 day', v_report -> 'coverage' ->> 'from');
+            assert (v_report -> 'coverage' ->> 'minutes_with_data')::int = 60,
+              format('ash.report(until => X): 60 covered minutes, got %s',
+                     v_report -> 'coverage' ->> 'minutes_with_data');
+
+            raise notice '#214 until-only anchoring PASSED';
+          end $$;
+
+          -- ---------------------------------------------------------------------
+          -- Zero-argument regression guard: the defaults must be untouched, and no
+          -- reader may start rejecting its own no-argument call.
+          -- ---------------------------------------------------------------------
+          do $$
+          declare
+            v_now constant timestamptz := date_trunc('minute', now());
+            v_until constant timestamptz := date_trunc('minute', now()) - interval '3 hours';
+            a record;
+            v_key text;
+            v_n bigint;
+            v_val text;
+          begin
+            select * into a from ash.aas();
+            assert a.period_end = v_now,
+              format('ash.aas(): period_end must be the current minute (%s), got %s',
+                     v_now, a.period_end);
+            assert a.period_start = v_now - interval '1 hour',
+              format('ash.aas(): period_start must be 1 hour earlier (%s), got %s',
+                     v_now - interval '1 hour', a.period_start);
+            assert a.avg_aas = 9.00,
+              format('ash.aas(): must read the trailing hour (9.00), got %s', a.avg_aas);
+
+            select t.key into v_key from ash.top('wait_event') as t;
+            assert v_key = 'Lock:transactionid',
+              format('ash.top(dimension): must default to the trailing hour, got %s', v_key);
+
+            assert (select count(*) from ash.timeline()) = 60,
+              'ash.timeline(): must emit 60 minute buckets over the default window';
+            assert (select count(*) from ash.chart() as c where c.bucket_start is not null) = 60,
+              'ash.chart(): must emit 60 minute buckets over the default window';
+            assert (select count(*) from ash.periods()) = 6,
+              'ash.periods(): must emit its 6 standard windows';
+            assert (ash.report() -> 'coverage' ->> 'to')::timestamptz = v_now,
+              'ash.report(): coverage.to must be the current minute';
+            select value into v_val from ash.summary() where metric = 'avg_aas';
+            assert v_val = '9.00',
+              format('ash.summary(): must summarise the trailing hour (9.00), got %s', v_val);
+            perform count(*) from ash.samples();
+            perform count(*) from ash.top('wait_event_type');
+            perform count(*) from ash.top('query_id');
+            perform count(*) from ash.top('database');
+            perform count(*) from ash.status();
+
+            -- ash.periods() already anchored on until; it must stay that way.
+            select count(*) into v_n
+            from ash.periods(v_until) as p
+            where p.period_end = v_until;
+            assert v_n = 6,
+              format('ash.periods(until): every window must end at until, got %s of 6', v_n);
+
+            raise notice '#214 zero-argument regression PASSED';
+          end $$;
+
+          rollback;
+
+          -- ============================================================================
+          -- An inverted window must raise on every since/until reader instead of being
+          -- silently rewritten by the #63 clamp.
+          -- ============================================================================
+          do $$
+          declare
+            v_since constant timestamptz := date_trunc('minute', now());
+            v_until constant timestamptz := date_trunc('minute', now()) - interval '3 hours';
+            v_calls constant text[] := array[
+              $c$select * from ash.aas($1, $2)$c$,
+              $c$select * from ash.timeline($1, $2)$c$,
+              $c$select * from ash.top('wait_event', $1, $2)$c$,
+              $c$select * from ash.samples($1, $2)$c$,
+              $c$select ash.report($1, $2)$c$,
+              $c$select * from ash.chart($1, $2)$c$,
+              $c$select * from ash.summary($1, $2)$c$,
+              $c$select * from ash.compare($1, $2, $1, $2)$c$
+            ];
+            v_call text;
+            v_raised text;
+            v_missing text[] := '{}';
+            v_wrong text[] := '{}';
+          begin
+            foreach v_call in array v_calls loop
+              v_raised := null;
+              begin
+                execute v_call using v_since, v_until;
+              exception when raise_exception then
+                v_raised := sqlerrm;
+              end;
+              if v_raised is null then
+                v_missing := v_missing || v_call;
+              elsif v_raised not like '%is after until%' then
+                v_wrong := v_wrong || (v_call || ' -> ' || v_raised);
+              end if;
+            end loop;
+            assert cardinality(v_missing) = 0,
+              'these readers silently accepted since > until: '
+              || array_to_string(v_missing, '; ');
+            assert cardinality(v_wrong) = 0,
+              'these readers raised the wrong error for since > until: '
+              || array_to_string(v_wrong, '; ');
+            raise notice '#214 inverted-window rejection PASSED';
+          end $$;
+          EOF
+
       - name: "Test v1.4: status output"
         env:
           PGPASSWORD: postgres
