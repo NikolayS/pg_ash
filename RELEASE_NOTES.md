@@ -26,6 +26,18 @@ surface has been replaced by the AAS-oriented 2.0 API:
 - **AAS-first readers.** `periods`, `aas`, `timeline`, `top`, `compare`,
   `samples`, `report`, `chart`, and `summary` use consistent named filters and
   report whether data came from raw samples, 1-minute rollups, or 1-hour rollups.
+- **Grain-honest extremes across all eight aggregate/render readers.**
+  `periods`, `aas`, `timeline`, `top`, `compare`, `report`, `chart`, and
+  `summary` no longer tell contradictory peak stories at the hourly retention
+  seam. `aas` / `top` return NULL peak/p99 when the surviving grain is coarser
+  than the requested bucket; `compare` adds `source_1` / `source_2` and NULLs
+  both peak/p99 sides on a grain mismatch. The `database` dimension keeps real
+  minute extremes from per-`datid` `minute_counts`. Legacy hours whose arrays
+  could not be backfilled are labelled `rollup_1h_flat`, so their compatibility
+  flat expansion is distinguishable from measurement. `report` remains an
+  explicitly minute-grain `rollup_1m` contract; `chart` remains presentation-
+  only, while `periods` / `summary` propagate the same honest typed results.
+  (issue #210)
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.

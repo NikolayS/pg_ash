@@ -98,8 +98,12 @@ Full mapping: [`blueprints/AAS_EXAMPLES.md`](blueprints/AAS_EXAMPLES.md).
 ## Reader API
 
 Start with `ash.periods()`, then drill down with `ash.timeline()` and `ash.top()`.
-Every reader reports its data source: `raw`, `rollup_1m`, `rollup_1h`, or
-`none`.
+Every reader reports its data source: `raw`, `rollup_1m`, `rollup_1h`,
+`rollup_1h_flat`, or `none`; the `flat` value marks a legacy hour whose minute
+detail could not be backfilled. `ash.compare()` reports the pair as
+`source_1` / `source_2`.
+Peak/p99 are NULL whenever the surviving grain is coarser than the requested
+bucket, while averages and backend-seconds remain valid.
 
 | Function | Use it for |
 |---|---|
