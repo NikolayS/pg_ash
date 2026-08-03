@@ -5947,6 +5947,15 @@ as $$
      */
     'grant_reader', 'revoke_reader',
     /*
+     * the list itself (#215): no reader calls it, only grant_reader /
+     * revoke_reader do. Leaving it out of the admin set made it part of the
+     * reader bundle, so revoke_reader() materialized an ACL on it and
+     * stripped the schema owner's own implicit EXECUTE — after which
+     * grant_reader() died with "permission denied for function
+     * _admin_funcs" while initialising this very variable.
+     */
+    '_admin_funcs',
+    /*
      * _apply_pgss_search_path runs ALTER FUNCTION on every reader, which
      * requires owner privilege so a non-owner call would fail anyway, but
      * list it explicitly so grant_reader doesn't hand it to monitoring
@@ -6076,8 +6085,8 @@ end $$;
  *     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
  *     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
  *     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg,
- *     _register_wait). Defining "reader" by exclusion (rather than
- *     enumeration) keeps the helpers correct as new readers and
+ *     _register_wait, _admin_funcs). Defining "reader" by exclusion (rather
+ *     than enumeration) keeps the helpers correct as new readers and
  *     reader-internal helpers are added.
  *   - SELECT on ash.sample (+ every sample_N partition), ash.query_map_all
  *     (+ every query_map_N partition), ash.config, ash.wait_event_map,
@@ -6202,6 +6211,7 @@ declare
   v_role text;
   -- See grant_reader: ash._admin_funcs() is the single source of truth.
   v_admin_funcs constant text[] := ash._admin_funcs();
+  v_schema_owner name;
   v_func_count int := 0;
   v_table_count int := 0;
 begin
@@ -6211,6 +6221,47 @@ begin
 
   if not exists (select 1 from pg_catalog.pg_roles where rolname = role) then
     raise exception 'ash.revoke_reader: role % does not exist',
+      quote_literal(role);
+  end if;
+
+  /*
+   * Targets that are not monitoring roles are refused up front (#215).
+   * revoke_reader() ends with REVOKE USAGE ON SCHEMA ash, so pointing it at
+   * the schema owner locks the install out of its own schema: take_sample(),
+   * status(), every reader — and grant_reader() itself, which lives in the
+   * schema that was just taken away — then fail with "permission denied for
+   * schema ash", with no supported way back. A superuser target keeps
+   * working through its ACL bypass, which is exactly why the mistake went
+   * unnoticed; the REVOKEs only leave misleading aclitems behind.
+   * grant_reader() is deliberately NOT symmetric here: granting to any of
+   * these roles is harmless.
+   */
+  select owner_role.rolname into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+
+  if role = v_schema_owner then
+    raise exception
+      'ash.revoke_reader: % owns schema ash; revoking would remove its USAGE '
+      'on the schema and break every ash.* call, including grant_reader()',
+      quote_literal(role);
+  end if;
+
+  if role = current_user then
+    raise exception
+      'ash.revoke_reader: refusing to revoke reader access from the calling '
+      'role %; revoke_reader is for monitoring roles',
+      quote_literal(role);
+  end if;
+
+  if exists (
+       select 1 from pg_catalog.pg_roles
+       where rolname = role and rolsuper
+     ) then
+    raise exception
+      'ash.revoke_reader: % is a superuser and bypasses these privileges; '
+      'revoking from it changes nothing and only leaves misleading ACLs',
       quote_literal(role);
   end if;
 
@@ -6263,7 +6314,7 @@ end;
 $$;
 
 comment on function ash.revoke_reader(name) is
-  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
+  'Revokes the privileges granted by ash.grant_reader(): USAGE on schema ash, EXECUTE on all reader functions, SELECT on reader tables. Idempotent. Inverse: ash.grant_reader(name). Refuses targets that are not monitoring roles: the owner of schema ash, the calling role, and superusers (revoking from the schema owner would remove its USAGE on schema ash and break every ash.* call, including grant_reader()). Caveat: ash.rebuild_partitions(N, ''yes'') creates new partition tables that previously-granted readers cannot access; re-run ash.grant_reader() for each monitoring role after any rebuild_partitions() call.';
 
 -- Lock down the helpers themselves: only the schema owner may hand out
 -- (or take back) privileges. PUBLIC must not be able to call them.

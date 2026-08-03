@@ -655,6 +655,142 @@ jobs:
           drop role ash_grafana;
           EOF
 
+      - name: "Issue #215: revoke_reader must not brick a non-superuser owner"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # revoke_reader() ends with REVOKE USAGE ON SCHEMA ash, so aiming it
+          # at the schema owner used to strip the install of its own schema:
+          # take_sample / status / every reader AND grant_reader() then failed
+          # with "permission denied for schema ash", and grant_reader() could
+          # not be used to undo it. A SUPERUSER owner is immune (ACL bypass),
+          # which is why every existing step — all of which run as postgres —
+          # missed it. So this step builds a second database owned by a plain
+          # login role and installs pg_ash there AS that role.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'ash_215_owner') then
+              create role ash_215_owner login password 'ash215';
+            end if;
+            if not exists (select from pg_roles where rolname = 'ash_215_reader') then
+              create role ash_215_reader login password 'ash215';
+            end if;
+          end $$;
+          EOF
+          psql -h localhost -U postgres -d postgres -c "drop database if exists ash_215_db"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "create database ash_215_db owner ash_215_owner"
+
+          PGPASSWORD=ash215 psql -h localhost -U ash_215_owner -d ash_215_db \
+            -v ON_ERROR_STOP=1 \
+            -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
+
+          PGPASSWORD=ash215 psql -h localhost -U ash_215_owner -d ash_215_db -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_owner name;
+            v_raised text;
+            v_rows int;
+          begin
+            select owner_role.rolname into v_owner
+            from pg_namespace as nsp
+            join pg_roles as owner_role on owner_role.oid = nsp.nspowner
+            where nsp.nspname = 'ash';
+            assert v_owner = current_user,
+              format('setup: schema ash must be owned by the connected role, got %s', v_owner);
+            assert not (select rolsuper from pg_roles where rolname = current_user),
+              'setup: this test is only meaningful for a NON-superuser owner';
+
+            -- 1) revoke_reader(<schema owner>) must refuse, not strip USAGE.
+            v_raised := null;
+            begin
+              perform ash.revoke_reader(v_owner);
+            exception when raise_exception then
+              v_raised := sqlerrm;
+            end;
+            assert v_raised is not null,
+              'ash.revoke_reader(<schema owner>) must raise, not brick the install';
+            assert v_raised like '%owns schema ash%',
+              format('revoke_reader must name the ownership reason, got: %s', v_raised);
+
+            -- 2) nothing was revoked: the owner keeps USAGE and every entry
+            --    point still works.
+            assert has_schema_privilege(v_owner, 'ash', 'USAGE'),
+              'owner must keep USAGE on schema ash after the refused revoke_reader';
+            select ash.take_sample() into v_rows;
+            assert v_rows >= 0,
+              format('take_sample must still run for the owner, got %s', v_rows);
+            assert (select count(*) from ash.periods()) = 6,
+              'ash.periods() must still return its 6 standard windows for the owner';
+            assert (select count(*) from ash.status()) > 0,
+              'ash.status() must still work for the owner';
+            assert ash.current_slot() = 0,
+              'ash.current_slot() must still be readable by the owner';
+
+            -- 3) grant_reader() must still work: it initialises from
+            --    ash._admin_funcs(), which the reader bundle used to revoke.
+            perform ash.grant_reader('ash_215_reader');
+            assert has_schema_privilege('ash_215_reader', 'ash', 'USAGE'),
+              'grant_reader must still be able to hand out USAGE';
+
+            -- 4) ash._admin_funcs() is admin-only: never part of the bundle.
+            assert '_admin_funcs' = any(ash._admin_funcs()),
+              'ash._admin_funcs() must list itself as admin-only (#215)';
+            assert not has_function_privilege(
+              'ash_215_reader', 'ash._admin_funcs()', 'EXECUTE'),
+              'grant_reader must not grant EXECUTE on ash._admin_funcs() (#215)';
+
+            -- 5) the normal path is untouched: a real monitoring role is
+            --    still revocable and loses exactly what grant_reader gave it.
+            perform ash.revoke_reader('ash_215_reader');
+            assert not has_schema_privilege('ash_215_reader', 'ash', 'USAGE'),
+              'revoke_reader must still remove USAGE from a monitoring role';
+
+            -- 6) a superuser target is refused: the ACL bypass makes the
+            --    revoke a no-op that only leaves misleading aclitems.
+            v_raised := null;
+            begin
+              perform ash.revoke_reader('postgres');
+            exception when raise_exception then
+              v_raised := sqlerrm;
+            end;
+            assert v_raised is not null,
+              'ash.revoke_reader(<superuser>) must raise';
+            assert v_raised like '%superuser%',
+              format('revoke_reader must name the superuser reason, got: %s', v_raised);
+
+            raise notice 'issue #215 owner/superuser guards PASSED';
+          end $$;
+          EOF
+
+          # 7) The calling role is refused too. Only reachable for a caller
+          #    that is neither the schema owner (owner guard fires first) nor
+          #    a plain role (revoke_reader is owner-only), i.e. a superuser
+          #    connected to the non-superuser-owned database.
+          psql -h localhost -U postgres -d ash_215_db -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_raised text;
+          begin
+            begin
+              perform ash.revoke_reader(current_user);
+            exception when raise_exception then
+              v_raised := sqlerrm;
+            end;
+            assert v_raised is not null,
+              'ash.revoke_reader(current_user) must raise';
+            assert v_raised like '%calling role%',
+              format('revoke_reader must name the calling-role reason, got: %s', v_raised);
+            raise notice 'issue #215 calling-role guard PASSED';
+          end $$;
+          EOF
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "drop database ash_215_db"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "drop role ash_215_reader" -c "drop role ash_215_owner"
+
       - name: "Test 2.0: pg_monitor gets reader access by default (opt-out via revoke_reader)"
         env:
           PGPASSWORD: postgres
