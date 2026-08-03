@@ -53,6 +53,34 @@ surface has been replaced by the AAS-oriented 2.0 API:
   handle the error. `ash.report()` still returns `null` — never an error — when
   the window simply has no coverage. (issue #214)
 
+- **`revoke_reader()` refuses targets that are not monitoring roles.** It now
+  raises when the target owns schema `ash`, is `current_user`, or is a
+  superuser, and leaves privileges unchanged. Previously, revoking the schema
+  owner on a non-superuser-owned install succeeded but removed the install's
+  own schema `USAGE`, after which sampling, every reader, and `grant_reader()`
+  failed with `permission denied for schema ash`. Calls targeting these roles
+  that previously succeeded must now handle the error. `_admin_funcs()` is
+  also in the admin set, so reader roles are no longer granted `EXECUTE` on the
+  helper that `grant_reader()` initializes from. (issue #215)
+
+- **Samples keep their query attribution across a concurrent slot rotation.**
+  `take_sample()` now writes the slot it used to resolve query-map ids into the
+  sample row. Previously, a rotation landing mid-sample could stamp packed ids
+  from the old slot's dictionary with the new slot. The row passed validation
+  and did not increment `insert_errors`, but its query ids decoded to `null`
+  initially and to unrelated queries after the new slot reused the same map
+  ids, silently misattributing the sample.
+
+- **Installer re-apply removes direct grants on admin functions.** The admin
+  hardening pass now revokes every named non-owner grantee before restoring the
+  schema owner's `EXECUTE`, removing stale `_admin_funcs()` grants that 2.0
+  beta 1 gave to reader roles, including `pg_monitor`. This makes an upgraded
+  install converge on the privileges of a fresh install. It also removes any
+  admin-function grant an operator deliberately gave directly to another role,
+  on every installer apply. To give a second role admin access, make it a
+  member of the schema owner role; inherited privileges are not revoked by the
+  hardening pass.
+
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
 [SECURITY.md](SECURITY.md#advisory-lock-squat-dos).
