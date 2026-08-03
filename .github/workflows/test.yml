@@ -3987,6 +3987,233 @@ jobs:
           end $$;
           EOF
 
+      - name: "Regression #212: raw retention boundary preserves the first minute"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          declare
+            v_minute timestamptz := date_trunc('minute', now());
+            v_oldest timestamptz := date_trunc('minute', now())
+                                      - interval '1 minute' + interval '11 seconds';
+            v_boundary timestamptz := date_trunc('minute', now())
+                                        - interval '11 minutes';
+            v_aged_sample timestamptz := date_trunc('minute', now())
+                                          - interval '20 minutes'
+                                          + interval '11 seconds';
+            v_aged_boundary timestamptz := date_trunc('minute', now())
+                                             - interval '10 minutes';
+            v_wait smallint;
+            v_query_map_id int4;
+            v_datid oid;
+            v_status_boundary timestamptz;
+            v_count int;
+            v_key text;
+            v_source text;
+            v_avg numeric;
+            v_peak numeric;
+            v_p99 numeric;
+            v_seconds numeric;
+            v_pct numeric;
+            v_message text;
+            v_state text;
+            v_rotate_result text;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            alter table ash.query_map_0 alter column id restart;
+
+            update ash.config
+            set current_slot = 0,
+                num_partitions = 3,
+                sample_interval = interval '1 second',
+                rotation_period = interval '10 minutes',
+                -- Mid-minute ring edge: the public boundary must floor this.
+                rotated_at = v_minute - interval '23 seconds'
+            where singleton;
+
+            select ash._register_wait('active', 'Lock', 'tuple') into v_wait;
+            insert into ash.query_map_0 (query_id) values (212212)
+            returning id into v_query_map_id;
+            select oid into v_datid
+            from pg_database
+            where datname = current_database();
+
+            -- A young install: eight one-second samples, all in the first
+            -- partial minute and all attributable to the same lock/query tie.
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            )
+            select ash.ts_from_timestamptz(v_oldest + i * interval '1 second'),
+                   v_datid, 1, array[-v_wait, 1, v_query_map_id]::int4[], 0
+            from generate_series(0, 7) as i;
+
+            -- README.md:193 verbatim: a young, fully-held install must not
+            -- reject the flagship query_id-by-wait drill.
+            v_message := null;
+            begin
+              select count(*), min(key), min(source), min(avg_aas),
+                     min(peak_aas), min(p99_aas), min(backend_seconds), min(pct)
+                into v_count, v_key, v_source, v_avg,
+                     v_peak, v_p99, v_seconds, v_pct
+              from ash.top(
+                'query_id',
+                since => now() - interval '5 minutes',
+                wait_event => 'Lock:tuple',
+                order_by => 'peak',
+                n => 5
+              );
+            exception when others then
+              v_message := sqlerrm;
+            end;
+            assert v_message is null,
+              'README:193 raised on a young install: ' || v_message;
+            assert (v_count, v_key, v_source) = (1, '212212', 'raw'),
+              format('README:193 identity: count=%s key=%s source=%s',
+                     v_count, v_key, v_source);
+            assert (v_avg, v_peak, v_p99, v_seconds, v_pct)
+                   = (0.03, 0.13, 0.13, 8.00, 100.00),
+              format('README:193 metrics: avg=%s peak=%s p99=%s seconds=%s pct=%s',
+                     v_avg, v_peak, v_p99, v_seconds, v_pct);
+
+            select value::timestamptz into v_status_boundary
+            from ash.status()
+            where metric = 'raw_retention_start';
+            assert v_status_boundary = v_boundary,
+              format('status boundary: expected %s, got %s (oldest sample %s)',
+                     v_boundary, v_status_boundary, v_oldest);
+
+            -- The documented status value must be directly reusable, without
+            -- the reader's minute floor moving it back across the guard.
+            select count(*), min(key), min(source), min(avg_aas),
+                   min(peak_aas), min(p99_aas), min(backend_seconds), min(pct)
+              into v_count, v_key, v_source, v_avg,
+                   v_peak, v_p99, v_seconds, v_pct
+            from ash.top(
+              'query_id', since => v_status_boundary,
+              wait_event => 'Lock:tuple', order_by => 'peak', n => 5
+            );
+            assert (v_count, v_key, v_source) = (1, '212212', 'raw'),
+              format('status boundary identity: count=%s key=%s source=%s',
+                     v_count, v_key, v_source);
+            assert (v_avg, v_peak, v_p99, v_seconds, v_pct)
+                   = (0.01, 0.13, 0.13, 8.00, 100.00),
+              format('status boundary metrics: avg=%s peak=%s p99=%s seconds=%s pct=%s',
+                     v_avg, v_peak, v_p99, v_seconds, v_pct);
+
+            -- A partial-overlap error must print the boundary rounded DOWN.
+            v_message := null;
+            begin
+              perform * from ash.top(
+                'query_id', since => v_boundary - interval '1 minute',
+                wait_event => 'Lock:tuple', order_by => 'peak', n => 5
+              );
+            exception when others then
+              v_message := sqlerrm;
+            end;
+            assert v_message = format(
+              'pg_ash: this drill needs raw samples; raw retention starts at %s '
+              'but the requested window starts at %s. Narrow the window to start '
+              'at or after %s (the window end is still inside raw retention), or '
+              'drill without the query/event tie.',
+              v_boundary, v_boundary - interval '1 minute', v_boundary
+            ), 'partial-overlap message mismatch: ' || coalesce(v_message, '<no error>');
+
+            -- Following that exact advice must preserve the first partial raw
+            -- minute and return the same eight backend-seconds, not zero rows.
+            select count(*), min(key), min(source), min(avg_aas),
+                   min(peak_aas), min(p99_aas), min(backend_seconds), min(pct)
+              into v_count, v_key, v_source, v_avg,
+                   v_peak, v_p99, v_seconds, v_pct
+            from ash.top(
+              'query_id', since => v_boundary,
+              wait_event => 'Lock:tuple', order_by => 'peak', n => 5
+            );
+            assert (v_count, v_key, v_source) = (1, '212212', 'raw'),
+              format('remediation identity: count=%s key=%s source=%s',
+                     v_count, v_key, v_source);
+            assert (v_avg, v_peak, v_p99, v_seconds, v_pct)
+                   = (0.01, 0.13, 0.13, 8.00, 100.00),
+              format('remediation metrics: avg=%s peak=%s p99=%s seconds=%s pct=%s',
+                     v_avg, v_peak, v_p99, v_seconds, v_pct);
+
+            -- Put one exact old row in the slot the next rotation truncates,
+            -- then prove it was genuinely aged out before testing the guard.
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values (
+              ash.ts_from_timestamptz(v_aged_sample),
+              v_datid, 1, array[-v_wait, 1, 0]::int4[], 2
+            );
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              ash.ts_from_timestamptz(date_trunc('minute', v_aged_sample)),
+              v_datid, 1, 1, array[v_wait, 1]::int4[], '{}'::int8[]
+            );
+            update ash.config
+            set rotated_at = now() - interval '11 minutes',
+                last_rollup_1m_ts = ash.ts_from_timestamptz(
+                  v_minute - interval '1 minute')
+            where singleton;
+            select ash.rotate() into v_rotate_result;
+            assert v_rotate_result =
+                   'rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)',
+              'aged-out setup rotation: ' || v_rotate_result;
+            assert (
+              select count(*) from ash.sample
+              where sample_ts = ash.ts_from_timestamptz(v_aged_sample)
+            ) = 0, 'rotation did not remove the aged sample';
+            assert ash._raw_retention_boundary() = v_aged_boundary,
+              format('post-rotation boundary: expected %s, got %s',
+                     v_aged_boundary, ash._raw_retention_boundary());
+
+            -- A window that held the now-truncated row must still raise the
+            -- unrecoverable form: the boundary fix cannot weaken this guard.
+            v_message := null;
+            v_state := null;
+            begin
+              perform * from ash.top(
+                'query_id',
+                since => date_trunc('minute', v_aged_sample),
+                until => date_trunc('minute', v_aged_sample)
+                           + interval '1 minute',
+                wait_event => 'Lock:tuple', order_by => 'peak', n => 5
+              );
+            exception when others then
+              v_message := sqlerrm;
+              v_state := sqlstate;
+            end;
+            assert v_state = 'P0001',
+              'aged-out window SQLSTATE: expected P0001, got ' || coalesce(v_state, '<none>');
+            assert v_message = format(
+              'pg_ash: this drill needs the raw wait<->query tie, but the requested '
+              'window (%s to %s) is entirely outside raw retention (raw retention '
+              'starts at %s). The tie is unrecoverable for that window — narrowing '
+              'it will not help. Use the untied aggregate readers instead: drop '
+              'either the wait filter or query_id (e.g. ash.aas(), ash.timeline(), '
+              'ash.top() with one of the two).',
+              date_trunc('minute', v_aged_sample),
+              date_trunc('minute', v_aged_sample) + interval '1 minute',
+              v_aged_boundary
+            ), 'aged-out message mismatch: ' || coalesce(v_message, '<no error>');
+
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.query_map_0, ash.query_map_1, ash.query_map_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set current_slot = 0,
+                rotation_period = interval '1 day',
+                rotated_at = now(),
+                last_rollup_1m_ts = null,
+                last_rollup_1h_ts = null
+            where singleton;
+            raise notice 'issue #212 raw retention boundary tests PASSED';
+          end $$;
+          EOF
+
       - name: "Test 2.0: report attribution, compare coverage, retention error split, chart legend"
         env:
           PGPASSWORD: postgres
@@ -4017,8 +4244,11 @@ jobs:
             v_cpu smallint; v_io smallint; v_q1 int4; v_dp oid;
             v_end timestamptz := date_trunc('hour', now());
             j jsonb; r record; n int; v_raised boolean;
-            v_raw timestamptz; v_bound timestamptz; v_passed timestamptz; v_msg text;
+            v_bound timestamptz; v_passed timestamptz; v_msg text;
           begin
+            update ash.config
+            set rotation_period = interval '30 minutes', rotated_at = v_end
+            where singleton;
             select ash._register_wait('active','CPU*','CPU*') into v_cpu;
             select ash._register_wait('active','IO','DataFileRead') into v_io;
             insert into ash.query_map_0 (query_id) values (424242);
@@ -4094,19 +4324,10 @@ jobs:
             assert v_raised, 'entirely-past retention error mismatch';
             -- partial overlap (window END inside raw retention, START before it):
             -- the message must (a) echo the un-floored start the USER passed and
-            -- (b) advise a minute-aligned boundary that, once passed, actually
-            -- clears the guard. Readers floor since to the minute before the
-            -- guard runs, so a mid-minute raw_retention_start otherwise loops:
-            -- narrowing to exactly raw_start re-floors below it and re-raises.
-            -- Give raw retention a mid-minute start with one earlier sample.
-            insert into ash.sample (sample_ts, datid, active_count, data, slot)
-            values (ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds'),
-                    v_dp, 1, array[-v_cpu, 1, 0]::integer[], 0);
-            v_raw := ash._raw_retention_start();
-            assert date_trunc('minute', v_raw) <> v_raw,
-              'test setup: raw_retention_start must be mid-minute, got ' || v_raw;
-            v_bound := date_trunc('minute', v_raw) + interval '1 minute';
-            v_passed := v_end - interval '2 hours' + interval '23 seconds';  -- mid-minute passed start
+            -- (b) advise the minute-aligned configured boundary, which is safe
+            -- to pass straight back through the readers' minute floor.
+            v_bound := v_end - interval '30 minutes';
+            v_passed := v_end - interval '40 minutes' + interval '23 seconds';
             v_raised := false;
             begin
               perform * from ash.aas(v_passed, v_end,
@@ -4119,23 +4340,17 @@ jobs:
             -- (a) echoes the un-floored start the user actually passed (not floored v_start_ts)
             assert v_msg like '%' || v_passed::text || '%',
               'message must echo the user''s passed start ' || v_passed || ', got: ' || v_msg;
-            -- (b) advises a minute-aligned boundary >= raw_start (followable, not a loop)
+            -- (b) advises the minute-aligned boundary (followable, not a loop)
             assert v_msg like '%start at or after ' || v_bound::text || '%',
               'hint must print minute-aligned boundary ' || v_bound || ', got: ' || v_msg;
             -- passing exactly that boundary now SUCCEEDS (the advice is actionable)
             select count(*) into n from ash.top('query_id', v_bound, v_end,
                                                 wait_event => 'DataFileRead');
             assert n = 1, 'following the hint boundary must return the 424242 row, got ' || n;
-            -- and passing raw_start itself re-floors below it and still raises (the loop we fixed)
-            v_raised := false;
-            begin
-              perform * from ash.aas(v_raw, v_end, wait_event => 'DataFileRead', query_id => 424242);
-            exception when others then v_raised := true; end;
-            assert v_raised, 'passing a mid-minute raw_start re-floors below it and still raises';
-            -- restore pre-test raw retention so downstream assertions see original state
-            delete from ash.sample
-              where sample_ts = ash.ts_from_timestamptz(v_end - interval '40 minutes' + interval '37 seconds');
-            raise notice 'retention error split PASSED (mid-minute hint is followable, echoes passed start)';
+            -- The boundary itself must also pass through another tie reader.
+            perform * from ash.aas(
+              v_bound, v_end, wait_event => 'DataFileRead', query_id => 424242);
+            raise notice 'retention error split PASSED (boundary hint is followable, echoes passed start)';
 
             -- ---- compare coverage honesty ----
             -- window 1 uncovered (4..3h back): NULL columns + NULL delta, overall mode.
@@ -4168,6 +4383,9 @@ jobs:
               if sqlerrm like 'ash.compare: unknown dimension%' then v_raised := true; else raise; end if;
             end;
             assert v_raised, 'compare dimension error must name ash.compare';
+            update ash.config
+            set rotation_period = interval '1 day', rotated_at = now()
+            where singleton;
             raise notice 'compare coverage honesty PASSED';
           end $$;
 
@@ -5236,6 +5454,8 @@ jobs:
               '#107: preserved reader must gain new internal helpers (ash._pgss_query_text)';
             assert has_function_privilege('ash_b1_reader', 'ash._raw_retention_start()', 'EXECUTE'),
               '#107: preserved reader must gain new internal helpers (ash._raw_retention_start)';
+            assert has_function_privilege('ash_b1_reader', 'ash._raw_retention_boundary()', 'EXECUTE'),
+              '#107: preserved reader must gain new internal helpers (ash._raw_retention_boundary)';
 
             -- No escalation: restoring grants must not widen the role's
             -- reach to admin functions or re-open PUBLIC.

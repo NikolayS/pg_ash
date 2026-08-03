@@ -2565,7 +2565,7 @@ begin
    * raw wait<->query drill stops. NULL when the source holds no data yet.
    */
   metric := 'raw_retention_start';
-  value := coalesce(ash._raw_retention_start()::text, 'no samples'); return next;
+  value := coalesce(ash._raw_retention_boundary()::text, 'no samples'); return next;
   metric := 'rollup_1m_retention_start';
   value := coalesce(ash._rollup_1m_retention_start()::text, 'no rollups'); return next;
   metric := 'rollup_1h_retention_start';
@@ -3423,9 +3423,10 @@ $$;
  */
 
 /*
- * Retention-start helpers: earliest timestamp each source can answer. Null
- * when the source holds no data. Used by source auto-selection and by the
- * raw-drill retention-boundary exception.
+ * Exact oldest timestamps currently held by each source. Null when the source
+ * holds no data. Used by source auto-selection and report attribution. Raw's
+ * configured retention boundary is separate: a fresh install or sampler
+ * outage can have a much newer oldest sample without having aged out data.
  */
 create or replace function ash._raw_retention_start()
 returns timestamptz
@@ -3434,6 +3435,40 @@ stable
 set search_path = pg_catalog, ash
 as $$
   select ash.ts_to_timestamptz(min(sample_ts)) from ash.sample
+$$;
+
+/*
+ * Earliest raw minute not lost to rotation. The completed-slot boundary is
+ * anchored at the last rotation, not at now(), because the current partial
+ * slot makes retention grow until the next rotation. If an older sample is
+ * still physically retained (for example after a delayed rotation), honor it.
+ * Keep the exact oldest sample separate for source selection and attribution.
+ */
+create or replace function ash._raw_retention_boundary()
+returns timestamptz
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  with oldest as (
+    select
+      ash._raw_retention_start() as sample_ts
+  )
+  select
+    case
+      when oldest.sample_ts is null then null
+      else date_trunc(
+        'minute',
+        least(
+          oldest.sample_ts,
+          config_row.rotated_at
+            - (config_row.num_partitions - 2) * config_row.rotation_period
+        )
+      )
+    end
+  from ash.config as config_row
+  cross join oldest
+  where config_row.singleton
 $$;
 
 create or replace function ash._rollup_1m_retention_start()
@@ -3536,13 +3571,28 @@ stable
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_next_boundary timestamptz;
+  v_raw_boundary timestamptz;
+  v_window_start timestamptz;
+  v_window_end timestamptz;
 begin
-  if raw_start is not null
-     and ash.ts_to_timestamptz(start_ts) >= raw_start then
+  v_raw_boundary := date_trunc(
+    'minute',
+    raw_start
+  );
+  v_window_start := date_trunc(
+    'minute',
+    ash.ts_to_timestamptz(start_ts)
+  );
+  v_window_end := date_trunc(
+    'minute',
+    ash.ts_to_timestamptz(end_ts)
+  );
+
+  if v_raw_boundary is not null
+     and v_window_start >= v_raw_boundary then
     return;  -- raw covers the window start: the tie drill can proceed
   end if;
-  if raw_start is null or ash.ts_to_timestamptz(end_ts) <= raw_start then
+  if v_raw_boundary is null or v_window_end <= v_raw_boundary then
     raise exception
       'pg_ash: this drill needs the raw wait<->query tie, but the requested '
       'window (% to %) is entirely outside raw retention (%). The tie is '
@@ -3551,25 +3601,23 @@ begin
       'query_id (e.g. ash.aas(), ash.timeline(), ash.top() with one of the '
       'two).',
       since,
-      ash.ts_to_timestamptz(end_ts),
-      coalesce('raw retention starts at ' || raw_start, 'no raw samples exist');
+      v_window_end,
+      coalesce(
+        'raw retention starts at ' || v_raw_boundary,
+        'no raw samples exist'
+      );
   end if;
   /*
-   * The reader floors since to the minute BEFORE this guard runs, so a user
-   * who narrows to exactly raw_start (when it is mid-minute) re-floors below
-   * it and loops on this same error. Advise the first minute-aligned instant
-   * at or after raw retention start — a value that actually clears the guard.
+   * The readers query minute grains, so remediation must preserve the partial
+   * first retained minute. The boundary and queried start are both floored;
+   * printing that same boundary is directly reusable by the caller.
    */
-  v_next_boundary := case
-    when date_trunc('minute', raw_start) = raw_start then raw_start
-    else date_trunc('minute', raw_start) + interval '1 minute'
-  end;
   raise exception
     'pg_ash: this drill needs raw samples; raw retention starts at % but the '
     'requested window starts at %. Narrow the window to start at or after % '
     '(the window end is still inside raw retention), or drill without the '
     'query/event tie.',
-    raw_start, since, v_next_boundary;
+    v_raw_boundary, since, v_raw_boundary;
 end;
 $$;
 
@@ -3862,7 +3910,7 @@ begin
 
   if v_tie then
     v_source := 'raw';
-    v_raw_start := ash._raw_retention_start();
+    v_raw_start := ash._raw_retention_boundary();
     perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
     v_grain_secs := 60;
   else
@@ -4027,7 +4075,7 @@ begin
            and (wait_event_type is not null or wait_event is not null);
   if v_tie then
     v_source := 'raw';
-    v_raw_start := ash._raw_retention_start();
+    v_raw_start := ash._raw_retention_boundary();
     perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
     v_grain_secs := 60;
   else
@@ -4461,7 +4509,7 @@ begin
 
   if v_tie then
     v_source := 'raw';
-    v_raw_start := ash._raw_retention_start();
+    v_raw_start := ash._raw_retention_boundary();
     perform ash._raise_tie_retention(v_raw_start, v_start_ts, v_end_ts, v_from);
     v_grain_secs := 60;
   else
