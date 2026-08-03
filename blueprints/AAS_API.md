@@ -18,8 +18,11 @@ removed (see §8). Sampling, storage, rollups, and admin/lifecycle functions
    a secondary absolute column. The v1.x units `samples` and bare
    `backend_seconds`-as-primary disappear.
 2. **One time convention.** Every reader takes
-   `since timestamptz default null` → `now() - interval '1 hour'` and
-   `until timestamptz default null` → `now()`.
+   `since timestamptz default null` and `until timestamptz default null`. The
+   window is resolved from its END: `until` → `now()`, then `since` →
+   `until - interval '1 hour'`, so passing only `until` answers the hour
+   *ending* at `until`. `since > until` raises rather than silently answering
+   a different window (issue #214).
    The `f(interval)` / `f_at(start, end)` twin pattern is dropped — that alone
    halves the surface. "Last 24 hours" is `since => now() - interval '24 hours'`.
 3. **Dimensions are parameters, not function names.** Group-by is an argument
@@ -66,8 +69,8 @@ Seven data functions, two render helpers. (v1.5 shipped ~25 readers × 2 forms.)
 ### Common parameters (uniform everywhere they appear)
 
 ```
-since           timestamptz default null   -- null → now() - '1 hour'
-until           timestamptz default null   -- null → now()
+since           timestamptz default null   -- null → until - '1 hour'
+until           timestamptz default null   -- null → now(); since > until raises
 wait_event_type text        default null   -- filter, e.g. 'IO', 'Lock', 'CPU*'
 wait_event      text        default null   -- filter, e.g. 'DataFileRead'
 query_id        bigint      default null   -- filter
@@ -267,8 +270,8 @@ For `report` (and documented for all readers):
 
 ```
 ash.report(
-  since  timestamptz default null,   -- null → now() - '1 day'
-  until    timestamptz default null,   -- null → now()
+  since  timestamptz default null,   -- null → until - '1 day'
+  until    timestamptz default null,   -- null → now(); since > until raises
   vcpus int         default null,   -- optional; normalization is the platform's job
   n   int         default 3       -- top-N events/queryids per window
 ) returns jsonb

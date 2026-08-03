@@ -39,6 +39,20 @@ surface has been replaced by the AAS-oriented 2.0 API:
   official `postgres:19beta1` image until the GA `postgres:19` image exists.
 - **Docs refreshed.** README examples now use the 2.0 named-argument API.
 
+## Fixes
+
+- **Reader windows are anchored on `until`, and an inverted window now raises.**
+  `aas`, `timeline`, `top`, `compare`, `samples`, `report`, `chart`, and
+  `summary` resolve `until` first (default `now()`) and only then default
+  `since` to `until` minus the reader's span (1 hour; 1 day for `report`), so
+  passing only `until` answers the window *ending* at `until` instead of a
+  window ending at `now()`. Calling any of them with `since > until` is now an
+  error: previously the inverted window was rewritten into a one-minute window
+  at an arbitrary distance and a full, plausible profile of the wrong period
+  was returned with no NOTICE. Automation that may pass a reversed pair must
+  handle the error. `ash.report()` still returns `null` — never an error — when
+  the window simply has no coverage. (issue #214)
+
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
 [SECURITY.md](SECURITY.md#advisory-lock-squat-dos).
