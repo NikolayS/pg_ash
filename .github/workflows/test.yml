@@ -1021,6 +1021,113 @@ jobs:
           $$;
           EOF
 
+      - name: "take_sample() must stamp the slot its query-map ids were resolved against"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # take_sample() only INSERTs when it can see a qualifying backend
+          # other than itself, so park one active client backend for the
+          # duration of the probe and wait until it is actually visible.
+          psql -h localhost -U postgres -d postgres -c "select pg_sleep(120)" > /dev/null 2>&1 &
+          sleeper=$!
+          for _ in $(seq 1 30); do
+            visible=$(psql -h localhost -U postgres -d postgres -tAc \
+              "select count(*) from pg_stat_activity where state = 'active' and backend_type = 'client backend' and query like 'select pg_sleep(120)%'")
+            [ "$visible" -ge 1 ] && break
+            sleep 1
+          done
+          test "$visible" -ge 1 || { echo "fixture backend never became visible" >&2; exit 1; }
+
+          set +e
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- ============================================================================
+          -- take_sample() must store the slot its query-map ids were resolved against.
+          --
+          -- v_current_slot is read once, near the top of ash.take_sample(), and drives
+          -- both the query_map_N registration INSERT and the query_map_all join that
+          -- packs map ids into sample.data. The sample INSERT used to omit the `slot`
+          -- column, so it fell back to the table DEFAULT ash.current_slot(), which
+          -- re-reads ash.config under the INSERT statement's own snapshot. ash.rotate()
+          -- takes a different advisory objid than the sampler, so nothing serializes
+          -- the two: a rotation committing in between stamped old-dictionary ids with
+          -- the new slot. The row still passes _sample_data_is_valid, so nothing warns
+          -- and insert_errors is not bumped — the sample simply decodes to NULL
+          -- query_ids, and to UNRELATED query_ids once the new slot's identity sequence
+          -- re-issues 1, 2, 3...
+          --
+          -- A real concurrent rotation cannot be landed deterministically in the middle
+          -- of a single take_sample() call from one session, so the window is injected
+          -- instead: ash.current_slot() is replaced for the duration of one transaction
+          -- with a probe that returns the true slot (0) on its FIRST evaluation and a
+          -- rotated slot (1) on every later one. That is exactly the divergence a
+          -- rotation opens. Everything happens inside a transaction that is rolled
+          -- back, so the real function, the config and the samples are restored even
+          -- if an assertion fails.
+          -- ============================================================================
+          begin;
+
+          create temp sequence ash_slot_probe_seq;
+
+          create or replace function ash.current_slot()
+          returns smallint
+          language sql
+          volatile
+          set search_path = pg_catalog, pg_temp
+          as $probe$
+            select case when nextval('ash_slot_probe_seq') = 1
+                        then 0::smallint
+                        else 1::smallint end
+          $probe$;
+
+          do $$
+          declare
+            v_errors_before bigint;
+            v_errors_after bigint;
+            v_inserted int;
+            v_slots smallint[];
+            v_probe_calls bigint;
+          begin
+            select insert_errors into v_errors_before from ash.config where singleton;
+            truncate ash.sample;
+
+            v_inserted := ash.take_sample();
+            assert v_inserted >= 1,
+              format('fixture: the sleeping backend must yield at least one sample '
+                     'row, got %s', v_inserted);
+
+            -- currval raises if take_sample never resolved ash.current_slot() at all,
+            -- which would make the slot assertion below vacuous.
+            v_probe_calls := currval('ash_slot_probe_seq');
+            assert v_probe_calls >= 1,
+              format('fixture: take_sample must resolve ash.current_slot(), got %s '
+                     'probe calls', v_probe_calls);
+
+            select array_agg(distinct sample_row.slot order by sample_row.slot)
+              into v_slots
+            from ash.sample as sample_row;
+            assert v_slots = array[0]::smallint[],
+              format('take_sample must store the slot its query-map ids were resolved '
+                     'against (0), got %s — the sample INSERT re-evaluated the '
+                     'ash.current_slot() column DEFAULT', v_slots);
+
+            select insert_errors into v_errors_after from ash.config where singleton;
+            assert v_errors_after = v_errors_before,
+              format('take_sample must not have hit an insert error during the probe '
+                     '(%s -> %s)', v_errors_before, v_errors_after);
+
+            raise notice 'take_sample slot-stamping PASSED';
+          end $$;
+
+          rollback;
+          EOF
+          rc=$?
+          set -e
+
+          psql -h localhost -U postgres -d postgres \
+            -c "select pg_terminate_backend(pid) from pg_stat_activity where query like 'select pg_sleep(120)%' and pid <> pg_backend_pid()" > /dev/null
+          wait $sleeper 2>/dev/null || true
+          exit $rc
+
       - name: Test decode_sample(int4) and decode_sample_at(timestamptz) convenience
         env:
           PGPASSWORD: postgres

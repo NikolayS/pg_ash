@@ -1014,8 +1014,23 @@ begin
       cross join backend_count;
 
       if v_data is not null and array_length(v_data, 1) >= 3 then
-        insert into ash.sample (sample_ts, datid, active_count, data)
-        values (v_sample_ts, v_datid_rec.datid, v_active_count, v_data);
+        /*
+         * slot is named explicitly and takes v_current_slot — the slot the
+         * packed query_map ids above were actually resolved against. Left
+         * out of the column list it falls back to the table DEFAULT,
+         * ash.current_slot(), which re-reads ash.config under this
+         * statement's own snapshot. rotate() takes a different advisory
+         * objid than the sampler, so nothing serializes the two: a rotation
+         * committing between the dictionary read and this INSERT stamped
+         * old-dictionary ids with the NEW slot. The row still satisfies
+         * _sample_data_is_valid, so nothing warns and insert_errors is not
+         * bumped — it just decodes to NULL query_ids until the new slot's
+         * identity sequence re-issues 1, 2, 3..., and to unrelated
+         * query_ids after that.
+         */
+        insert into ash.sample (sample_ts, datid, active_count, data, slot)
+        values (v_sample_ts, v_datid_rec.datid, v_active_count, v_data,
+                v_current_slot);
         v_rows_inserted := v_rows_inserted + 1;
       end if;
 
