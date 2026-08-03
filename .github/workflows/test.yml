@@ -3000,6 +3000,262 @@ jobs:
           $$;
           EOF
 
+      - name: "Issue #213: rebuild_partitions preserves reader grants"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # A rebuild drops and recreates query_map_all plus every sample_N /
+          # query_map_N relation. The outage used to be latent: empty storage
+          # let readers appear healthy until the first sample made status()
+          # touch the freshly-created, ungranted query_map_all view. Drive that
+          # path before inspecting ACLs so this test fails on the user-visible
+          # bug, not only on a catalog difference.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            if not exists (
+              select from pg_roles where rolname = 'cx213_rebuild_reader'
+            ) then
+              create role cx213_rebuild_reader;
+            end if;
+            if not exists (
+              select from pg_roles where rolname = 'cx213_rebuild_partial'
+            ) then
+              create role cx213_rebuild_partial;
+            end if;
+            if not exists (
+              select from pg_roles where rolname = 'cx213_rebuild_none'
+            ) then
+              create role cx213_rebuild_none;
+            end if;
+          end $$;
+
+          select ash.grant_reader('cx213_rebuild_reader');
+          grant select on ash.query_map_0 to cx213_rebuild_partial
+            with grant option;
+          grant select on ash.sample_1 to cx213_rebuild_partial;
+
+          do $$
+          declare
+            v_acl text[];
+            v_full_acl constant text[] := array[
+              'query_map_0:false', 'query_map_1:false',
+              'query_map_2:false', 'query_map_all:false',
+              'sample_0:false', 'sample_1:false', 'sample_2:false'
+            ];
+            v_role constant name[] := array[
+              'cx213_rebuild_reader'::name, 'pg_monitor'::name,
+              'cx213_rebuild_partial'::name, 'cx213_rebuild_none'::name
+            ];
+            v_expected text[];
+          begin
+            for i in 1 .. cardinality(v_role) loop
+              v_expected := case
+                when i <= 2 then v_full_acl
+                when i = 3 then array['query_map_0:true', 'sample_1:false']
+                else array[]::text[]
+              end;
+              select coalesce(
+                       array_agg(
+                         relation.relname || ':' || acl.is_grantable
+                         order by relation.relname
+                       ),
+                       array[]::text[]
+                     )
+              into v_acl
+              from pg_class as relation
+              join pg_namespace as nsp on nsp.oid = relation.relnamespace
+              cross join lateral aclexplode(relation.relacl) as acl
+              join pg_roles as grantee on grantee.oid = acl.grantee
+              where nsp.nspname = 'ash'
+                and (relation.relname = 'query_map_all'
+                     or relation.relname ~ '^query_map_[0-9]+$'
+                     or relation.relname ~ '^sample_[0-9]+$')
+                and acl.privilege_type = 'SELECT'
+                and grantee.rolname = v_role[i];
+              assert v_acl = v_expected,
+                format('%s pre-rebuild ACL: expected %s, got %s',
+                       v_role[i], v_expected, v_acl);
+            end loop;
+          end $$;
+
+          select ash.rebuild_partitions(4, 'yes');
+          update ash.config set sampling_enabled = true where singleton;
+          EOF
+
+          PGAPPNAME=cx213_rebuild_probe \
+            psql -h localhost -U postgres -d postgres \
+              -c "select pg_sleep(30)" >/dev/null 2>&1 &
+          probe_pid=$!
+          trap 'kill "$probe_pid" 2>/dev/null || true; wait "$probe_pid" 2>/dev/null || true' EXIT
+
+          active_probe=0
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            active_probe=$(psql -h localhost -U postgres -d postgres -tAX \
+              -c "select count(*) from pg_stat_activity
+                  where application_name = 'cx213_rebuild_probe'
+                    and state = 'active'")
+            if [ "$active_probe" = "1" ]; then
+              break
+            fi
+            sleep 0.25
+          done
+          if [ "$active_probe" != "1" ]; then
+            echo "Expected exactly one active sampler probe, got: $active_probe" >&2
+            exit 1
+          fi
+
+          sampled=$(psql -h localhost -U postgres -d postgres -tAX \
+            -v ON_ERROR_STOP=1 -c "select ash.take_sample()")
+          if [ "$sampled" != "1" ]; then
+            echo "Expected ash.take_sample() to insert exactly 1 row, got: $sampled" >&2
+            exit 1
+          fi
+          terminated=$(psql -h localhost -U postgres -d postgres -tAX \
+            -v ON_ERROR_STOP=1 \
+            -c "select count(*)
+                from (
+                  select pg_terminate_backend(pid) as stopped
+                  from pg_stat_activity
+                  where application_name = 'cx213_rebuild_probe'
+                ) as probe
+                where stopped")
+          if [ "$terminated" != "1" ]; then
+            echo "Expected to terminate exactly 1 sampler probe, got: $terminated" >&2
+            exit 1
+          fi
+          wait "$probe_pid" 2>/dev/null || true
+          trap - EXIT
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          set role cx213_rebuild_reader;
+          do $$
+          declare
+            v_status_version text;
+            v_status_samples text;
+            v_status_partitions text;
+            v_sample record;
+          begin
+            select value into strict v_status_version
+            from ash.status() where metric = 'version';
+            assert v_status_version = '2.0-beta1',
+              format('named reader status version: expected 2.0-beta1, got %s',
+                     v_status_version);
+            select value into strict v_status_samples
+            from ash.status() where metric = 'samples_total';
+            assert v_status_samples = '1',
+              format('named reader status samples_total: expected 1, got %s',
+                     v_status_samples);
+            select value into strict v_status_partitions
+            from ash.status() where metric = 'num_partitions';
+            assert v_status_partitions = '4',
+              format('named reader status num_partitions: expected 4, got %s',
+                     v_status_partitions);
+
+            select count(*) as rows,
+                   min(database_name) as database_name,
+                   min(active_backends) as active_backends,
+                   min(wait_event) as wait_event
+            into v_sample
+            from ash.samples(
+              now() - interval '1 hour', now() + interval '1 second'
+            );
+            assert v_sample.rows = 1,
+              format('named reader samples(): expected 1 row, got %s',
+                     v_sample.rows);
+            assert v_sample.database_name = 'postgres',
+              format('named reader samples(): expected database postgres, got %s',
+                     v_sample.database_name);
+            assert v_sample.active_backends = 1,
+              format('named reader samples(): expected active_backends 1, got %s',
+                     v_sample.active_backends);
+            assert v_sample.wait_event = 'Timeout:PgSleep',
+              format('named reader samples(): expected Timeout:PgSleep, got %s',
+                     v_sample.wait_event);
+          end $$;
+          reset role;
+
+          set role pg_monitor;
+          do $$
+          declare
+            v_status_version text;
+            v_status_samples text;
+            v_sample_count bigint;
+          begin
+            select value into strict v_status_version
+            from ash.status() where metric = 'version';
+            assert v_status_version = '2.0-beta1',
+              format('pg_monitor status version: expected 2.0-beta1, got %s',
+                     v_status_version);
+            select value into strict v_status_samples
+            from ash.status() where metric = 'samples_total';
+            assert v_status_samples = '1',
+              format('pg_monitor status samples_total: expected 1, got %s',
+                     v_status_samples);
+            select count(*) into v_sample_count
+            from ash.samples(
+              now() - interval '1 hour', now() + interval '1 second'
+            );
+            assert v_sample_count = 1,
+              format('pg_monitor samples(): expected 1 row, got %s',
+                     v_sample_count);
+          end $$;
+          reset role;
+
+          do $$
+          declare
+            v_acl text[];
+            v_full_acl constant text[] := array[
+              'query_map_0:false', 'query_map_1:false',
+              'query_map_2:false', 'query_map_3:false',
+              'query_map_all:false', 'sample_0:false',
+              'sample_1:false', 'sample_2:false', 'sample_3:false'
+            ];
+            v_role constant name[] := array[
+              'cx213_rebuild_reader'::name, 'pg_monitor'::name,
+              'cx213_rebuild_partial'::name, 'cx213_rebuild_none'::name
+            ];
+            v_expected text[];
+          begin
+            for i in 1 .. cardinality(v_role) loop
+              v_expected := case
+                when i <= 2 then v_full_acl
+                when i = 3 then array['query_map_0:true', 'sample_1:false']
+                else array[]::text[]
+              end;
+              select coalesce(
+                       array_agg(
+                         relation.relname || ':' || acl.is_grantable
+                         order by relation.relname
+                       ),
+                       array[]::text[]
+                     )
+              into v_acl
+              from pg_class as relation
+              join pg_namespace as nsp on nsp.oid = relation.relnamespace
+              cross join lateral aclexplode(relation.relacl) as acl
+              join pg_roles as grantee on grantee.oid = acl.grantee
+              where nsp.nspname = 'ash'
+                and (relation.relname = 'query_map_all'
+                     or relation.relname ~ '^query_map_[0-9]+$'
+                     or relation.relname ~ '^sample_[0-9]+$')
+                and acl.privilege_type = 'SELECT'
+                and grantee.rolname = v_role[i];
+              assert v_acl = v_expected,
+                format('%s post-rebuild ACL: expected %s, got %s',
+                       v_role[i], v_expected, v_acl);
+            end loop;
+          end $$;
+
+          select ash.rebuild_partitions(3, 'yes');
+          update ash.config set sampling_enabled = true where singleton;
+          drop owned by cx213_rebuild_reader, cx213_rebuild_partial,
+            cx213_rebuild_none;
+          drop role cx213_rebuild_reader;
+          drop role cx213_rebuild_partial;
+          drop role cx213_rebuild_none;
+          EOF
+
       - name: "Test v1.4: array merge helpers"
         env:
           PGPASSWORD: postgres

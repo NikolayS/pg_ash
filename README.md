@@ -373,9 +373,13 @@ select ash.rebuild_partitions(9, 'yes');
 select ash.start();
 ```
 
-`rebuild_partitions()` drops all raw samples and query-map partitions. Rollups
-survive. Re-run `ash.grant_reader()` for monitoring roles afterward because
-new partitions need fresh grants.
+`rebuild_partitions()` drops and recreates all raw-sample and query-map
+relations, including the `query_map_all` view. Rollups survive. Existing
+reader bundles are preserved automatically, including the installer's default
+`pg_monitor` grant; partial manual grants are restored only on the same
+relation names and are not widened. Older 2.0-beta1 builds did not preserve
+these grants: after a rebuild on one of those builds, re-run
+`ash.grant_reader()` for each reader role, including `pg_monitor`.
 
 Typical storage at 1-second sampling:
 
