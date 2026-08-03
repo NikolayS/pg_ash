@@ -3578,6 +3578,316 @@ jobs:
 
           echo "Critical bug #81 regression tests PASSED"
 
+      - name: "Critical bug #211: rollup cleanup must not freeze rotation"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- Recreate the legacy geometry that made cleanup and rotation
+          -- deadlock. The new constraint is removed only in this transaction;
+          -- ROLLBACK restores it and every fixture below.
+          begin;
+          alter table ash.config
+            drop constraint if exists config_raw_rollup_geometry_check;
+
+          do $$
+          declare
+            v_minute_ts int4;
+            v_wait_id smallint;
+            v_rollup_result int;
+            v_cleanup_result text;
+            v_rotate_result text;
+            v_current_slot smallint;
+            v_raw_rows bigint;
+            v_rollup_rows bigint;
+          begin
+            perform ash.stop();
+            truncate ash.sample;
+            truncate ash.rollup_1m;
+            truncate ash.rollup_1h;
+            truncate ash.wait_event_map restart identity cascade;
+            truncate ash.query_map_0 restart identity;
+            truncate ash.query_map_1 restart identity;
+            truncate ash.query_map_2 restart identity;
+
+            v_minute_ts := ash.ts_from_timestamptz(
+              date_trunc('minute', now() - interval '36 hours')
+            );
+            select ash._register_wait('active', 'Issue211', 'ExpiredRollup')
+            into v_wait_id;
+
+            update ash.config
+            set current_slot = 0,
+              rotated_at = now() - interval '2 days',
+              rotation_period = interval '1 day',
+              rollup_1m_retention_days = 1,
+              last_rollup_1m_ts = ash.ts_from_timestamptz(
+                date_trunc('minute', now())
+              ),
+              last_rollup_1h_ts = null,
+              sampling_enabled = true
+            where singleton;
+
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values (
+              v_minute_ts,
+              0::oid,
+              1::smallint,
+              array[-v_wait_id, 1, 0]::integer[],
+              2::smallint
+            );
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              v_minute_ts,
+              0::oid,
+              1::smallint,
+              1::smallint,
+              array[v_wait_id, 1]::int4[],
+              '{}'::int8[]
+            );
+
+            -- Shipped job order: the forward-only watermark cannot revisit
+            -- this minute, then cleanup removes its already-built rollup.
+            select ash.rollup_minute(1000000) into v_rollup_result;
+            assert v_rollup_result = 0,
+              format('expired minute rollup result should be 0, got %s',
+                     v_rollup_result);
+
+            select ash.rollup_cleanup() into v_cleanup_result;
+            assert v_cleanup_result =
+              'cleanup: deleted 1 minute rows, 0 hourly rows',
+              format('unexpected cleanup result: %s', v_cleanup_result);
+            select count(*) into v_rollup_rows
+            from ash.rollup_1m
+            where ts = v_minute_ts and datid = 0::oid;
+            assert v_rollup_rows = 0,
+              format('expired minute should have 0 rollups, got %s',
+                     v_rollup_rows);
+
+            select ash.rotate() into v_rotate_result;
+            assert v_rotate_result =
+              'rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)',
+              format('rotation did not recover after cleanup: %s',
+                     v_rotate_result);
+
+            select current_slot into v_current_slot
+            from ash.config where singleton;
+            select count(*) into v_raw_rows from ash.sample_2;
+            assert v_current_slot = 1,
+              format('current_slot should advance to 1, got %s',
+                     v_current_slot);
+            assert v_raw_rows = 0,
+              format('recovered rotation should leave 0 rows in slot 2, got %s',
+                     v_raw_rows);
+
+            raise notice 'issue #211 expired-rollup rotation recovery PASSED';
+          end $$;
+          rollback;
+
+          -- Preserve issue #81: a still-retained raw group whose watermark is
+          -- already past it must keep blocking truncation until its rollup is
+          -- genuinely complete. Also verify consecutive failures and reset.
+          begin;
+          do $$
+          declare
+            v_minute_ts int4;
+            v_wait_id smallint;
+            v_rotate_result text;
+            v_current_slot smallint;
+            v_raw_rows bigint;
+            v_status_values text[];
+          begin
+            perform ash.stop();
+            truncate ash.sample;
+            truncate ash.rollup_1m;
+            truncate ash.rollup_1h;
+            truncate ash.wait_event_map restart identity cascade;
+            truncate ash.query_map_0 restart identity;
+            truncate ash.query_map_1 restart identity;
+            truncate ash.query_map_2 restart identity;
+
+            v_minute_ts := ash.ts_from_timestamptz(
+              date_trunc('minute', now() - interval '2 minutes')
+            );
+            select ash._register_wait('active', 'Issue211', 'RetainedUnrolled')
+            into v_wait_id;
+
+            update ash.config
+            set current_slot = 0,
+              rotated_at = now() - interval '2 days',
+              rotation_period = interval '1 day',
+              rollup_1m_retention_days = 30,
+              last_rollup_1m_ts = ash.ts_from_timestamptz(
+                date_trunc('minute', now())
+              ),
+              last_rollup_1h_ts = null,
+              sampling_enabled = true
+            where singleton;
+            if exists (
+              select from information_schema.columns
+              where table_schema = 'ash'
+                and table_name = 'config'
+                and column_name = 'consecutive_rotate_failures'
+            ) then
+              execute 'update ash.config '
+                'set consecutive_rotate_failures = 0 where singleton';
+            end if;
+
+            insert into ash.sample (
+              sample_ts, datid, active_count, data, slot
+            ) values (
+              v_minute_ts,
+              0::oid,
+              1::smallint,
+              array[-v_wait_id, 1, 0]::integer[],
+              2::smallint
+            );
+
+            select ash.rotate() into v_rotate_result;
+            assert v_rotate_result =
+              'failed: pre-truncation rollup incomplete for 1 group(s) '
+              'in slot 2; slot not truncated',
+              format('retained unrolled group should block rotation, got: %s',
+                     v_rotate_result);
+            select current_slot into v_current_slot
+            from ash.config where singleton;
+            select count(*) into v_raw_rows from ash.sample_2;
+            assert v_current_slot = 0,
+              format('failed rotation should leave current_slot 0, got %s',
+                     v_current_slot);
+            assert v_raw_rows = 1,
+              format('failed rotation should preserve 1 raw row, got %s',
+                     v_raw_rows);
+            select array_agg(value order by value) into v_status_values
+            from ash.status()
+            where metric = 'consecutive_rotate_failures';
+            assert v_status_values = array['1']::text[],
+              format('status failure metric should be exactly {1}, got %s',
+                     coalesce(v_status_values::text, 'NULL'));
+
+            select ash.rotate() into v_rotate_result;
+            assert v_rotate_result =
+              'failed: pre-truncation rollup incomplete for 1 group(s) '
+              'in slot 2; slot not truncated',
+              format('second retained-group failure changed: %s',
+                     v_rotate_result);
+            select array_agg(value order by value) into v_status_values
+            from ash.status()
+            where metric = 'consecutive_rotate_failures';
+            assert v_status_values = array['2']::text[],
+              format('status failure metric should be exactly {2}, got %s',
+                     coalesce(v_status_values::text, 'NULL'));
+
+            insert into ash.rollup_1m (
+              ts, datid, samples, peak_backends, wait_counts, query_counts
+            ) values (
+              v_minute_ts,
+              0::oid,
+              1::smallint,
+              1::smallint,
+              array[v_wait_id, 1]::int4[],
+              '{}'::int8[]
+            );
+            select ash.rotate() into v_rotate_result;
+            assert v_rotate_result =
+              'rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)',
+              format('rotation should recover after complete rollup, got: %s',
+                     v_rotate_result);
+            select array_agg(value order by value) into v_status_values
+            from ash.status()
+            where metric = 'consecutive_rotate_failures';
+            assert v_status_values = array['0']::text[],
+              format('successful rotation should reset metric to {0}, got %s',
+                     coalesce(v_status_values::text, 'NULL'));
+
+            raise notice 'issue #211 retained-group gate and status PASSED';
+          end $$;
+          rollback;
+
+          -- Geometry must be rejected before rebuild_partitions() changes any
+          -- state, and direct writes to each participating config column must
+          -- be covered by the named cross-column constraint.
+          do $$
+          declare
+            v_result text := '<accepted>';
+            v_constraint text;
+            v_num_partitions smallint;
+            v_sampling_enabled bool;
+          begin
+            begin
+              perform ash.rebuild_partitions(32, 'yes');
+            exception when raise_exception then
+              get stacked diagnostics v_result = message_text;
+            end;
+            assert v_result =
+              'rebuild_partitions: 32 partitions at rotation_period 1 day '
+              'exceed rollup_1m retention 30 days; require '
+              '(num_partitions - 1) * rotation_period '
+              '<= rollup_1m_retention_days',
+              format('unexpected rebuild geometry result: %s', v_result);
+            select num_partitions, sampling_enabled
+            into v_num_partitions, v_sampling_enabled
+            from ash.config where singleton;
+            assert v_num_partitions = 3,
+              format('rejected rebuild should leave 3 partitions, got %s',
+                     v_num_partitions);
+            assert v_sampling_enabled = true,
+              format('rejected rebuild should leave sampling enabled, got %s',
+                     v_sampling_enabled);
+
+            begin
+              update ash.config
+              set rollup_1m_retention_days = 1
+              where singleton;
+              v_constraint := '<accepted retention>';
+            exception when check_violation then
+              get stacked diagnostics v_constraint = constraint_name;
+            end;
+            assert v_constraint = 'config_raw_rollup_geometry_check',
+              format('retention update constraint should be exact, got %s',
+                     coalesce(v_constraint, 'NULL'));
+
+            begin
+              update ash.config
+              set rotation_period = interval '16 days'
+              where singleton;
+              v_constraint := '<accepted rotation>';
+            exception when check_violation then
+              get stacked diagnostics v_constraint = constraint_name;
+            end;
+            assert v_constraint = 'config_raw_rollup_geometry_check',
+              format('rotation update constraint should be exact, got %s',
+                     coalesce(v_constraint, 'NULL'));
+
+            begin
+              update ash.config
+              set num_partitions = 32
+              where singleton;
+              v_constraint := '<accepted partitions>';
+            exception when check_violation then
+              get stacked diagnostics v_constraint = constraint_name;
+            end;
+            assert v_constraint = 'config_raw_rollup_geometry_check',
+              format('partition update constraint should be exact, got %s',
+                     coalesce(v_constraint, 'NULL'));
+
+            update ash.config
+            set rollup_1m_retention_days = 2
+            where singleton;
+            assert (
+              select rollup_1m_retention_days from ash.config where singleton
+            ) = 2,
+              'exact-boundary geometry should set retention to 2 days';
+            update ash.config
+            set rollup_1m_retention_days = 30
+            where singleton;
+
+            raise notice 'issue #211 geometry validation PASSED';
+          end $$;
+          EOF
+
       - name: "Test 2.0 readers over rollup sources"
         env:
           PGPASSWORD: postgres

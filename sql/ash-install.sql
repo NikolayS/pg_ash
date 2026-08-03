@@ -268,7 +268,13 @@ create table if not exists ash.config (
   -- M-BUG-4: rows silently dropped by take_sample()'s inner exception handler.
   insert_errors              bigint not null default 0,
   -- M-BUG-6 / H-SEC-3: _register_wait dictionary-cap hit counter.
-  register_wait_cap_hits     bigint not null default 0
+  register_wait_cap_hits     bigint not null default 0,
+  -- Consecutive rotate() failure returns; reset only by a real rotation.
+  consecutive_rotate_failures bigint not null default 0,
+  constraint config_raw_rollup_geometry_check check (
+    (num_partitions - 1) * rotation_period
+      <= rollup_1m_retention_days * interval '1 day'
+  )
 );
 
 -- Insert initial row if not exists.
@@ -300,14 +306,17 @@ alter table ash.config
    * registrations are being silently dropped for that sample (those sessions
    * won't appear in encoded data for this tick). Surfaced by ash.status().
    */
-  add column if not exists register_wait_cap_hits bigint not null default 0;
+  add column if not exists register_wait_cap_hits bigint not null default 0,
+  add column if not exists consecutive_rotate_failures bigint not null default 0;
 
 /*
- * Ensure retention CHECK constraints exist for both fresh and upgrade paths.
+ * Ensure config CHECK constraints exist for both fresh and upgrade paths.
  * ADD COLUMN IF NOT EXISTS above doesn't apply CHECKs to pre-existing columns,
- * so add them explicitly here (guarded by a not-exists probe for idempotency).
+ * so add them explicitly here (guarded by not-exists probes for idempotency).
  */
 do $$
+declare
+  v_required_rollup_days numeric;
 begin
   if not exists (
     select from pg_constraint
@@ -324,6 +333,55 @@ begin
     alter table ash.config
       add constraint config_rollup_1h_retention_days_check
       check (rollup_1h_retention_days >= 1);
+  end if;
+
+  if not exists (
+    select from pg_constraint
+    where conname = 'config_raw_rollup_geometry_check'
+      and conrelid = 'ash.config'::regclass
+  ) then
+    /*
+     * Existing 2.0-beta1 installs may already have the unsafe geometry this
+     * check closes. Raising minute-rollup retention is the only non-destructive
+     * repair: reducing num_partitions would drop raw data, while rejecting the
+     * installer would prevent affected systems from receiving the rotate fix.
+     * Round up because retention is configured in whole days.
+     */
+    select ceil(
+      extract(epoch from ((num_partitions - 1) * rotation_period)) / 86400
+    )
+    into v_required_rollup_days
+    from ash.config
+    where singleton;
+
+    if v_required_rollup_days > 32767 then
+      raise exception
+        'pg_ash: existing raw retention geometry requires % days of '
+        'rollup_1m retention, beyond the smallint limit; reduce '
+        'num_partitions or rotation_period before reinstalling',
+        v_required_rollup_days;
+    end if;
+
+    if exists (
+      select from ash.config
+      where singleton
+        and (num_partitions - 1) * rotation_period
+          > rollup_1m_retention_days * interval '1 day'
+    ) then
+      raise warning
+        'pg_ash: raising rollup_1m_retention_days to % so existing raw '
+        'retention does not exceed minute-rollup retention',
+        v_required_rollup_days;
+      update ash.config
+      set rollup_1m_retention_days = v_required_rollup_days::smallint
+      where singleton;
+    end if;
+
+    alter table ash.config
+      add constraint config_raw_rollup_geometry_check check (
+        (num_partitions - 1) * rotation_period
+          <= rollup_1m_retention_days * interval '1 day'
+      );
   end if;
 end $$;
 
@@ -1323,6 +1381,8 @@ declare
   v_truncate_slot smallint;
   v_num_partitions smallint;
   v_rotation_period interval;
+  v_rollup_1m_retention_days smallint;
+  v_rollup_1m_cutoff int4;
   v_rotated_at timestamptz;
   v_rotation_minutes int;
   v_rollup_result int;
@@ -1346,8 +1406,10 @@ begin
 
   begin
     -- Get current config.
-    select current_slot, num_partitions, rotation_period, rotated_at
-    into v_old_slot, v_num_partitions, v_rotation_period, v_rotated_at
+    select current_slot, num_partitions, rotation_period,
+           rollup_1m_retention_days, rotated_at
+    into v_old_slot, v_num_partitions, v_rotation_period,
+         v_rollup_1m_retention_days, v_rotated_at
     from ash.config
     where singleton;
 
@@ -1379,6 +1441,9 @@ begin
            hashtext('pg_ash')::int4,
            hashtext('pg_ash_rollup')::int4
          ) then
+        update ash.config
+        set consecutive_rotate_failures = consecutive_rotate_failures + 1
+        where singleton;
         return format(
           'failed: pre-truncation rollup busy; slot %s not truncated',
           v_truncate_slot
@@ -1391,6 +1456,9 @@ begin
       begin
         select ash.rollup_minute(v_rotation_minutes) into v_rollup_result;
       exception when undefined_function then
+        update ash.config
+        set consecutive_rotate_failures = consecutive_rotate_failures + 1
+        where singleton;
         return format(
           'failed: rollup_minute() unavailable; slot %s not truncated',
           v_truncate_slot
@@ -1398,6 +1466,9 @@ begin
       when others then
         raise warning 'ash.rotate: rollup_minute failed [%]: %',
           sqlstate, sqlerrm;
+        update ash.config
+        set consecutive_rotate_failures = consecutive_rotate_failures + 1
+        where singleton;
         return format(
           'failed: pre-truncation rollup failed [%s]; slot %s not truncated',
           sqlstate,
@@ -1405,12 +1476,25 @@ begin
         );
       end;
 
+      v_rollup_1m_cutoff := ash.ts_from_timestamptz(
+        now() - v_rollup_1m_retention_days * interval '1 day'
+      );
+
+      /*
+       * Only retained minute groups need proof. Once a minute is past
+       * rollup_1m retention, rolling it up now would merely create a row that
+       * rollup_cleanup() deletes on its next pass. There is nothing left to
+       * preserve, so blocking rotation would protect data the operator has
+       * already configured away. Groups still inside retention keep the full
+       * issue #81 completeness gate below.
+       */
       execute format(
         'with raw as ('
         '  select (sample_ts / 60) * 60 as ts, datid,'
         '         count(distinct sample_ts)::smallint as samples,'
         '         max(active_count)::smallint as peak_backends'
         '  from ash.sample_%1$s'
+        '  where (sample_ts / 60) * 60 >= $1'
         '  group by 1, 2'
         ') '
         'select count(*) '
@@ -1421,9 +1505,12 @@ begin
         '   or rollup_min.samples < raw.samples '
         '   or rollup_min.peak_backends < raw.peak_backends',
         v_truncate_slot
-      ) into v_unrolled_groups;
+      ) into v_unrolled_groups using v_rollup_1m_cutoff;
 
       if v_unrolled_groups > 0 then
+        update ash.config
+        set consecutive_rotate_failures = consecutive_rotate_failures + 1
+        where singleton;
         return format(
           'failed: pre-truncation rollup incomplete for %s group(s) '
           'in slot %s; slot not truncated',
@@ -1436,7 +1523,8 @@ begin
     -- Advance current_slot first (before truncate).
     update ash.config
     set current_slot = v_new_slot,
-      rotated_at = now()
+      rotated_at = now(),
+      consecutive_rotate_failures = 0
     where singleton;
 
     /*
@@ -1457,6 +1545,9 @@ begin
       v_old_slot, v_new_slot, v_truncate_slot);
 
   exception when lock_not_available then
+    update ash.config
+    set consecutive_rotate_failures = consecutive_rotate_failures + 1
+    where singleton;
     return 'failed: lock timeout on partition truncate, will retry next cycle';
   when others then
     raise;
@@ -1483,6 +1574,8 @@ as $$
 declare
   v_old_n int;
   v_new_n int;
+  v_rotation_period interval;
+  v_rollup_1m_retention_days smallint;
 begin
   /*
    * Destructive: drops all raw sample partitions. Require explicit
@@ -1495,13 +1588,31 @@ begin
       'select ash.rebuild_partitions(%, ''yes'')', num_partitions;
   end if;
 
-  select config_row.num_partitions into v_old_n
+  select config_row.num_partitions, config_row.rotation_period,
+         config_row.rollup_1m_retention_days
+  into v_old_n, v_rotation_period, v_rollup_1m_retention_days
   from ash.config as config_row
   where config_row.singleton;
   v_new_n := coalesce(rebuild_partitions.num_partitions, v_old_n);
 
   if v_new_n < 3 or v_new_n > 32 then
     raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
+  end if;
+
+  /*
+   * Validate before disabling sampling or touching partitions. Cleanup must
+   * retain every minute that can still reach rotate()'s completeness gate;
+   * otherwise the forward-only rollup watermark cannot recreate a deleted
+   * row and the ring can freeze permanently.
+   */
+  if (v_new_n - 1) * v_rotation_period
+       > v_rollup_1m_retention_days * interval '1 day' then
+    raise exception
+      'rebuild_partitions: % partitions at rotation_period % exceed '
+      'rollup_1m retention % days; require '
+      '(num_partitions - 1) * rotation_period '
+      '<= rollup_1m_retention_days',
+      v_new_n, v_rotation_period, v_rollup_1m_retention_days;
   end if;
 
   -- Step 1: mark sampling disabled. take_sample() checks this and returns
@@ -2488,6 +2599,9 @@ begin
   metric := 'rotated_at'; value := v_config.rotated_at::text; return next;
   metric := 'time_since_rotation';
   value := (now() - v_config.rotated_at)::text;
+  return next;
+  metric := 'consecutive_rotate_failures';
+  value := v_config.consecutive_rotate_failures::text;
   return next;
 
   if v_last_sample_ts is not null then
