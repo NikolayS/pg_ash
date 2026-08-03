@@ -6075,6 +6075,7 @@ declare
   );
   v_admin_funcs constant text[] := ash._admin_funcs();
   v_rec record;
+  v_grantee record;
 begin
   /*
    * Admin functions: revoke from PUBLIC and grant only to the schema owner.
@@ -6086,7 +6087,8 @@ begin
    * skipped here and locked down by their own DO block once created.
    */
   for v_rec in
-    select proc.proname,
+    select proc.oid,
+           proc.proname,
            pg_catalog.pg_get_function_identity_arguments(proc.oid) as args
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
@@ -6096,6 +6098,40 @@ begin
   loop
     execute format('revoke all on function ash.%I(%s) from public',
                    v_rec.proname, v_rec.args);
+
+    /*
+     * Named grantees too, not just PUBLIC. A function can enter
+     * _admin_funcs() after it shipped as part of the reader bundle
+     * (_admin_funcs itself did, in #215), and the EXECUTE that the previous
+     * version handed to every monitoring role then has no owner: the
+     * upgrade path is an installer re-apply, and neither revoke_reader()
+     * (which now skips admin functions by definition) nor grant_reader()
+     * would ever take it back. The result was that an install upgraded from
+     * 2.0 beta 1 kept privileges a fresh install of the same version does
+     * not grant — pg_monitor included, since the installer re-grants the
+     * reader bundle to it on every apply — breaking fresh-vs-upgraded
+     * equivalence on the real beta1 -> final path. Revoke here, before the
+     * owner GRANT below, so hardening converges on re-apply instead of
+     * inheriting whatever the previous version's reader bundle contained.
+     *
+     * Only the function owner is spared. An operator who runs pg_ash
+     * maintenance under a second role does so by making it a member of the
+     * owner role (privileges then come from the membership, not from an
+     * aclitem, and nothing below touches them); a direct GRANT on an admin
+     * function is exactly the state this block is defined to remove.
+     */
+    for v_grantee in
+      select distinct pg_catalog.pg_get_userbyid(acl.grantee) as rolname
+      from pg_catalog.pg_proc as proc
+      cross join lateral pg_catalog.aclexplode(proc.proacl) as acl
+      where proc.oid = v_rec.oid
+        and acl.grantee <> 0
+        and acl.grantee <> proc.proowner
+    loop
+      execute format('revoke all on function ash.%I(%s) from %I',
+                     v_rec.proname, v_rec.args, v_grantee.rolname);
+    end loop;
+
     execute format('grant execute on function ash.%I(%s) to %I',
                    v_rec.proname, v_rec.args, v_owner);
   end loop;

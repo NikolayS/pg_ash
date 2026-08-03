@@ -5878,6 +5878,173 @@ jobs:
           drop role lp_overload;
           EOF
 
+      - name: "ACL convergence: fresh install vs an upgraded 2.0 beta 1 install"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # A function can move INTO ash._admin_funcs() after it already
+          # shipped as part of the reader bundle — #215 moved _admin_funcs
+          # itself. The beta1 -> final upgrade path is an installer re-apply
+          # and CREATE OR REPLACE preserves ACLs, so the EXECUTE the PREVIOUS
+          # version handed to every reader role has nobody left to withdraw
+          # it: revoke_reader() skips admin functions by definition, and the
+          # hardening block used to revoke only from PUBLIC. pg_monitor is
+          # affected on every install, since the installer re-grants it the
+          # default reader bundle on every apply. The upgraded database then
+          # carries privileges a fresh install of the very same version does
+          # not grant.
+          #
+          # The "Schema equivalence" step below cannot see this: it compares a
+          # fresh install against the discovered 1.0 -> ... chain, and no
+          # released version before 2.0 beta 1 granted a reader bundle to
+          # pg_monitor at all, so the chain never reproduces the stale grant.
+          git show v2.0-beta1:sql/ash-install.sql > /tmp/ash-2.0-beta1-install.sql
+
+          cat > /tmp/ash_acl_snapshot.sql << 'SNAPSQL'
+          \pset tuples_only on
+          \pset format unaligned
+          select 'FUNCACL', p.proname,
+                 pg_get_function_identity_arguments(p.oid),
+                 case when a.grantee = 0 then 'PUBLIC'
+                      else pg_get_userbyid(a.grantee) end,
+                 a.privilege_type
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          cross join lateral aclexplode(p.proacl) a
+          where n.nspname = 'ash'
+          order by 2, 3, 4, 5;
+
+          select 'RELACL', c.relname,
+                 case when a.grantee = 0 then 'PUBLIC'
+                      else pg_get_userbyid(a.grantee) end,
+                 a.privilege_type
+          from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+          cross join lateral aclexplode(c.relacl) a
+          where n.nspname = 'ash'
+          order by 2, 3, 4;
+          SNAPSQL
+
+          # 1) A real 2.0 beta 1 database with a monitoring role configured on
+          #    it, upgraded the only supported way: re-apply the installer.
+          #    Install as a plain owner role, with a separate admin inheriting
+          #    that owner, so the test proves hardening keeps supported admin
+          #    access without relying on the postgres superuser ACL bypass.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            if not exists (select from pg_roles where rolname = 'beta_acl_owner') then
+              create role beta_acl_owner;
+            end if;
+            if not exists (select from pg_roles where rolname = 'beta_acl_admin') then
+              create role beta_acl_admin;
+            end if;
+            if not exists (select from pg_roles where rolname = 'beta_acl_reader') then
+              create role beta_acl_reader login password 'x';
+            end if;
+          end $$;
+
+          grant beta_acl_owner to beta_acl_admin;
+          select format(
+            'grant create on database %I to beta_acl_owner',
+            current_database()
+          ) \gexec
+
+          set role beta_acl_owner;
+          \i /tmp/ash-2.0-beta1-install.sql
+          select ash.grant_reader('beta_acl_reader');
+          reset role;
+          EOF
+
+          fresh_install_path="$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << EOF
+          set role beta_acl_owner;
+          \i $fresh_install_path
+          reset role;
+          EOF
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            -- the stale reader-bundle grant on a now-admin function is gone,
+            -- for the named monitoring role and for the default pg_monitor
+            -- bundle alike
+            assert not has_function_privilege('beta_acl_reader', 'ash._admin_funcs()', 'EXECUTE'),
+              'upgraded install kept a reader EXECUTE on admin function ash._admin_funcs()';
+            assert not has_function_privilege('pg_monitor', 'ash._admin_funcs()', 'EXECUTE'),
+              'upgraded install kept pg_monitor EXECUTE on admin function ash._admin_funcs()';
+
+            -- and nothing legitimate was revoked along with it: the reader
+            -- keeps the reader bundle, the owner keeps its own explicit
+            -- EXECUTE on the admin function
+            assert has_function_privilege('beta_acl_reader', 'ash.periods(timestamptz)', 'EXECUTE'),
+              'upgrade lost the reader bundle it is supposed to preserve';
+            assert has_function_privilege('beta_acl_admin', 'ash._admin_funcs()', 'EXECUTE'),
+              'hardening broke an admin role that inherits from the schema owner';
+            assert exists (
+              select 1
+              from pg_proc p
+              join pg_namespace n on n.oid = p.pronamespace
+              cross join lateral aclexplode(p.proacl) a
+              where n.nspname = 'ash'
+                and p.proname = '_admin_funcs'
+                and a.grantee = p.proowner
+                and a.privilege_type = 'EXECUTE'
+            ), 'hardening revoked the owner EXECUTE on ash._admin_funcs()';
+
+            raise notice 'stale grants withdrawn; owner and inherited admin preserved';
+          end $$;
+          EOF
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f /tmp/ash_acl_snapshot.sql > /tmp/acl_beta1_upgraded_once.txt
+
+          # Re-applying once more must be a fixed point, not merely happen to
+          # remove the stale grant on the first run.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << EOF
+          set role beta_acl_owner;
+          \i $fresh_install_path
+          reset role;
+          EOF
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f /tmp/ash_acl_snapshot.sql > /tmp/acl_beta1_upgraded_twice.txt
+          diff -u /tmp/acl_beta1_upgraded_once.txt /tmp/acl_beta1_upgraded_twice.txt
+          echo "ACL re-apply convergence PASSED: first and second re-apply grant identical privileges"
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          set role beta_acl_owner;
+          select ash.uninstall('yes');
+          reset role;
+          EOF
+
+          # 2) Same version, same monitoring role, installed fresh.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << EOF
+          set role beta_acl_owner;
+          \i $fresh_install_path
+          select ash.grant_reader('beta_acl_reader');
+          reset role;
+          EOF
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f /tmp/ash_acl_snapshot.sql > /tmp/acl_fresh_install.txt
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          set role beta_acl_owner;
+          select ash.uninstall('yes');
+          reset role;
+          drop owned by beta_acl_reader, beta_acl_admin, beta_acl_owner;
+          drop role beta_acl_admin;
+          drop role beta_acl_reader;
+          drop role beta_acl_owner;
+          EOF
+
+          # 3) Compare. The two must be indistinguishable, privileges included.
+          if diff -u /tmp/acl_fresh_install.txt /tmp/acl_beta1_upgraded_twice.txt; then
+            echo "ACL convergence PASSED: fresh install and 2.0 beta 1 upgrade grant identical privileges"
+          else
+            echo "::error::ACL convergence FAILED: an upgraded 2.0 beta 1 install and a fresh install of the same version differ in ash.* privileges (see diff above)"
+            exit 1
+          fi
+
       - name: "Schema equivalence: fresh dev install vs full upgrade path"
         env:
           PGPASSWORD: postgres
