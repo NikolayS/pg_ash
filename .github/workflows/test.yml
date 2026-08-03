@@ -3723,10 +3723,10 @@ jobs:
           -- p99_aas as a short (rollup_1m-backed) window containing the same spike.
           -- Invariants: (a) monotonic peak — widening the window never shrinks the
           -- peak; (b) seam consistency — identical peak/p99 from either source;
-          -- (c) p99_aas non-null over rollup_1h-backed windows. Also: rollup_hour()
-          -- computes minute_counts exactly, legacy NULL rows flat-fill to the hour
-          -- average (lower bound, never an invented spike), and wait-filtered reads
-          -- honestly stay hour-grain.
+          -- (c) p99_aas non-null over exact rollup_1h-backed windows. Also:
+          -- rollup_hour() computes minute_counts exactly, legacy NULL rows are
+          -- visibly marked as flat estimates, and wait-filtered reads NULL
+          -- minute peak/p99 when only hour-grain evidence survives.
           -- ============================================================================
           do $$
           declare
@@ -3796,35 +3796,42 @@ jobs:
             where data_points > 0;
             assert n = 6, 'timeline 10-min buckets with data over rollup_1h = 6, got ' || n;
 
-            -- wait-filtered long window has no per-minute detail and honestly stays
-            -- hour-grain: peak = IO hour average (59*20+60)/3600 = 0.34, timeline p99 null
+            -- wait-filtered long window has no per-minute detail. Its average
+            -- remains exact, but a requested minute peak/p99 is honestly NULL.
             select * into a from ash.aas(v_h - interval '2 hours', v_h + interval '1 hour',
                                          wait_event_type => 'IO');
-            assert a.source = 'rollup_1h' and a.peak_aas = 0.34,
-              format('filtered long window stays hour-grain: peak=%s (want 0.34)', a.peak_aas);
+            assert a.source = 'rollup_1h' and a.avg_aas = 0.11
+                   and a.peak_aas is null and a.p99_aas is null,
+              format('filtered long window source=%s avg=%s peak=%s p99=%s',
+                     a.source, a.avg_aas, a.peak_aas, a.p99_aas);
             select p99_aas into v_p99
             from ash.timeline(v_h - interval '2 hours', v_h + interval '1 hour', '1 hour',
                               wait_event_type => 'IO')
             where data_points > 0;
             assert v_p99 is null, 'filtered rollup_1h timeline p99 stays null, got ' || coalesce(v_p99::text, 'null');
 
-            -- legacy pre-2.0 row (minute_counts null): flat-fills to its hour average
-            -- (AAS 1.00/min) — peak keeps the real spike, p99 non-null, no fake spike
+            -- legacy pre-2.0 row (minute_counts null): the compatibility path
+            -- still flat-fills averages, but marks the whole read and NULLs the
+            -- minute extremes because the legacy hour's distribution is unknown.
             insert into ash.rollup_1h (ts, datid, samples, peak_backends, wait_counts, query_counts, minute_counts)
             values (ash.ts_from_timestamptz(v_h - interval '1 hour'), 0::oid, 3600, 9,
                     array[v_cpu, 3600]::int4[], '{}'::int8[], null);
             select * into a from ash.aas(v_h - interval '2 hours', v_h + interval '1 hour');
-            assert a.peak_aas = 11.30 and a.p99_aas = 1.00 and a.buckets_with_data = 120,
-              format('legacy mix: peak=%s p99=%s bwd=%s (want 11.30 1.00 120)',
-                     a.peak_aas, a.p99_aas, a.buckets_with_data);
+            assert a.source = 'rollup_1h_flat'
+                   and a.peak_aas is null and a.p99_aas is null
+                   and a.buckets_with_data = 120,
+              format('legacy mix: source=%s peak=%s p99=%s bwd=%s',
+                     a.source, a.peak_aas, a.p99_aas,
+                     a.buckets_with_data);
 
-            -- periods(): the long windows (1w, 1mo) carry the true minute peak and a
-            -- non-null p99 (US-6 capacity planning works past rollup_1m retention)
+            -- periods() propagates the legacy marker and does not re-label the
+            -- flat estimate as a measured minute peak/p99.
             for r in select * from ash.periods(v_h + interval '1 hour') loop
               if r.period in ('1w', '1mo') then
-                assert r.peak_aas = 11.30 and r.p99_aas is not null,
-                  format('periods %s: peak=%s p99=%s (want 11.30, non-null)',
-                         r.period, r.peak_aas, r.p99_aas);
+                assert r.source = 'rollup_1h_flat'
+                       and r.peak_aas is null and r.p99_aas is null,
+                  format('periods %s: source=%s peak=%s p99=%s',
+                         r.period, r.source, r.peak_aas, r.p99_aas);
               end if;
             end loop;
 
@@ -3834,6 +3841,706 @@ jobs:
               where singleton;
 
             raise notice 'rollup_1h seam minute-grain peak/p99 PASSED';
+          end $$;
+          EOF
+
+      - name: "Issue #210: honest peak/p99 grain across every AAS reader"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- B1a: an hour-grain wait breakdown must not label its hour average
+          -- as a one-minute peak/p99. Average, seconds, and pct remain exact.
+          do $$
+          declare
+            v_h timestamptz := date_trunc('hour', now()) - interval '48 hours';
+            v_datid oid;
+            v_cpu smallint;
+            v_aas record;
+            v_top record;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set sample_interval = interval '1 second',
+                last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+            select oid into v_datid from pg_database
+            where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+
+            -- 59 minutes at AAS 1 and one minute at AAS 10:
+            -- total=4140 backend-seconds, avg=1.15, minute p99=4.69.
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_h), v_datid, 3600, 10,
+              array[v_cpu, 4140]::int4[], '{}'::int8[],
+              array[600] || array_fill(60, array[59])
+            );
+
+            select * into v_aas
+            from ash.aas(v_h, v_h + interval '1 hour');
+            assert v_aas.source = 'rollup_1h'
+                   and v_aas.avg_aas = 1.15
+                   and v_aas.peak_aas = 10.00
+                   and v_aas.p99_aas = 4.69
+                   and v_aas.backend_seconds = 4140.00,
+              format('B1a aas source=%s avg=%s peak=%s p99=%s seconds=%s',
+                     v_aas.source, v_aas.avg_aas, v_aas.peak_aas,
+                     v_aas.p99_aas, v_aas.backend_seconds);
+
+            select * into v_top
+            from ash.top('wait_event', v_h, v_h + interval '1 hour');
+            assert v_top.key = 'CPU*' and v_top.source = 'rollup_1h'
+                   and v_top.avg_aas = 1.15
+                   and v_top.peak_aas is null
+                   and v_top.p99_aas is null
+                   and v_top.backend_seconds = 4140.00
+                   and v_top.pct = 100.00,
+              format('B1a top key=%s source=%s avg=%s peak=%s p99=%s '
+                     'seconds=%s pct=%s',
+                     v_top.key, v_top.source, v_top.avg_aas,
+                     v_top.peak_aas, v_top.p99_aas,
+                     v_top.backend_seconds, v_top.pct);
+            raise notice 'issue #210 B1a PASSED';
+          end $$;
+
+          -- B1b: a wait filter forces the surviving hour grain. The scalar
+          -- average is exact, but minute peak/p99 are unknowable and NULL.
+          do $$
+          declare
+            v_h timestamptz := date_trunc('hour', now()) - interval '48 hours';
+            v_datid oid;
+            v_cpu smallint;
+            v_io smallint;
+            v_all record;
+            v_io_aas record;
+            v_query_aas record;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            select oid into v_datid from pg_database
+            where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+            select ash._register_wait('active', 'IO', 'DataFileRead') into v_io;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_h), v_datid, 3600, 10,
+              array[v_cpu, 3540, v_io, 600]::int4[],
+              array[99::bigint, 600]::int8[],
+              array[600] || array_fill(60, array[59])
+            );
+
+            select * into v_all
+            from ash.aas(v_h, v_h + interval '1 hour');
+            select * into v_io_aas
+            from ash.aas(
+              v_h, v_h + interval '1 hour', wait_event_type => 'IO'
+            );
+            select * into v_query_aas
+            from ash.aas(
+              v_h, v_h + interval '1 hour', query_id => 99
+            );
+            assert v_all.source = 'rollup_1h'
+                   and v_all.peak_aas = 10.00
+                   and v_all.p99_aas = 4.69,
+              format('B1b unfiltered source=%s peak=%s p99=%s',
+                     v_all.source, v_all.peak_aas, v_all.p99_aas);
+            assert v_io_aas.source = 'rollup_1h'
+                   and v_io_aas.avg_aas = 0.17
+                   and v_io_aas.peak_aas is null
+                   and v_io_aas.p99_aas is null
+                   and v_io_aas.backend_seconds = 600.00,
+              format('B1b filtered source=%s avg=%s peak=%s p99=%s '
+                     'seconds=%s',
+                     v_io_aas.source, v_io_aas.avg_aas,
+                     v_io_aas.peak_aas, v_io_aas.p99_aas,
+                     v_io_aas.backend_seconds);
+            assert v_query_aas.source = 'rollup_1h'
+                   and v_query_aas.avg_aas = 0.17
+                   and v_query_aas.peak_aas is null
+                   and v_query_aas.p99_aas is null
+                   and v_query_aas.backend_seconds = 600.00,
+              format('B1b query source=%s avg=%s peak=%s p99=%s seconds=%s',
+                     v_query_aas.source, v_query_aas.avg_aas,
+                     v_query_aas.peak_aas, v_query_aas.p99_aas,
+                     v_query_aas.backend_seconds);
+            raise notice 'issue #210 B1b PASSED';
+          end $$;
+
+          -- B1c: identical wait load on an hourly baseline and a minute-grain
+          -- comparison window keeps avg_delta=0, discloses both sources, and
+          -- suppresses the entire unlike-grain peak/p99 pair.
+          do $$
+          declare
+            v_h1 timestamptz := date_trunc('hour', now()) - interval '48 hours';
+            v_h2 timestamptz := date_trunc('hour', now()) - interval '2 hours';
+            v_datid oid;
+            v_cpu smallint;
+            v_dim record;
+            v_all record;
+            v_db record;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            select oid into v_datid from pg_database
+            where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_h1), v_datid, 3600, 10,
+              array[v_cpu, 4140]::int4[], '{}'::int8[],
+              array[600] || array_fill(60, array[59])
+            );
+            for i in 0..59 loop
+              insert into ash.rollup_1m (
+                ts, datid, samples, peak_backends,
+                wait_counts, query_counts
+              ) values (
+                ash.ts_from_timestamptz(
+                  v_h2 + (i || ' minutes')::interval
+                ),
+                v_datid, 60, case when i = 0 then 10 else 1 end,
+                array[v_cpu, case when i = 0 then 600 else 60 end]::int4[],
+                '{}'::int8[]
+              );
+            end loop;
+
+            select * into v_dim
+            from ash.compare(
+              v_h1, v_h1 + interval '1 hour',
+              v_h2, v_h2 + interval '1 hour',
+              dimension => 'wait_event_type'
+            );
+            assert v_dim.key = 'CPU*'
+                   and v_dim.source_1 = 'rollup_1h'
+                   and v_dim.source_2 = 'rollup_1m'
+                   and v_dim.avg_aas_1 = 1.15
+                   and v_dim.avg_aas_2 = 1.15
+                   and v_dim.avg_delta = 0.00
+                   and v_dim.peak_aas_1 is null
+                   and v_dim.peak_aas_2 is null
+                   and v_dim.p99_aas_1 is null
+                   and v_dim.p99_aas_2 is null
+                   and v_dim.pct_1 = 100.00 and v_dim.pct_2 = 100.00,
+              format('B1c dimension key=%s sources=%s/%s avg=%s/%s '
+                     'delta=%s peak=%s/%s p99=%s/%s pct=%s/%s',
+                     v_dim.key, v_dim.source_1, v_dim.source_2,
+                     v_dim.avg_aas_1, v_dim.avg_aas_2, v_dim.avg_delta,
+                     v_dim.peak_aas_1, v_dim.peak_aas_2,
+                     v_dim.p99_aas_1, v_dim.p99_aas_2,
+                     v_dim.pct_1, v_dim.pct_2);
+
+            -- Overall rollup_1h reads use real minute_counts, so these two
+            -- sources resolve to the same minute grain and keep the pair.
+            select * into v_all
+            from ash.compare(
+              v_h1, v_h1 + interval '1 hour',
+              v_h2, v_h2 + interval '1 hour'
+            );
+            assert v_all.key = 'overall'
+                   and v_all.source_1 = 'rollup_1h'
+                   and v_all.source_2 = 'rollup_1m'
+                   and v_all.avg_delta = 0.00
+                   and v_all.peak_aas_1 = 10.00
+                   and v_all.peak_aas_2 = 10.00
+                   and v_all.p99_aas_1 = 4.69
+                   and v_all.p99_aas_2 = 4.69,
+              format('B1c overall sources=%s/%s delta=%s peak=%s/%s '
+                     'p99=%s/%s',
+                     v_all.source_1, v_all.source_2, v_all.avg_delta,
+                     v_all.peak_aas_1, v_all.peak_aas_2,
+                     v_all.p99_aas_1, v_all.p99_aas_2);
+
+            -- Database is likewise minute-grain on the hourly side because
+            -- minute_counts is stored per datid; keep its comparable pair.
+            select * into v_db
+            from ash.compare(
+              v_h1, v_h1 + interval '1 hour',
+              v_h2, v_h2 + interval '1 hour',
+              dimension => 'database'
+            );
+            assert v_db.key = current_database()
+                   and v_db.source_1 = 'rollup_1h'
+                   and v_db.source_2 = 'rollup_1m'
+                   and v_db.avg_delta = 0.00
+                   and v_db.peak_aas_1 = 10.00
+                   and v_db.peak_aas_2 = 10.00
+                   and v_db.p99_aas_1 = 4.69
+                   and v_db.p99_aas_2 = 4.69,
+              format('B1c database key=%s sources=%s/%s delta=%s '
+                     'peak=%s/%s p99=%s/%s',
+                     v_db.key, v_db.source_1, v_db.source_2,
+                     v_db.avg_delta, v_db.peak_aas_1, v_db.peak_aas_2,
+                     v_db.p99_aas_1, v_db.p99_aas_2);
+            raise notice 'issue #210 B1c PASSED';
+          end $$;
+
+          -- Database is the precise dimensional exception: minute_counts is
+          -- stored per (hour, datid), so top(database) can retain real minute
+          -- peak/p99 and spike-first ordering on rollup_1h.
+          do $$
+          declare
+            v_h timestamptz := date_trunc('hour', now()) - interval '48 hours';
+            v_datid oid;
+            v_cpu smallint;
+            v_spike record;
+            v_steady record;
+            v_ranked record;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            select oid into v_datid from pg_database
+            where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values
+              (
+                ash.ts_from_timestamptz(v_h), v_datid, 3600, 10,
+                array[v_cpu, 4140]::int4[], '{}'::int8[],
+                array[600] || array_fill(60, array[59])
+              ),
+              (
+                ash.ts_from_timestamptz(v_h), 0::oid, 3600, 2,
+                array[v_cpu, 7200]::int4[], '{}'::int8[],
+                array_fill(120, array[60])
+              );
+
+            select * into v_spike
+            from ash.top(
+              'database', v_h, v_h + interval '1 hour',
+              n => 10, order_by => 'peak'
+            )
+            where key = current_database();
+            select * into v_steady
+            from ash.top(
+              'database', v_h, v_h + interval '1 hour',
+              n => 10, order_by => 'peak'
+            )
+            where key = '<oid:0>';
+            select * into v_ranked
+            from ash.top(
+              'database', v_h, v_h + interval '1 hour',
+              n => 1, order_by => 'peak'
+            );
+
+            assert v_spike.source = 'rollup_1h'
+                   and v_spike.avg_aas = 1.15
+                   and v_spike.peak_aas = 10.00
+                   and v_spike.p99_aas = 4.69
+                   and v_spike.backend_seconds = 4140.00
+                   and v_spike.pct = 36.51,
+              format('database spike source=%s avg=%s peak=%s p99=%s '
+                     'seconds=%s pct=%s',
+                     v_spike.source, v_spike.avg_aas, v_spike.peak_aas,
+                     v_spike.p99_aas, v_spike.backend_seconds, v_spike.pct);
+            assert v_steady.avg_aas = 2.00
+                   and v_steady.peak_aas = 2.00
+                   and v_steady.p99_aas = 2.00
+                   and v_steady.backend_seconds = 7200.00
+                   and v_steady.pct = 63.49,
+              format('database steady avg=%s peak=%s p99=%s seconds=%s pct=%s',
+                     v_steady.avg_aas, v_steady.peak_aas,
+                     v_steady.p99_aas, v_steady.backend_seconds, v_steady.pct);
+            assert v_ranked.key = current_database()
+                   and v_ranked.peak_aas = 10.00,
+              format('database spike-first key=%s peak=%s',
+                     v_ranked.key, v_ranked.peak_aas);
+            raise notice 'issue #210 database precision PASSED';
+          end $$;
+
+          -- B1d: a legacy hour has only hour-grain evidence. Its historical
+          -- flat-minute compatibility expansion remains usable for averages,
+          -- but source=rollup_1h_flat marks it and minute peak/p99 are NULL.
+          do $$
+          declare
+            v_h timestamptz := date_trunc('hour', now()) - interval '48 hours';
+            v_datid oid;
+            v_cpu smallint;
+            v_aas record;
+            v_database_aas record;
+            v_top record;
+            v_rows int;
+            v_points bigint;
+            v_min_avg numeric;
+            v_max_avg numeric;
+            v_nonnull_peaks int;
+            v_nonnull_p99s int;
+            v_sources int;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            select oid into v_datid from pg_database
+            where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+
+            insert into ash.rollup_1h (
+              ts, datid, samples, peak_backends,
+              wait_counts, query_counts, minute_counts
+            ) values (
+              ash.ts_from_timestamptz(v_h), v_datid, 3600, 10,
+              array[v_cpu, 600]::int4[], '{}'::int8[], null
+            );
+
+            select * into v_aas
+            from ash.aas(v_h, v_h + interval '1 hour');
+            select * into v_database_aas
+            from ash.aas(
+              v_h, v_h + interval '1 hour',
+              database => current_database()
+            );
+            assert v_aas.source = 'rollup_1h_flat'
+                   and v_aas.buckets_expected = 60
+                   and v_aas.buckets_with_data = 60
+                   and v_aas.avg_aas = 0.17
+                   and v_aas.peak_aas is null
+                   and v_aas.p99_aas is null
+                   and v_aas.backend_seconds = 600.00,
+              format('B1d aas source=%s expected=%s with_data=%s avg=%s '
+                     'peak=%s p99=%s seconds=%s',
+                     v_aas.source, v_aas.buckets_expected,
+                     v_aas.buckets_with_data, v_aas.avg_aas,
+                     v_aas.peak_aas, v_aas.p99_aas,
+                     v_aas.backend_seconds);
+            assert v_database_aas.source = 'rollup_1h_flat'
+                   and v_database_aas.avg_aas = 0.17
+                   and v_database_aas.peak_aas is null
+                   and v_database_aas.p99_aas is null
+                   and v_database_aas.backend_seconds = 600.00,
+              format('B1d database filter source=%s avg=%s peak=%s p99=%s '
+                     'seconds=%s',
+                     v_database_aas.source, v_database_aas.avg_aas,
+                     v_database_aas.peak_aas, v_database_aas.p99_aas,
+                     v_database_aas.backend_seconds);
+
+            select count(*), sum(data_points), min(avg_aas), max(avg_aas),
+                   count(peak_aas), count(p99_aas),
+                   count(distinct source)
+              into v_rows, v_points, v_min_avg, v_max_avg,
+                   v_nonnull_peaks, v_nonnull_p99s, v_sources
+            from ash.timeline(
+              v_h, v_h + interval '1 hour', interval '1 minute'
+            );
+            assert v_rows = 60 and v_points = 60
+                   and v_min_avg = 0.17 and v_max_avg = 0.17
+                   and v_nonnull_peaks = 0 and v_nonnull_p99s = 0
+                   and v_sources = 1
+                   and (select min(source) from ash.timeline(
+                         v_h, v_h + interval '1 hour', interval '1 minute'
+                       )) = 'rollup_1h_flat',
+              format('B1d timeline rows=%s points=%s avg=%s..%s '
+                     'nonnull peak/p99=%s/%s sources=%s',
+                     v_rows, v_points, v_min_avg, v_max_avg,
+                     v_nonnull_peaks, v_nonnull_p99s, v_sources);
+
+            select * into v_top
+            from ash.top('database', v_h, v_h + interval '1 hour');
+            assert v_top.source = 'rollup_1h_flat'
+                   and v_top.avg_aas = 0.17
+                   and v_top.peak_aas is null
+                   and v_top.p99_aas is null
+                   and v_top.backend_seconds = 600.00
+                   and v_top.pct = 100.00,
+              format('B1d top source=%s avg=%s peak=%s p99=%s '
+                     'seconds=%s pct=%s',
+                     v_top.source, v_top.avg_aas,
+                     v_top.peak_aas, v_top.p99_aas,
+                     v_top.backend_seconds, v_top.pct);
+            raise notice 'issue #210 B1d PASSED';
+          end $$;
+
+          truncate ash.rollup_1m, ash.rollup_1h;
+          update ash.config
+          set last_rollup_1m_ts = null, last_rollup_1h_ts = null
+          where singleton;
+          EOF
+
+      - name: "Issue #210: cross-reader agreement + zero-argument readers"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          -- One fixed minute-grain window must tell the same numeric story in
+          -- aas, timeline, top, summary, and report.
+          do $$
+          declare
+            v_h timestamptz := date_trunc('hour', now()) - interval '2 hours';
+            v_datid oid;
+            v_cpu smallint;
+            v_aas record;
+            v_timeline record;
+            v_top record;
+            v_report jsonb;
+            v_summary_avg text;
+            v_summary_peak text;
+            v_summary_p99 text;
+            v_summary_seconds text;
+            v_summary_wait text;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config set sample_interval = interval '1 second'
+            where singleton;
+            select oid into v_datid from pg_database
+            where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+
+            for i in 0..59 loop
+              insert into ash.rollup_1m (
+                ts, datid, samples, peak_backends,
+                wait_counts, query_counts
+              ) values (
+                ash.ts_from_timestamptz(
+                  v_h + (i || ' minutes')::interval
+                ),
+                v_datid, 60, case when i = 0 then 10 else 1 end,
+                array[v_cpu, case when i = 0 then 600 else 60 end]::int4[],
+                array[4242::bigint,
+                      case when i = 0 then 600 else 60 end]::int8[]
+              );
+            end loop;
+
+            select * into v_aas
+            from ash.aas(v_h, v_h + interval '1 hour');
+            select * into v_timeline
+            from ash.timeline(
+              v_h, v_h + interval '1 hour', interval '1 hour'
+            );
+            select * into v_top
+            from ash.top(
+              'wait_event_type', v_h, v_h + interval '1 hour'
+            );
+            v_report := ash.report(v_h, v_h + interval '1 hour');
+            select value into v_summary_avg
+            from ash.summary(v_h, v_h + interval '1 hour')
+            where metric = 'avg_aas';
+            select value into v_summary_peak
+            from ash.summary(v_h, v_h + interval '1 hour')
+            where metric = 'peak_aas';
+            select value into v_summary_p99
+            from ash.summary(v_h, v_h + interval '1 hour')
+            where metric = 'p99_aas';
+            select value into v_summary_seconds
+            from ash.summary(v_h, v_h + interval '1 hour')
+            where metric = 'backend_seconds';
+            select value into v_summary_wait
+            from ash.summary(v_h, v_h + interval '1 hour')
+            where metric = 'top_wait_1';
+
+            assert v_aas.source = 'rollup_1m'
+                   and v_aas.avg_aas = 1.15
+                   and v_aas.peak_aas = 10.00
+                   and v_aas.p99_aas = 4.69
+                   and v_aas.backend_seconds = 4140.00,
+              format('agreement aas source=%s avg=%s peak=%s p99=%s sec=%s',
+                     v_aas.source, v_aas.avg_aas, v_aas.peak_aas,
+                     v_aas.p99_aas, v_aas.backend_seconds);
+            assert v_timeline.source = 'rollup_1m'
+                   and v_timeline.data_points = 60
+                   and v_timeline.avg_aas = 1.15
+                   and v_timeline.peak_aas = 10.00
+                   and v_timeline.p99_aas = 4.69,
+              format('agreement timeline source=%s points=%s avg=%s '
+                     'peak=%s p99=%s',
+                     v_timeline.source, v_timeline.data_points,
+                     v_timeline.avg_aas, v_timeline.peak_aas,
+                     v_timeline.p99_aas);
+            assert v_top.key = 'CPU*' and v_top.source = 'rollup_1m'
+                   and v_top.avg_aas = 1.15
+                   and v_top.peak_aas = 10.00
+                   and v_top.p99_aas = 4.69
+                   and v_top.backend_seconds = 4140.00
+                   and v_top.pct = 100.00,
+              format('agreement top key=%s source=%s avg=%s peak=%s '
+                     'p99=%s sec=%s pct=%s',
+                     v_top.key, v_top.source, v_top.avg_aas,
+                     v_top.peak_aas, v_top.p99_aas,
+                     v_top.backend_seconds, v_top.pct);
+            assert v_summary_avg = '1.15'
+                   and v_summary_peak = '10.00'
+                   and v_summary_p99 = '4.69'
+                   and v_summary_seconds = '4140.00'
+                   and v_summary_wait = 'CPU* (avg_aas 1.15, 100.00%)',
+              format('agreement summary avg=%s peak=%s p99=%s sec=%s wait=%s',
+                     v_summary_avg, v_summary_peak, v_summary_p99,
+                     v_summary_seconds, v_summary_wait);
+            assert v_report->'coverage'->>'source' = 'rollup_1m'
+                   and (v_report->'coverage'->>'minutes_expected')::int = 60
+                   and (v_report->'coverage'->>'minutes_with_data')::int = 60
+                   and (v_report->'aas_avg'->>'total')::numeric = 1.15
+                   and (v_report->'aas_worst1m'->>'total')::numeric = 10.00
+                   and (v_report->'aas_p99'->>'total')::numeric = 4.69,
+              format('agreement report coverage=%s avg=%s peak=%s p99=%s',
+                     v_report->'coverage', v_report->'aas_avg'->>'total',
+                     v_report->'aas_worst1m'->>'total',
+                     v_report->'aas_p99'->>'total');
+            raise notice 'issue #210 cross-reader agreement PASSED';
+          end $$;
+
+          -- Minimal/default invocations for the complete reader surface. The
+          -- fixture is steady AAS 1 for two hours, so every assertion is exact
+          -- and every now()-relative default is exercised without alignment
+          -- guards or special timestamps.
+          do $$
+          declare
+            v_end timestamptz := date_trunc('minute', now());
+            v_datid oid;
+            v_cpu smallint;
+            v_aas record;
+            v_compare record;
+            v_report jsonb;
+            v_count int;
+            v_sum numeric;
+            v_min numeric;
+            v_max numeric;
+            v_key text;
+            v_value text;
+          begin
+            truncate ash.sample_0, ash.sample_1, ash.sample_2;
+            truncate ash.rollup_1m, ash.rollup_1h;
+            select oid into v_datid from pg_database
+            where datname = current_database();
+            select ash._register_wait('active', 'CPU*', 'CPU*') into v_cpu;
+
+            for i in 1..120 loop
+              insert into ash.rollup_1m (
+                ts, datid, samples, peak_backends,
+                wait_counts, query_counts
+              ) values (
+                ash.ts_from_timestamptz(
+                  v_end - (i || ' minutes')::interval
+                ),
+                v_datid, 60, 1, array[v_cpu, 60]::int4[],
+                array[4242::bigint, 60]::int8[]
+              );
+            end loop;
+
+            select count(*) into v_count from ash.periods();
+            assert v_count = 6,
+              'zero-argument periods row count ' || v_count;
+            assert (select count(*) from ash.periods()
+                    where bucket = interval '1 minute') = 6,
+              'zero-argument periods must expose six minute-grain rows';
+
+            select * into v_aas from ash.aas();
+            assert v_aas.source = 'rollup_1m'
+                   and v_aas.buckets_expected = 60
+                   and v_aas.buckets_with_data = 60
+                   and v_aas.avg_aas = 1.00
+                   and v_aas.peak_aas = 1.00
+                   and v_aas.p99_aas = 1.00
+                   and v_aas.backend_seconds = 3600.00,
+              format('zero-argument aas source=%s expected=%s data=%s '
+                     'avg=%s peak=%s p99=%s sec=%s',
+                     v_aas.source, v_aas.buckets_expected,
+                     v_aas.buckets_with_data, v_aas.avg_aas,
+                     v_aas.peak_aas, v_aas.p99_aas,
+                     v_aas.backend_seconds);
+
+            select count(*), sum(data_points), min(avg_aas), max(avg_aas)
+              into v_count, v_sum, v_min, v_max
+            from ash.timeline();
+            assert v_count = 60 and v_sum = 60
+                   and v_min = 1.00 and v_max = 1.00,
+              format('zero-argument timeline rows=%s points=%s avg=%s..%s',
+                     v_count, v_sum, v_min, v_max);
+
+            select count(*), min(key) into v_count, v_key
+            from ash.top('wait_event_type');
+            assert v_count = 1 and v_key = 'CPU*',
+              format('minimal top(wait_event_type) rows=%s key=%s',
+                     v_count, v_key);
+            select count(*), min(key) into v_count, v_key
+            from ash.top('wait_event');
+            assert v_count = 1 and v_key = 'CPU*',
+              format('minimal top(wait_event) rows=%s key=%s',
+                     v_count, v_key);
+            select count(*), min(key) into v_count, v_key
+            from ash.top('query_id');
+            assert v_count = 1 and v_key = '4242',
+              format('minimal top(query_id) rows=%s key=%s',
+                     v_count, v_key);
+            select count(*), min(key) into v_count, v_key
+            from ash.top('database');
+            assert v_count = 1 and v_key = current_database(),
+              format('minimal top(database) rows=%s key=%s',
+                     v_count, v_key);
+
+            select * into v_compare
+            from ash.compare(
+              v_end - interval '2 hours', v_end - interval '1 hour',
+              v_end - interval '1 hour', v_end
+            );
+            assert v_compare.key = 'overall'
+                   and v_compare.source_1 = 'rollup_1m'
+                   and v_compare.source_2 = 'rollup_1m'
+                   and v_compare.avg_aas_1 = 1.00
+                   and v_compare.avg_aas_2 = 1.00
+                   and v_compare.avg_delta = 0.00
+                   and v_compare.peak_aas_1 = 1.00
+                   and v_compare.peak_aas_2 = 1.00
+                   and v_compare.p99_aas_1 = 1.00
+                   and v_compare.p99_aas_2 = 1.00,
+              format('minimal compare sources=%s/%s avg=%s/%s delta=%s '
+                     'peak=%s/%s p99=%s/%s',
+                     v_compare.source_1, v_compare.source_2,
+                     v_compare.avg_aas_1, v_compare.avg_aas_2,
+                     v_compare.avg_delta,
+                     v_compare.peak_aas_1, v_compare.peak_aas_2,
+                     v_compare.p99_aas_1, v_compare.p99_aas_2);
+
+            select count(*) into v_count from ash.samples();
+            assert v_count = 0,
+              'zero-argument samples row count ' || v_count;
+
+            v_report := ash.report();
+            assert v_report->'coverage'->>'source' = 'rollup_1m'
+                   and (v_report->'coverage'->>'minutes_expected')::int = 1440
+                   and (v_report->'coverage'->>'minutes_with_data')::int = 120
+                   and (v_report->'aas_avg'->>'total')::numeric = 1.00
+                   and (v_report->'aas_worst1m'->>'total')::numeric = 1.00
+                   and (v_report->'aas_p99'->>'total')::numeric = 1.00,
+              format('zero-argument report coverage=%s avg=%s peak=%s p99=%s',
+                     v_report->'coverage', v_report->'aas_avg'->>'total',
+                     v_report->'aas_worst1m'->>'total',
+                     v_report->'aas_p99'->>'total');
+
+            select count(*), sum(aas), min(aas), max(aas)
+              into v_count, v_sum, v_min, v_max
+            from ash.chart();
+            assert v_count = 61 and v_sum = 60.00
+                   and v_min = 1.00 and v_max = 1.00,
+              format('zero-argument chart rows=%s sum=%s aas=%s..%s',
+                     v_count, v_sum, v_min, v_max);
+
+            select count(*) into v_count from ash.summary();
+            select value into v_value from ash.summary()
+            where metric = 'peak_aas';
+            assert v_count = 11 and v_value = '1.00',
+              format('zero-argument summary rows=%s peak=%s',
+                     v_count, v_value);
+
+            select value into v_value from ash.status()
+            where metric = 'version';
+            assert v_value = '2.0-beta1',
+              'zero-argument status version ' || coalesce(v_value, 'null');
+
+            truncate ash.rollup_1m, ash.rollup_1h;
+            update ash.config
+            set last_rollup_1m_ts = null, last_rollup_1h_ts = null
+            where singleton;
+            raise notice 'issue #210 zero-argument reader sweep PASSED';
           end $$;
           EOF
 
