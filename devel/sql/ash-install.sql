@@ -1052,18 +1052,66 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
+  /*
+   * Derived from pg_class, not from ash.config.sample_unlogged. The config
+   * flag is the operator's intent; relpersistence is the physical truth, and
+   * the two can drift — which is exactly the drift _apply_sample_persistence()
+   * exists to repair. Trusting the flag would make this guard return "readable"
+   * against partitions that are still unlogged, putting the 55000 straight
+   * back. Same cost, cannot drift.
+   */
   select not (
     ash._in_recovery()
-    and coalesce(
-      (select config_row.sample_unlogged from ash.config as config_row
-       where config_row.singleton),
-      false
+    and exists (
+      select
+      from pg_catalog.pg_inherits as inh
+      join pg_catalog.pg_class as rel on rel.oid = inh.inhrelid
+      where inh.inhparent = 'ash.sample'::pg_catalog.regclass
+        and rel.relpersistence = 'u'
     )
   )
 $$;
 
 comment on function ash._raw_ring_readable() is
   'False when this backend cannot read ash.sample: an unlogged ring on a server in recovery. Readers fall back to the always-logged rollups instead of raising SQLSTATE 55000.';
+
+/*
+ * Some reads cannot be answered from the rollups at all — raw sample decoding
+ * and any exact per-query drill need the ring itself. On a standby with an
+ * unlogged ring those cannot work, and the honest thing is to say so in
+ * pg_ash's own words. Without this the caller gets either a bare
+ * "cannot access temporary or unlogged relations during recovery", which names
+ * neither pg_ash nor the setting, or — worse — a retention error claiming the
+ * data does not exist and the drill is unrecoverable, when it exists and is
+ * perfectly recoverable on the primary.
+ */
+create or replace function ash._require_raw_ring(what text)
+returns void
+language plpgsql
+stable
+set search_path = pg_catalog, ash
+as $$
+begin
+  if ash._raw_ring_readable() then
+    return;
+  end if;
+
+  raise exception using
+    errcode = '55000',
+    message = format(
+      '%s needs the raw sample ring, which is UNLOGGED on this installation '
+      'and therefore unreadable while this server is in recovery',
+      what
+    ),
+    hint = 'Run it on the primary. The rollup-backed readers (aas, timeline, '
+      'top, periods, report, chart, summary without query_id) work here. To '
+      'make the raw ring readable on standbys, run '
+      'ash.set_sample_persistence(''logged'') on the primary.';
+end;
+$$;
+
+comment on function ash._require_raw_ring(text) is
+  'Raises a pg_ash-authored SQLSTATE 55000 naming the cause and the remedy when a read needs the raw ring but the ring is unlogged and this server is in recovery. Used by readers that cannot fall back to the rollups.';
 
 -- Core sampler function (no hstore dependency)
 create or replace function ash.take_sample()
@@ -1536,6 +1584,11 @@ $$;
  * avoiding the "search-all-partitions" branch that can return stale ids
  * after rotation).
  */
+/*
+ * plpgsql rather than sql so the raw-ring guard can short-circuit before the
+ * query runs. decode_sample_at() delegates here, so guarding this overload
+ * covers both.
+ */
 create or replace function ash.decode_sample(sample_ts int4)
 returns table (
   datid      oid,
@@ -1543,10 +1596,15 @@ returns table (
   query_id   int8,
   count      int
 )
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
+begin
+  perform ash._require_raw_ring('ash.decode_sample()');
+
+  return query
+
   select sample_row.datid, decoded.wait_event, decoded.query_id, decoded.count
   from ash.sample as sample_row
   cross join lateral
@@ -1556,7 +1614,8 @@ as $$
    * to the sample_row.sample_ts column (columns take precedence), not the
    * parameter
    */
-  where sample_row.sample_ts = decode_sample.sample_ts
+  where sample_row.sample_ts = decode_sample.sample_ts;
+end;
 $$;
 
 /*
@@ -1616,6 +1675,7 @@ set search_path = pg_catalog, ash
 set lock_timeout = '250ms'
 as $$
 begin
+
   update ash.config
   set consecutive_rotate_failures = consecutive_rotate_failures + 1
   where singleton;
@@ -3397,7 +3457,22 @@ begin
   value := v_config.consecutive_rotate_failures::text;
   return next;
 
-  if v_last_sample_ts is not null then
+  /*
+   * Never say "no samples" when the truthful answer is "cannot read them from
+   * here". On a standby with an unlogged ring the samples exist on the
+   * primary; reporting absence would make a healthy sampler look dead, which
+   * is the exact misreading these guards exist to prevent. Keep the row SHAPE
+   * stable too — time_since_last_sample must not silently disappear — so
+   * scrapers see a changed value rather than a missing metric.
+   */
+  if not ash._raw_ring_readable() then
+    metric := 'last_sample_ts';
+    value := 'unknown (unlogged ring, in recovery)';
+    return next;
+    metric := 'time_since_last_sample';
+    value := 'unknown (unlogged ring, in recovery)';
+    return next;
+  elsif v_last_sample_ts is not null then
     metric := 'last_sample_ts';
     value := ash.ts_to_timestamptz(v_last_sample_ts)::text;
     return next;
@@ -3406,10 +3481,15 @@ begin
     return next;
   else
     metric := 'last_sample_ts'; value := 'no samples'; return next;
+    metric := 'time_since_last_sample'; value := 'no samples'; return next;
   end if;
 
-  metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
-  metric := 'samples_total'; value := v_samples_total::text; return next;
+  metric := 'samples_in_current_slot';
+  value := coalesce(v_samples_current::text, 'unknown (unlogged ring, in recovery)');
+  return next;
+  metric := 'samples_total';
+  value := coalesce(v_samples_total::text, 'unknown (unlogged ring, in recovery)');
+  return next;
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
   /*
    * M-BUG-6 / H-SEC-3: denominator tracks the 32 000 cap enforced in
@@ -3473,7 +3553,11 @@ begin
    * windows before querying. NULL when the source holds no data yet.
    */
   metric := 'raw_retention_start';
-  value := coalesce(ash._raw_retention_start()::text, 'no samples'); return next;
+  value := case
+    when not ash._raw_ring_readable() then 'unknown (unlogged ring, in recovery)'
+    else coalesce(ash._raw_retention_start()::text, 'no samples')
+  end;
+  return next;
   metric := 'rollup_1m_retention_start';
   value := coalesce(ash._rollup_1m_retention_start()::text, 'no rollups'); return next;
   metric := 'rollup_1h_retention_start';
@@ -5174,6 +5258,14 @@ begin
   v_exact_query := query_id is not null;
 
   if v_exact_query then
+    /*
+     * An exact per-query drill can only be answered from the ring, so this
+     * bypasses _pick_source entirely. Say so honestly before reading, rather
+     * than letting the read fail with a bare 55000 — or, worse, reach the
+     * tie-retention path and claim the samples do not exist and the drill is
+     * unrecoverable, when both are false on the primary.
+     */
+    perform ash._require_raw_ring('exact query attribution');
     v_source := 'raw';
     /*
      * Preserve the existing tie guard. For the broader query_id-only case,
@@ -5399,6 +5491,14 @@ begin
            and (wait_event_type is not null or wait_event is not null);
   v_exact_query := query_id is not null;
   if v_exact_query then
+    /*
+     * An exact per-query drill can only be answered from the ring, so this
+     * bypasses _pick_source entirely. Say so honestly before reading, rather
+     * than letting the read fail with a bare 55000 — or, worse, reach the
+     * tie-retention path and claim the samples do not exist and the drill is
+     * unrecoverable, when both are false on the primary.
+     */
+    perform ash._require_raw_ring('exact query attribution');
     v_source := 'raw';
     v_coarser_query_history := ash._exact_query_uses_coarser(
       v_start_ts,
@@ -6032,6 +6132,14 @@ begin
                    );
 
   if v_exact_query then
+    /*
+     * An exact per-query drill can only be answered from the ring, so this
+     * bypasses _pick_source entirely. Say so honestly before reading, rather
+     * than letting the read fail with a bare 55000 — or, worse, reach the
+     * tie-retention path and claim the samples do not exist and the drill is
+     * unrecoverable, when both are false on the primary.
+     */
+    perform ash._require_raw_ring('exact query attribution');
     v_source := 'raw';
     v_coarser_query_history := ash._exact_query_uses_coarser(
       v_start_ts,
@@ -6667,6 +6775,9 @@ declare
   v_has_pgss boolean := false;
   v_pgss_schema text;
 begin
+  -- Raw sample listing has no rollup equivalent.
+  perform ash._require_raw_ring('ash.samples()');
+
   if v_from > v_to then
     raise exception
       'ash.samples: since must be less than or equal to until';
