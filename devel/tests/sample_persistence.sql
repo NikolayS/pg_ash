@@ -525,6 +525,78 @@ begin
 end
 $after_reapply$;
 
+do $extra_negatives$
+declare
+  v_state text;
+  v_msg text;
+  v_before bool;
+begin
+  select sample_unlogged into v_before from ash.config where singleton;
+
+  /*
+   * NULL is a distinct branch from 'bogus': lower(btrim(null)) is NULL, so
+   * `not in ('logged','unlogged')` alone evaluates to NULL, not false. The
+   * `v_mode is null or` disjunct is what actually rejects it — without a test,
+   * deleting it would let set_sample_persistence(null) fall through to a NULL
+   * update while the suite stayed green.
+   */
+  begin
+    perform ash.set_sample_persistence(null);
+    raise exception '#224: set_sample_persistence(null) was accepted';
+  exception when others then
+    v_state := sqlstate;
+    v_msg := sqlerrm;
+  end;
+  assert v_state = '22023', format(
+    '#224: set_sample_persistence(null) expected 22023, got %s: %s',
+    v_state, v_msg
+  );
+  assert (select sample_unlogged from ash.config where singleton) = v_before,
+    '#224: set_sample_persistence(null) changed sample_unlogged';
+
+  /*
+   * Partial drift. Every other reconcile assertion is all-N or zero, so a
+   * helper that only ever converted the whole ring — or nothing — would pass.
+   * Drift exactly one partition and require exactly one conversion.
+   */
+  perform ash.set_sample_persistence('unlogged');
+  alter table ash.sample_1 set logged;
+  assert ash._apply_sample_persistence() = 1, format(
+    '#224: reconcile of a one-partition drift converted %s partitions, '
+    'expected exactly 1',
+    ash._apply_sample_persistence()
+  );
+  assert (
+    select count(*) = 0
+    from pg_catalog.pg_inherits as inh
+    join pg_catalog.pg_class as rel on rel.oid = inh.inhrelid
+    where inh.inhparent = 'ash.sample'::pg_catalog.regclass
+      and rel.relpersistence <> 'u'
+  ), '#224: reconcile left a partition logged after repairing drift';
+
+  /*
+   * Only numeric children are touched: a decoy sibling in the ash schema
+   * whose name is not sample_<N> must be left alone.
+   */
+  create table ash.sample_backup (like ash.sample_0);
+  perform ash.set_sample_persistence('logged');
+  assert (
+    select relpersistence
+    from pg_catalog.pg_class
+    where oid = 'ash.sample_backup'::pg_catalog.regclass
+  ) = 'p', '#224: reconcile altered a non-partition decoy table';
+  drop table ash.sample_backup;
+
+  /*
+   * Hand the ring back in the state the cleanup block below expects: it
+   * asserts an exact conversion count for the final flip to logged.
+   */
+  perform ash.set_sample_persistence('unlogged');
+
+  raise notice '#224 negative and drift cases PASSED';
+end
+$extra_negatives$;
+
 do $cleanup$
 declare
   v_result text;
