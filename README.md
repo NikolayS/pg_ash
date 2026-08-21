@@ -396,6 +396,11 @@ for their side effects. The procedures are admin-only, are not included in the
 `ash.grant_reader()` bundle, and should receive only explicit minimal grants;
 do not grant schema-wide `EXECUTE` privileges.
 
+Both `ash.start()` and installer re-apply re-sync only command text pg_ash
+itself scheduled. A command you have customised is left alone, with a notice
+naming the recommended form — so you can safely tune, say, the sampler's
+`statement_timeout` and keep calling `ash.start()`.
+
 ## Scheduling
 
 pg_cron is optional. For pg_cron scheduling, install pg_ash in the database
