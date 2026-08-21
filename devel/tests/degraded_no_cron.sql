@@ -2,6 +2,9 @@ do $$
 declare
   v_rec record;
   v_status_val text;
+  v_sampled int;
+  v_skipped_before bigint;
+  v_skipped_after bigint;
 begin
   -- start() should work without pg_cron (no error, prints hints)
   select status into v_status_val
@@ -40,8 +43,40 @@ begin
   assert v_status_val like '%no%',
     'status() should show pg_cron not available, got: ' || v_status_val;
 
-  -- take_sample() should work without pg_cron
-  perform ash.take_sample();
+  /*
+   * The external-ticking trap: ash.stop() (called just above) clears
+   * ash.config.sampling_enabled, and take_sample() then silently no-ops and
+   * bumps skipped_samples. An integrator who ticks take_sample() from their
+   * own scheduler therefore still depends on ash.start(), even with pg_cron
+   * absent -- the opposite of what "you don't need start() without pg_cron"
+   * suggests. Assert both sides so the contract cannot regress unnoticed.
+   */
+  select skipped_samples into v_skipped_before from ash.config where singleton;
+  v_sampled := ash.take_sample();
+  select skipped_samples into v_skipped_after from ash.config where singleton;
+  assert v_sampled = 0,
+    format('take_sample() must no-op while sampling is disabled, got %s',
+      v_sampled);
+  assert v_skipped_after = v_skipped_before + 1,
+    format('disabled take_sample() must bump skipped_samples by exactly 1, '
+      'got %s -> %s', v_skipped_before, v_skipped_after);
+
+  -- Re-enabling restores collection without pg_cron.
+  perform * from ash.start('1 second');
+  select skipped_samples into v_skipped_before from ash.config where singleton;
+  v_sampled := ash.take_sample();
+  select skipped_samples into v_skipped_after from ash.config where singleton;
+  /*
+   * take_sample() excludes its own backend (pid <> pg_backend_pid()), so an
+   * otherwise idle test database legitimately captures zero backends. The
+   * exact discriminator between "sampled and found nothing" and "refused to
+   * sample" is therefore skipped_samples, not the return value.
+   */
+  assert v_sampled is not null and v_sampled >= 0,
+    format('re-enabled take_sample() must return a count, got %s', v_sampled);
+  assert v_skipped_after = v_skipped_before,
+    format('an accepted sample must not bump skipped_samples, got %s -> %s',
+      v_skipped_before, v_skipped_after);
 
   -- All 2.0 reader functions should work
   perform ash.periods();
