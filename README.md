@@ -373,6 +373,28 @@ renamed or removed.
 
 Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` confirmation token.
 
+### Primary-only writes and standby behavior
+
+pg_ash writes only on a primary. Physical standbys receive the `ash` schema
+and its stored history through streaming replication, but do not sample or
+roll up their own local activity.
+
+On a server in recovery, the five scheduler-facing routines
+`ash.take_sample()`, `ash.rotate()`, `ash.rollup_minute()`,
+`ash.rollup_hour()`, and `ash.rollup_cleanup()` emit an actionable NOTICE and
+return their neutral value (`0` or explicit recovery-skip text). This keeps a
+pg_cron job left behind after demotion from producing recurring errors. The
+explicit administrative entrypoints `ash.start()`, `ash.stop()`,
+`ash.rebuild_partitions()`, `ash.uninstall()`, and state-changing
+`ash.set_debug_logging()` calls raise SQLSTATE `25006`; run them on the
+primary. Calling `ash.set_debug_logging(NULL)` remains a read.
+
+The installer likewise refuses to run on a standby: install pg_ash on the
+primary and let streaming replication carry it to replicas. Reader functions
+continue to work on a standby. `ash.status()` reports `in_recovery = true` and
+warns that `sampling_enabled` is the primary's replicated configuration, not
+evidence of local sampling.
+
 ### CALL-able maintenance procedures
 
 Each **scheduled** collection or maintenance function has an admin-only
@@ -390,11 +412,29 @@ entrypoints (`ash.start()`, `ash.stop()`, `ash.rebuild_partitions()`,
 
 This surface exists for routers and load balancers that route by statement
 kind. Such a router can classify `select ash.take_sample()` as a read, send it
-to a replica, and fail with `cannot execute INSERT in a read-only transaction`.
-`CALL` is unambiguously a write and expresses that these routines are invoked
-for their side effects. The procedures are admin-only, are not included in the
-`ash.grant_reader()` bundle, and should receive only explicit minimal grants;
-do not grant schema-wide `EXECUTE` privileges.
+to a replica, and bypass the intended primary write path. `CALL` is
+unambiguously a write and expresses that these routines are invoked for their
+side effects. If a maintenance call still reaches a physical standby, the
+procedure inherits the function's safe recovery no-op. The procedures are
+admin-only, are not included in the `ash.grant_reader()` bundle, and should
+receive only explicit minimal grants; do not grant schema-wide `EXECUTE`
+privileges.
+
+### Load-balanced blind spot
+
+On an installation that routes reads to replicas, pg_ash observes writes,
+post-write sticky reads, and background jobs that use the default consistency
+route because those sessions reach the primary. It does not observe ordinary
+read queries served by replicas: `ash.take_sample()` reads only the primary's
+local `pg_stat_activity`, while sampling on a standby is intentionally a
+no-op.
+
+The recorded workload mix is therefore write-skewed. Slow reads and replica
+saturation — the most common incident class in a load-balanced deployment —
+are precisely the activity pg_ash cannot show. Account for this blind spot
+when interpreting every chart, report, and top-query list. Per-replica
+coverage requires a different collection design and is tracked as a future
+item in [issue #227](https://github.com/NikolayS/pg_ash/issues/227).
 
 Both `ash.start()` and installer re-apply re-sync only command text pg_ash
 itself scheduled. A command you have customised is left alone, with a notice
