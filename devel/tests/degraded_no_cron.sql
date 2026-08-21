@@ -93,11 +93,30 @@ begin
   call ash.run_rollup_minute();
   call ash.run_rollup_hour();
   call ash.run_rollup_cleanup();
-  assert (select count(*) from ash.rollup_1m) = 0,
+  /*
+   * Assert the invariant, not a raw count: whether the samples just taken
+   * fall in a already-complete minute depends on where in the wall clock
+   * the test happens to run, so a fixed row count here would flake across a
+   * minute boundary. What must always hold is that the CURRENT, still-open
+   * minute is never folded.
+   */
+  assert (
+    select count(*)
+    from ash.rollup_1m
+    where ts >= ash.ts_from_timestamptz(
+      date_trunc('minute', clock_timestamp())
+    )
+  ) = 0,
     format(
-      'external path: rollup_minute folded an incomplete minute, got %s '
-      'rollup_1m row(s)',
-      (select count(*) from ash.rollup_1m)
+      'external path: rollup_minute folded the current incomplete minute, '
+      'got %s such rollup_1m row(s)',
+      (
+        select count(*)
+        from ash.rollup_1m
+        where ts >= ash.ts_from_timestamptz(
+          date_trunc('minute', clock_timestamp())
+        )
+      )
     );
 
   -- All 2.0 reader functions should work
