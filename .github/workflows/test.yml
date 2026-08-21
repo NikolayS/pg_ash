@@ -8803,6 +8803,57 @@ jobs:
             -c "drop extension if exists pg_cron cascade"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
+          # The external-scheduler path is the only non-pg_cron way pg_ash is
+          # driven, so it needs a live backend to sample before the behavioural
+          # assertions in degraded_no_cron.sql can check exact row counts.
+          cronless_workload_pid=""
+          cleanup_cronless_workload() {
+            psql -h localhost -U postgres -d postgres -tAc \
+              "select pg_terminate_backend(pid)
+               from pg_stat_activity
+               where pid <> pg_backend_pid()
+                 and application_name = 'pg_ash_cronless_workload'" \
+              >/dev/null 2>&1 || true
+            if [[ -n "${cronless_workload_pid}" ]]; then
+              kill "${cronless_workload_pid}" >/dev/null 2>&1 || true
+              wait "${cronless_workload_pid}" >/dev/null 2>&1 || true
+            fi
+            # A stray active session breaks later exact active_count asserts.
+            for _ in {1..30}; do
+              if psql -h localhost -U postgres -d postgres -tAc \
+                   "select count(*) from pg_stat_activity
+                    where application_name = 'pg_ash_cronless_workload'" \
+                   2>/dev/null | grep -qx 0; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "cronless fixture backend did not go away" >&2
+            return 1
+          }
+          trap cleanup_cronless_workload EXIT
+
+          PGAPPNAME=pg_ash_cronless_workload \
+            psql -h localhost -U postgres -d postgres \
+              -c "select pg_sleep(120)" >/dev/null 2>&1 &
+          cronless_workload_pid="$!"
+
+          cronless_ready=false
+          for _ in {1..20}; do
+            if psql -h localhost -U postgres -d postgres -tAc \
+                 "select count(*) from pg_stat_activity
+                  where application_name = 'pg_ash_cronless_workload'
+                    and state = 'active'" | grep -qx 1; then
+              cronless_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${cronless_ready}" != true ]]; then
+            echo "cronless fixture backend never became active" >&2
+            exit 1
+          fi
+
           cronless_out="$(
             psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
               -f devel/tests/degraded_no_cron.sql 2>&1
@@ -8840,6 +8891,34 @@ jobs:
             echo "FAIL: ash.start emitted the old cluster-wide pg_cron claim" >&2
             exit 1
           fi
+
+          # The external scheduler has no catalog to inspect: ash.start()
+          # PRINTS the jobs to register, so that printed guidance is the
+          # registration surface and has to be asserted like one. It must name
+          # the CALL forms — a copy-pasted `select ash.take_sample()` loop is
+          # exactly what a read-routing proxy will misroute (#221).
+          for cronless_expected in \
+            '"call ash.run_take_sample()" (for per-second, use a loop)' \
+            'CALL ash.run_take_sample() \watch 1' \
+            'execute "CALL ash.run_take_sample()" in a loop' \
+            'Also schedule CALL ash.run_rotate() at the rotation_period' \
+            'Schedule rollup: CALL ash.run_rollup_minute() every minute'
+          do
+            if ! printf '%s\n' "$cronless_out" | grep -Fq \
+                "$cronless_expected"; then
+              echo "FAIL: external-scheduler guidance missing: $cronless_expected" >&2
+              exit 1
+            fi
+          done
+          # Negative: the legacy SELECT recommendation must be gone entirely.
+          if printf '%s\n' "$cronless_out" | grep -Fq \
+              '"select ash.take_sample()"'; then
+            echo "FAIL: ash.start still recommends the SELECT sampler form" >&2
+            exit 1
+          fi
+
+          cleanup_cronless_workload
+          trap - EXIT
       - name: "Behavioral feature coverage across extension modes"
         env:
           PGPASSWORD: postgres
