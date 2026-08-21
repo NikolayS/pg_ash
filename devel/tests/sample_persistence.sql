@@ -530,6 +530,7 @@ declare
   v_state text;
   v_msg text;
   v_before bool;
+  v_converted int;
 begin
   select sample_unlogged into v_before from ash.config where singleton;
 
@@ -561,10 +562,17 @@ begin
    */
   perform ash.set_sample_persistence('unlogged');
   alter table ash.sample_1 set logged;
-  assert ash._apply_sample_persistence() = 1, format(
+  /*
+   * Capture the count first. Calling the helper again inside format() would
+   * run it a second time on the failure path — repairing the ring before the
+   * message is built, so the assertion would always report 0 converted, and
+   * would perform DDL while failing.
+   */
+  v_converted := ash._apply_sample_persistence();
+  assert v_converted = 1, format(
     '#224: reconcile of a one-partition drift converted %s partitions, '
     'expected exactly 1',
-    ash._apply_sample_persistence()
+    v_converted
   );
   assert (
     select count(*) = 0
@@ -578,20 +586,26 @@ begin
    * Only numeric children are touched: a decoy sibling in the ash schema
    * whose name is not sample_<N> must be left alone.
    */
-  create table ash.sample_backup (like ash.sample_0);
+  /*
+   * The decoy has to be a REAL partition of ash.sample. A standalone table is
+   * already excluded by the helper's inhparent predicate, so it would pass
+   * even with the documented '^sample_[0-9]+$' name filter deleted — the very
+   * claim this case is supposed to pin.
+   */
+  create table ash.sample_spare partition of ash.sample for values in (99);
   perform ash.set_sample_persistence('logged');
   assert (
     select relpersistence
     from pg_catalog.pg_class
-    where oid = 'ash.sample_backup'::pg_catalog.regclass
-  ) = 'p', '#224: reconcile altered a non-partition decoy table';
-  drop table ash.sample_backup;
-
-  /*
-   * Hand the ring back in the state the cleanup block below expects: it
-   * asserts an exact conversion count for the final flip to logged.
-   */
+    where oid = 'ash.sample_spare'::pg_catalog.regclass
+  ) = 'p', '#224: reconcile altered a non-numeric partition decoy';
   perform ash.set_sample_persistence('unlogged');
+  assert (
+    select relpersistence
+    from pg_catalog.pg_class
+    where oid = 'ash.sample_spare'::pg_catalog.regclass
+  ) = 'p', '#224: reconcile converted a partition whose name is not sample_<N>';
+  drop table ash.sample_spare;
 
   raise notice '#224 negative and drift cases PASSED';
 end

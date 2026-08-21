@@ -561,14 +561,22 @@ jobs:
             -c "select ash.set_sample_persistence('unlogged')" >/dev/null
           psql -h localhost -U postgres -d postgres -tAc \
             "select pg_switch_wal()" >/dev/null 2>&1 || true
+          unlogged_replayed=false
           for _ in {1..30}; do
             if docker exec "$CONTAINER_ID" psql -U postgres -p 5433 -tAc \
                  "select relpersistence from pg_class
                   where relname = 'sample_0'" 2>/dev/null | grep -qx u; then
+              unlogged_replayed=true
               break
             fi
             sleep 1
           done
+          # Without this the loop falls through and every assertion below runs
+          # against a still-logged ring, passing trivially.
+          if [[ "${unlogged_replayed}" != true ]]; then
+            echo "issue #224: the unlogged persistence change never replayed to the standby" >&2
+            exit 1
+          fi
           for reader in \
             'select count(*) from ash.status()' \
             'select count(*) from ash.periods()' \
@@ -591,6 +599,48 @@ jobs:
             echo "issue #224: ash.status() on an unlogged-ring standby reported in_recovery=${standby_recovery}, expected true" >&2
             exit 1
           fi
+          # The readers that CANNOT fall back to the rollups must fail with
+          # pg_ash's own message naming the cause and the remedy — not a bare
+          # "cannot access temporary or unlogged relations during recovery",
+          # and above all not a retention error claiming the samples do not
+          # exist and the drill is unrecoverable, which is false: they exist
+          # and the drill works on the primary.
+          for raw_only in \
+            'select * from ash.samples()' \
+            'select * from ash.decode_sample_at(now())' \
+            'select * from ash.aas(query_id := 12345)' \
+            'select * from ash.timeline(query_id := 12345)' \
+            "select * from ash.top('wait_event', query_id := 12345)"
+          do
+            raw_only_out="$(docker exec "$CONTAINER_ID" psql -U postgres \
+              -p 5433 -v ON_ERROR_STOP=1 -tAc "$raw_only" 2>&1 || true)"
+            if ! grep -Fq 'needs the raw sample ring' <<<"${raw_only_out}"; then
+              echo "issue #224: expected pg_ash's raw-ring message from: $raw_only" >&2
+              printf '%s\n' "${raw_only_out}" >&2
+              exit 1
+            fi
+            if grep -Fq 'unrecoverable' <<<"${raw_only_out}"; then
+              echo "issue #224: raw-only reader wrongly claimed the data is unrecoverable: $raw_only" >&2
+              printf '%s\n' "${raw_only_out}" >&2
+              exit 1
+            fi
+          done
+
+          # status() must say "unknown", never "no samples": the samples exist
+          # on the primary, and reporting absence makes a healthy sampler look
+          # dead. Check the row shape survives too.
+          for raw_metric in last_sample_ts time_since_last_sample \
+            samples_in_current_slot samples_total raw_retention_start
+          do
+            metric_value="$(docker exec "$CONTAINER_ID" psql -U postgres \
+              -p 5433 -tAc "select value from ash.status()
+                            where metric = '${raw_metric}'" 2>/dev/null)"
+            if [[ "${metric_value}" != "unknown (unlogged ring, in recovery)" ]]; then
+              echo "issue #224: ash.status().${raw_metric} on an unlogged-ring standby was '${metric_value}', expected the unknown marker" >&2
+              exit 1
+            fi
+          done
+
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "select ash.set_sample_persistence('logged')" >/dev/null
 

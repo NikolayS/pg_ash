@@ -391,11 +391,23 @@ and state-changing `ash.set_debug_logging()` calls raise SQLSTATE `25006`;
 run them on the primary. Calling `ash.set_debug_logging(NULL)` remains a read.
 
 The installer likewise refuses to run on a standby: install pg_ash on the
-primary and let streaming replication carry it to replicas. Reader functions
-continue to work on a standby in both persistence modes. With an unlogged raw
-ring the samples themselves are physically unreadable during recovery, so
-readers on a standby answer from the always-logged rollups instead, and
-`ash.status()` reports the raw-sample counters as unknown rather than zero.
+primary and let streaming replication carry it to replicas.
+
+With the default **logged** ring, every reader works on a standby. With an
+**unlogged** ring the samples are physically unreadable during recovery, and
+readers split into two groups there:
+
+- **Answer from the rollups**: `ash.aas()`, `ash.timeline()`, `ash.top()`,
+  `ash.periods()`, `ash.report()`, `ash.chart()`, `ash.summary()`, and
+  `ash.status()`. These degrade to rollup granularity rather than failing.
+  `ash.status()` reports the raw-sample rows as
+  `unknown (unlogged ring, in recovery)` — never as zero or "no samples",
+  since the samples do exist on the primary.
+- **Cannot answer, and say so**: `ash.samples()`, `ash.decode_sample()`,
+  `ash.decode_sample_at()`, and any exact per-query drill (passing
+  `query_id`, which forces raw attribution). These raise SQLSTATE `55000`
+  with a message naming the cause and the remedy — run it on the primary, or
+  switch the ring back with `ash.set_sample_persistence('logged')`.
 `ash.status()` reports `in_recovery = true` and warns that
 `sampling_enabled` is the primary's replicated configuration, not evidence of
 local sampling.
@@ -555,7 +567,7 @@ configured mode as `sample_unlogged`.
   restart preserves the data. This is why the default is logged.
 - A promoted replica starts with an empty sample ring. Logged rollups survive,
   so history continuity is kept at rollup granularity but not raw granularity.
-- Unlogged tables are not readable on standbys at all.
+- Unlogged tables are not readable on standbys at all, so raw-sample readers cannot answer there. See the standby section above for which readers degrade to rollups and which raise.
 - Backups do **NOT** shrink: `pg_dump` without
   `--no-unlogged-table-data` dumps unlogged contents.
 - Rollup tables stay logged always.
