@@ -44,6 +44,12 @@ AAS-oriented 2.0 API:
 
 ## Changes since 2.0 beta 1
 
+- **Raw sample WAL can be reduced with an opt-in unlogged ring.**
+  `ash.set_sample_persistence('unlogged')` converts only raw `sample_N`
+  partitions and is preserved by rotation, partition rebuilds, and installer
+  re-apply; the default remains logged and rollups always stay logged. A crash
+  or immediate shutdown truncates unlogged raw history, promoted replicas
+  start with an empty raw ring, and standbys cannot read it. (issue #224)
 - **Primary-only operation is explicit on physical standbys.** Scheduled
   sampling, rotation, and rollup routines now emit an actionable notice and
   return a neutral value without writing when the server is in recovery.

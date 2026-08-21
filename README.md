@@ -363,6 +363,7 @@ renamed or removed.
 | `ash.take_sample()` | Take one sample manually; normally called by the scheduler |
 | `ash.rotate()` | Rotate raw partitions and roll up endangered samples |
 | `ash.rebuild_partitions(n, 'yes')` | Recreate raw partitions; destructive for raw samples |
+| `ash.set_sample_persistence(mode)` | Set raw partitions to `logged` or `unlogged` |
 | `ash.rollup_minute([batch])` | Fold raw samples into `rollup_1m` |
 | `ash.rollup_hour()` | Fold minute rollups into `rollup_1h` |
 | `ash.rollup_cleanup()` | Delete expired rollup rows |
@@ -385,15 +386,17 @@ On a server in recovery, the five scheduler-facing routines
 return their neutral value (`0` or explicit recovery-skip text). This keeps a
 pg_cron job left behind after demotion from producing recurring errors. The
 explicit administrative entrypoints `ash.start()`, `ash.stop()`,
-`ash.rebuild_partitions()`, `ash.uninstall()`, and state-changing
-`ash.set_debug_logging()` calls raise SQLSTATE `25006`; run them on the
-primary. Calling `ash.set_debug_logging(NULL)` remains a read.
+`ash.rebuild_partitions()`, `ash.set_sample_persistence()`, `ash.uninstall()`,
+and state-changing `ash.set_debug_logging()` calls raise SQLSTATE `25006`;
+run them on the primary. Calling `ash.set_debug_logging(NULL)` remains a read.
 
 The installer likewise refuses to run on a standby: install pg_ash on the
-primary and let streaming replication carry it to replicas. Reader functions
-continue to work on a standby. `ash.status()` reports `in_recovery = true` and
-warns that `sampling_enabled` is the primary's replicated configuration, not
-evidence of local sampling.
+primary and let streaming replication carry it to replicas. With the default
+logged ring, reader functions continue to work on a standby. Unlogged raw
+partitions are not readable there; logged rollup history remains readable.
+`ash.status()` reports `in_recovery = true` and warns that
+`sampling_enabled` is the primary's replicated configuration, not evidence of
+local sampling.
 
 ### CALL-able maintenance procedures
 
@@ -528,6 +531,37 @@ workload:
 | 100 | 50 MiB | 100 MiB |
 | 500 | 245 MiB | 490 MiB |
 
+### Reducing raw-sample WAL with unlogged partitions
+
+The raw `ash.sample_N` ring is logged by default. Operators who accept weaker
+raw-history durability can reduce its WAL with:
+
+```sql
+select ash.set_sample_persistence('unlogged');
+```
+
+The setting survives rotation, partition rebuilds, and installer re-apply.
+Changing a populated ring rewrites each partition whose persistence differs;
+matching partitions are left untouched. Restore the default with
+`select ash.set_sample_persistence('logged');`. `ash.status()` reports the
+configured mode as `sample_unlogged`.
+
+**Durability and operations trade-offs:**
+
+- A crash or immediate shutdown **TRUNCATES every unlogged partition**. The
+  raw ring is empty exactly when an incident post-mortem wants it. A clean
+  restart preserves the data. This is why the default is logged.
+- A promoted replica starts with an empty sample ring. Logged rollups survive,
+  so history continuity is kept at rollup granularity but not raw granularity.
+- Unlogged tables are not readable on standbys at all.
+- Backups do **NOT** shrink: `pg_dump` without
+  `--no-unlogged-table-data` dumps unlogged contents.
+- Rollup tables stay logged always.
+
+Reducing sampling frequency is the alternative lever for the same WAL and
+storage problem and costs no durability, although it provides less temporal
+detail. For example, use `ash.start('5 seconds')` instead of 1-second sampling.
+
 The corresponding historical rollup estimate was about 120 MiB per database
 for 5 years of trend data.
 
@@ -595,7 +629,7 @@ select pg_reload_conf();
 |---|---|---|---|
 | Install | `\i` SQL | C extension + restart | Agent and storage |
 | Managed Postgres | Yes | Usually no | Yes, with effort |
-| History survives restart | Yes | No | Depends |
+| History survives restart | Yes (logged default) | No | Depends |
 | Query with SQL | Yes | Yes | Usually no |
 | Storage | In database | Memory ring | External |
 | Sampling frequency | Usually 1s | Usually 10ms | Usually 15-60s |

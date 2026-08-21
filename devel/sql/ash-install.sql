@@ -308,7 +308,13 @@ create table if not exists ash.config (
   -- M-BUG-6 / H-SEC-3: _register_wait dictionary-cap hit counter.
   register_wait_cap_hits     bigint not null default 0,
   -- Consecutive rotate() failure returns; reset by a successful rotation.
-  consecutive_rotate_failures bigint not null default 0
+  consecutive_rotate_failures bigint not null default 0,
+  /*
+   * Keep raw samples logged by default: a crash truncates unlogged tables,
+   * destroying exactly the ASH history an incident post-mortem needs.
+   * Operators must opt in knowingly with set_sample_persistence().
+   */
+  sample_unlogged            bool not null default false
 );
 
 -- Insert initial row if not exists.
@@ -345,7 +351,12 @@ alter table ash.config
    */
   add column if not exists register_wait_cap_hits bigint not null default 0,
   add column if not exists consecutive_rotate_failures bigint not null
-    default 0;
+    default 0,
+  /*
+   * Logged remains the upgrade default. ADD COLUMN IF NOT EXISTS preserves
+   * an operator's existing opt-in when this installer is re-applied.
+   */
+  add column if not exists sample_unlogged bool not null default false;
 
 /*
  * Keep the day-granularity error reusable and actionable. The explicit call
@@ -708,17 +719,75 @@ create table if not exists ash.sample (
   slot         smallint not null default ash.current_slot()
 ) partition by list (slot);
 
+/*
+ * Reconcile existing raw-ring partitions with the configured persistence.
+ * CREATE TABLE IF NOT EXISTS never changes an existing table, so both the
+ * installer and rebuild_partitions() call this after their creation loops.
+ * Catalog enumeration guarantees that only ash.sample's numeric children
+ * are touched; the partitioned parent and logged rollups are never altered.
+ */
+create or replace function ash._apply_sample_persistence()
+returns int
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_converted int := 0;
+  v_mode text;
+  v_rec record;
+  v_sample_unlogged bool;
+  v_target "char";
+begin
+  v_sample_unlogged := coalesce((
+    select sample_unlogged from ash.config where singleton
+  ), false);
+  v_target := case when v_sample_unlogged then 'u' else 'p' end;
+  v_mode := case when v_sample_unlogged then 'unlogged' else 'logged' end;
+
+  for v_rec in
+    select rel.relname
+    from pg_inherits as inh
+    join pg_class as rel on rel.oid = inh.inhrelid
+    join pg_namespace as nsp on nsp.oid = rel.relnamespace
+    where inh.inhparent = 'ash.sample'::regclass
+      and nsp.nspname = 'ash'
+      and rel.relname ~ '^sample_[0-9]+$'
+      and rel.relpersistence <> v_target
+    order by rel.relname
+  loop
+    execute format('alter table ash.%I set %s', v_rec.relname, v_mode);
+    v_converted := v_converted + 1;
+  end loop;
+
+  return v_converted;
+end;
+$$;
+
+comment on function ash._apply_sample_persistence() is
+$$Internal admin helper: reconciles only the numeric ash.sample_N partitions with ash.config.sample_unlogged and returns the number converted. Existing partitions are altered only when pg_class.relpersistence differs, so a matching ring is a no-op. Never alters the partitioned ash.sample parent or the always-logged rollup tables.$$;
+
 -- Create partitions and indexes dynamically based on num_partitions.
 do $$
 declare
   v_n int;
+  v_sample_unlogged bool;
 begin
   select num_partitions into v_n from ash.config where singleton;
+  /*
+   * COALESCE keeps the first installer pass safe if the singleton row does
+   * not exist yet; logged is the conservative bootstrap default.
+   */
+  v_sample_unlogged := coalesce((
+    select sample_unlogged from ash.config where singleton
+  ), false);
 
   for i in 0 .. v_n - 1 loop
     execute format(
-      'create table if not exists ash.sample_%s '
-      'partition of ash.sample for values in (%s)', i, i
+      'create %stable if not exists ash.sample_%s '
+      'partition of ash.sample for values in (%s)',
+      case when v_sample_unlogged then 'unlogged ' else '' end,
+      i,
+      i
     );
 
     -- (sample_ts) for time-range reader queries
@@ -733,6 +802,8 @@ begin
       'on ash.sample_%s (datid, sample_ts)', i, i
     );
   end loop;
+
+  perform ash._apply_sample_persistence();
 end $$;
 
 /*
@@ -1750,6 +1821,7 @@ declare
   v_rec record;
   v_rotation_period interval;
   v_rollup_1m_retention_days int;
+  v_sample_unlogged bool;
 begin
   if ash._in_recovery() then
     raise exception using
@@ -1780,6 +1852,13 @@ begin
   from ash.config as config_row
   where config_row.singleton;
   v_new_n := coalesce(rebuild_partitions.num_partitions, v_old_n);
+  /*
+   * COALESCE also keeps this creation path safe if the singleton row is
+   * unexpectedly absent; logged is the conservative bootstrap default.
+   */
+  v_sample_unlogged := coalesce((
+    select sample_unlogged from ash.config where singleton
+  ), false);
 
   if v_new_n < 3 or v_new_n > 32 then
     raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
@@ -1953,8 +2032,11 @@ begin
   -- Step 7: create new partitions.
   for i in 0 .. v_new_n - 1 loop
     execute format(
-      'create table ash.sample_%s '
-      'partition of ash.sample for values in (%s)', i, i
+      'create %stable if not exists ash.sample_%s '
+      'partition of ash.sample for values in (%s)',
+      case when v_sample_unlogged then 'unlogged ' else '' end,
+      i,
+      i
     );
 
     execute format(
@@ -1973,6 +2055,12 @@ begin
       i, i
     );
   end loop;
+
+  /*
+   * IF NOT EXISTS does not change an existing table's persistence. Reconcile
+   * every numeric child after creation so rebuilds cannot drift from config.
+   */
+  perform ash._apply_sample_persistence();
 
   -- Step 8: rebuild the query_map_all view.
   perform ash._rebuild_query_map_view();
@@ -2852,6 +2940,56 @@ begin
 end;
 $$;
 
+/*
+ * Change raw-ring persistence without ever altering the partitioned parent
+ * or the logged rollup tables. Validation precedes the config update so an
+ * invalid mode cannot change the operator's current setting.
+ */
+create or replace function ash.set_sample_persistence(mode text)
+returns text
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_converted int;
+  v_mode text := lower(btrim(set_sample_persistence.mode));
+  v_summary text;
+begin
+  if v_mode is null or v_mode not in ('logged', 'unlogged') then
+    raise exception using
+      errcode = '22023',
+      message = format(
+        'ash.set_sample_persistence: mode must be logged or unlogged; got %L',
+        set_sample_persistence.mode
+      );
+  end if;
+
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  update ash.config
+  set sample_unlogged = (v_mode = 'unlogged')
+  where singleton
+    and sample_unlogged is distinct from (v_mode = 'unlogged');
+
+  v_converted := ash._apply_sample_persistence();
+  v_summary := format(
+    'sample persistence: %s; %s partitions converted. Converting populated '
+    'partitions rewrites them; in unlogged mode the raw sample ring will be '
+    'empty after a crash or immediate shutdown.',
+    v_mode,
+    v_converted
+  );
+
+  raise notice '%', v_summary;
+  return v_summary;
+end;
+$$;
+
 -- Uninstall: stop jobs and drop schema.
 create or replace function ash.uninstall(confirm text default null)
 returns text
@@ -3173,6 +3311,7 @@ begin
   value := case when ash._color_on() then 'on' else 'off' end;
   return next;
   metric := 'num_partitions'; value := v_config.num_partitions::text; return next;
+  metric := 'sample_unlogged'; value := v_config.sample_unlogged::text; return next;
   metric := 'sampling_enabled'; value := v_config.sampling_enabled::text; return next;
   metric := 'skipped_samples'; value := v_config.skipped_samples::text; return next;
   metric := 'current_slot'; value := v_config.current_slot::text; return next;
@@ -7536,14 +7675,14 @@ $$Human render helper: key/value AAS overview for one window [since, until) (def
  * the whole surface (readers vs operations) before any \df spelunking.
  */
 comment on schema ash is
-$$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader entry points (start with ash.periods()): periods, aas, timeline, top, compare, samples, report, chart, summary, status — readers report load in AAS (Average Active Sessions), and their function comments state how provenance is exposed. Operations/admin (owner-only, not granted by grant_reader): start, stop, take_sample, rotate, rollup_minute, rollup_hour, rollup_cleanup, rebuild_partitions, set_debug_logging, uninstall, grant_reader, revoke_reader. Each function documents itself: select obj_description('ash.<name>(<argtypes>)'::regprocedure).$$;
+$$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader entry points (start with ash.periods()): periods, aas, timeline, top, compare, samples, report, chart, summary, status — readers report load in AAS (Average Active Sessions), and their function comments state how provenance is exposed. Operations/admin (owner-only, not granted by grant_reader): start, stop, take_sample, rotate, rollup_minute, rollup_hour, rollup_cleanup, rebuild_partitions, set_sample_persistence, set_debug_logging, uninstall, grant_reader, revoke_reader. Each function documents itself: select obj_description('ash.<name>(<argtypes>)'::regprocedure).$$;
 
 /*
  * Operational / admin surface: obj_description for every entry point, so the
  * reader-vs-ops split is legible from \df+ alone.
  */
 comment on function ash.status() is
-$$Installation health snapshot (readable by monitoring roles): sampling state and interval, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
+$$Installation health snapshot (readable by monitoring roles): sampling state and interval, raw sample persistence, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
 $$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
@@ -7568,6 +7707,9 @@ $$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h
 
 comment on function ash.rebuild_partitions(int, text) is
 $$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
+
+comment on function ash.set_sample_persistence(text) is
+$$Admin: set raw ash.sample_N partitions to logged or unlogged persistence (mode is case-insensitive and surrounding whitespace is ignored); other values raise SQLSTATE 22023 without changing config, and calls on a standby raise 25006. Updates ash.config.sample_unlogged so installer re-apply and ash.rebuild_partitions() create and reconcile every raw slot consistently. Matching partitions are untouched; converting populated partitions rewrites them. The partitioned ash.sample parent and ash.rollup_1m/ash.rollup_1h always remain logged. Unlogged mode reduces raw-sample WAL, but a crash or immediate shutdown truncates every raw partition, a promoted replica starts with an empty raw ring, and unlogged tables cannot be read on a standby; use only after accepting that post-mortem trade-off. A clean restart preserves unlogged data. pg_dump includes unlogged contents unless --no-unlogged-table-data is used. Returns and raises a NOTICE with the selected mode and exact conversion count.$$;
 
 comment on function ash.set_debug_logging(bool) is
 $$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
@@ -7692,8 +7834,9 @@ set search_path = pg_catalog
 as $$
   select array[
     'start', 'stop', 'uninstall', 'rotate', 'take_sample',
-    'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
-    'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
+    'set_debug_logging', 'set_sample_persistence', 'rebuild_partitions',
+    'rollup_minute', 'rollup_hour', 'rollup_cleanup',
+    '_drop_all_partitions',
     /* Procedure forms of the maintenance/admin routines. */
     'run_take_sample', 'run_rotate', 'run_rollup_minute',
     'run_rollup_hour', 'run_rollup_cleanup',
@@ -7705,7 +7848,8 @@ as $$
     '_job_command_map', '_canonical_job_command',
     '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
-    '_register_wait', '_validate_rotation_period', '_record_rotate_failure',
+    '_register_wait', '_apply_sample_persistence',
+    '_validate_rotation_period', '_record_rotate_failure',
     '_validate_rotation_config', '_validate_config_update',
     /*
      * The privilege helpers and their canonical exclusion-list helper are
@@ -7842,11 +7986,13 @@ end $$;
  * Granted set:
  *   - USAGE on schema ash
  *   - EXECUTE on every ash.* function EXCEPT the admin set (start, stop,
- *     uninstall, rotate, take_sample, set_debug_logging, rebuild_partitions,
+ *     uninstall, rotate, take_sample, set_debug_logging,
+ *     set_sample_persistence, rebuild_partitions,
  *     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
  *     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
  *     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg,
- *     _register_wait, _validate_rotation_period, _record_rotate_failure,
+ *     _register_wait, _apply_sample_persistence,
+ *     _validate_rotation_period, _record_rotate_failure,
  *     _validate_rotation_config, _validate_config_update, _admin_funcs).
  *     Defining "reader" by exclusion (rather than enumeration) keeps the
  *     helpers correct as new readers and reader-internal helpers are added.
