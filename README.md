@@ -353,6 +353,84 @@ naming that alternate source; it does not synthesize per-minute class data.
 The payload contract is stable for the 2.0 minor line: keys may be added, not
 renamed or removed.
 
+## LLM analysis
+
+`ash.report()` is already the shape an LLM wants: one JSONB document, stable
+keys, no scraping. What a model lacks is the meaning of the numbers. "AAS" is
+not general knowledge, and a model that guesses at it will confidently call a
+sick database healthy.
+
+Pass the payload together with the prompt below.
+
+```sql
+select ash.report(
+  since => now() - interval '1 day',
+  vcpus => 16   -- required for a verdict: AAS is judged against core count
+);
+```
+
+<details>
+<summary>Prompt (copy this, then paste the JSON after it)</summary>
+
+```text
+You are analyzing a PostgreSQL database's Active Session History, produced by
+pg_ash. Below is one JSON document from ash.report().
+
+Background you need:
+
+AAS means Average Active Sessions: the average number of database sessions
+that were concurrently running or waiting during the window. It is the
+Postgres analogue of the Linux load average, and it is only meaningful when
+compared against the machine's core count. AAS of 8 on 64 vCPUs is idle; AAS
+of 8 on 4 vCPUs is an incident. The "vcpus" field gives the core count; if it
+is absent, say you cannot issue a capacity verdict rather than guessing.
+
+Wait classes tell you what the sessions were doing:
+  cpu     - running on CPU (this is work, not waiting)
+  io      - waiting on disk or page reads
+  ipc     - waiting on another backend, e.g. parallel workers
+  lock    - waiting on a row or table lock (application contention)
+  lwlock  - waiting on internal shared-memory locks (engine contention)
+
+How to read the document:
+
+- aas_avg, aas_worst1m, aas_p99, aas_p999 are each an object keyed by
+  "total" plus the five wait classes above. "total" is the whole workload.
+- Averages hide incidents. Always report the peak alongside the average.
+  For example: a 16-vCPU cluster averaging 4.9 AAS over a week is 31% of
+  capacity and looks healthy, while a worst single minute of 295 AAS is
+  1844% of capacity. The average is true and useless.
+- top_events_* name the specific wait events at the extreme minutes,
+  broken down by class.
+- top_queryids_* attribute those extreme minutes to query IDs. These keys
+  are optional. Check top_queryids_available first: when it is false,
+  pg_stat_statements is not resolving queries, so say query attribution is
+  unavailable. Never invent a query.
+- coverage tells you whether to trust any of it. minutes_with_data versus
+  minutes_expected is the resolution you actually got; if it is far below,
+  the window is mostly uncovered and your verdict is weak. source names the
+  data tier. raw_retention_start is the oldest point that can be drilled
+  into.
+
+Produce:
+
+1. A one-line verdict: healthy, degraded, or overloaded, with avg and peak
+   AAS each expressed as a percentage of vcpus.
+2. The dominant wait class at the peak, and what that class implies.
+3. The specific wait events and, if available, query IDs responsible.
+4. What to investigate next - one concrete step, not a checklist.
+5. Any caveat forced by coverage or by missing query attribution.
+
+State only what the document supports. If a field is absent, say so.
+```
+
+</details>
+
+The same payload is what an embedding application should put behind a "copy
+report" action: the operator copies JSON, pastes it into whatever model they
+already use, and gets a plain-language verdict without pg_ash calling any
+external service itself.
+
 ## Admin API
 
 | Function | Purpose |
