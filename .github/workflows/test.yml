@@ -341,6 +341,14 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: "#224: optional unlogged raw sample ring"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v install_path="$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" \
+            --file=devel/tests/sample_persistence.sql
+
       - name: "#222: recovery guard coverage on every PostgreSQL version"
         # Every guard calls ash._in_recovery() rather than pg_is_in_recovery()
         # directly, which gives the tests a seam: redefine that one function

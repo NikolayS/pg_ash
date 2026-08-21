@@ -39,7 +39,8 @@ begin
     'last_rollup_1h_ts',
     'insert_errors',
     'register_wait_cap_hits',
-    'consecutive_rotate_failures'
+    'consecutive_rotate_failures',
+    'sample_unlogged'
   ]::text[],
     format('ash.config column order differs: %s', v_columns);
 
@@ -80,6 +81,8 @@ begin
     'register_wait_cap_hits default was not applied';
   assert v_config.consecutive_rotate_failures = 0,
     'consecutive_rotate_failures default was not applied';
+  assert not v_config.sample_unlogged,
+    'sample_unlogged default should be false';
 
   select pg_get_userbyid(relation.relowner)
   into v_owner
