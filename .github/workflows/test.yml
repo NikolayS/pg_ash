@@ -551,6 +551,49 @@ jobs:
             exit 1
           fi
 
+          # An unlogged ring is physically unreadable during recovery
+          # ("cannot access temporary or unlogged relations during
+          # recovery", 55000). Opting into it on the primary must NOT break
+          # readers on the replica: they have to degrade to the
+          # always-logged rollups. Before ash._raw_ring_readable() existed,
+          # every reader here — ash.status() included — failed outright.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "select ash.set_sample_persistence('unlogged')" >/dev/null
+          psql -h localhost -U postgres -d postgres -tAc \
+            "select pg_switch_wal()" >/dev/null 2>&1 || true
+          for _ in {1..30}; do
+            if docker exec "$CONTAINER_ID" psql -U postgres -p 5433 -tAc \
+                 "select relpersistence from pg_class
+                  where relname = 'sample_0'" 2>/dev/null | grep -qx u; then
+              break
+            fi
+            sleep 1
+          done
+          for reader in \
+            'select count(*) from ash.status()' \
+            'select count(*) from ash.periods()' \
+            'select count(*) from ash.aas()' \
+            'select count(*) from ash.report()'
+          do
+            if ! docker exec "$CONTAINER_ID" psql -U postgres -p 5433 \
+                 -v ON_ERROR_STOP=1 -tAc "$reader" >/dev/null 2>&1; then
+              echo "issue #224: reader failed on a standby with an unlogged ring: $reader" >&2
+              docker exec "$CONTAINER_ID" psql -U postgres -p 5433 \
+                -tAc "$reader" >&2 2>&1 || true
+              exit 1
+            fi
+          done
+          # ash.status() must still report node role, not error out.
+          standby_recovery="$(docker exec "$CONTAINER_ID" psql -U postgres \
+            -p 5433 -tAc "select value from ash.status()
+                          where metric = 'in_recovery'" 2>/dev/null)"
+          if [[ "${standby_recovery}" != "true" ]]; then
+            echo "issue #224: ash.status() on an unlogged-ring standby reported in_recovery=${standby_recovery}, expected true" >&2
+            exit 1
+          fi
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "select ash.set_sample_persistence('logged')" >/dev/null
+
           stop_standby
 
           # The seed had to be COMMITTED on the primary to replicate, so it
@@ -560,6 +603,7 @@ jobs:
             --file=devel/tests/replica_guards_cleanup.sql
 
           echo "Issue #222 real-standby assertions PASSED"
+          echo "Issue #224 unlogged-ring standby reader assertions PASSED"
 
       - name: Test SQL entrypoints fail atomically
         env:

@@ -391,9 +391,11 @@ and state-changing `ash.set_debug_logging()` calls raise SQLSTATE `25006`;
 run them on the primary. Calling `ash.set_debug_logging(NULL)` remains a read.
 
 The installer likewise refuses to run on a standby: install pg_ash on the
-primary and let streaming replication carry it to replicas. With the default
-logged ring, reader functions continue to work on a standby. Unlogged raw
-partitions are not readable there; logged rollup history remains readable.
+primary and let streaming replication carry it to replicas. Reader functions
+continue to work on a standby in both persistence modes. With an unlogged raw
+ring the samples themselves are physically unreadable during recovery, so
+readers on a standby answer from the always-logged rollups instead, and
+`ash.status()` reports the raw-sample counters as unknown rather than zero.
 `ash.status()` reports `in_recovery = true` and warns that
 `sampling_enabled` is the primary's replicated configuration, not evidence of
 local sampling.
