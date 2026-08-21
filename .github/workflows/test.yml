@@ -83,6 +83,22 @@ jobs:
             fi
           done
 
+          # Keep the copyable LLM prompt aligned with ash.report's payload.
+          if ! grep -Fq "## LLM analysis" README.md; then
+            echo "README.md must retain the LLM analysis section" >&2
+            exit 1
+          fi
+          llm_analysis="$(sed -n "/^## LLM analysis$/,/^## /p" README.md)"
+          for field in \
+            "aas_avg" "aas_worst1m" "aas_p99" "aas_p999" "top_events_" \
+            "top_queryids_available" "coverage" "minutes_with_data" \
+            "minutes_expected" "raw_retention_start" "vcpus"; do
+            if ! grep -Fq "$field" README.md || ! grep -Fq "$field" <<<"$llm_analysis"; then
+              echo "README.md LLM analysis must document ash.report field $field" >&2
+              exit 1
+            fi
+          done
+
           if ! grep -Fq "Only \`ash.rebuild_partitions\` and \`ash.uninstall\` require the exact \`'yes'\` confirmation token." README.md; then
             echo "README.md must limit the exact 'yes' confirmation contract to rebuild_partitions and uninstall." >&2
             exit 1
@@ -7099,6 +7115,12 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/query_attribution_assert.sql
+
+      - name: "Test 2.0: ash.report payload contract the README prompt relies on"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/report_contract.sql
 
       - name: "Test 2.0: stale and rounded-up rollup source selection"
         env:
