@@ -375,6 +375,29 @@ Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` conf
 
 ## Scheduling
 
+### What `ash.start()` does, and does not do
+
+`ash.start()` starts no process. Despite the name, it does two things:
+
+1. sets `sampling_enabled` in `ash.config`;
+2. registers pg_cron jobs, when pg_cron is available.
+
+Consequences worth knowing before you wire it into an application:
+
+- **It is idempotent.** Calling it again does not duplicate jobs.
+- **You do not need to call it again after a restart.** pg_cron jobs live in
+  `cron.job`, which is an ordinary table; they survive restarts like any other
+  row. There is no in-memory state to lose.
+- **You still need it when you tick externally.** This is the trap. `ash.stop()`
+  clears `sampling_enabled`, and `ash.take_sample()` then returns `0` and
+  increments `skipped_samples` instead of collecting. An external scheduler
+  calling `ash.take_sample()` on a stopped installation will appear to run
+  perfectly and collect nothing. `ash.status()` reports both
+  `sampling_enabled` and `skipped_samples`; check them if samples are missing.
+
+The name is misleading and is expected to change — see
+[#223](https://github.com/NikolayS/pg_ash/issues/223).
+
 pg_cron is optional. For pg_cron scheduling, install pg_ash in the database
 named by `cron.database_name`; it still observes activity from every database.
 With pg_cron installed, `ash.start('1 second')` schedules:
