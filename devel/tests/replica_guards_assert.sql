@@ -43,6 +43,28 @@ begin
   assert ash._in_recovery(),
     'ash._in_recovery() must be true in this context';
 
+  /*
+   * Precondition, not decoration. rollup_minute() and rollup_hour() return 0
+   * whenever there is nothing to fold, so on an empty database "returns 0 in
+   * recovery" would pass with the guards deleted. The caller seeds pending
+   * work first (replica_guards_seed_pending.sql); fail loudly if it did not,
+   * rather than silently asserting against an empty ring.
+   */
+  assert (
+    select count(*) > 0
+    from ash.sample
+    where sample_ts < ash.ts_from_timestamptz(
+      date_trunc('minute', clock_timestamp())
+    )
+  ), 'fixture: no completed-minute samples — the rollup guard asserts '
+     'would be vacuous';
+  assert (
+    select last_rollup_1m_ts is null
+      or last_rollup_1m_ts < (select max(sample_ts) from ash.sample)
+    from ash.config where singleton
+  ), 'fixture: rollup watermark is already caught up — the rollup guard '
+     'asserts would be vacuous';
+
   /* ---- scheduled routines: clean no-op, never an error ---- */
 
   v_int := ash.take_sample();
@@ -88,8 +110,14 @@ begin
       raise exception '% on a standby must raise, but succeeded', v_admin_call;
     exception when others then
       v_state := sqlstate;
-      assert v_state = '25006',
-        format('%s on a standby must raise 25006, got %s: %s',
+      /*
+       * SQLSTATE alone is not discriminating on a REAL standby: an unguarded
+       * write raises 25006 from PostgreSQL itself. Pin the guard's own
+       * wording too, so this assertion fails if the guard is removed.
+       */
+      assert v_state = '25006'
+         and sqlerrm like '%cannot administer pg_ash on a standby%',
+        format('%s on a standby must raise the pg_ash 25006 guard, got %s: %s',
                v_admin_call, v_state, sqlerrm);
     end;
   end loop;

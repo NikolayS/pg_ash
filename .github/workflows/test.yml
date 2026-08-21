@@ -412,6 +412,7 @@ jobs:
 
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SEAM'
           begin;
+          \i devel/tests/replica_guards_seed_pending.sql
           create or replace function ash._in_recovery()
           returns bool language sql as 'select true';
           \i devel/tests/replica_guards_assert.sql
@@ -443,12 +444,34 @@ jobs:
           IFS=$'\n\t'
 
           standby_dir=/tmp/ash_standby
+          # Verify the second postmaster actually died. A best-effort stop can
+          # leave a live postmaster and walsender running for the remaining
+          # ~8000 lines of the job, silently — the same class of leak the
+          # fixture-backend teardown above hard-fails on. Also reclaim the
+          # PGDATA copy, which is a full basebackup.
           stop_standby() {
             docker exec "$CONTAINER_ID" bash -c \
               "su postgres -c 'pg_ctl -D ${standby_dir} -m fast stop'" \
               >/dev/null 2>&1 || true
+            for _ in {1..30}; do
+              if ! docker exec "$CONTAINER_ID" \
+                   pg_isready -p 5433 -q >/dev/null 2>&1; then
+                docker exec "$CONTAINER_ID" rm -rf "${standby_dir}" \
+                  >/dev/null 2>&1 || true
+                return 0
+              fi
+              sleep 1
+            done
+            echo "issue #222: standby postmaster on :5433 did not stop" >&2
+            return 1
           }
           trap stop_standby EXIT
+
+          # Seed pending rollup work on the primary first, so the standby
+          # inherits it and the rollup guard assertions are discriminating
+          # rather than measuring an empty ring.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/replica_guards_seed_pending.sql
 
           samples_before="$(psql -h localhost -U postgres -d postgres -tAc \
             'select count(*) from ash.sample')"
@@ -505,9 +528,18 @@ jobs:
             echo "issue #222: installer must fail on a standby, but succeeded" >&2
             exit 1
           fi
+          # 25006 alone proves nothing: with the refusal block deleted the
+          # installer still dies at its first statement (create temp table)
+          # with the same SQLSTATE. Pin the guard's own message as well.
           if ! grep -q 25006 <<<"${installer_output}"; then
             printf '%s\n' "${installer_output}" >&2
             echo "issue #222: installer on a standby must raise 25006" >&2
+            exit 1
+          fi
+          if ! grep -Fq 'cannot install pg_ash on a standby' \
+              <<<"${installer_output}"; then
+            printf '%s\n' "${installer_output}" >&2
+            echo "issue #222: installer refusal must come from the pg_ash guard, not from a generic read-only error" >&2
             exit 1
           fi
 
