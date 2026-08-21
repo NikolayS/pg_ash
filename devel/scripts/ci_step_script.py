@@ -59,6 +59,26 @@ def _indent(line: str, *, line_number: int) -> int | None:
     return len(leading)
 
 
+def _block_scalar_indent(line: str, *, line_number: int) -> int | None:
+    """Indentation for block-scalar termination; None only for blank lines.
+
+    Unlike :func:`_indent`, a comment line reports its real indentation. Inside
+    a literal block a ``#`` line indented at or beyond the content is ordinary
+    content (a shell comment), but one indented back to the parent's level ends
+    the scalar, exactly as YAML specifies. Treating it as content instead makes
+    the block appear to start at the comment's indentation.
+    """
+    text = _without_eol(line)
+    leading = text[: len(text) - len(text.lstrip(" \t"))]
+    if "\t" in leading:
+        raise WorkflowError(
+            f"line {line_number}: tabs are not valid YAML indentation"
+        )
+    if not text.strip():
+        return None
+    return len(leading)
+
+
 def _is_mapping_key(line: str, indent: int, key: str) -> bool:
     text = _without_eol(line)
     prefix = " " * indent + key + ":"
@@ -192,7 +212,7 @@ def _deindent_literal_block(
 ) -> str:
     block_end = end
     for idx in range(start, end):
-        indentation = _indent(lines[idx], line_number=idx + 1)
+        indentation = _block_scalar_indent(lines[idx], line_number=idx + 1)
         if indentation is not None and indentation <= parent_indent:
             block_end = idx
             break
