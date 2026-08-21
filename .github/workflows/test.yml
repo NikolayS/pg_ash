@@ -2,10 +2,10 @@ name: Test pg_ash
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
   workflow_dispatch:
     inputs:
       release_tag:
@@ -11420,3 +11420,25 @@ jobs:
           CRON: ${{ matrix.cron }}
         run: |
           echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
+
+  # One stable check name for the branch ruleset's required status checks.
+  # The matrix contexts embed PG versions ("test (19beta2, on)") and change
+  # every release, so requiring them by name would rot. Fails if any needed
+  # job failed or was cancelled; a job that never ran leaves this pending.
+  ci-required:
+    if: always()
+    needs: [docs-lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert every required job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "needed job results: ${RESULTS}"
+          for r in ${RESULTS}; do
+            case "${r}" in
+              success|skipped) ;;
+              *) echo "a required job reported: ${r}" >&2; exit 1 ;;
+            esac
+          done
