@@ -1,0 +1,59 @@
+# Guards the one CI failure mode that is completely silent.
+#
+# GitHub Actions refuses to create a workflow run when the workflow file
+# exceeds 512,000 bytes. It does not report an error, annotate the commit, or
+# mark anything red — the run simply never appears. Since a missing run is
+# indistinguishable from a run with nothing to say, `Test pg_ash` can stop
+# executing entirely while the pull request still shows green checks, and
+# every guarantee that depends on "CI is green" silently becomes void.
+#
+# This check deliberately lives in its own small workflow file rather than in
+# test.yml: a guard inside the file it guards cannot run once that file is too
+# large to start, which is exactly when it is needed.
+name: Workflow size
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check workflow files against the GitHub Actions size limit
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          # GitHub's hard limit; a run is never created past this point.
+          limit=512000
+          # Fail well before the cliff so there is room to land a fix.
+          warn=460000
+
+          status=0
+          for wf in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -e "$wf" ] || continue
+            size="$(wc -c < "$wf" | tr -d ' ')"
+            pct=$(( size * 100 / limit ))
+            printf '%8d bytes (%3d%% of the %d-byte limit)  %s\n' \
+              "$size" "$pct" "$limit" "$wf"
+            if [ "$size" -ge "$warn" ]; then
+              status=1
+              {
+                echo "::error file=$wf::$wf is $size bytes, at or above the"\
+                  "${warn}-byte guard rail (GitHub refuses to create a run"\
+                  "past ${limit} bytes, silently). Move large inline test"\
+                  "bodies into devel/tests/*.sql and invoke them with"\
+                  "'psql --file', as cron_path.sql and features.sql already do."
+              } >&2
+            fi
+          done
+          exit "$status"
