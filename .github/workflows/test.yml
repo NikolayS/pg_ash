@@ -8183,8 +8183,12 @@ jobs:
             > /tmp/ash_latest_upgrade.sql
           test -s /tmp/ash_chain_before_latest.sql
           test -s /tmp/ash_latest_upgrade.sql
+          python3 devel/scripts/ash_sql_chain.py reapply-chain \
+            > /tmp/ash_reapply_chain.sql
+          test -s /tmp/ash_reapply_chain.sql
           echo "--- fixture chain ---"; cat /tmp/ash_chain_before_latest.sql
           echo "--- payload under test ---"; cat /tmp/ash_latest_upgrade.sql
+          echo "--- re-apply chain ---"; cat /tmp/ash_reapply_chain.sql
 
           cat > /tmp/ash_config_ordinal_driver.sql << 'EOF'
           \i /tmp/ash_chain_before_latest.sql
@@ -8197,8 +8201,19 @@ jobs:
           as
           select 'ash.config'::regclass::oid as relation_oid;
 
-          -- The released migration remains safe to re-apply after normalization.
-          \i /tmp/ash_latest_upgrade.sql
+          /*
+           * The re-apply-safe payload remains safe to re-apply after
+           * normalization. Use the discovered re-apply chain rather than
+           * replaying the whole payload: once a development installer stages
+           * a new ash.config column, replaying the released 1.5-to-2.0
+           * migration on top of it fails its own strict column check
+           * ("cannot normalize ash.config: expected columns {...}, found
+           * {..., sample_unlogged}"). That check is correct — a released
+           * migration is only re-apply-safe against the schema it shipped
+           * for — and released SQL is immutable, so the test must replay
+           * what ash_sql_chain.py actually declares re-apply-safe.
+           */
+          \i /tmp/ash_reapply_chain.sql
           \i devel/tests/config_ordinal_assert.sql
 
           do $$
