@@ -544,6 +544,13 @@ jobs:
           fi
 
           stop_standby
+
+          # The seed had to be COMMITTED on the primary to replicate, so it
+          # outlives this step. Undo it, or later steps that assert exact
+          # pre-existing state fail for reasons unrelated to themselves.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/replica_guards_cleanup.sql
+
           echo "Issue #222 real-standby assertions PASSED"
 
       - name: Test SQL entrypoints fail atomically
