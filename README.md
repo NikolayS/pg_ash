@@ -510,9 +510,7 @@ surface from the catalog alone.
 
 ## Requirements
 
-- Postgres 14+
-- `pg_stat_statements` optional but recommended for `query_text`
-- `pg_cron` optional but recommended for built-in scheduling
+Postgres 14+. Nothing else is required.
 
 `compute_query_id` must be on for useful query attribution:
 
@@ -520,6 +518,46 @@ surface from the catalog alone.
 alter system set compute_query_id = 'on';
 select pg_reload_conf();
 ```
+
+### Optional dependencies, and what you lose without them
+
+Both integrations are soft. pg_ash installs, samples, and answers questions
+with neither of them present — this is deliberate, because an application
+vendor embedding pg_ash cannot require every customer's DBA to install
+extensions, and on vendor-managed Postgres the application's own database user
+usually lacks the privilege to do it.
+
+| | pg_cron | pg_stat_statements | What you get |
+|---|---|---|---|
+| Both present | yes | yes | Everything: scheduled sampling and rollups, wait analysis, and query **text** on `ash.top`, `ash.samples`, and `ash.report` |
+| No pg_stat_statements | yes | no | Everything except query text. Query **IDs** still work — they come from `pg_stat_activity`, not from pg_stat_statements — so attribution by `query_id` is intact and `query_text` is `NULL`. `ash.report()` sets `top_queryids_available` accordingly |
+| No pg_cron | no | yes | Everything, but you schedule the jobs. `ash.start()` records the interval, enables sampling, and prints the external jobs to run; see [Scheduling](#scheduling) |
+| Neither | no | no | Wait-event analysis by type, event, and query ID, on a schedule you drive. This is the floor, and it is still the whole AAS story minus SQL text |
+
+`pg_cron` is a third-party extension (originally Citus, now maintained by
+Microsoft) and is not available on every platform. The external-scheduler path
+is a supported way to run pg_ash, not a fallback for the unlucky — some
+integrators choose it deliberately to keep scheduling under their own control.
+
+### Choosing a sampling interval
+
+| Interval | Verdict |
+|---|---|
+| 1 second | The default, and the right answer for almost everyone |
+| 15 seconds | Workable. Comparable to what managed platforms sample at; you will see sustained pressure but blur short bursts |
+| 1 minute | Too coarse. Spikes disappear entirely — a minute of trouble can average away to nothing |
+
+Sampling has a floor that no interval setting fixes. When an incident lasts a
+handful of seconds, 1-second sampling often cannot tell you which wait came
+first — whether a `LWLock` wave triggered lock contention or followed it. That
+ordering question needs wait-event *tracing*, not sampling, and pg_ash does not
+provide it. For sustained load, capacity questions, and "what was this database
+doing at 03:14", 1-second sampling answers well.
+
+The cost of sampling more often is roughly linear in the number of *active
+sessions*, not in database size: each sample stores the currently active
+backends, compressed. See [Retention and storage](#retention-and-storage) for
+the volume this implies.
 
 ## Compared to alternatives
 
