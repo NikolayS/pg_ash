@@ -8227,17 +8227,69 @@ jobs:
             > /tmp/ash_latest_upgrade.sql
           test -s /tmp/ash_chain_before_latest.sql
           test -s /tmp/ash_latest_upgrade.sql
+
+          # Split the payload again: the released migration (which performs
+          # the ash.config normalization) and the development overlay that
+          # follows it. The migration's own idempotence — "already canonical
+          # => early return, do not rewrite the table" — can only be tested
+          # BEFORE the overlay stages a new config column, because after that
+          # the migration correctly refuses to run at all.
+          grep '^.i sql/migrations/' /tmp/ash_latest_upgrade.sql \
+            > /tmp/ash_latest_migration.sql
+          grep -v '^.i sql/migrations/' /tmp/ash_latest_upgrade.sql \
+            > /tmp/ash_latest_overlay.sql || true
+          test -s /tmp/ash_latest_migration.sql
+
           python3 devel/scripts/ash_sql_chain.py reapply-chain \
             > /tmp/ash_reapply_chain.sql
-          test -s /tmp/ash_reapply_chain.sql
+          # reapply-chain is legitimately empty right after a release stamp
+          # removes devel/sql/; skip rather than fail, matching the pinned
+          # v1.5 step's handling of the same situation.
+          if [ ! -s /tmp/ash_reapply_chain.sql ]; then
+            echo "no re-apply-safe payload discovered (post-release-stamp state) — overlay re-apply assertions skipped"
+            : > /tmp/ash_reapply_chain.sql
+          fi
           echo "--- fixture chain ---"; cat /tmp/ash_chain_before_latest.sql
           echo "--- payload under test ---"; cat /tmp/ash_latest_upgrade.sql
+          echo "--- released migration ---"; cat /tmp/ash_latest_migration.sql
+          echo "--- development overlay ---"; cat /tmp/ash_latest_overlay.sql
           echo "--- re-apply chain ---"; cat /tmp/ash_reapply_chain.sql
 
           cat > /tmp/ash_config_ordinal_driver.sql << 'EOF'
           \i /tmp/ash_chain_before_latest.sql
           \i devel/tests/config_ordinal_setup.sql
-          \i /tmp/ash_latest_upgrade.sql
+
+          -- Apply the released migration on its own: this is what performs
+          -- the ash.config normalization.
+          \i /tmp/ash_latest_migration.sql
+
+          create temporary table config_ordinal_oid_normalized
+          on commit preserve rows
+          as
+          select 'ash.config'::regclass::oid as relation_oid;
+
+          /*
+           * Re-apply the released migration against the schema it shipped
+           * for. Its normalization block must take the early-return path —
+           * "already canonical, do not rewrite" — which is exactly what
+           * makes a normalization migration re-apply-safe. This assertion
+           * has to live here, before the overlay stages a new config column;
+           * afterwards the migration correctly refuses to run at all, so the
+           * property would otherwise have no coverage anywhere in CI.
+           */
+          \i /tmp/ash_latest_migration.sql
+          do $$
+          begin
+            assert 'ash.config'::regclass::oid = (
+              select relation_oid from config_ordinal_oid_normalized
+            ), 'canonical ash.config was rebuilt when the released migration '
+               'was re-applied';
+            raise notice
+              'released migration re-apply left ash.config in place';
+          end $$;
+
+          -- Now the development overlay, then the full canonical assertions.
+          \i /tmp/ash_latest_overlay.sql
           \i devel/tests/config_ordinal_assert.sql
 
           create temporary table config_ordinal_oid_after
