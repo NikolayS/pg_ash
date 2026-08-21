@@ -1032,6 +1032,39 @@ $$;
 comment on function ash._in_recovery() is
   'Reports whether this server is in recovery (a physical standby).';
 
+/*
+ * Can this backend read the raw sample ring at all?
+ *
+ * PostgreSQL refuses to read an UNLOGGED relation during recovery
+ * ("cannot access temporary or unlogged relations during recovery",
+ * SQLSTATE 55000). So on a standby, an installation that opted into an
+ * unlogged ring has raw samples that are physically unreadable here — while
+ * the always-logged rollups remain perfectly readable.
+ *
+ * Readers consult this before probing the ring, so that a standby degrades
+ * to rollup-backed answers instead of erroring out. Without it, opting into
+ * unlogged on the primary silently breaks every reader on every replica,
+ * including ash.status() — the one place an operator looks to find out why.
+ */
+create or replace function ash._raw_ring_readable()
+returns bool
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select not (
+    ash._in_recovery()
+    and coalesce(
+      (select config_row.sample_unlogged from ash.config as config_row
+       where config_row.singleton),
+      false
+    )
+  )
+$$;
+
+comment on function ash._raw_ring_readable() is
+  'False when this backend cannot read ash.sample: an unlogged ring on a server in recovery. Readers fall back to the always-logged rollups instead of raising SQLSTATE 55000.';
+
 -- Core sampler function (no hstore dependency)
 create or replace function ash.take_sample()
 returns int
@@ -2031,8 +2064,15 @@ begin
 
   -- Step 7: create new partitions.
   for i in 0 .. v_new_n - 1 loop
+    /*
+     * No `if not exists` here, unlike the installer's loop: step 6 dropped
+     * every partition, so a name that still exists is a leftover NON-partition
+     * table. Skipping it silently would leave the slot unattached to
+     * ash.sample and surface much later as "no partition of relation sample
+     * found for row" during take_sample(). Fail here instead.
+     */
     execute format(
-      'create %stable if not exists ash.sample_%s '
+      'create %stable ash.sample_%s '
       'partition of ash.sample for values in (%s)',
       case when v_sample_unlogged then 'unlogged ' else '' end,
       i,
@@ -3278,14 +3318,29 @@ begin
   select * into v_config from ash.config where singleton;
 
   -- Last sample timestamp
-  select max(sample_ts) into v_last_sample_ts from ash.sample;
+  /*
+   * status() must keep working on a standby with an unlogged ring — it is
+   * the documented place to look when pg_ash misbehaves, and node role is
+   * one of the rows it reports.
+   */
+  if ash._raw_ring_readable() then
+    select max(sample_ts) into v_last_sample_ts from ash.sample;
+  else
+    v_last_sample_ts := null;
+  end if;
 
-  -- Samples in current partition
-  select count(*) into v_samples_current
-  from ash.sample where slot = v_config.current_slot;
+  -- Samples in current partition / total (both unreadable on an
+  -- unlogged ring during recovery; report them as unknown, not as zero,
+  -- so nobody mistakes "cannot read" for "no samples").
+  if ash._raw_ring_readable() then
+    select count(*) into v_samples_current
+    from ash.sample where slot = v_config.current_slot;
 
-  -- Total samples
-  select count(*) into v_samples_total from ash.sample;
+    select count(*) into v_samples_total from ash.sample;
+  else
+    v_samples_current := null;
+    v_samples_total := null;
+  end if;
 
   -- Dictionary sizes
   select count(*) into v_wait_events from ash.wait_event_map;
@@ -4457,15 +4512,33 @@ $$;
  * a delayed rotation. It therefore does not jump to the first post-install or
  * post-outage sample. Null when raw holds no data.
  */
+/*
+ * Deliberately plpgsql, not sql. A `case when readable then (select … from
+ * ash.sample) end` does NOT work: the uncorrelated sub-select is planned as
+ * an InitPlan and evaluated at executor startup regardless of the CASE, so
+ * it still opens the relation and still raises 55000 on a standby with an
+ * unlogged ring. An IF in plpgsql genuinely does not execute the query.
+ */
 create or replace function ash._raw_oldest_sample()
 returns timestamptz
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
-  select ash.ts_to_timestamptz(min(sample_ts))
-  from ash.sample
-  where slot = any(ash._active_slots())
+declare
+  v_oldest timestamptz;
+begin
+  if not ash._raw_ring_readable() then
+    return null;
+  end if;
+
+  select ash.ts_to_timestamptz(min(sample_row.sample_ts))
+  into v_oldest
+  from ash.sample as sample_row
+  where sample_row.slot = any(ash._active_slots());
+
+  return v_oldest;
+end;
 $$;
 
 create or replace function ash._raw_retention_start()
