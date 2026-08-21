@@ -8536,6 +8536,11 @@ jobs:
           git show v1.5:sql/ash-install.sql > /tmp/ash-v1.5-install.sql
           python3 devel/scripts/ash_sql_chain.py pinned-upgrade-chain 1.5 \
             > /tmp/ash-v1.5-upgrade-chain.sql
+          python3 devel/scripts/ash_sql_chain.py reapply-chain \
+            > /tmp/ash_reapply_chain.sql
+          test -s /tmp/ash_reapply_chain.sql
+          echo "--- upgrade chain ---"; cat /tmp/ash-v1.5-upgrade-chain.sql
+          echo "--- re-apply chain ---"; cat /tmp/ash_reapply_chain.sql
           psql \
             --no-psqlrc \
             --host=localhost \
@@ -8936,9 +8941,23 @@ jobs:
           end $$;
           reset role;
 
-          -- Re-apply the helper-generated public-wrapper + candidate-overlay
-          -- chain: both layers promise to be re-apply-safe.
-          \i /tmp/ash-v1.5-upgrade-chain.sql
+          /*
+           * Re-apply what the helper declares re-apply-safe. Deliberately not
+           * the pinned wrapper chain: that chain leads with the released
+           * 1.5-to-2.0 migration, and once a development installer stages a
+           * new ash.config column, replaying that migration against the
+           * upgraded schema fails its own strict column check ("cannot
+           * normalize ash.config: expected columns {...}, found {...,
+           * sample_unlogged}"). The check is correct — a released migration is
+           * only re-apply-safe against the schema it shipped for, and released
+           * SQL is immutable — and at release-stamp time the promoted
+           * migration learns the new column, so the mismatch is confined to
+           * the development cycle. The property under test here is #107's:
+           * that reader grants and config state survive a re-apply of the
+           * layer that drops and recreates functions, which is the installer
+           * overlay that reapply-chain names.
+           */
+          \i /tmp/ash_reapply_chain.sql
 
           do $$
           declare
