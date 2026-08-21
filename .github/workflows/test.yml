@@ -3199,21 +3199,29 @@ jobs:
               'ash_rollup_gc command must call ash.run_rollup_cleanup()';
 
             /*
-             * Reproduce the existing-job divergence: both persistent jobs
-             * have drifted commands, and ash.start() must repair them in
-             * place while reporting that the command was re-synced.
+             * Existing-job divergence, both sides of the contract.
+             *
+             * This block previously set both commands to 'select 1' and
+             * required ash.start() to overwrite them. That encoded the old
+             * "always re-sync" behaviour, which is exactly what destroyed an
+             * operator's customised command. The contract is now: re-sync
+             * only text pg_ash itself scheduled; anything else is a
+             * customisation and is preserved, with the status saying so.
+             *
+             * Case 1: a RECOGNISED legacy command must still be repaired.
              */
             perform cron.alter_job(
               job_id := (
                 select jobid from cron.job where jobname = 'ash_sampler'
               ),
-              command := 'select 1'
+              command :=
+                'set statement_timeout = ''500ms''; select ash.take_sample()'
             );
             perform cron.alter_job(
               job_id := (
                 select jobid from cron.job where jobname = 'ash_rotation'
               ),
-              command := 'select 1'
+              command := 'SELECT ash.rotate()'
             );
             select
               max(status) filter (where job_type = 'sampler'),
@@ -3237,11 +3245,50 @@ jobs:
               select command from cron.job where jobname = 'ash_sampler'
             ) =
               'set statement_timeout = ''500ms''; call ash.run_take_sample()',
-              'existing ash_sampler command was not re-synced';
+              'recognised legacy ash_sampler command was not re-synced';
             assert (
               select command from cron.job where jobname = 'ash_rotation'
             ) = 'call ash.run_rotate()',
-              'existing ash_rotation command was not re-synced';
+              'recognised legacy ash_rotation command was not re-synced';
+
+            /*
+             * Case 2: an UNRECOGNISED command is a customisation and must
+             * survive, with the schedule still repaired and the status
+             * reporting preservation rather than a re-sync.
+             */
+            perform cron.alter_job(
+              job_id := (
+                select jobid from cron.job where jobname = 'ash_sampler'
+              ),
+              command := 'select 1'
+            );
+            select max(status) filter (where job_type = 'sampler')
+            into v_sampler_status
+            from ash.start('1 second');
+
+            assert v_sampler_status =
+              'already exists — schedule updated to 1 seconds; '
+              'custom command preserved', format(
+                'customised ash_sampler status mismatch: %s',
+                v_sampler_status
+              );
+            assert (
+              select command from cron.job where jobname = 'ash_sampler'
+            ) = 'select 1',
+              'ash.start overwrote a customised ash_sampler command';
+            assert (
+              select schedule from cron.job where jobname = 'ash_sampler'
+            ) = '1 seconds',
+              'ash.start skipped the schedule repair for a customised job';
+
+            -- Restore the canonical command for the steps that follow.
+            perform cron.alter_job(
+              job_id := (
+                select jobid from cron.job where jobname = 'ash_sampler'
+              ),
+              command :=
+                'set statement_timeout = ''500ms''; call ash.run_take_sample()'
+            );
             perform ash.stop();
 
             select job_id into v_job_id
