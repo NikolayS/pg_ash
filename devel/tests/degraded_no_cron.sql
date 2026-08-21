@@ -144,9 +144,67 @@ begin
     (select count(*) from ash.rollup_1h where datid = v_datid)
   );
 
+  /*
+   * Cleanup, both sides. Asserting only that a fresh grain survives passes
+   * against a procedure that does nothing — this fixture has nothing expired,
+   * so run_rollup_cleanup() reported "deleted 0 minute rows". Seed a grain
+   * past rollup_1m_retention_days as well, and require that one to be deleted
+   * while the two-hour-old grain is spared.
+   */
+  insert into ash.rollup_1m (
+    ts, datid, samples, peak_backends, wait_counts, query_counts
+  )
+  values (
+    ash.ts_from_timestamptz(
+      clock_timestamp()
+        - make_interval(
+            days => (select rollup_1m_retention_days + 1
+                     from ash.config where singleton)
+          )
+    ) / 60 * 60,
+    v_datid, 1, 1, array[v_wait_id::int, 1], '{}'::int8[]
+  );
+
   call ash.run_rollup_cleanup();
   assert (select count(*) from ash.rollup_1m where ts = v_minute) = 1,
     'external path: run_rollup_cleanup deleted a within-retention grain';
+  assert (
+    select count(*) = 0
+    from ash.rollup_1m
+    where ts < ash.ts_from_timestamptz(
+      clock_timestamp()
+        - make_interval(
+            days => (select rollup_1m_retention_days
+                     from ash.config where singleton)
+          )
+    )
+  ), format(
+    'external path: run_rollup_cleanup left %s expired minute grain(s)',
+    (
+      select count(*) from ash.rollup_1m
+      where ts < ash.ts_from_timestamptz(
+        clock_timestamp()
+          - make_interval(
+              days => (select rollup_1m_retention_days
+                       from ash.config where singleton)
+            )
+      )
+    )
+  );
+
+  /*
+   * Only now is the open-minute invariant meaningful. run_rollup_minute()'s
+   * default batch_limit of 60 stops a full hour short of now from a
+   * two-hour-old watermark, so the current minute was never even considered —
+   * the check could not fail. Advance the watermark to just behind now and
+   * roll up again, so this is the boundary check it claims to be.
+   */
+  update ash.config
+  set last_rollup_1m_ts = ash.ts_from_timestamptz(
+    date_trunc('minute', clock_timestamp()) - interval '2 minutes'
+  )
+  where singleton;
+  call ash.run_rollup_minute();
   /*
    * Assert the invariant, not a raw count: whether the samples just taken
    * fall in a already-complete minute depends on where in the wall clock
