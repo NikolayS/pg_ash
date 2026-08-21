@@ -62,8 +62,32 @@ begin
     select last_rollup_1m_ts is null
       or last_rollup_1m_ts < (select max(sample_ts) from ash.sample)
     from ash.config where singleton
-  ), 'fixture: rollup watermark is already caught up — the rollup guard '
-     'asserts would be vacuous';
+  ), 'fixture: rollup watermark is already caught up — the rollup_minute '
+     'guard assert would be vacuous';
+  /*
+   * rollup_hour() reads ash.rollup_1m, not ash.sample. Without pending MINUTE
+   * grains it returns 0 whatever the guard does, so require them explicitly.
+   */
+  assert (
+    select count(*) > 0
+    from ash.rollup_1m
+    where ts < ash.ts_from_timestamptz(
+      date_trunc('hour', clock_timestamp())
+    )
+  ), 'fixture: no completed-hour minute grains — the rollup_hour guard '
+     'assert would be vacuous';
+  /*
+   * rollup_hour() only seals an hour once the minute watermark is past its
+   * end, so require that too — otherwise it declines for a legitimate reason
+   * and the guard assertion proves nothing.
+   */
+  assert (
+    select last_rollup_1m_ts >= (
+      select min(ts) + 3600 from ash.rollup_1m
+    )
+    from ash.config where singleton
+  ), 'fixture: minute watermark is not past the seeded hour — the '
+     'rollup_hour guard assert would be vacuous';
 
   /* ---- scheduled routines: clean no-op, never an error ---- */
 
