@@ -730,6 +730,16 @@ create or replace function ash._apply_sample_persistence()
 returns int
 language plpgsql
 set search_path = pg_catalog, ash
+/*
+ * ALTER TABLE ... SET LOGGED/UNLOGGED takes ACCESS EXCLUSIVE and rewrites the
+ * partition. On a live installation the sampler inserts every second and
+ * readers scan the ring, so a blocked ALTER would queue behind them and then
+ * block everything arriving behind itself — converting a routine setting
+ * change into a stall of the whole ring. Fail fast instead. Reconciliation is
+ * idempotent and per-partition, so a timed-out conversion leaves a
+ * partially-converted ring that the next call finishes.
+ */
+set lock_timeout = '5s'
 as $$
 declare
   v_converted int := 0;
@@ -764,7 +774,7 @@ end;
 $$;
 
 comment on function ash._apply_sample_persistence() is
-$$Internal admin helper: reconciles only the numeric ash.sample_N partitions with ash.config.sample_unlogged and returns the number converted. Existing partitions are altered only when pg_class.relpersistence differs, so a matching ring is a no-op. Never alters the partitioned ash.sample parent or the always-logged rollup tables.$$;
+$$Internal admin helper: reconciles only the numeric ash.sample_N partitions with ash.config.sample_unlogged and returns the number converted. Existing partitions are altered only when pg_class.relpersistence differs, so a matching ring is a no-op. Never alters the partitioned ash.sample parent or the always-logged rollup tables. Runs with lock_timeout = 5s: the ALTER takes ACCESS EXCLUSIVE and rewrites the partition, so it fails fast rather than stalling the sampler; reconciliation is idempotent so the next call finishes a timed-out conversion.$$;
 
 -- Create partitions and indexes dynamically based on num_partitions.
 do $$
