@@ -341,6 +341,146 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: "#222: recovery guard coverage on every PostgreSQL version"
+        # Every guard calls ash._in_recovery() rather than pg_is_in_recovery()
+        # directly, which gives the tests a seam: redefine that one function
+        # inside a transaction and every guarded branch runs for real, on
+        # every PG major, without standing up a standby per matrix job. The
+        # rollback restores the real definition, and the follow-up assertions
+        # in replica_guards_primary.sql prove the override did not leak.
+        #
+        # The companion "#222: recovery guards on a real streaming standby"
+        # step proves the predicate itself against a genuine replica. Neither
+        # step alone is sufficient.
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          PGAPPNAME=ash_222_primary \
+            psql -h localhost -U postgres -d postgres \
+              -c "select pg_sleep(120)" >/dev/null 2>&1 &
+          workload_pid="$!"
+          trap 'kill "${workload_pid}" 2>/dev/null || true' EXIT
+
+          workload_ready=false
+          for _ in {1..20}; do
+            if psql -h localhost -U postgres -d postgres -tAc \
+                 "select count(*) from pg_stat_activity
+                  where application_name = 'ash_222_primary'
+                    and state = 'active'" | grep -qx 1; then
+              workload_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${workload_ready}" != true ]]; then
+            echo "issue #222 fixture: workload backend never became active" >&2
+            exit 1
+          fi
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SEAM'
+          begin;
+          create or replace function ash._in_recovery()
+          returns bool language sql as 'select true';
+          \i devel/tests/replica_guards_assert.sql
+          rollback;
+          SEAM
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/replica_guards_primary.sql
+
+      - name: "#222: recovery guards on a real streaming standby"
+        # Runs a second postmaster inside the same service container, built
+        # with pg_basebackup over the unix socket. The official postgres image
+        # already ships `local replication all trust`, and wal_level=replica /
+        # max_wal_senders=10 are the defaults, so no server config change is
+        # needed. shared_preload_libraries is cleared on the standby so pg_cron
+        # does not start there.
+        #
+        # Gated to one matrix cell: this proves the predicate against a real
+        # replica, while the seam step above covers every PG major.
+        if: matrix.postgres == 18 && matrix.cron == 'on'
+        env:
+          PGPASSWORD: postgres
+          CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+
+          standby_dir=/tmp/ash_standby
+          stop_standby() {
+            docker exec "$CONTAINER_ID" bash -c \
+              "su postgres -c 'pg_ctl -D ${standby_dir} -m fast stop'" \
+              >/dev/null 2>&1 || true
+          }
+          trap stop_standby EXIT
+
+          samples_before="$(psql -h localhost -U postgres -d postgres -tAc \
+            'select count(*) from ash.sample')"
+
+          docker exec "$CONTAINER_ID" bash -c "
+            set -e
+            rm -rf ${standby_dir}
+            su postgres -c 'pg_basebackup -h /var/run/postgresql -U postgres \
+              -D ${standby_dir} -Fp -Xs -R'
+            su postgres -c 'pg_ctl -D ${standby_dir} \
+              -o \"-p 5433 -c hot_standby=on -c shared_preload_libraries=\" \
+              -l /tmp/ash_standby.log start'
+          "
+
+          standby_ready=false
+          for _ in {1..30}; do
+            if docker exec "$CONTAINER_ID" psql -U postgres -p 5433 -tAc \
+                 'select pg_is_in_recovery()' 2>/dev/null | grep -qx t; then
+              standby_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${standby_ready}" != true ]]; then
+            echo "issue #222: standby did not reach recovery after 30 probes" >&2
+            docker exec "$CONTAINER_ID" cat /tmp/ash_standby.log >&2 || true
+            exit 1
+          fi
+
+          docker cp devel/tests/replica_guards_assert.sql \
+            "$CONTAINER_ID:/tmp/replica_guards_assert.sql"
+          docker exec -i "$CONTAINER_ID" psql -U postgres -p 5433 \
+            -v ON_ERROR_STOP=1 -f /tmp/replica_guards_assert.sql
+
+          # A standby cannot have written to the primary.
+          samples_after="$(psql -h localhost -U postgres -d postgres -tAc \
+            'select count(*) from ash.sample')"
+          if [[ "${samples_after}" -ne "${samples_before}" ]]; then
+            echo "issue #222: standby calls changed the primary's ash.sample \
+              (${samples_before} -> ${samples_after})" >&2
+            exit 1
+          fi
+
+          # The installer itself must refuse on a standby, with SQLSTATE 25006.
+          install_path="$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
+          docker cp "$install_path" "$CONTAINER_ID:/tmp/ash-install.sql"
+          set +e
+          installer_output="$(docker exec -i "$CONTAINER_ID" psql -U postgres \
+            -p 5433 -v ON_ERROR_STOP=1 -v VERBOSITY=verbose \
+            -f /tmp/ash-install.sql 2>&1)"
+          installer_rc=$?
+          set -e
+          if [[ "${installer_rc}" -eq 0 ]]; then
+            echo "issue #222: installer must fail on a standby, but succeeded" >&2
+            exit 1
+          fi
+          if ! grep -q 25006 <<<"${installer_output}"; then
+            printf '%s\n' "${installer_output}" >&2
+            echo "issue #222: installer on a standby must raise 25006" >&2
+            exit 1
+          fi
+
+          stop_standby
+          echo "Issue #222 real-standby assertions PASSED"
+
       - name: Test SQL entrypoints fail atomically
         env:
           PGPASSWORD: postgres

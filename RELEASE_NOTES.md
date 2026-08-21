@@ -44,6 +44,12 @@ AAS-oriented 2.0 API:
 
 ## Changes since 2.0 beta 1
 
+- **Primary-only operation is explicit on physical standbys.** Scheduled
+  sampling, rotation, and rollup routines now emit an actionable notice and
+  return a neutral value without writing when the server is in recovery.
+  Administrative entrypoints and the installer fail with SQLSTATE `25006`,
+  reader functions remain available, and `ash.status()` reports the node's
+  recovery state while explaining replicated `sampling_enabled`. (issue #222)
 - **Maintenance routines now have a `CALL` surface.** Admins and schedulers
   can invoke `run_take_sample`, `run_rotate`, `run_rollup_minute`,
   `run_rollup_hour`, and `run_rollup_cleanup` as procedures. This prevents

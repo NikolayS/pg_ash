@@ -20,6 +20,20 @@
 \set ON_ERROR_STOP on
 begin;
 
+do $$
+begin
+  /*
+   * ash._in_recovery() is not defined this early in the installer, so use
+   * the catalog predicate directly before any installation writes.
+   */
+  if pg_catalog.pg_is_in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot install pg_ash on a standby: pg_ash installs on the '
+        'primary and reaches replicas through streaming replication';
+  end if;
+end $$;
+
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
  * DROP FUNCTION destroys ACLs that CREATE OR REPLACE would keep, so a
@@ -934,6 +948,19 @@ $$;
 -- STEP 2: Sampler and decoder
 --------------------------------------------------------------------------------
 
+create or replace function ash._in_recovery()
+returns bool
+language sql
+stable
+parallel safe
+set search_path = pg_catalog
+as $$
+  select pg_catalog.pg_is_in_recovery()
+$$;
+
+comment on function ash._in_recovery() is
+  'Reports whether this server is in recovery (a physical standby).';
+
 -- Core sampler function (no hstore dependency)
 create or replace function ash.take_sample()
 returns int
@@ -955,6 +982,13 @@ declare
   v_missed_count bigint;
   v_seen_waits text[] := '{}';
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.take_sample: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   -- Get config (single read for all settings).
   select sampling_enabled, include_bg_workers, debug_logging
   into v_sampling_enabled, v_include_bg, v_debug_logging
@@ -1515,6 +1549,14 @@ declare
   v_endangered_rows bigint;
   v_unrolled_groups bigint;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rotate: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 'skipped: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+  end if;
+
   /*
    * Advisory lock prevents concurrent rotation from pg_cron overlap.
    * Xact-level: auto-releases on commit/rollback — no leak risk with pg_cron
@@ -1709,6 +1751,13 @@ declare
   v_rotation_period interval;
   v_rollup_1m_retention_days int;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   /*
    * Destructive: drops all raw sample partitions. Require explicit
    * confirmation BEFORE touching any state (sampling_enabled, pg_cron jobs,
@@ -2070,6 +2119,13 @@ declare
   v_stored_command text;
   v_canonical_command text;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   /*
    * Read debug_logging flag so we can trace the pg_cron detection /
    * scheduling path when ash.start() appears to no-op. Treat an error here as
@@ -2660,6 +2716,13 @@ as $$
 declare
   v_job_id bigint;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   -- Mark sampling as disabled.
   update ash.config set sampling_enabled = false where singleton;
 
@@ -2762,6 +2825,17 @@ as $$
 declare
   v_current bool;
 begin
+  /*
+   * NULL only reports the replicated setting and remains safe on a standby;
+   * non-NULL arguments change state and must be run on the primary.
+   */
+  if enabled is not null and ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   select debug_logging into v_current from ash.config where singleton;
 
   if enabled is null then
@@ -2788,6 +2862,13 @@ declare
   v_rec record;
   v_jobs_removed int := 0;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   if confirm is distinct from 'yes' then
     raise exception 'to uninstall pg_ash, call: select ash.uninstall(''yes'')';
   end if;
@@ -3046,7 +3127,15 @@ declare
   v_rollup_1m_newest int4;
   v_rollup_1h_oldest int4;
   v_rollup_1h_newest int4;
+  v_in_recovery bool := ash._in_recovery();
 begin
+  if v_in_recovery then
+    raise notice
+      'ash.status: server is in recovery (standby); no sampling or rollup '
+      'happens here, and sampling_enabled reflects the primary''s '
+      'configuration rather than local activity';
+  end if;
+
   -- Get config
   select * into v_config from ash.config where singleton;
 
@@ -3079,6 +3168,7 @@ begin
   end;
 
   metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
+  metric := 'in_recovery'; value := v_in_recovery::text; return next;
   metric := 'color';
   value := case when ash._color_on() then 'on' else 'off' end;
   return next;
@@ -3559,6 +3649,13 @@ declare
   v_has_later_data bool;
   v_sampler_lock_acquired bool := false;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_minute: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   /*
    * Acquire rollup lock (xact-level). Rollup operations serialize with each
    * other, and rebuild_partitions's drain poll waits on this objid.
@@ -3806,6 +3903,13 @@ declare
   v_batch_limit int := 24;
   v_total int := 0;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_hour: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   /*
    * Wait for the shared rollup lock instead of skipping. The hourly pg_cron
    * job runs at minute 1, when the every-minute worker also fires; a try-lock
@@ -3922,6 +4026,14 @@ declare
   v_cutoff_1m int4;
   v_cutoff_1h int4;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_cleanup: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 'skipped: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+  end if;
+
   /*
    * Acquire rollup lock (xact-level). Shares the kind with rollup_minute
    * and rollup_hour so cleanup can't delete rows that an in-flight rollup
