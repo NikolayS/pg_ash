@@ -1,5 +1,8 @@
 # pg_ash development and release SQL process
 
+CI triggers, the `ci-required` aggregator, and the branch-ruleset
+required-status-checks configuration live in [CI.md](CI.md).
+
 ## Version identity and prereleases
 
 Release tags use the repository's two-part version scheme. Prerelease stages
