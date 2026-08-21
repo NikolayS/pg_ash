@@ -375,8 +375,10 @@ Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` conf
 
 ### CALL-able maintenance procedures
 
-Each side-effecting collection or maintenance function has an admin-only
-procedure form for schedulers and automation:
+Each **scheduled** collection or maintenance function has an admin-only
+procedure form for schedulers and automation. The interactive administrative
+entrypoints (`ash.start()`, `ash.stop()`, `ash.rebuild_partitions()`,
+`ash.uninstall()`) remain functions — a human runs those, not a scheduler:
 
 | Function | Procedure form |
 |---|---|

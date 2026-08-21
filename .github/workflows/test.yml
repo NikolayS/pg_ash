@@ -2984,6 +2984,85 @@ jobs:
                 'Installer re-apply CALL command migration tests PASSED';
             end
             $migration$;
+
+            /*
+             * Round 2: the v1.0/v1.1 UPPERCASE forms, and an operator's
+             * customised command.
+             *
+             * v1.0 and v1.1 scheduled 'SELECT ash.take_sample()' and
+             * 'SELECT ash.rotate()'. ash-1.1-to-1.2.sql normalized only the
+             * sampler, and no released migration ever rewrote the rotation
+             * command — so an installation that started at 1.0/1.1 still
+             * carries the uppercase text. Round 1 above only ever seeds the
+             * exact lowercase strings, so the map's join condition is never
+             * exercised on its false branch, and a customised command is
+             * never proven to survive. Both are covered here.
+             */
+            select cron.unschedule('ash_sampler');
+            select cron.unschedule('ash_rotation');
+            select cron.unschedule('ash_rollup_gc');
+            create temp table _legacy_jobs_v10 (
+              jobname text primary key,
+              jobid bigint not null,
+              expected_command text not null
+            );
+            insert into _legacy_jobs_v10 values
+              (
+                'ash_sampler',
+                cron.schedule(
+                  'ash_sampler', '9 seconds', 'SELECT ash.take_sample()'
+                ),
+                'set statement_timeout = ''500ms''; call ash.run_take_sample()'
+              ),
+              (
+                'ash_rotation',
+                cron.schedule(
+                  'ash_rotation', '5 0 * * *', 'SELECT ash.rotate()'
+                ),
+                'call ash.run_rotate()'
+              ),
+              (
+                -- Customised: must come back byte-identical.
+                'ash_rollup_gc',
+                cron.schedule(
+                  'ash_rollup_gc', '0 3 * * *',
+                  'select ash.rollup_cleanup() /* site-local tweak */'
+                ),
+                'select ash.rollup_cleanup() /* site-local tweak */'
+              );
+            \i :install_path
+            do $migration_v10$
+            declare
+              v_actual record;
+              v_expected record;
+            begin
+              for v_expected in select * from _legacy_jobs_v10 loop
+                select jobid, command
+                into strict v_actual
+                from cron.job
+                where jobname = v_expected.jobname
+                  and database = current_database()
+                  and username = current_user;
+
+                assert v_actual.jobid = v_expected.jobid, format(
+                  'uppercase-legacy re-apply replaced %s jobid %s with %s',
+                  v_expected.jobname, v_expected.jobid, v_actual.jobid
+                );
+                assert v_actual.command = v_expected.expected_command,
+                  format(
+                    'uppercase-legacy re-apply command mismatch for %s: '
+                    'expected %L, got %L',
+                    v_expected.jobname,
+                    v_expected.expected_command,
+                    v_actual.command
+                  );
+              end loop;
+              raise notice
+                'v1.0/v1.1 uppercase migration and custom-command '
+                'preservation tests PASSED';
+            end
+            $migration_v10$;
+            drop table _legacy_jobs_v10;
           \endif
 
           do $$

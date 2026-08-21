@@ -4,6 +4,9 @@ declare
   v_status_val text;
   v_before bigint;
   v_after bigint;
+  v_wait_id smallint;
+  v_datid oid;
+  v_minute int4;
 begin
   -- start() should work without pg_cron (no error, prints hints)
   select status into v_status_val
@@ -90,9 +93,60 @@ begin
    * and assert the grain landed, so this is a side-effect check rather than
    * a smoke test.
    */
+  /*
+   * Seed a deterministic complete minute so the rollup procedures have real
+   * work to do. Asserting only "the open minute was not folded" would pass
+   * even if the procedures did nothing at all, which is what the earlier
+   * version of this check amounted to.
+   */
+  select ash._register_wait('active', 'Degraded', 'ExternalPath')
+  into v_wait_id;
+  select oid into v_datid from pg_database
+  where datname = current_database();
+  /*
+   * Two hours back, so the minute AND the hour containing it are both
+   * complete: rollup_minute folds the grain, and rollup_hour has a finished
+   * hour to fold. A fixture in the current hour would leave rollup_hour with
+   * legitimately nothing to do, which proves nothing.
+   */
+  v_minute := ash.ts_from_timestamptz(
+    date_trunc('minute', clock_timestamp()) - interval '2 hours'
+  );
+  insert into ash.sample (sample_ts, datid, active_count, data, slot)
+  select v_minute + offs, v_datid, 2, array[-v_wait_id::int, 2, 0, 0],
+    ash.current_slot()
+  from unnest(array[0, 10, 20]) as offs;
+  update ash.config
+  set last_rollup_1m_ts = v_minute, last_rollup_1h_ts = null
+  where singleton;
+
   call ash.run_rollup_minute();
+  assert (
+    select samples = 3 and peak_backends = 2
+      and wait_counts = array[v_wait_id::int, 6]
+    from ash.rollup_1m
+    where ts = v_minute and datid = v_datid
+  ), format(
+    'external path: run_rollup_minute produced the wrong grain: %s',
+    (
+      select row(samples, peak_backends, wait_counts)::text
+      from ash.rollup_1m where ts = v_minute and datid = v_datid
+    )
+  );
+
   call ash.run_rollup_hour();
+  assert (
+    select count(*) = 1
+    from ash.rollup_1h
+    where datid = v_datid
+  ), format(
+    'external path: run_rollup_hour expected exactly 1 hourly row, got %s',
+    (select count(*) from ash.rollup_1h where datid = v_datid)
+  );
+
   call ash.run_rollup_cleanup();
+  assert (select count(*) from ash.rollup_1m where ts = v_minute) = 1,
+    'external path: run_rollup_cleanup deleted a within-retention grain';
   /*
    * Assert the invariant, not a raw count: whether the samples just taken
    * fall in a already-complete minute depends on where in the wall clock

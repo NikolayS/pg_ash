@@ -402,6 +402,14 @@ $role_setup$;
 set role ash_issue_221_reader;
 do $reader_denials$
 begin
+  /*
+   * Positive control first. SQLSTATE 42501 is also what a reader gets when
+   * grant_reader() silently did nothing or the role never received schema
+   * USAGE, so without this the five denials below could all "pass" while
+   * proving nothing about procedure exclusion specifically.
+   */
+  perform ash.periods();
+
   begin
     call ash.run_take_sample();
     raise exception 'reader unexpectedly called run_take_sample';

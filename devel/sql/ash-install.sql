@@ -2253,9 +2253,18 @@ begin
    */
 
   -- Check for existing sampler job (idempotent).
+  /*
+   * cron.job is cluster-wide, so an unfiltered jobname lookup finds another
+   * database's sampler. The rotation lookup below has always filtered; this
+   * one did not, and now that the branch re-syncs `command` as well as
+   * `schedule` an unfiltered match would rewrite a different database's job
+   * while this database still ends up with no sampler at all.
+   */
   select jobid into v_sampler_job
   from cron.job
-  where jobname = 'ash_sampler';
+  where jobname = 'ash_sampler'
+    and username = current_user
+    and database = current_database();
 
   if v_sampler_job is not null then
     /*
@@ -2478,9 +2487,12 @@ begin
   end if;
 
   -- Remove sampler job.
+  -- cron.job is cluster-wide; never unschedule another database's job.
   select jobid into v_job_id
   from cron.job
-  where jobname = 'ash_sampler';
+  where jobname = 'ash_sampler'
+    and username = current_user
+    and database = current_database();
 
   if v_job_id is not null then
     perform cron.unschedule('ash_sampler');
@@ -2493,7 +2505,9 @@ begin
   -- Remove rotation job
   select jobid into v_job_id
   from cron.job
-  where jobname = 'ash_rotation';
+  where jobname = 'ash_rotation'
+    and username = current_user
+    and database = current_database();
 
   if v_job_id is not null then
     perform cron.unschedule('ash_rotation');
@@ -7978,9 +7992,26 @@ begin
             'set statement_timeout = ''500ms''; select ash.take_sample()',
             'set statement_timeout = ''500ms''; call ash.run_take_sample()'
           ),
+          /*
+           * v1.0 and v1.1 scheduled these in uppercase. ash-1.1-to-1.2.sql
+           * normalized only the sampler command, and no released migration
+           * has ever rewritten the rotation command — so an installation
+           * that started at 1.0/1.1 still carries the uppercase text and
+           * would otherwise keep a SELECT-form writer forever.
+           */
+          (
+            'ash_sampler',
+            'SELECT ash.take_sample()',
+            'set statement_timeout = ''500ms''; call ash.run_take_sample()'
+          ),
           (
             'ash_rotation',
             'select ash.rotate()',
+            'call ash.run_rotate()'
+          ),
+          (
+            'ash_rotation',
+            'SELECT ash.rotate()',
             'call ash.run_rotate()'
           ),
           (
@@ -8004,11 +8035,25 @@ begin
       where cron_job.database = current_database()
         and cron_job.username = current_user
     loop
-      perform cron.schedule(
-        v_job.jobname,
-        v_job.schedule,
-        v_job.new_command
-      );
+      /*
+       * A cron.schedule() failure here must not abort the installer. This
+       * block now matches essentially every upgrading installation, and
+       * pg_cron revokes some of its API from PUBLIC, so a restricted
+       * installing role could otherwise turn a routine re-apply into a failed
+       * upgrade. Same defence the pg_monitor grant block above uses.
+       */
+      begin
+        perform cron.schedule(
+          v_job.jobname,
+          v_job.schedule,
+          v_job.new_command
+        );
+      exception when others then
+        raise warning
+          'pg_ash: could not migrate the legacy pg_cron command for job % '
+          '(%: %); it still uses the SELECT form and should be re-created',
+          v_job.jobname, sqlstate, sqlerrm;
+      end;
     end loop;
   end if;
 end $$;
