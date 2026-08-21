@@ -3063,6 +3063,82 @@ jobs:
             end
             $migration_v10$;
             drop table _legacy_jobs_v10;
+
+            /*
+             * Round 3: ash.start() must PRESERVE an operator's customised
+             * command and only re-sync text pg_ash itself scheduled.
+             *
+             * The installer migration deliberately preserves custom text;
+             * start() used to overwrite it unconditionally, so the two paths
+             * disagreed. start() is re-entrant by design and runbooks call
+             * it, so "customise after the last start()" is not a contract
+             * anyone can hold.
+             */
+            select ash.start('2 seconds');
+            select cron.alter_job(
+              job_id := (
+                select jobid from cron.job
+                where jobname = 'ash_sampler'
+                  and database = current_database()
+                  and username = current_user
+              ),
+              command :=
+                'set statement_timeout = ''5s''; call ash.run_take_sample()'
+            );
+            select cron.alter_job(
+              job_id := (
+                select jobid from cron.job
+                where jobname = 'ash_rollup_gc'
+                  and database = current_database()
+                  and username = current_user
+              ),
+              command := 'call ash.run_rollup_cleanup() /* site-local */'
+            );
+            -- A recognised legacy form must still be re-synced.
+            select cron.alter_job(
+              job_id := (
+                select jobid from cron.job
+                where jobname = 'ash_rotation'
+                  and database = current_database()
+                  and username = current_user
+              ),
+              command := 'SELECT ash.rotate()'
+            );
+            select ash.start('3 seconds');
+            do $custom_preserved$
+            declare
+              v_cmd text;
+            begin
+              select command into v_cmd from cron.job
+              where jobname = 'ash_sampler'
+                and database = current_database()
+                and username = current_user;
+              assert v_cmd
+                = 'set statement_timeout = ''5s''; call ash.run_take_sample()',
+                format('ash.start clobbered the customised sampler command: %L',
+                       v_cmd);
+
+              select command into v_cmd from cron.job
+              where jobname = 'ash_rollup_gc'
+                and database = current_database()
+                and username = current_user;
+              assert v_cmd = 'call ash.run_rollup_cleanup() /* site-local */',
+                format('ash.start clobbered the customised gc command: %L',
+                       v_cmd);
+
+              select command into v_cmd from cron.job
+              where jobname = 'ash_rotation'
+                and database = current_database()
+                and username = current_user;
+              assert v_cmd = 'call ash.run_rotate()',
+                format('ash.start failed to re-sync a recognised legacy '
+                       'rotation command, got %L', v_cmd);
+
+              raise notice
+                'ash.start custom-command preservation tests PASSED';
+            end
+            $custom_preserved$;
+            select ash.stop();
           \endif
 
           do $$

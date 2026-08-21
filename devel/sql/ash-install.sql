@@ -1961,6 +1961,83 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Check if pg_cron extension is available
+/*
+ * Single source of truth for pg_cron job command text: every spelling pg_ash
+ * has ever scheduled, and the canonical form each should become.
+ *
+ * Two places need this and must never disagree — ash.start()'s
+ * already-exists branches and the installer re-apply migration. Encoding it
+ * twice is how they drift, and the drift is user-visible: one path preserving
+ * an operator's customised command while the other silently overwrites it.
+ *
+ * Anything NOT listed here is, by definition, operator-customised and must be
+ * left alone.
+ */
+create or replace function ash._job_command_map()
+returns table (
+  jobname           text,
+  legacy_command    text,
+  canonical_command text
+)
+language sql
+immutable
+parallel safe
+set search_path = pg_catalog
+as $$
+  values
+    -- v1.0/v1.1 scheduled these in uppercase; only the sampler was ever
+    -- normalized by a released migration (ash-1.1-to-1.2.sql).
+    ('ash_sampler', 'SELECT ash.take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_sampler',
+     'set statement_timeout = ''500ms''; select ash.take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_sampler',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_rotation', 'SELECT ash.rotate()', 'call ash.run_rotate()'),
+    ('ash_rotation', 'select ash.rotate()', 'call ash.run_rotate()'),
+    ('ash_rotation', 'call ash.run_rotate()', 'call ash.run_rotate()'),
+    ('ash_rollup_1m', 'select ash.rollup_minute()',
+     'call ash.run_rollup_minute()'),
+    ('ash_rollup_1m', 'call ash.run_rollup_minute()',
+     'call ash.run_rollup_minute()'),
+    ('ash_rollup_1h', 'select ash.rollup_hour()', 'call ash.run_rollup_hour()'),
+    ('ash_rollup_1h', 'call ash.run_rollup_hour()',
+     'call ash.run_rollup_hour()'),
+    ('ash_rollup_gc', 'select ash.rollup_cleanup()',
+     'call ash.run_rollup_cleanup()'),
+    ('ash_rollup_gc', 'call ash.run_rollup_cleanup()',
+     'call ash.run_rollup_cleanup()')
+$$;
+
+comment on function ash._job_command_map() is
+  'Every pg_cron command string pg_ash has ever scheduled, mapped to its canonical current form. A stored command absent from this map is operator-customised and must never be rewritten. Shared by ash.start() and the installer re-apply migration so the two cannot drift.';
+
+/*
+ * The canonical command for a job whose stored text pg_ash recognises, or
+ * NULL when the operator has customised it (leave it alone) or the job name
+ * is not one of ours.
+ */
+create or replace function ash._canonical_job_command(
+  jobname text,
+  stored_command text
+)
+returns text
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select command_map.canonical_command
+  from ash._job_command_map() as command_map
+  where command_map.jobname = _canonical_job_command.jobname
+    and command_map.legacy_command = _canonical_job_command.stored_command
+  limit 1
+$$;
+
+comment on function ash._canonical_job_command(text, text) is
+  'Returns the canonical pg_cron command for a recognised pg_ash job command, or NULL when the stored text is operator-customised and must be preserved.';
+
 create or replace function ash._pg_cron_available()
 returns boolean
 language sql
@@ -1990,6 +2067,8 @@ declare
   v_debug_logging boolean := false;
   v_pg_cron_available boolean;
   v_cron_database text;
+  v_stored_command text;
+  v_canonical_command text;
 begin
   /*
    * Read debug_logging flag so we can trace the pg_cron detection /
@@ -2276,17 +2355,43 @@ begin
      * reason: otherwise an upgraded installation keeps the legacy SELECT
      * writer until an operator recreates the job.
      */
-    perform cron.alter_job(
-      job_id := v_sampler_job,
-      schedule := v_schedule,
-      command :=
-        'set statement_timeout = ''500ms''; call ash.run_take_sample()'
-    );
+    /*
+     * Re-sync the command ONLY when the stored text is one pg_ash itself has
+     * scheduled. Rewriting unconditionally would destroy an operator's
+     * customised command — e.g. a longer statement_timeout — and would
+     * contradict the installer migration below, which deliberately preserves
+     * custom text. start() is re-entrant by design and runbooks call it, so
+     * "customise after the last start()" is not a contract anyone can hold.
+     */
+    select cron_job.command into v_stored_command
+    from cron.job as cron_job
+    where cron_job.jobid = v_sampler_job;
+    v_canonical_command :=
+      ash._canonical_job_command('ash_sampler', v_stored_command);
+
+    if v_canonical_command is null then
+      perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
+      raise notice
+        'ash.start: ash_sampler has a customised command; preserving it. '
+        'pg_ash writes through CALL now — if that command still uses '
+        '"select ash.take_sample()" a read-routing proxy may send it to a '
+        'replica. Recommended: %',
+        'set statement_timeout = ''500ms''; call ash.run_take_sample()';
+      status := format(
+        'already exists — schedule updated to %s; custom command preserved',
+        v_schedule);
+    else
+      perform cron.alter_job(
+        job_id := v_sampler_job,
+        schedule := v_schedule,
+        command := v_canonical_command
+      );
+      status := format(
+        'already exists — schedule updated to %s; command re-synced',
+        v_schedule);
+    end if;
     job_type := 'sampler';
     job_id := v_sampler_job;
-    status := format(
-      'already exists — schedule updated to %s; command re-synced',
-      v_schedule);
     return next;
   else
     -- Create sampler job.
@@ -2334,15 +2439,35 @@ begin
      * As with H-BUG-2 above, also re-sync the command so an existing job does
      * not silently keep the legacy SELECT writer after an installer upgrade.
      */
-    perform cron.alter_job(
-      job_id := v_rotation_job,
-      schedule := '0 0 * * *',
-      command := 'call ash.run_rotate()'
-    );
+    -- Same contract as the sampler branch: never overwrite custom text.
+    select cron_job.command into v_stored_command
+    from cron.job as cron_job
+    where cron_job.jobid = v_rotation_job;
+    v_canonical_command :=
+      ash._canonical_job_command('ash_rotation', v_stored_command);
+
+    if v_canonical_command is null then
+      perform cron.alter_job(
+        job_id := v_rotation_job,
+        schedule := '0 0 * * *'
+      );
+      raise notice
+        'ash.start: ash_rotation has a customised command; preserving it. '
+        'Recommended: %', 'call ash.run_rotate()';
+      status :=
+        'already exists — schedule reset to 0 0 * * *; '
+        'custom command preserved';
+    else
+      perform cron.alter_job(
+        job_id := v_rotation_job,
+        schedule := '0 0 * * *',
+        command := v_canonical_command
+      );
+      status :=
+        'already exists — schedule reset to 0 0 * * *; command re-synced';
+    end if;
     job_type := 'rotation';
     job_id := v_rotation_job;
-    status :=
-      'already exists — schedule reset to 0 0 * * *; command re-synced';
     return next;
   else
     -- Create rotation job (daily at midnight UTC).
@@ -2364,6 +2489,27 @@ begin
 
   -- Schedule rollup cron jobs (idempotent: unschedule first).
   -- rollup_minute: every minute.
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_1m'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_1m', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_1m has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_minute()';
+  else
+    v_canonical_command := 'call ash.run_rollup_minute()';
+  end if;
+
   begin
     perform cron.unschedule('ash_rollup_1m');
   exception when others then
@@ -2373,7 +2519,7 @@ begin
   select cron.schedule(
     'ash_rollup_1m',
     '* * * * *',
-    'call ash.run_rollup_minute()'
+    v_canonical_command
   ) into v_rotation_job; -- reuse variable for job id
 
   if not v_skip_nodename_update then
@@ -2387,6 +2533,27 @@ begin
 
   -- rollup_hour: every hour at minute 1; its blocking shared lock sequences it
   -- after any in-flight minute rollup before it checks the minute watermark.
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_1h'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_1h', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_1h has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_hour()';
+  else
+    v_canonical_command := 'call ash.run_rollup_hour()';
+  end if;
+
   begin
     perform cron.unschedule('ash_rollup_1h');
   exception when others then
@@ -2396,7 +2563,7 @@ begin
   select cron.schedule(
     'ash_rollup_1h',
     '1 * * * *',
-    'call ash.run_rollup_hour()'
+    v_canonical_command
   ) into v_rotation_job;
 
   if not v_skip_nodename_update then
@@ -2409,6 +2576,27 @@ begin
   return next;
 
   -- rollup_cleanup: daily at 03:00 UTC
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_gc'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_gc', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_gc has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_cleanup()';
+  else
+    v_canonical_command := 'call ash.run_rollup_cleanup()';
+  end if;
+
   begin
     perform cron.unschedule('ash_rollup_gc');
   exception when others then
@@ -2418,7 +2606,7 @@ begin
   select cron.schedule(
     'ash_rollup_gc',
     '0 3 * * *',
-    'call ash.run_rollup_cleanup()'
+    v_canonical_command
   ) into v_rotation_job;
 
   if not v_skip_nodename_update then
@@ -7397,6 +7585,12 @@ as $$
     /* Procedure forms of the maintenance/admin routines. */
     'run_take_sample', 'run_rotate', 'run_rollup_minute',
     'run_rollup_hour', 'run_rollup_cleanup',
+    /*
+     * Scheduling internals: only ash.start() and the installer re-apply
+     * migration consult these. No reader needs them, so keep them out of the
+     * reader bundle rather than widening it for helpers.
+     */
+    '_job_command_map', '_canonical_job_command',
     '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
     '_register_wait', '_validate_rotation_period', '_record_rotate_failure',
@@ -7983,55 +8177,13 @@ begin
       select
         cron_job.jobname,
         cron_job.schedule,
-        command_map.new_command
+        command_map.canonical_command as new_command
       from cron.job as cron_job
-      inner join (
-        values
-          (
-            'ash_sampler',
-            'set statement_timeout = ''500ms''; select ash.take_sample()',
-            'set statement_timeout = ''500ms''; call ash.run_take_sample()'
-          ),
-          /*
-           * v1.0 and v1.1 scheduled these in uppercase. ash-1.1-to-1.2.sql
-           * normalized only the sampler command, and no released migration
-           * has ever rewritten the rotation command — so an installation
-           * that started at 1.0/1.1 still carries the uppercase text and
-           * would otherwise keep a SELECT-form writer forever.
-           */
-          (
-            'ash_sampler',
-            'SELECT ash.take_sample()',
-            'set statement_timeout = ''500ms''; call ash.run_take_sample()'
-          ),
-          (
-            'ash_rotation',
-            'select ash.rotate()',
-            'call ash.run_rotate()'
-          ),
-          (
-            'ash_rotation',
-            'SELECT ash.rotate()',
-            'call ash.run_rotate()'
-          ),
-          (
-            'ash_rollup_1m',
-            'select ash.rollup_minute()',
-            'call ash.run_rollup_minute()'
-          ),
-          (
-            'ash_rollup_1h',
-            'select ash.rollup_hour()',
-            'call ash.run_rollup_hour()'
-          ),
-          (
-            'ash_rollup_gc',
-            'select ash.rollup_cleanup()',
-            'call ash.run_rollup_cleanup()'
-          )
-      ) as command_map(jobname, legacy_command, new_command)
+      inner join ash._job_command_map() as command_map
         on command_map.jobname = cron_job.jobname
         and command_map.legacy_command = cron_job.command
+        and command_map.legacy_command
+            is distinct from command_map.canonical_command
       where cron_job.database = current_database()
         and cron_job.username = current_user
     loop

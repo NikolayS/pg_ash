@@ -51,10 +51,9 @@ AAS-oriented 2.0 API:
   and sending it to a read-only replica. pg_cron jobs use the procedure forms;
   installer re-apply migrates the known legacy commands — including the
   uppercase `SELECT` forms scheduled by 1.0 and 1.1 — while preserving custom
-  commands, cadence, job IDs, and active state. Note that `ash.start()` itself
-  re-syncs the `ash_sampler` and `ash_rotation` commands to the canonical
-  values, so a customised command should be applied after the last
-  `ash.start()` call, not before. The procedures are admin-only
+  commands, cadence, job IDs, and active state. `ash.start()` honours the same
+  contract: it re-syncs only command text pg_ash itself scheduled, and leaves
+  a customised command alone with a notice naming the recommended form. The procedures are admin-only
   and excluded from `ash.grant_reader()`. (issue #221)
 
 ### Fixes
