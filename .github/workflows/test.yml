@@ -30,6 +30,14 @@ jobs:
       - name: Test release stamp checker
         run: python3 devel/scripts/test_release_stamp.py -v
 
+      # Lives here, not in `test`, on purpose: this suite parses test.yml, and
+      # a job inside that workflow's matrix cannot be trusted to report on the
+      # parseability of the file it was scheduled from. docs-lint needs no
+      # database and runs on every event, so a break is loud and immediate.
+      # Without this the suite had no gate at all and #243 reached main.
+      - name: Test CI step extractor
+        run: python3 devel/scripts/test_ci_step_script.py -v
+
       - name: Verify release tag matches payload stamp
         if: >-
           github.ref_type == 'tag' ||
