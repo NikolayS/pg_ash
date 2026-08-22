@@ -291,35 +291,35 @@ begin
       'ash_sampler',
       pg_catalog.jsonb_build_array(
         '2 seconds',
-        'set statement_timeout = ''500ms''; select ash.take_sample()',
+        'set statement_timeout = ''500ms''; call ash.run_take_sample()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rotation',
       pg_catalog.jsonb_build_array(
         '0 0 * * *',
-        'select ash.rotate()',
+        'call ash.run_rotate()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rollup_1m',
       pg_catalog.jsonb_build_array(
         '* * * * *',
-        'select ash.rollup_minute()',
+        'call ash.run_rollup_minute()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rollup_1h',
       pg_catalog.jsonb_build_array(
         '1 * * * *',
-        'select ash.rollup_hour()',
+        'call ash.run_rollup_hour()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rollup_gc',
       pg_catalog.jsonb_build_array(
         '0 3 * * *',
-        'select ash.rollup_cleanup()',
+        'call ash.run_rollup_cleanup()',
         pg_catalog.current_database(),
         true
       )
