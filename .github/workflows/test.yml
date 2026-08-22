@@ -7482,10 +7482,33 @@ jobs:
           PGPASSWORD: postgres
         run: |
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
-          sed '$d' /tmp/ash_full_upgrade_chain.sql > /tmp/ash_chain_before_latest.sql
-          tail -n 1 /tmp/ash_full_upgrade_chain.sql > /tmp/ash_latest_upgrade.sql
+
+          # Split the chain at the LAST released migration, not at the last
+          # line. This test's fixture must predate the migration that
+          # normalizes ash.config's column order, and that normalization
+          # happens in the newest sql/migrations/ script. Splitting on the
+          # last line was equivalent only while that migration WAS the last
+          # line; once a development installer is staged in devel/sql/, the
+          # chain gains a trailing entry, the fixture ends up already
+          # canonical, and config_ordinal_setup.sql fails its own
+          # precondition assert. Everything from the last released migration
+          # onward is the payload under test.
+          split_line="$(
+            grep -n '^.i sql/migrations/' /tmp/ash_full_upgrade_chain.sql \
+              | tail -n 1 | cut -d: -f1
+          )"
+          if [ -z "${split_line}" ]; then
+            echo "no sql/migrations/ entry in the discovered upgrade chain" >&2
+            exit 1
+          fi
+          head -n "$((split_line - 1))" /tmp/ash_full_upgrade_chain.sql \
+            > /tmp/ash_chain_before_latest.sql
+          tail -n "+${split_line}" /tmp/ash_full_upgrade_chain.sql \
+            > /tmp/ash_latest_upgrade.sql
           test -s /tmp/ash_chain_before_latest.sql
           test -s /tmp/ash_latest_upgrade.sql
+          echo "--- fixture chain ---"; cat /tmp/ash_chain_before_latest.sql
+          echo "--- payload under test ---"; cat /tmp/ash_latest_upgrade.sql
 
           cat > /tmp/ash_config_ordinal_driver.sql << 'EOF'
           \i /tmp/ash_chain_before_latest.sql

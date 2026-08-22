@@ -48,9 +48,27 @@ immutable, and `sql/ash-install.sql` represents the latest tagged release.
 
 For the next development cycle, create a `devel/sql/` area:
 
-- `devel/sql/ash-install.sql` is the in-progress future final installer.
+- `devel/sql/ash-install.sql` is the in-progress future final installer. The
+  release-stamp PR recreates it immediately, as a **byte-identical copy** of
+  the `sql/ash-install.sql` it just promoted.
 - For a new stable release line, `devel/sql/ash-X.Y-to-A.B.sql` is its
   in-progress cumulative upgrade script.
+
+Recreating the baseline copy in the stamp PR — rather than leaving the first
+feature PR of the cycle to create it — matters for review, not tidiness. The
+installer is ~8000 lines, so whichever PR introduces it shows an ~8000-line
+addition that buries its actual change. Landing the copy on its own, where the
+whole diff is provably a copy, keeps every later PR's diff equal to its real
+delta.
+
+A reviewer can verify a claimed copy in one command:
+
+```bash
+git diff origin/main:sql/ash-install.sql <branch>:devel/sql/ash-install.sql
+```
+
+Empty output means byte-identical. `shasum -a 256` on both paths is equivalent
+and easier to quote in a PR description.
 
 All post-release SQL changes must be made in `devel/sql/`, not in released files
 under `sql/`. After a prerelease of the current line, its released cumulative
@@ -116,9 +134,19 @@ promote the development SQL into released core SQL:
 4. Update release notes and README install/upgrade instructions.
 5. Add or update a root-level `sql/ash-X.Y-to-A.B.sql` compatibility wrapper
    that includes the canonical migration under `sql/migrations/`.
-6. Leave CI on discovery-based helpers; remove only obsolete `devel/sql/`
+6. Recreate `devel/sql/ash-install.sql` as a byte-identical copy of the
+   `sql/ash-install.sql` promoted in step 1, in this same PR. Verify with
+   `git diff HEAD:sql/ash-install.sql HEAD:devel/sql/ash-install.sql`
+   (empty output). The next cycle then begins with the baseline already
+   present, so no feature PR carries an ~8000-line copy alongside its own
+   change.
+   A no-op overlay is safe for CI: `ash_sql_chain.py` still discovers it and
+   appends it to the full, re-apply and pinned upgrade paths, and applying an
+   installer identical to the released one is exactly the idempotent re-apply
+   those paths already assert.
+7. Leave CI on discovery-based helpers; remove only obsolete `devel/sql/`
    references if the helper no longer emits them after promotion.
-7. From the exact candidate commit, dispatch `test.yml` with the intended tag
+8. From the exact candidate commit, dispatch `test.yml` with the intended tag
    as `release_tag`. Its stamp check and CI suite, followed by the full release
    gate, must pass before tagging; the tag push runs the same identity check
    again.
