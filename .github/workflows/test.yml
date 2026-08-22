@@ -2601,6 +2601,83 @@ jobs:
           $$;
           EOF
 
+      - name: "Issue #221: CALL-able maintenance procedures"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export PAGER=cat
+
+          procedure_workload_pid=""
+          cleanup_procedure_workload() {
+            psql -h localhost -U postgres -d postgres -tAc \
+              "select pg_terminate_backend(pid)
+               from pg_stat_activity
+               where pid <> pg_backend_pid()
+                 and datname = current_database()
+                 and application_name = 'pg_ash_issue_221_workload'" \
+              >/dev/null 2>&1 || true
+            if [[ -n "${procedure_workload_pid}" ]]; then
+              kill "${procedure_workload_pid}" >/dev/null 2>&1 || true
+              wait "${procedure_workload_pid}" >/dev/null 2>&1 || true
+            fi
+            # Killing the client does not retire the server backend
+            # instantly, and a stray active session breaks any later step
+            # that asserts an exact active_count (issue #169). Wait for
+            # pg_stat_activity to agree before leaving the step.
+            for _ in {1..30}; do
+              if psql -h localhost -U postgres -d postgres -tAc \
+                   "select count(*) from pg_stat_activity
+                    where application_name = 'pg_ash_issue_221_workload'" \
+                   2>/dev/null | grep -qx 0; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "issue #221 fixture backend did not go away" >&2
+            return 1
+          }
+          trap cleanup_procedure_workload EXIT
+
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "select ash.stop();" >/dev/null
+          PGAPPNAME=pg_ash_issue_221_workload \
+            psql -h localhost -U postgres -d postgres \
+              -c "select pg_sleep(120)" >/dev/null 2>&1 &
+          procedure_workload_pid="$!"
+
+          workload_count=0
+          for _ in {1..20}; do
+            workload_count="$(
+              psql -h localhost -U postgres -d postgres -tAc \
+                "select count(*)
+                 from pg_stat_activity
+                 where datname = current_database()
+                   and application_name = 'pg_ash_issue_221_workload'
+                   and state = 'active'"
+            )"
+            if [[ "${workload_count}" -eq 1 ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${workload_count}" -ne 1 ]]; then
+            echo "issue #221 fixture expected exactly one active workload backend, got ${workload_count}" >&2
+            exit 1
+          fi
+
+          psql \
+            --no-psqlrc \
+            --host=localhost \
+            --username=postgres \
+            --dbname=postgres \
+            --set=ON_ERROR_STOP=1 \
+            --file=devel/tests/procedures_call_surface.sql
+
+          cleanup_procedure_workload
+          trap - EXIT
+
       - name: Test start/stop
         env:
           PGPASSWORD: postgres
@@ -2619,7 +2696,7 @@ jobs:
           $$;
           EOF
 
-      - name: "H-CI-3: end-to-end pg_cron fires ash.take_sample (#46)"
+      - name: "H-CI-3: end-to-end pg_cron fires ash.run_take_sample (#46)"
         # Closes #46. Pre-reqs (provisioned in "Create pg_cron extension"
         # above): pg_cron extension created, `root` role exists,
         # `root` database exists, `cron.use_background_workers = on`.
@@ -2675,6 +2752,34 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -f devel/tests/cron_path.sql
 
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          do $$
+          begin
+            assert (
+              select command from cron.job where jobname = 'ash_sampler'
+            ) =
+              'set statement_timeout = ''500ms''; call ash.run_take_sample()',
+              'H-CI-3 ash_sampler command is not the exact CALL form';
+            assert (
+              select command from cron.job where jobname = 'ash_rotation'
+            ) = 'call ash.run_rotate()',
+              'H-CI-3 ash_rotation command is not the exact CALL form';
+            assert (
+              select command from cron.job where jobname = 'ash_rollup_1m'
+            ) = 'call ash.run_rollup_minute()',
+              'H-CI-3 ash_rollup_1m command is not the exact CALL form';
+            assert (
+              select command from cron.job where jobname = 'ash_rollup_1h'
+            ) = 'call ash.run_rollup_hour()',
+              'H-CI-3 ash_rollup_1h command is not the exact CALL form';
+            assert (
+              select command from cron.job where jobname = 'ash_rollup_gc'
+            ) = 'call ash.run_rollup_cleanup()',
+              'H-CI-3 ash_rollup_gc command is not the exact CALL form';
+            raise notice 'H-CI-3 pg_cron CALL command assertions PASSED';
+          end $$;
+          EOF
+
           # Poll for actual job runs. With cron.use_background_workers=on
           # the jobs fire as bgworkers — but cron.job_run_details is only
           # populated for the libpq-mode path, so we assert via the side
@@ -2686,7 +2791,7 @@ jobs:
             samples=$(psql -h localhost -U postgres -d postgres -tAc "select count(*) from ash.sample")
             echo "  waited=$((SECONDS)) samples=$samples"
             if [ "${samples:-0}" -gt 0 ]; then
-              echo "H-CI-3 PASSED: pg_cron fired ash.take_sample and ash.sample has $samples row(s)"
+              echo "H-CI-3 PASSED: pg_cron fired ash.run_take_sample and ash.sample has $samples row(s)"
               break
             fi
             sleep 5
@@ -2694,13 +2799,13 @@ jobs:
 
           # Hard-fail with diagnostics if no samples ever appeared.
           if [ "${samples:-0}" -eq 0 ]; then
-            echo "::error::H-CI-3 FAILED: pg_cron did not fire ash.take_sample within 90 s (no rows in ash.sample)"
+            echo "::error::H-CI-3 FAILED: pg_cron did not fire ash.run_take_sample within 90 s (no rows in ash.sample)"
             echo "--- ash.status() ---"
             psql -h localhost -U postgres -d postgres -c "select * from ash.status()"
             echo "--- ash.config ---"
             psql -h localhost -U postgres -d postgres -c "select * from ash.config"
-            echo "--- ash.take_sample() called manually ---"
-            psql -h localhost -U postgres -d postgres -c "select ash.take_sample(); select count(*) from ash.sample;"
+            echo "--- ash.run_take_sample() called manually ---"
+            psql -h localhost -U postgres -d postgres -c "call ash.run_take_sample(); select count(*) from ash.sample;"
             echo "--- cron.job ---"
             psql -h localhost -U postgres -d postgres -c "select * from cron.job"
             echo "--- cron.job_run_details (last 10) ---"
@@ -2757,7 +2862,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -v install_path="$(
+              python3 devel/scripts/ash_sql_chain.py fresh-install-path
+            )" << 'EOF'
           select case
                    when exists (
                      select from pg_extension where extname = 'pg_cron'
@@ -2765,46 +2873,280 @@ jobs:
                    else 'false'
                  end as has_pgcron \gset
           \if :has_pgcron
-            -- Simulate an existing installation whose job still has the old
-            -- unsafe schedule, then prove installer re-apply migrates it.
-            create temp table _legacy_hourly_job (jobid bigint primary key);
-            insert into _legacy_hourly_job
-            select cron.schedule(
-              'ash_rollup_1h', '0 * * * *', 'select ash.rollup_hour()'
+            select ash.stop();
+            create temp table _legacy_jobs (
+              jobname text primary key,
+              jobid bigint not null,
+              schedule text not null,
+              expected_command text not null
             );
+            insert into _legacy_jobs values
+              (
+                'ash_sampler',
+                cron.schedule(
+                  'ash_sampler',
+                  '7 seconds',
+                  'set statement_timeout = ''500ms''; select ash.take_sample()'
+                ),
+                '7 seconds',
+                'set statement_timeout = ''500ms''; call ash.run_take_sample()'
+              ),
+              (
+                'ash_rotation',
+                cron.schedule(
+                  'ash_rotation', '5 0 * * *', 'select ash.rotate()'
+                ),
+                '5 0 * * *',
+                'call ash.run_rotate()'
+              ),
+              (
+                'ash_rollup_1m',
+                cron.schedule(
+                  'ash_rollup_1m', '* * * * *',
+                  'select ash.rollup_minute()'
+                ),
+                '* * * * *',
+                'call ash.run_rollup_minute()'
+              ),
+              (
+                'ash_rollup_1h',
+                cron.schedule(
+                  'ash_rollup_1h', '0 * * * *',
+                  'select ash.rollup_hour()'
+                ),
+                '0 * * * *',
+                'call ash.run_rollup_hour()'
+              ),
+              (
+                'ash_rollup_gc',
+                cron.schedule(
+                  'ash_rollup_gc', '0 3 * * *',
+                  'select ash.rollup_cleanup()'
+                ),
+                '0 3 * * *',
+                'call ash.run_rollup_cleanup()'
+              );
             select cron.alter_job(
-              job_id := (select jobid from _legacy_hourly_job),
+              job_id := (
+                select jobid from _legacy_jobs
+                where jobname = 'ash_rollup_1h'
+              ),
               active := false
             );
-            \i sql/ash-install.sql
+            \i :install_path
             do $migration$
             declare
-              v_job_id bigint;
-              v_schedule text;
-              v_command text;
-              v_active bool;
+              v_actual record;
+              v_expected record;
             begin
-              select jobid, schedule, command, active
-              into v_job_id, v_schedule, v_command, v_active
-              from cron.job
-              where jobname = 'ash_rollup_1h';
-              assert v_job_id = (select jobid from _legacy_hourly_job),
-                'installer re-apply replaced the existing hourly job';
-              assert v_schedule = '1 * * * *',
-                'installer re-apply must migrate hourly rollup to minute 1, '
-                'got: ' || v_schedule;
-              assert v_command = 'select ash.rollup_hour()',
-                'installer re-apply changed the hourly command';
-              assert not v_active,
-                'installer re-apply reactivated the disabled hourly job';
+              for v_expected in select * from _legacy_jobs loop
+                select jobid, schedule, command, active
+                into strict v_actual
+                from cron.job
+                where jobname = v_expected.jobname
+                  and database = current_database()
+                  and username = current_user;
+
+                assert v_actual.jobid = v_expected.jobid, format(
+                  'installer re-apply replaced %s jobid %s with %s',
+                  v_expected.jobname,
+                  v_expected.jobid,
+                  v_actual.jobid
+                );
+                assert v_actual.schedule = case
+                  when v_expected.jobname = 'ash_rollup_1h'
+                    then '1 * * * *'
+                  else v_expected.schedule
+                end, format(
+                  'installer re-apply changed %s cadence: expected %s, got %s',
+                  v_expected.jobname,
+                  case
+                    when v_expected.jobname = 'ash_rollup_1h'
+                      then '1 * * * *'
+                    else v_expected.schedule
+                  end,
+                  v_actual.schedule
+                );
+                assert v_actual.command = v_expected.expected_command,
+                  format(
+                    'installer re-apply command mismatch for %s: '
+                    'expected %s, got %s',
+                    v_expected.jobname,
+                    v_expected.expected_command,
+                    v_actual.command
+                  );
+                if v_expected.jobname = 'ash_rollup_1h' then
+                  assert not v_actual.active,
+                    'installer re-apply reactivated ash_rollup_1h';
+                end if;
+              end loop;
+              raise notice
+                'Installer re-apply CALL command migration tests PASSED';
             end
             $migration$;
+
+            /*
+             * Round 2: the v1.0/v1.1 UPPERCASE forms, and an operator's
+             * customised command.
+             *
+             * v1.0 and v1.1 scheduled 'SELECT ash.take_sample()' and
+             * 'SELECT ash.rotate()'. ash-1.1-to-1.2.sql normalized only the
+             * sampler, and no released migration ever rewrote the rotation
+             * command — so an installation that started at 1.0/1.1 still
+             * carries the uppercase text. Round 1 above only ever seeds the
+             * exact lowercase strings, so the map's join condition is never
+             * exercised on its false branch, and a customised command is
+             * never proven to survive. Both are covered here.
+             */
+            select cron.unschedule('ash_sampler');
+            select cron.unschedule('ash_rotation');
+            select cron.unschedule('ash_rollup_gc');
+            create temp table _legacy_jobs_v10 (
+              jobname text primary key,
+              jobid bigint not null,
+              expected_command text not null
+            );
+            insert into _legacy_jobs_v10 values
+              (
+                'ash_sampler',
+                cron.schedule(
+                  'ash_sampler', '9 seconds', 'SELECT ash.take_sample()'
+                ),
+                'set statement_timeout = ''500ms''; call ash.run_take_sample()'
+              ),
+              (
+                'ash_rotation',
+                cron.schedule(
+                  'ash_rotation', '5 0 * * *', 'SELECT ash.rotate()'
+                ),
+                'call ash.run_rotate()'
+              ),
+              (
+                -- Customised: must come back byte-identical.
+                'ash_rollup_gc',
+                cron.schedule(
+                  'ash_rollup_gc', '0 3 * * *',
+                  'select ash.rollup_cleanup() /* site-local tweak */'
+                ),
+                'select ash.rollup_cleanup() /* site-local tweak */'
+              );
+            \i :install_path
+            do $migration_v10$
+            declare
+              v_actual record;
+              v_expected record;
+            begin
+              for v_expected in select * from _legacy_jobs_v10 loop
+                select jobid, command
+                into strict v_actual
+                from cron.job
+                where jobname = v_expected.jobname
+                  and database = current_database()
+                  and username = current_user;
+
+                assert v_actual.jobid = v_expected.jobid, format(
+                  'uppercase-legacy re-apply replaced %s jobid %s with %s',
+                  v_expected.jobname, v_expected.jobid, v_actual.jobid
+                );
+                assert v_actual.command = v_expected.expected_command,
+                  format(
+                    'uppercase-legacy re-apply command mismatch for %s: '
+                    'expected %L, got %L',
+                    v_expected.jobname,
+                    v_expected.expected_command,
+                    v_actual.command
+                  );
+              end loop;
+              raise notice
+                'v1.0/v1.1 uppercase migration and custom-command '
+                'preservation tests PASSED';
+            end
+            $migration_v10$;
+            drop table _legacy_jobs_v10;
+
+            /*
+             * Round 3: ash.start() must PRESERVE an operator's customised
+             * command and only re-sync text pg_ash itself scheduled.
+             *
+             * The installer migration deliberately preserves custom text;
+             * start() used to overwrite it unconditionally, so the two paths
+             * disagreed. start() is re-entrant by design and runbooks call
+             * it, so "customise after the last start()" is not a contract
+             * anyone can hold.
+             */
+            select ash.start('2 seconds');
+            select cron.alter_job(
+              job_id := (
+                select jobid from cron.job
+                where jobname = 'ash_sampler'
+                  and database = current_database()
+                  and username = current_user
+              ),
+              command :=
+                'set statement_timeout = ''5s''; call ash.run_take_sample()'
+            );
+            select cron.alter_job(
+              job_id := (
+                select jobid from cron.job
+                where jobname = 'ash_rollup_gc'
+                  and database = current_database()
+                  and username = current_user
+              ),
+              command := 'call ash.run_rollup_cleanup() /* site-local */'
+            );
+            -- A recognised legacy form must still be re-synced.
+            select cron.alter_job(
+              job_id := (
+                select jobid from cron.job
+                where jobname = 'ash_rotation'
+                  and database = current_database()
+                  and username = current_user
+              ),
+              command := 'SELECT ash.rotate()'
+            );
+            select ash.start('3 seconds');
+            do $custom_preserved$
+            declare
+              v_cmd text;
+            begin
+              select command into v_cmd from cron.job
+              where jobname = 'ash_sampler'
+                and database = current_database()
+                and username = current_user;
+              assert v_cmd
+                = 'set statement_timeout = ''5s''; call ash.run_take_sample()',
+                format('ash.start clobbered the customised sampler command: %L',
+                       v_cmd);
+
+              select command into v_cmd from cron.job
+              where jobname = 'ash_rollup_gc'
+                and database = current_database()
+                and username = current_user;
+              assert v_cmd = 'call ash.run_rollup_cleanup() /* site-local */',
+                format('ash.start clobbered the customised gc command: %L',
+                       v_cmd);
+
+              select command into v_cmd from cron.job
+              where jobname = 'ash_rotation'
+                and database = current_database()
+                and username = current_user;
+              assert v_cmd = 'call ash.run_rotate()',
+                format('ash.start failed to re-sync a recognised legacy '
+                       'rotation command, got %L', v_cmd);
+
+              raise notice
+                'ash.start custom-command preservation tests PASSED';
+            end
+            $custom_preserved$;
+            select ash.stop();
           \endif
 
           do $$
           declare
             v_job_id bigint;
+            v_rotation_status text;
             v_schedule text;
+            v_sampler_status text;
             v_has_pgcron boolean;
           begin
             -- Skip cron schedule tests if pg_cron not available (e.g., PG19 beta)
@@ -2833,6 +3175,120 @@ jobs:
             where jobname = 'ash_rollup_1h';
             assert v_schedule = '1 * * * *',
               'hourly rollup should run at minute 1, got: ' || v_schedule;
+
+            assert (
+              select command from cron.job where jobname = 'ash_sampler'
+            ) =
+              'set statement_timeout = ''500ms''; call ash.run_take_sample()',
+              'ash_sampler command must call ash.run_take_sample()';
+            assert (
+              select command from cron.job where jobname = 'ash_rotation'
+            ) = 'call ash.run_rotate()',
+              'ash_rotation command must call ash.run_rotate()';
+            assert (
+              select command from cron.job where jobname = 'ash_rollup_1m'
+            ) = 'call ash.run_rollup_minute()',
+              'ash_rollup_1m command must call ash.run_rollup_minute()';
+            assert (
+              select command from cron.job where jobname = 'ash_rollup_1h'
+            ) = 'call ash.run_rollup_hour()',
+              'ash_rollup_1h command must call ash.run_rollup_hour()';
+            assert (
+              select command from cron.job where jobname = 'ash_rollup_gc'
+            ) = 'call ash.run_rollup_cleanup()',
+              'ash_rollup_gc command must call ash.run_rollup_cleanup()';
+
+            /*
+             * Existing-job divergence, both sides of the contract.
+             *
+             * This block previously set both commands to 'select 1' and
+             * required ash.start() to overwrite them. That encoded the old
+             * "always re-sync" behaviour, which is exactly what destroyed an
+             * operator's customised command. The contract is now: re-sync
+             * only text pg_ash itself scheduled; anything else is a
+             * customisation and is preserved, with the status saying so.
+             *
+             * Case 1: a RECOGNISED legacy command must still be repaired.
+             */
+            perform cron.alter_job(
+              job_id := (
+                select jobid from cron.job where jobname = 'ash_sampler'
+              ),
+              command :=
+                'set statement_timeout = ''500ms''; select ash.take_sample()'
+            );
+            perform cron.alter_job(
+              job_id := (
+                select jobid from cron.job where jobname = 'ash_rotation'
+              ),
+              command := 'SELECT ash.rotate()'
+            );
+            select
+              max(status) filter (where job_type = 'sampler'),
+              max(status) filter (where job_type = 'rotation')
+            into v_sampler_status, v_rotation_status
+            from ash.start('1 second');
+
+            assert v_sampler_status =
+              'already exists — schedule updated to 1 seconds; '
+              'command re-synced', format(
+                'existing ash_sampler re-sync status mismatch: %s',
+                v_sampler_status
+              );
+            assert v_rotation_status =
+              'already exists — schedule reset to 0 0 * * *; '
+              'command re-synced', format(
+                'existing ash_rotation re-sync status mismatch: %s',
+                v_rotation_status
+              );
+            assert (
+              select command from cron.job where jobname = 'ash_sampler'
+            ) =
+              'set statement_timeout = ''500ms''; call ash.run_take_sample()',
+              'recognised legacy ash_sampler command was not re-synced';
+            assert (
+              select command from cron.job where jobname = 'ash_rotation'
+            ) = 'call ash.run_rotate()',
+              'recognised legacy ash_rotation command was not re-synced';
+
+            /*
+             * Case 2: an UNRECOGNISED command is a customisation and must
+             * survive, with the schedule still repaired and the status
+             * reporting preservation rather than a re-sync.
+             */
+            perform cron.alter_job(
+              job_id := (
+                select jobid from cron.job where jobname = 'ash_sampler'
+              ),
+              command := 'select 1'
+            );
+            select max(status) filter (where job_type = 'sampler')
+            into v_sampler_status
+            from ash.start('1 second');
+
+            assert v_sampler_status =
+              'already exists — schedule updated to 1 seconds; '
+              'custom command preserved', format(
+                'customised ash_sampler status mismatch: %s',
+                v_sampler_status
+              );
+            assert (
+              select command from cron.job where jobname = 'ash_sampler'
+            ) = 'select 1',
+              'ash.start overwrote a customised ash_sampler command';
+            assert (
+              select schedule from cron.job where jobname = 'ash_sampler'
+            ) = '1 seconds',
+              'ash.start skipped the schedule repair for a customised job';
+
+            -- Restore the canonical command for the steps that follow.
+            perform cron.alter_job(
+              job_id := (
+                select jobid from cron.job where jobname = 'ash_sampler'
+              ),
+              command :=
+                'set statement_timeout = ''500ms''; call ash.run_take_sample()'
+            );
             perform ash.stop();
 
             select job_id into v_job_id
@@ -8549,6 +9005,57 @@ jobs:
             -c "drop extension if exists pg_cron cascade"
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" > /dev/null
 
+          # The external-scheduler path is the only non-pg_cron way pg_ash is
+          # driven, so it needs a live backend to sample before the behavioural
+          # assertions in degraded_no_cron.sql can check exact row counts.
+          cronless_workload_pid=""
+          cleanup_cronless_workload() {
+            psql -h localhost -U postgres -d postgres -tAc \
+              "select pg_terminate_backend(pid)
+               from pg_stat_activity
+               where pid <> pg_backend_pid()
+                 and application_name = 'pg_ash_cronless_workload'" \
+              >/dev/null 2>&1 || true
+            if [[ -n "${cronless_workload_pid}" ]]; then
+              kill "${cronless_workload_pid}" >/dev/null 2>&1 || true
+              wait "${cronless_workload_pid}" >/dev/null 2>&1 || true
+            fi
+            # A stray active session breaks later exact active_count asserts.
+            for _ in {1..30}; do
+              if psql -h localhost -U postgres -d postgres -tAc \
+                   "select count(*) from pg_stat_activity
+                    where application_name = 'pg_ash_cronless_workload'" \
+                   2>/dev/null | grep -qx 0; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "cronless fixture backend did not go away" >&2
+            return 1
+          }
+          trap cleanup_cronless_workload EXIT
+
+          PGAPPNAME=pg_ash_cronless_workload \
+            psql -h localhost -U postgres -d postgres \
+              -c "select pg_sleep(120)" >/dev/null 2>&1 &
+          cronless_workload_pid="$!"
+
+          cronless_ready=false
+          for _ in {1..20}; do
+            if psql -h localhost -U postgres -d postgres -tAc \
+                 "select count(*) from pg_stat_activity
+                  where application_name = 'pg_ash_cronless_workload'
+                    and state = 'active'" | grep -qx 1; then
+              cronless_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${cronless_ready}" != true ]]; then
+            echo "cronless fixture backend never became active" >&2
+            exit 1
+          fi
+
           cronless_out="$(
             psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
               -f devel/tests/degraded_no_cron.sql 2>&1
@@ -8586,6 +9093,34 @@ jobs:
             echo "FAIL: ash.start emitted the old cluster-wide pg_cron claim" >&2
             exit 1
           fi
+
+          # The external scheduler has no catalog to inspect: ash.start()
+          # PRINTS the jobs to register, so that printed guidance is the
+          # registration surface and has to be asserted like one. It must name
+          # the CALL forms — a copy-pasted `select ash.take_sample()` loop is
+          # exactly what a read-routing proxy will misroute (#221).
+          for cronless_expected in \
+            '"call ash.run_take_sample()" (for per-second, use a loop)' \
+            'CALL ash.run_take_sample() \watch 1' \
+            'execute "CALL ash.run_take_sample()" in a loop' \
+            'Also schedule CALL ash.run_rotate() at the rotation_period' \
+            'Schedule rollup: CALL ash.run_rollup_minute() every minute'
+          do
+            if ! printf '%s\n' "$cronless_out" | grep -Fq \
+                "$cronless_expected"; then
+              echo "FAIL: external-scheduler guidance missing: $cronless_expected" >&2
+              exit 1
+            fi
+          done
+          # Negative: the legacy SELECT recommendation must be gone entirely.
+          if printf '%s\n' "$cronless_out" | grep -Fq \
+              '"select ash.take_sample()"'; then
+            echo "FAIL: ash.start still recommends the SELECT sampler form" >&2
+            exit 1
+          fi
+
+          cleanup_cronless_workload
+          trap - EXIT
       - name: "Behavioral feature coverage across extension modes"
         env:
           PGPASSWORD: postgres

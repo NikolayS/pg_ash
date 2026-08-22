@@ -373,6 +373,34 @@ renamed or removed.
 
 Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` confirmation token.
 
+### CALL-able maintenance procedures
+
+Each **scheduled** collection or maintenance function has an admin-only
+procedure form for schedulers and automation. The interactive administrative
+entrypoints (`ash.start()`, `ash.stop()`, `ash.rebuild_partitions()`,
+`ash.uninstall()`) remain functions — a human runs those, not a scheduler:
+
+| Function | Procedure form |
+|---|---|
+| `ash.take_sample()` | `call ash.run_take_sample();` |
+| `ash.rotate()` | `call ash.run_rotate();` |
+| `ash.rollup_minute([batch])` | `call ash.run_rollup_minute();` or `call ash.run_rollup_minute(batch);` |
+| `ash.rollup_hour()` | `call ash.run_rollup_hour();` |
+| `ash.rollup_cleanup()` | `call ash.run_rollup_cleanup();` |
+
+This surface exists for routers and load balancers that route by statement
+kind. Such a router can classify `select ash.take_sample()` as a read, send it
+to a replica, and fail with `cannot execute INSERT in a read-only transaction`.
+`CALL` is unambiguously a write and expresses that these routines are invoked
+for their side effects. The procedures are admin-only, are not included in the
+`ash.grant_reader()` bundle, and should receive only explicit minimal grants;
+do not grant schema-wide `EXECUTE` privileges.
+
+Both `ash.start()` and installer re-apply re-sync only command text pg_ash
+itself scheduled. A command you have customised is left alone, with a notice
+naming the recommended form — so you can safely tune, say, the sampler's
+`statement_timeout` and keep calling `ash.start()`.
+
 ## Scheduling
 
 pg_cron is optional. For pg_cron scheduling, install pg_ash in the database
@@ -389,7 +417,7 @@ external jobs to schedule. The minimum useful external loop is:
 
 ```bash
 while true; do
-  psql -qAtX -d mydb -c "set statement_timeout = '500ms'; select ash.take_sample();"
+  psql -qAtX -d mydb -c "set statement_timeout = '500ms'; call ash.run_take_sample();"
   sleep 1
 done
 ```
@@ -397,10 +425,10 @@ done
 Also schedule maintenance:
 
 ```bash
-0 0 * * * psql -qAtX -d mydb -c "select ash.rotate();"
-* * * * * psql -qAtX -d mydb -c "select ash.rollup_minute();"
-1 * * * * psql -qAtX -d mydb -c "select ash.rollup_hour();"
-0 3 * * * psql -qAtX -d mydb -c "select ash.rollup_cleanup();"
+0 0 * * * psql -qAtX -d mydb -c "call ash.run_rotate();"
+* * * * * psql -qAtX -d mydb -c "call ash.run_rollup_minute();"
+1 * * * * psql -qAtX -d mydb -c "call ash.run_rollup_hour();"
+0 3 * * * psql -qAtX -d mydb -c "call ash.run_rollup_cleanup();"
 ```
 
 At 1-second sampling, pg_cron `cron.job_run_details` can grow by about
