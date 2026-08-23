@@ -62,7 +62,17 @@ begin
   ), 'external-path fixture: expected exactly one tagged active backend';
 
   truncate table ash.sample;
-  update ash.config set sampling_enabled = true where singleton;
+  /*
+   * Pin include_bg_workers explicitly rather than relying on the install
+   * default. The exact-count assertions below ("exactly 1 sample row") hold
+   * only while background workers are excluded, so if that default ever
+   * changes this test would start failing for a reason that has nothing to do
+   * with the external-scheduler path it exists to cover.
+   */
+  update ash.config
+  set sampling_enabled = true,
+    include_bg_workers = false
+  where singleton;
 
   call ash.run_take_sample();
   select count(*) into v_after from ash.sample;
