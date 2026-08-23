@@ -24,6 +24,22 @@ begin
     execute format('truncate table ash.query_map_%s restart identity', i);
   end loop;
 
+  /*
+   * The seed interns a wait event via ash._register_wait('active', 'Guard',
+   * 'PendingWork'), which writes a row to ash.wait_event_map. Truncating the
+   * sample and rollup tables does not remove it, so "restore the pristine
+   * post-install state" was not true: a synthetic wait event outlived the
+   * step and showed up in ash.wait_event_map for everything after it.
+   *
+   * Delete that one row by its identity rather than truncating the table:
+   * real wait events interned by earlier steps' sampling are legitimate state
+   * and must survive.
+   */
+  delete from ash.wait_event_map
+  where state = 'active'
+    and type = 'Guard'
+    and event = 'PendingWork';
+
   update ash.config
   set last_rollup_1m_ts = null,
     last_rollup_1h_ts = null,
