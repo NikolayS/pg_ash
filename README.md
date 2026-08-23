@@ -363,7 +363,7 @@ renamed or removed.
 | `ash.take_sample()` | Take one sample manually; normally called by the scheduler |
 | `ash.rotate()` | Rotate raw partitions and roll up endangered samples |
 | `ash.rebuild_partitions(n, 'yes')` | Recreate raw partitions; destructive for raw samples |
-| `ash.set_sample_persistence(mode)` | Set raw partitions to `logged` or `unlogged` |
+| `ash.set_sample_persistence(mode)` | Set raw partitions to `logged` or `unlogged`; `unlogged` means a crash leaves the raw ring **empty** on recovery, and each conversion takes ACCESS EXCLUSIVE and rewrites the partitions |
 | `ash.rollup_minute([batch])` | Fold raw samples into `rollup_1m` |
 | `ash.rollup_hour()` | Fold minute rollups into `rollup_1h` |
 | `ash.rollup_cleanup()` | Delete expired rollup rows |
