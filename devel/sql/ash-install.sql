@@ -20,6 +20,20 @@
 \set ON_ERROR_STOP on
 begin;
 
+do $$
+begin
+  /*
+   * ash._in_recovery() is not defined this early in the installer, so use
+   * the catalog predicate directly before any installation writes.
+   */
+  if pg_catalog.pg_is_in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot install pg_ash on a standby: pg_ash installs on the '
+        'primary and reaches replicas through streaming replication';
+  end if;
+end $$;
+
 /*
  * Preserve function EXECUTE grants across the drop/recreate below (#107).
  * DROP FUNCTION destroys ACLs that CREATE OR REPLACE would keep, so a
@@ -934,6 +948,19 @@ $$;
 -- STEP 2: Sampler and decoder
 --------------------------------------------------------------------------------
 
+create or replace function ash._in_recovery()
+returns bool
+language sql
+stable
+parallel safe
+set search_path = pg_catalog
+as $$
+  select pg_catalog.pg_is_in_recovery()
+$$;
+
+comment on function ash._in_recovery() is
+  'Reports whether this server is in recovery (a physical standby).';
+
 -- Core sampler function (no hstore dependency)
 create or replace function ash.take_sample()
 returns int
@@ -955,6 +982,13 @@ declare
   v_missed_count bigint;
   v_seen_waits text[] := '{}';
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.take_sample: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   -- Get config (single read for all settings).
   select sampling_enabled, include_bg_workers, debug_logging
   into v_sampling_enabled, v_include_bg, v_debug_logging
@@ -1515,6 +1549,14 @@ declare
   v_endangered_rows bigint;
   v_unrolled_groups bigint;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rotate: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 'skipped: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+  end if;
+
   /*
    * Advisory lock prevents concurrent rotation from pg_cron overlap.
    * Xact-level: auto-releases on commit/rollback — no leak risk with pg_cron
@@ -1709,6 +1751,13 @@ declare
   v_rotation_period interval;
   v_rollup_1m_retention_days int;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   /*
    * Destructive: drops all raw sample partitions. Require explicit
    * confirmation BEFORE touching any state (sampling_enabled, pg_cron jobs,
@@ -1961,6 +2010,83 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Check if pg_cron extension is available
+/*
+ * Single source of truth for pg_cron job command text: every spelling pg_ash
+ * has ever scheduled, and the canonical form each should become.
+ *
+ * Two places need this and must never disagree — ash.start()'s
+ * already-exists branches and the installer re-apply migration. Encoding it
+ * twice is how they drift, and the drift is user-visible: one path preserving
+ * an operator's customised command while the other silently overwrites it.
+ *
+ * Anything NOT listed here is, by definition, operator-customised and must be
+ * left alone.
+ */
+create or replace function ash._job_command_map()
+returns table (
+  jobname           text,
+  legacy_command    text,
+  canonical_command text
+)
+language sql
+immutable
+parallel safe
+set search_path = pg_catalog
+as $$
+  values
+    -- v1.0/v1.1 scheduled these in uppercase; only the sampler was ever
+    -- normalized by a released migration (ash-1.1-to-1.2.sql).
+    ('ash_sampler', 'SELECT ash.take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_sampler',
+     'set statement_timeout = ''500ms''; select ash.take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_sampler',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_rotation', 'SELECT ash.rotate()', 'call ash.run_rotate()'),
+    ('ash_rotation', 'select ash.rotate()', 'call ash.run_rotate()'),
+    ('ash_rotation', 'call ash.run_rotate()', 'call ash.run_rotate()'),
+    ('ash_rollup_1m', 'select ash.rollup_minute()',
+     'call ash.run_rollup_minute()'),
+    ('ash_rollup_1m', 'call ash.run_rollup_minute()',
+     'call ash.run_rollup_minute()'),
+    ('ash_rollup_1h', 'select ash.rollup_hour()', 'call ash.run_rollup_hour()'),
+    ('ash_rollup_1h', 'call ash.run_rollup_hour()',
+     'call ash.run_rollup_hour()'),
+    ('ash_rollup_gc', 'select ash.rollup_cleanup()',
+     'call ash.run_rollup_cleanup()'),
+    ('ash_rollup_gc', 'call ash.run_rollup_cleanup()',
+     'call ash.run_rollup_cleanup()')
+$$;
+
+comment on function ash._job_command_map() is
+  'Every pg_cron command string pg_ash has ever scheduled, mapped to its canonical current form. A stored command absent from this map is operator-customised and must never be rewritten. Shared by ash.start() and the installer re-apply migration so the two cannot drift.';
+
+/*
+ * The canonical command for a job whose stored text pg_ash recognises, or
+ * NULL when the operator has customised it (leave it alone) or the job name
+ * is not one of ours.
+ */
+create or replace function ash._canonical_job_command(
+  jobname text,
+  stored_command text
+)
+returns text
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select command_map.canonical_command
+  from ash._job_command_map() as command_map
+  where command_map.jobname = _canonical_job_command.jobname
+    and command_map.legacy_command = _canonical_job_command.stored_command
+  limit 1
+$$;
+
+comment on function ash._canonical_job_command(text, text) is
+  'Returns the canonical pg_cron command for a recognised pg_ash job command, or NULL when the stored text is operator-customised and must be preserved.';
+
 create or replace function ash._pg_cron_available()
 returns boolean
 language sql
@@ -1990,7 +2116,16 @@ declare
   v_debug_logging boolean := false;
   v_pg_cron_available boolean;
   v_cron_database text;
+  v_stored_command text;
+  v_canonical_command text;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   /*
    * Read debug_logging flag so we can trace the pg_cron detection /
    * scheduling path when ash.start() appears to no-op. Treat an error here as
@@ -2177,18 +2312,18 @@ begin
     end if;
     raise notice
       '  system cron:    * * * * * psql -qAtX -c '
-      '"select ash.take_sample()" (for per-second, use a loop)';
-    raise notice '  psql:           SELECT ash.take_sample() \watch 1';
+      '"call ash.run_take_sample()" (for per-second, use a loop)';
+    raise notice '  psql:           CALL ash.run_take_sample() \watch 1';
     raise notice
-      '  any language:   execute "SELECT ash.take_sample()" in a loop '
+      '  any language:   execute "CALL ash.run_take_sample()" in a loop '
       'with sleep';
     raise notice
-      'Also schedule ash.rotate() at the rotation_period interval '
-      '(default: daily).';
+      'Also schedule CALL ash.run_rotate() at the rotation_period '
+      'interval (default: daily).';
     raise notice
-      'Schedule rollup: ash.rollup_minute() every minute, '
-      'ash.rollup_hour() at minute 1 every hour, '
-      'ash.rollup_cleanup() daily.';
+      'Schedule rollup: CALL ash.run_rollup_minute() every minute, '
+      'CALL ash.run_rollup_hour() at minute 1 every hour, '
+      'CALL ash.run_rollup_cleanup() daily.';
 
     return;
   end if;
@@ -2253,9 +2388,18 @@ begin
    */
 
   -- Check for existing sampler job (idempotent).
+  /*
+   * cron.job is cluster-wide, so an unfiltered jobname lookup finds another
+   * database's sampler. The rotation lookup below has always filtered; this
+   * one did not, and now that the branch re-syncs `command` as well as
+   * `schedule` an unfiltered match would rewrite a different database's job
+   * while this database still ends up with no sampler at all.
+   */
   select jobid into v_sampler_job
   from cron.job
-  where jobname = 'ash_sampler';
+  where jobname = 'ash_sampler'
+    and username = current_user
+    and database = current_database();
 
   if v_sampler_job is not null then
     /*
@@ -2263,19 +2407,54 @@ begin
      * Previously ash.start(new_interval) updated ash.config.sample_interval
      * (further below) but never touched cron.job.schedule, so pg_cron kept
      * firing at the old cadence — a silent behavioral divergence between
-     * configured and actual sampling rate.
+     * configured and actual sampling rate. Re-sync the command for the same
+     * reason: otherwise an upgraded installation keeps the legacy SELECT
+     * writer until an operator recreates the job.
      */
-    perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
+    /*
+     * Re-sync the command ONLY when the stored text is one pg_ash itself has
+     * scheduled. Rewriting unconditionally would destroy an operator's
+     * customised command — e.g. a longer statement_timeout — and would
+     * contradict the installer migration below, which deliberately preserves
+     * custom text. start() is re-entrant by design and runbooks call it, so
+     * "customise after the last start()" is not a contract anyone can hold.
+     */
+    select cron_job.command into v_stored_command
+    from cron.job as cron_job
+    where cron_job.jobid = v_sampler_job;
+    v_canonical_command :=
+      ash._canonical_job_command('ash_sampler', v_stored_command);
+
+    if v_canonical_command is null then
+      perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
+      raise notice
+        'ash.start: ash_sampler has a customised command; preserving it. '
+        'pg_ash writes through CALL now — if that command still uses '
+        '"select ash.take_sample()" a read-routing proxy may send it to a '
+        'replica. Recommended: %',
+        'set statement_timeout = ''500ms''; call ash.run_take_sample()';
+      status := format(
+        'already exists — schedule updated to %s; custom command preserved',
+        v_schedule);
+    else
+      perform cron.alter_job(
+        job_id := v_sampler_job,
+        schedule := v_schedule,
+        command := v_canonical_command
+      );
+      status := format(
+        'already exists — schedule updated to %s; command re-synced',
+        v_schedule);
+    end if;
     job_type := 'sampler';
     job_id := v_sampler_job;
-    status := format('already exists — schedule updated to %s', v_schedule);
     return next;
   else
     -- Create sampler job.
     select cron.schedule(
       'ash_sampler',
       v_schedule,
-      'set statement_timeout = ''500ms''; select ash.take_sample()'
+      'set statement_timeout = ''500ms''; call ash.run_take_sample()'
     ) into v_sampler_job;
 
     /*
@@ -2313,21 +2492,45 @@ begin
     /*
      * The supported rotation contract is day-granular. Repair any manually
      * drifted or legacy sub-day cron expression on every idempotent start.
+     * As with H-BUG-2 above, also re-sync the command so an existing job does
+     * not silently keep the legacy SELECT writer after an installer upgrade.
      */
-    perform cron.alter_job(
-      job_id := v_rotation_job,
-      schedule := '0 0 * * *'
-    );
+    -- Same contract as the sampler branch: never overwrite custom text.
+    select cron_job.command into v_stored_command
+    from cron.job as cron_job
+    where cron_job.jobid = v_rotation_job;
+    v_canonical_command :=
+      ash._canonical_job_command('ash_rotation', v_stored_command);
+
+    if v_canonical_command is null then
+      perform cron.alter_job(
+        job_id := v_rotation_job,
+        schedule := '0 0 * * *'
+      );
+      raise notice
+        'ash.start: ash_rotation has a customised command; preserving it. '
+        'Recommended: %', 'call ash.run_rotate()';
+      status :=
+        'already exists — schedule reset to 0 0 * * *; '
+        'custom command preserved';
+    else
+      perform cron.alter_job(
+        job_id := v_rotation_job,
+        schedule := '0 0 * * *',
+        command := v_canonical_command
+      );
+      status :=
+        'already exists — schedule reset to 0 0 * * *; command re-synced';
+    end if;
     job_type := 'rotation';
     job_id := v_rotation_job;
-    status := 'already exists — schedule reset to 0 0 * * *';
     return next;
   else
     -- Create rotation job (daily at midnight UTC).
     select cron.schedule(
       'ash_rotation',
       '0 0 * * *',
-      'select ash.rotate()'
+      'call ash.run_rotate()'
     ) into v_rotation_job;
 
     if not v_skip_nodename_update then
@@ -2342,6 +2545,27 @@ begin
 
   -- Schedule rollup cron jobs (idempotent: unschedule first).
   -- rollup_minute: every minute.
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_1m'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_1m', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_1m has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_minute()';
+  else
+    v_canonical_command := 'call ash.run_rollup_minute()';
+  end if;
+
   begin
     perform cron.unschedule('ash_rollup_1m');
   exception when others then
@@ -2351,7 +2575,7 @@ begin
   select cron.schedule(
     'ash_rollup_1m',
     '* * * * *',
-    'select ash.rollup_minute()'
+    v_canonical_command
   ) into v_rotation_job; -- reuse variable for job id
 
   if not v_skip_nodename_update then
@@ -2365,6 +2589,27 @@ begin
 
   -- rollup_hour: every hour at minute 1; its blocking shared lock sequences it
   -- after any in-flight minute rollup before it checks the minute watermark.
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_1h'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_1h', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_1h has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_hour()';
+  else
+    v_canonical_command := 'call ash.run_rollup_hour()';
+  end if;
+
   begin
     perform cron.unschedule('ash_rollup_1h');
   exception when others then
@@ -2374,7 +2619,7 @@ begin
   select cron.schedule(
     'ash_rollup_1h',
     '1 * * * *',
-    'select ash.rollup_hour()'
+    v_canonical_command
   ) into v_rotation_job;
 
   if not v_skip_nodename_update then
@@ -2387,6 +2632,27 @@ begin
   return next;
 
   -- rollup_cleanup: daily at 03:00 UTC
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_gc'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_gc', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_gc has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_cleanup()';
+  else
+    v_canonical_command := 'call ash.run_rollup_cleanup()';
+  end if;
+
   begin
     perform cron.unschedule('ash_rollup_gc');
   exception when others then
@@ -2396,7 +2662,7 @@ begin
   select cron.schedule(
     'ash_rollup_gc',
     '0 3 * * *',
-    'select ash.rollup_cleanup()'
+    v_canonical_command
   ) into v_rotation_job;
 
   if not v_skip_nodename_update then
@@ -2450,6 +2716,13 @@ as $$
 declare
   v_job_id bigint;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   -- Mark sampling as disabled.
   update ash.config set sampling_enabled = false where singleton;
 
@@ -2465,9 +2738,12 @@ begin
   end if;
 
   -- Remove sampler job.
+  -- cron.job is cluster-wide; never unschedule another database's job.
   select jobid into v_job_id
   from cron.job
-  where jobname = 'ash_sampler';
+  where jobname = 'ash_sampler'
+    and username = current_user
+    and database = current_database();
 
   if v_job_id is not null then
     perform cron.unschedule('ash_sampler');
@@ -2480,7 +2756,9 @@ begin
   -- Remove rotation job
   select jobid into v_job_id
   from cron.job
-  where jobname = 'ash_rotation';
+  where jobname = 'ash_rotation'
+    and username = current_user
+    and database = current_database();
 
   if v_job_id is not null then
     perform cron.unschedule('ash_rotation');
@@ -2547,6 +2825,17 @@ as $$
 declare
   v_current bool;
 begin
+  /*
+   * NULL only reports the replicated setting and remains safe on a standby;
+   * non-NULL arguments change state and must be run on the primary.
+   */
+  if enabled is not null and ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   select debug_logging into v_current from ash.config where singleton;
 
   if enabled is null then
@@ -2573,6 +2862,13 @@ declare
   v_rec record;
   v_jobs_removed int := 0;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   if confirm is distinct from 'yes' then
     raise exception 'to uninstall pg_ash, call: select ash.uninstall(''yes'')';
   end if;
@@ -2831,7 +3127,15 @@ declare
   v_rollup_1m_newest int4;
   v_rollup_1h_oldest int4;
   v_rollup_1h_newest int4;
+  v_in_recovery bool := ash._in_recovery();
 begin
+  if v_in_recovery then
+    raise notice
+      'ash.status: server is in recovery (standby); no sampling or rollup '
+      'happens here, and sampling_enabled reflects the primary''s '
+      'configuration rather than local activity';
+  end if;
+
   -- Get config
   select * into v_config from ash.config where singleton;
 
@@ -2864,6 +3168,7 @@ begin
   end;
 
   metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
+  metric := 'in_recovery'; value := v_in_recovery::text; return next;
   metric := 'color';
   value := case when ash._color_on() then 'on' else 'off' end;
   return next;
@@ -3344,6 +3649,13 @@ declare
   v_has_later_data bool;
   v_sampler_lock_acquired bool := false;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_minute: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   /*
    * Acquire rollup lock (xact-level). Rollup operations serialize with each
    * other, and rebuild_partitions's drain poll waits on this objid.
@@ -3591,6 +3903,13 @@ declare
   v_batch_limit int := 24;
   v_total int := 0;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_hour: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   /*
    * Wait for the shared rollup lock instead of skipping. The hourly pg_cron
    * job runs at minute 1, when the every-minute worker also fires; a try-lock
@@ -3707,6 +4026,14 @@ declare
   v_cutoff_1m int4;
   v_cutoff_1h int4;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_cleanup: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 'skipped: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+  end if;
+
   /*
    * Acquire rollup lock (xact-level). Shares the kind with rollup_minute
    * and rollup_hour so cleanup can't delete rows that an in-flight rollup
@@ -3740,6 +4067,92 @@ begin
     v_1m_deleted, v_1h_deleted);
 end;
 $$;
+
+/*
+ * CALL-able maintenance procedures.
+ *
+ * Load balancers and query proxies may route by statement kind, treating a
+ * SELECT of a writer function as a read and sending it to a read-only replica.
+ * CALL is unambiguously a write, and procedures are the semantically correct
+ * construct for routines invoked for their side effects.
+ *
+ * Transaction control is deliberately deferred to issue #228. These routines
+ * rely on transaction-scoped advisory locks, which a COMMIT would release.
+ */
+create or replace procedure ash.run_take_sample()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result int;
+begin
+  select ash.take_sample() into v_result;
+  raise notice 'ash.run_take_sample: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_take_sample() is
+  'CALL-able form of ash.take_sample(); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rotate()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result text;
+begin
+  select ash.rotate() into v_result;
+  raise notice 'ash.run_rotate: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rotate() is
+  'CALL-able form of ash.rotate(); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rollup_minute(batch_limit int default 60)
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result int;
+begin
+  select ash.rollup_minute(batch_limit) into v_result;
+  raise notice 'ash.run_rollup_minute: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rollup_minute(int) is
+  'CALL-able form of ash.rollup_minute(int); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rollup_hour()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result int;
+begin
+  select ash.rollup_hour() into v_result;
+  raise notice 'ash.run_rollup_hour: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rollup_hour() is
+  'CALL-able form of ash.rollup_hour(); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rollup_cleanup()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result text;
+begin
+  select ash.rollup_cleanup() into v_result;
+  raise notice 'ash.run_rollup_cleanup: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rollup_cleanup() is
+  'CALL-able form of ash.rollup_cleanup(); exists so query routers cannot mistake a writer for a read.';
 
 drop function if exists ash.aas_summary(interval);
 drop function if exists ash.aas_summary_at(timestamptz, timestamptz);
@@ -7264,7 +7677,7 @@ comment on function ash._apply_pgss_search_path() is
 select ash._apply_pgss_search_path();
 
 /*
- * Canonical "admin" function set: callers that must NOT be granted to
+ * Canonical "admin" routine set: callers that must NOT be granted to
  * monitoring roles. Single source of truth for the REVOKE-from-PUBLIC /
  * GRANT-to-owner hardening block below and for grant_reader/revoke_reader
  * (which exclude these names from the reader EXECUTE bundle). Adding a new
@@ -7281,6 +7694,15 @@ as $$
     'start', 'stop', 'uninstall', 'rotate', 'take_sample',
     'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
     'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
+    /* Procedure forms of the maintenance/admin routines. */
+    'run_take_sample', 'run_rotate', 'run_rollup_minute',
+    'run_rollup_hour', 'run_rollup_cleanup',
+    /*
+     * Scheduling internals: only ash.start() and the installer re-apply
+     * migration consult these. No reader needs them, so keep them out of the
+     * reader bundle rather than widening it for helpers.
+     */
+    '_job_command_map', '_canonical_job_command',
     '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
     '_register_wait', '_validate_rotation_period', '_record_rotate_failure',
@@ -7305,7 +7727,7 @@ as $$
 $$;
 
 comment on function ash._admin_funcs() is
-  'Canonical list of ash.* admin function names (must not be granted to monitoring roles). Single source of truth used by the REVOKE/GRANT hardening block and by grant_reader/revoke_reader.';
+  'Canonical list of ash.* admin routine names (functions and procedures that must not be granted to monitoring roles). Single source of truth used by the REVOKE/GRANT hardening block and by grant_reader/revoke_reader.';
 
 do $$
 declare
@@ -7316,10 +7738,10 @@ declare
   v_rec record;
 begin
   /*
-   * Admin functions: revoke from PUBLIC and grant only to the schema owner.
+   * Admin routines: revoke from PUBLIC and grant only to the schema owner.
    * Resolve signatures dynamically via pg_proc so any future overload or
-   * default-argument change is picked up automatically. prokind in ('f','a')
-   * covers regular functions and aggregates (_int{4,8}_array_cat_agg).
+   * default-argument change is picked up automatically. The prokind filter
+   * covers functions, aggregates (_int{4,8}_array_cat_agg), and procedures.
    * Entries in _admin_funcs() that are not yet created at this point in
    * install order (e.g. grant_reader/revoke_reader, defined below) are
    * skipped here and locked down by their own DO block once created.
@@ -7330,12 +7752,12 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
-      and proc.prokind in ('f', 'a')
+      and proc.prokind in ('f', 'a', 'p')
       and proc.proname::text = any(v_admin_funcs)
   loop
-    execute format('revoke all on function ash.%I(%s) from public',
+    execute format('revoke all on routine ash.%I(%s) from public',
                    v_rec.proname, v_rec.args);
-    execute format('grant execute on function ash.%I(%s) to %I',
+    execute format('grant execute on routine ash.%I(%s) to %I',
                    v_rec.proname, v_rec.args, v_owner);
   end loop;
 
@@ -7346,10 +7768,11 @@ begin
    */
 
   /*
-   * Reader/helper functions: revoke EXECUTE from PUBLIC for every non-trigger
-   * function in ash.*. Signatures are resolved dynamically via pg_proc so
-   * default arguments and future overloads do not cause drift. Admin
-   * functions above are re-revoked here (harmless: REVOKE is idempotent).
+   * Reader/helper functions and maintenance procedures: revoke EXECUTE from
+   * PUBLIC for every non-trigger routine in ash.*. Signatures are resolved
+   * dynamically via pg_proc so default arguments and future overloads do not
+   * cause drift. Admin routines above are re-revoked here (harmless: REVOKE is
+   * idempotent).
    */
   for v_rec in
     select proc.proname,
@@ -7357,9 +7780,9 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
-      and proc.prokind = 'f'
+      and proc.prokind in ('f', 'p')
   loop
-    execute format('revoke execute on function ash.%I(%s) from public',
+    execute format('revoke execute on routine ash.%I(%s) from public',
                    v_rec.proname, v_rec.args);
   end loop;
 
@@ -7482,6 +7905,7 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
+      /* Maintenance procedures are admin-only; exclude them from readers. */
       and proc.prokind = 'f'
       and proc.proname::text <> all (v_admin_funcs)
   loop
@@ -7596,6 +8020,7 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
+      /* Maintenance procedures are admin-only; exclude them from readers. */
       and proc.prokind = 'f'
       and proc.proname::text <> all (v_admin_funcs)
   loop
@@ -7839,6 +8264,60 @@ begin
         '1 * * * *',
         v_hourly_job.command
       );
+    end loop;
+  end if;
+end $$;
+
+/*
+ * Installer re-apply migration for legacy pg_ash job commands. Replacing
+ * ash.start() does not change command text already stored in cron.job, so a
+ * running installation would otherwise keep SELECT-based writers forever.
+ *
+ * Match both the pg_ash job name and its exact known legacy command. This
+ * deliberately preserves every operator-customized command, even for a job
+ * with a standard pg_ash name. Named cron.schedule() updates the caller's job
+ * in place without requiring cron.alter_job(), which pg_cron revokes from
+ * PUBLIC. Reusing the stored schedule preserves cadence, jobid, and active
+ * state while changing only the command text.
+ */
+do $$
+declare
+  v_job record;
+begin
+  if ash._pg_cron_available() then
+    for v_job in
+      select
+        cron_job.jobname,
+        cron_job.schedule,
+        command_map.canonical_command as new_command
+      from cron.job as cron_job
+      inner join ash._job_command_map() as command_map
+        on command_map.jobname = cron_job.jobname
+        and command_map.legacy_command = cron_job.command
+        and command_map.legacy_command
+            is distinct from command_map.canonical_command
+      where cron_job.database = current_database()
+        and cron_job.username = current_user
+    loop
+      /*
+       * A cron.schedule() failure here must not abort the installer. This
+       * block now matches essentially every upgrading installation, and
+       * pg_cron revokes some of its API from PUBLIC, so a restricted
+       * installing role could otherwise turn a routine re-apply into a failed
+       * upgrade. Same defence the pg_monitor grant block above uses.
+       */
+      begin
+        perform cron.schedule(
+          v_job.jobname,
+          v_job.schedule,
+          v_job.new_command
+        );
+      exception when others then
+        raise warning
+          'pg_ash: could not migrate the legacy pg_cron command for job % '
+          '(%: %); it still uses the SELECT form and should be re-created',
+          v_job.jobname, sqlstate, sqlerrm;
+      end;
     end loop;
   end if;
 end $$;
