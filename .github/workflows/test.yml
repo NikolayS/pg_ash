@@ -28,7 +28,9 @@ jobs:
           fetch-depth: 0
 
       - name: Test release stamp checker
-        run: python3 devel/scripts/test_release_stamp.py -v
+        run: |
+          python3 devel/scripts/test_release_stamp.py -v
+          python3 devel/scripts/test_staged_migration.py -v
 
       - name: Verify release tag matches payload stamp
         if: >-
@@ -8260,10 +8262,10 @@ jobs:
         run: |
           python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > /tmp/ash_full_upgrade_chain.sql
 
-          # Split the chain at the LAST released migration, not at the last
+          # Split the chain at the LAST released or staged migration, not the last
           # line. This test's fixture must predate the migration that
           # normalizes ash.config's column order, and that normalization
-          # happens in the newest sql/migrations/ script. Splitting on the
+          # happens in the newest released or staged cumulative script. Splitting on the
           # last line was equivalent only while that migration WAS the last
           # line; once a development installer is staged in devel/sql/, the
           # chain gains a trailing entry, the fixture ends up already
@@ -8271,11 +8273,11 @@ jobs:
           # precondition assert. Everything from the last released migration
           # onward is the payload under test.
           split_line="$(
-            grep -n '^.i sql/migrations/' /tmp/ash_full_upgrade_chain.sql \
+            grep -nE '^.i (sql/migrations|devel/sql)/ash-[0-9].*-to-.*[.]sql$' /tmp/ash_full_upgrade_chain.sql \
               | tail -n 1 | cut -d: -f1
           )"
           if [ -z "${split_line}" ]; then
-            echo "no sql/migrations/ entry in the discovered upgrade chain" >&2
+            echo "no migration entry in the discovered upgrade chain" >&2
             exit 1
           fi
           head -n "$((split_line - 1))" /tmp/ash_full_upgrade_chain.sql \
@@ -8291,9 +8293,9 @@ jobs:
           # => early return, do not rewrite the table" — can only be tested
           # BEFORE the overlay stages a new config column, because after that
           # the migration correctly refuses to run at all.
-          grep '^.i sql/migrations/' /tmp/ash_latest_upgrade.sql \
+          grep -E '^.i (sql/migrations|devel/sql)/ash-[0-9].*-to-.*[.]sql$' /tmp/ash_latest_upgrade.sql \
             > /tmp/ash_latest_migration.sql
-          grep -v '^.i sql/migrations/' /tmp/ash_latest_upgrade.sql \
+          grep -vE '^.i (sql/migrations|devel/sql)/ash-[0-9].*-to-.*[.]sql$' /tmp/ash_latest_upgrade.sql \
             > /tmp/ash_latest_overlay.sql || true
           test -s /tmp/ash_latest_migration.sql
 
@@ -9250,6 +9252,18 @@ jobs:
           drop role lp_stray;
           drop role lp_overload;
           EOF
+
+      - name: "Migration rollback includes installer and config normalization"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          bash devel/tests/config_normalization_atomicity.sh
+
+      - name: "Promoted public migration supports historical tags and reapply"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          python3 devel/tests/promoted_upgrade_paths.py
 
       - name: "Schema equivalence: fresh dev install vs full upgrade path"
         env:
