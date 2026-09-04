@@ -126,7 +126,9 @@ jobs:
           grep -Fq \
             'named by `cron.database_name`; it still observes activity from every database.' \
             README.md
-          grep -Fq '`ash.report()` reads `ash.rollup_1m` only.' README.md
+          grep -Fq 'Base metrics and top events read `ash.rollup_1m`.' README.md
+          grep -Fq 'read raw samples for eligible extreme minutes.' README.md
+          python3 devel/scripts/check_llm_docs.py
           grep -Fq 'it returns SQL `NULL` and emits a NOTICE' README.md
           grep -Fq "function signatures are unchanged; parameter" RELEASE_NOTES.md
           grep -Fq "names were de-prefixed." RELEASE_NOTES.md
@@ -6502,6 +6504,20 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/query_attribution_assert.sql
+
+      - name: "Test LLM investigation over real lock waits"
+        if: matrix.postgres == 18
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: postgres
+        run: bash devel/tests/llm_example_live.sh
+
+      - name: "Test 2.0: documented report shape and semantics"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/report_contract.sql
 
       - name: "Test 2.0: stale and rounded-up rollup source selection"
         env:

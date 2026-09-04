@@ -7,6 +7,8 @@ declare
   v_wait_id smallint;
   v_datid oid;
   v_minute int4;
+  v_skipped_before bigint;
+  v_sampled int;
 begin
   -- start() should work without pg_cron (no error, prints hints)
   select status into v_status_val
@@ -45,6 +47,19 @@ begin
   assert v_status_val like '%no%',
     'status() should show pg_cron not available, got: ' || v_status_val;
 
+  -- Disabled external ticks are accepted SQL calls but collect no activity.
+  select skipped_samples into v_skipped_before
+  from ash.config where singleton;
+  v_sampled := ash.take_sample();
+  assert v_sampled = 0, 'disabled sampler must return zero';
+  assert (select skipped_samples = v_skipped_before + 1
+          from ash.config where singleton),
+    'disabled external tick must increment skipped_samples exactly once';
+
+  perform * from ash.start('1 second');
+  select skipped_samples into v_skipped_before
+  from ash.config where singleton;
+
   /*
    * The external-scheduler path is the only other way pg_ash is driven, so
    * the CALL surface has to be usable there too — an operator's `psql -c
@@ -70,11 +85,13 @@ begin
    * with the external-scheduler path it exists to cover.
    */
   update ash.config
-  set sampling_enabled = true,
-    include_bg_workers = false
+  set include_bg_workers = false
   where singleton;
 
   call ash.run_take_sample();
+  assert (select skipped_samples = v_skipped_before
+          from ash.config where singleton),
+    're-enabled external tick must not increment skipped_samples';
   select count(*) into v_after from ash.sample;
   assert v_after = 1,
     format(
