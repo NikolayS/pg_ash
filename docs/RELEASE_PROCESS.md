@@ -73,8 +73,9 @@ and easier to quote in a PR description.
 All post-release SQL changes must be made in `devel/sql/`, not in released files
 under `sql/`. After a prerelease of the current line, its released cumulative
 migration remains the public entry point and the next candidate installer is
-staged under `devel/sql/`; that migration may change again only in a later
-release-stamp PR.
+staged under `devel/sql/`; the released file under `sql/migrations/` may change again only in a later
+release-stamp PR. Its executable behavior can be refreshed through a staged
+copy as described below.
 
 When that current-line cumulative migration needs executable changes before
 another prerelease, stage a same-named copy in `devel/sql/` alongside its
