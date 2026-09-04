@@ -360,6 +360,14 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: "#122: disclose selected partial rollup source"
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGDATABASE: postgres
+          PGPASSWORD: postgres
+        run: python3 devel/scripts/test_partial_rollup_source.py
+
       - name: "#137: retained history cadence guard"
         env:
           PGPASSWORD: postgres
