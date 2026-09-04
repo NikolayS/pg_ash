@@ -45,8 +45,9 @@ and waits with NULL text.
 
 ## Reproduce in a disposable database
 
-Install the development candidate in an otherwise quiet disposable database,
-then run the live test. It creates and drops only its fixture table, starts
+Install the development candidate in a disposable database on an otherwise
+quiet Postgres instance: sampling observes every database on the server. Then
+run the live test. It creates and drops only its fixture table, starts
 sampling, and leaves the collected history available for inspection. Use
 standard libpq environment variables for the connection. Query attribution
 requires `compute_query_id = on` (or `auto` with a module that computes query
@@ -64,9 +65,16 @@ python3 devel/tests/llm_example_live.py --output /tmp/llm-investigation-output.t
 For the text variant, install pg_stat_statements in that database on a server
 where it is preloaded, then run `select ash._apply_pgss_search_path();` before
 the live test. The test also works without the extension and checks that no
-fixture SQL text appears. It never installs optional extensions itself.
+fixture SQL text appears. It never installs optional extensions itself. CI validates the no-extension
+variant; the SQL-text variant above was also verified manually.
 
-The test takes about 15–75 seconds because it waits for an actual minute
+Preserve NOTICE diagnostics alongside exported rows and JSON. In particular,
+`pg_ash partial source:` means newer completed raw observations were omitted
+from the selected minute rollup. Such results cannot establish complete-window
+load; absence of that notice also does not prove completeness. The capture
+helper combines psql stdout and stderr so diagnostics remain in its output.
+
+The test takes about 10–75 seconds because it waits for an actual minute
 boundary. Its synthetic counterpart, `devel/tests/report_contract.sql`, tests
 required report keys and exact semantic relationships inside a transaction
 that rolls back all fixture changes. Required-key checks accept additive keys.

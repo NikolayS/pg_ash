@@ -3,7 +3,7 @@
 
 Uses psql connection environment variables. Installs no extensions and changes
 no timestamps/counts. Requires an installed candidate and an otherwise quiet
-DB. Leaves collected history for inspection; drops only its own fixture table.
+Postgres instance (sampling observes every database). Leaves collected history for inspection; drops only its own fixture table.
 """
 
 import argparse
@@ -60,7 +60,7 @@ def main() -> None:
             PSQL + ["-qAt", "-c", "set application_name = 'pgash_llm_blocker'; "
                     "begin; update public.pgash_llm_demo_orders "
                     "set status = 'processing' where id = 1; "
-                    "select pg_sleep(12); commit"],
+                    "select pg_sleep(3600); commit"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         processes.append(blocker)
@@ -78,7 +78,13 @@ def main() -> None:
             time.sleep(max(0, deadline - time.monotonic()))
             assert int(sql("select ash.take_sample()")) >= 1
             deadline += 1
-        for process in processes:
+        # Release the blocker explicitly after the final sample. Its long
+        # sleep is a bounded fallback, not a deadline racing CI startup.
+        sql("select pg_cancel_backend(pid) from pg_stat_activity "
+            "where application_name = 'pgash_llm_blocker'")
+        _, blocker_stderr = blocker.communicate(timeout=5)
+        assert blocker.returncode != 0 and "canceling statement" in blocker_stderr
+        for process in processes[1:]:
             _, stderr = process.communicate(timeout=20)
             if process.returncode:
                 raise RuntimeError(stderr)
@@ -103,9 +109,9 @@ def main() -> None:
             PSQL + ["-P", "format=unaligned", "-v", f"since={since}",
                     "-v", f"until={until}",
                     "-f", str(ROOT / "examples/llm-investigation.sql")],
-            capture_output=True, text=True, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True,
         )
-        assert "error:" not in result.stderr.lower(), result.stderr
+        assert "error:" not in result.stdout.lower(), result.stdout
         assert "Step 5: raw samples" in result.stdout, result.stdout
         assert "Lock:transactionid" in result.stdout, result.stdout
         assert '"top_queryids_available": true' in result.stdout, result.stdout

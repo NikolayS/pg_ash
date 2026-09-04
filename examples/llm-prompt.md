@@ -21,7 +21,11 @@ saturation. Use workload latency, throughput, CPU measurements, and scheduler
 health when available. If they are absent, state what remains unknown.
 
 Read effective window bounds, source, and bucket resolution before comparing
-numbers. Missing stored observations can mean idle activity, missed sampling,
+numbers. Preserve and interpret NOTICE diagnostics with the result. A notice
+starting "pg_ash partial source:" discloses omitted newer raw observations;
+describe that result as partial and do not infer complete-window load from it.
+A source label or absence of this notice does not prove completeness.
+Missing stored observations can mean idle activity, missed sampling,
 or expired data. No sampler heartbeat is stored. data_points,
 buckets_with_data, and minutes_with_data cannot prove continuous sampling.
 The currently configured sampling interval weights historical observations;
@@ -41,7 +45,9 @@ For an ash.report() payload:
   coincide with the total peak and must not be added together.
 - top_events_* describe each non-CPU class's own extreme minute or percentile
   set. top_queryids_* contain IDs, not SQL text, for raw-covered extreme
-  minutes. Missing class keys and partial attribution are possible.
+  minutes. Missing class keys and partial attribution are possible. Values in
+  event(aas) and queryid(aas) entries are AAS rounded to one decimal; they need
+  not match or sum to class values rounded to two decimals.
 - top_queryids_available says that at least one attribution key is available;
   it is independent of pg_stat_statements and does not promise full coverage.
 - coverage.from, coverage.to, and coverage.source describe the report's base
