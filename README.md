@@ -372,6 +372,24 @@ renamed or removed.
 | `ash.revoke_reader(role)` | Revoke the monitoring-reader bundle |
 | `ash.uninstall('yes')` | Drop pg_ash and unschedule jobs |
 
+The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
+and `uninstall()` to run as the `ash` schema owner, including when another
+superuser administers the installation. Use `SET ROLE` to the owner first.
+A failed lifecycle call rolls back its configuration, job and DDL changes.
+`stop()` reports only jobs actually removed, with their real IDs. A successful
+rebuild leaves sampling disabled until an explicit `start()`.
+
+Explicit `start()` reactivates local managed jobs and migrates recognized
+commands to `CALL`, while preserving custom command strings. An ordinary
+schema owner can repeat start and reactivate jobs without `cron.alter_job`
+privileges; reactivating an inactive job may allocate a new job ID. The pg_cron
+administrator must configure working scheduler connection defaults. Managed
+names owned by the same role but targeting another database cause an error
+before changes. Visible managed jobs owned by another role in this database
+also block start/teardown; resolve that ownership conflict deliberately before
+retrying.
+
+
 Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` confirmation token.
 
 ### Primary-only writes and standby behavior
