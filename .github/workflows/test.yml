@@ -41,6 +41,9 @@ jobs:
       - name: Test mandatory-job and demo guards
         run: python3 devel/scripts/test_ci_guards.py -v
 
+      - name: Test interactive SQL runner
+        run: python3 devel/scripts/test_run_with_pty.py -v
+
       - name: Verify release tag matches payload stamp
         if: >-
           github.ref_type == 'tag' ||
@@ -510,10 +513,9 @@ jobs:
           # committable after the first error.
           printf '\\set ON_ERROR_ROLLBACK on\n\\i %s\ncommit;\n\\q\n' \
             "${install_path}" |
-            script --quiet --return \
-              --command \
-              "psql --no-psqlrc --host=localhost --username=postgres --dbname=ash_atomic_failure_test" \
-              /dev/null \
+            python3 devel/scripts/run_with_pty.py \
+              psql --no-psqlrc --host=localhost --username=postgres \
+              --dbname=ash_atomic_failure_test \
               >"${failure_log_dir}/on-error-rollback.log" 2>&1
           if ! grep -Fq \
               "forced mid-install failure at ash.rollup_1m" \

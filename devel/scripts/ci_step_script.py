@@ -210,13 +210,23 @@ def _deindent_literal_block(
         indentation = _block_scalar_indent(lines[idx], line_number=idx + 1)
         if indentation is None:
             continue
-        if indentation is not None and indentation <= parent_indent:
+        if indentation <= parent_indent:
             block_end = idx
             break
         if first_content_indent is None:
             first_content_indent = indentation
         elif (indentation < first_content_indent
               and lines[idx].lstrip().startswith("#")):
+            for later in range(idx + 1, end):
+                later_indent = _block_scalar_indent(lines[later], line_number=later + 1)
+                if later_indent is None or lines[later].lstrip().startswith("#"):
+                    continue
+                if later_indent <= parent_indent:
+                    break
+                raise WorkflowError(
+                    f"line {later + 1}: content resumes after a dedented comment "
+                    f"terminated the run block at line {run_line}"
+                )
             block_end = idx
             break
 

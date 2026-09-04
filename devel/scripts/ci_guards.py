@@ -11,7 +11,7 @@ def require_jobs(needs: object) -> None:
     """Both mandatory jobs must exist and have completed successfully."""
     if not isinstance(needs, dict):
         raise ValueError("required-job evidence must be an object")
-    for name in ("docs-lint", "test"):
+    for name in dict.fromkeys(("docs-lint", "test", *needs)):
         job = needs.get(name)
         if not isinstance(job, dict) or job.get("result") != "success":
             raise ValueError(f"mandatory job {name!r} did not succeed: {job!r}")

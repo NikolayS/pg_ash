@@ -143,7 +143,6 @@ require_commands() {
     pg_isready
     psql
     python3
-    script
     sed
     sort
   )
@@ -373,7 +372,7 @@ run_ci_selection() {
     # Parallel major workers must not share the workflow's historical /tmp
     # filenames. This is the only transformation made to canonical step bodies.
     step_body="${step_body//\/tmp\//${surface_temp_dir}/}"
-    if ! bash \
+    if ! "${BASH}" \
       --noprofile \
       --norc \
       -e \
