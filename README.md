@@ -357,7 +357,7 @@ renamed or removed.
 
 | Function | Purpose |
 |---|---|
-| `ash.start([every])` | Enable sampling and schedule jobs when pg_cron is available (1–59 whole seconds, whole minutes, or whole hours up to 23h) |
+| `ash.start([every])` | Resume sampling at the configured cadence, or set an explicit 1–60 whole-second cadence when all history tiers are empty |
 | `ash.stop()` | Disable sampling and unschedule pg_cron jobs |
 | `ash.status()` | Health, version, retention, partition, scheduler, and rollup state |
 | `ash.take_sample()` | Take one sample manually; normally called by the scheduler |
@@ -592,7 +592,8 @@ configured mode as `sample_unlogged`.
 
 Reducing sampling frequency is the alternative lever for the same WAL and
 storage problem and costs no durability, although it provides less temporal
-detail. For example, use `ash.start('5 seconds')` instead of 1-second sampling.
+detail. For a new installation with no retained history, for example, use
+`ash.start('5 seconds')` before collecting samples.
 
 The corresponding historical rollup estimate was about 120 MiB per database
 for 5 years of trend data.
@@ -680,13 +681,24 @@ Postgres.
   exhaust it faster on older Postgres versions.
 - Parallel workers share the leader query ID and count as separate active
   backends.
-- 2.0 does not persist the cadence in force for historical samples. AAS readers
-  weight every stored appearance with the current
-  `ash.config.sample_interval`, so changing it rescales earlier raw and rollup
-  history. Keep the interval fixed while that history is needed. At intervals
-  greater than one minute, the full tick weight lands in one minute, so
-  one-minute peaks and report worst-minute values can exceed the concurrency
-  actually observed.
+- Sampling accepts 1–60 whole seconds. `ash.start()` without an interval resumes
+  the configured cadence; a fresh installation defaults to 1 second. Changing
+  cadence through `ash.start(interval)` or a direct config update is refused
+  while **any** raw, minute-rollup, or hour-rollup history remains. Start a new
+  cadence only after explicitly archiving and removing all retained history;
+  pg_ash never clears it automatically. Changes require a `READ COMMITTED`
+  transaction and fail promptly if a sampler or history writer is active.
+- Older samples do not record their cadence. The guard prevents new cadence
+  changes from reweighting history, but cannot repair mixed-cadence history
+  collected before this guard. Installer re-apply preserves legacy data and
+  config. If its cadence is outside 1–60 whole seconds, sampling skips and AAS
+  readers raise an actionable error; raw evidence and `ash.status()` remain
+  available. Archive and explicitly remove all three history tiers before
+  selecting a supported cadence. External schedulers must actually run at
+  the configured interval; this guard cannot measure their timing. Minute
+  extrema remain sampling estimates: for example, exact 59-second sampling
+  can place two observations in one minute and temporarily overstate its AAS.
+  Persisted weighted time is still needed for a complete cadence solution.
 - Successful idle sampler ticks write no row. `data_points`,
   `buckets_with_data`, and report `minutes_with_data` describe
   facts derived from stored activity, not verified sampling coverage; a

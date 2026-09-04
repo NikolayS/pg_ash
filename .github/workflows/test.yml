@@ -355,6 +355,32 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: "#137: retained history cadence guard"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/cadence_history.sql
+
+      - name: "#137: cadence changes serialize with history writers"
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGDATABASE: postgres
+          PGPASSWORD: postgres
+        run: python3 devel/scripts/test_cadence_concurrency.py
+
+      - name: "#137: preserve unsupported legacy cadence on upgrade"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -Eeuo pipefail
+          trap 'dropdb -h localhost -U postgres --if-exists ash_cadence_legacy' EXIT
+          createdb -h localhost -U postgres ash_cadence_legacy
+          psql -h localhost -U postgres -d ash_cadence_legacy -v ON_ERROR_STOP=1 \
+            -v legacy_install_path=sql/ash-install.sql \
+            -v "install_path=$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" \
+            -f devel/tests/cadence_legacy.sql
+
       - name: "#224: optional unlogged raw sample ring"
         env:
           PGPASSWORD: postgres
@@ -3409,6 +3435,8 @@ jobs:
              * it, so "customise after the last start()" is not a contract
              * anyone can hold.
              */
+            begin;
+            truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
             select ash.start('2 seconds');
             select cron.alter_job(
               job_id := (
@@ -3474,6 +3502,7 @@ jobs:
             end
             $custom_preserved$;
             select ash.stop();
+            commit;
           \endif
 
           do $$
@@ -3484,13 +3513,14 @@ jobs:
             v_sampler_status text;
             v_has_pgcron boolean;
           begin
+            truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
             -- Skip cron schedule tests if pg_cron not available (e.g., PG19 beta)
             select exists (select from pg_extension where extname = 'pg_cron') into v_has_pgcron;
             if not v_has_pgcron then
               -- Just verify start() works without pg_cron (no error)
               perform ash.start('1 second');
-              perform ash.start('5 minutes');
-              perform ash.start('2 hours');
+              perform ash.start('5 seconds');
+              perform ash.start('60 seconds');
               perform ash.stop();
               raise notice 'pg_cron not available — interval schedule tests skipped (pg_cron-optional path verified)';
               return;
@@ -3652,75 +3682,22 @@ jobs:
             assert v_schedule = '*/1 * * * *', '1 minute should be */1 * * * *, got: ' || v_schedule;
             perform ash.stop();
 
-            select job_id into v_job_id
-            from ash.start('5 minutes')
-            where job_type = 'sampler';
-            assert v_job_id is not null, '5 minutes should work';
-            select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '*/5 * * * *', '5 minutes should be */5 * * * *, got: ' || v_schedule;
-            perform ash.stop();
-
-            select job_id into v_job_id
-            from ash.start('59 minutes')
-            where job_type = 'sampler';
-            assert v_job_id is not null, '59 minutes should work';
-            select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '*/59 * * * *', '59 minutes should be */59 * * * *, got: ' || v_schedule;
-            perform ash.stop();
-
-            -- Test boundary: 60 minutes = 1 hour (cron format)
-            select job_id into v_job_id
-            from ash.start('60 minutes')
-            where job_type = 'sampler';
-            assert v_job_id is not null, '60 minutes should work as 1 hour';
-            select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '0 * * * *', '60 minutes should be 0 * * * *, got: ' || v_schedule;
-            perform ash.stop();
-
-            -- Test 1+ hours range
-            select job_id into v_job_id
-            from ash.start('1 hour')
-            where job_type = 'sampler';
-            assert v_job_id is not null, '1 hour should work';
-            select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '0 * * * *', '1 hour should be 0 * * * *, got: ' || v_schedule;
-            perform ash.stop();
-
-            select job_id into v_job_id
-            from ash.start('2 hours')
-            where job_type = 'sampler';
-            assert v_job_id is not null, '2 hours should work';
-            select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '0 */2 * * *', '2 hours should be 0 */2 * * *, got: ' || v_schedule;
-            perform ash.stop();
-
-            -- Test 23 hours (maximum allowed)
-            select job_id into v_job_id
-            from ash.start('23 hours')
-            where job_type = 'sampler';
-            assert v_job_id is not null, '23 hours should work';
-            select schedule into v_schedule from cron.job where jobid = v_job_id;
-            assert v_schedule = '0 */23 * * *', '23 hours should be 0 */23 * * *, got: ' || v_schedule;
-            perform ash.stop();
-
-            -- Test 24 hours should ERROR (exceeds 23h limit)
+            -- Coarse cadences would fabricate one-minute peaks (#137).
             declare
+              v_invalid interval;
               v_error_msg text;
             begin
-              select status into v_error_msg
-              from ash.start('24 hours')
-              where job_type = 'error';
-              assert v_error_msg like '%23 hours%', '24 hours should error with 23 hours limit, got: ' || v_error_msg;
-            end;
-
-            -- Test error case: non-round interval
-            declare
-              v_error_msg text;
-            begin
-              select status into v_error_msg
-              from ash.start('90 seconds')
-              where job_type = 'error';
-              assert v_error_msg like '%exact minutes%', '90 seconds should error, got: ' || v_error_msg;
+              foreach v_invalid in array array[
+                interval '90 seconds', interval '5 minutes',
+                interval '59 minutes', interval '60 minutes',
+                interval '1 hour', interval '2 hours', interval '23 hours',
+                interval '24 hours'
+              ] loop
+                select status into strict v_error_msg
+                from ash.start(v_invalid) where job_type = 'error';
+                assert v_error_msg like '%maximum 60 seconds%',
+                  format('coarse interval %s error mismatch: %s', v_invalid, v_error_msg);
+              end loop;
             end;
 
             raise notice 'All interval format tests PASSED';
@@ -4875,7 +4852,7 @@ jobs:
             from ash.start(interval '100000000 days');
             assert v_errors = 1,
               format('ash.start(oversized): expected one error row, got %s', v_errors);
-            assert v_status like 'interval exceeds maximum 23 hours%',
+            assert v_status like 'interval exceeds maximum 60 seconds%',
               format('ash.start(oversized): unexpected status: %s', v_status);
 
             select sample_interval into v_after
@@ -6493,12 +6470,13 @@ jobs:
             assert v_metric = 3.00 and v_pct = 60.00, format('top(query_id) 333 avg=%s pct=%s', v_metric, v_pct);
 
             -- Sample-interval scaling: 12 samples at 5s sampling = a full busy minute (AAS 1).
-            update ash.config set sample_interval = '5 seconds' where singleton;
             truncate ash.rollup_1m;
+            update ash.config set sample_interval = '5 seconds' where singleton;
             insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
             values (ash.ts_from_timestamptz(v_end - interval '1 minute'), 0::oid, 12, 1, array[v_cpu, 12]::int4[], '{}'::int8[]);
             select avg_aas into v_metric from ash.aas(v_end - interval '1 minute', v_end);
             assert v_metric = 1.00, 'aas under 5s sampling 12*5/60=1.00, got ' || v_metric;
+            truncate ash.rollup_1m;
             update ash.config set sample_interval = '1 second' where singleton;
 
             -- Empty window: zero-filled (avg/peak/p99 = 0, no data).
