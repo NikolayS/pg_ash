@@ -1,3 +1,16 @@
+# Unreleased development changes
+
+- Lifecycle operations now require the exact `ash` schema owner, including
+  when invoked by another superuser; use `SET ROLE` to the owner. Failed
+  start/stop/rebuild/uninstall calls roll back jobs, config and DDL together.
+  `stop()` returns real job IDs only for actual removals. A successful rebuild
+  leaves sampling disabled. (#203)
+- Explicit start reactivates local jobs while preserving custom commands and
+  migrating recognized commands to `CALL`. Non-superuser owners can repeat
+  start without `cron.alter_job` privileges; an inactive job may receive a new
+  ID when recreated. Cross-database managed-name collisions and visible
+  foreign-owner same-database jobs fail before changes. (#250)
+
 # pg_ash 2.0 beta 1 release notes
 
 2.0 beta 1 promotes the rewritten reader API from `devel/sql/` into the normal
@@ -42,7 +55,33 @@ AAS-oriented 2.0 API:
   official `postgres:19beta1` image until the GA `postgres:19` image exists.
 - **Docs refreshed.** README examples now use the 2.0 named-argument API.
 
-## Fixes since 2.0 beta 1
+## Changes since 2.0 beta 1
+
+- **Raw sample WAL can be reduced with an opt-in unlogged ring.**
+  `ash.set_sample_persistence('unlogged')` converts only raw `sample_N`
+  partitions and is preserved by rotation, partition rebuilds, and installer
+  re-apply; the default remains logged and rollups always stay logged. A crash
+  or immediate shutdown truncates unlogged raw history, promoted replicas
+  start with an empty raw ring, and standbys cannot read it. (issue #224)
+- **Primary-only operation is explicit on physical standbys.** Scheduled
+  sampling, rotation, and rollup routines now emit an actionable notice and
+  return a neutral value without writing when the server is in recovery.
+  Administrative entrypoints and the installer fail with SQLSTATE `25006`,
+  reader functions remain available, and `ash.status()` reports the node's
+  recovery state while explaining replicated `sampling_enabled`. (issue #222)
+- **Maintenance routines now have a `CALL` surface.** Admins and schedulers
+  can invoke `run_take_sample`, `run_rotate`, `run_rollup_minute`,
+  `run_rollup_hour`, and `run_rollup_cleanup` as procedures. This prevents
+  statement-kind routers from treating a side-effecting `SELECT` as a read
+  and sending it to a read-only replica. pg_cron jobs use the procedure forms;
+  installer re-apply migrates the known legacy commands — including the
+  uppercase `SELECT` forms scheduled by 1.0 and 1.1 — while preserving custom
+  commands, cadence, job IDs, and active state. `ash.start()` honours the same
+  contract: it re-syncs only command text pg_ash itself scheduled, and leaves
+  a customised command alone with a notice naming the recommended form. The procedures are admin-only
+  and excluded from `ash.grant_reader()`. (issue #221)
+
+### Fixes
 
 - **Reader windows and diagnostics are now explicit.** Reader functions reject
   inverted windows and anchor an `until`-only call to the preceding hour.
