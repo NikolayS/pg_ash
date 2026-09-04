@@ -445,6 +445,30 @@ readers split into two groups there:
 `sampling_enabled` is the primary's replicated configuration, not evidence of
 local sampling.
 
+### Starting a new collection cadence
+
+Keep the configured cadence while retained history is needed. An explicit
+cadence change with history raises SQLSTATE `55000`; contention raises `55P03`
+so the operator can retry. Invalid interval shapes return an `error` row from
+`ash.start()`.
+
+After exporting the history you want to keep, the installation owner can
+**deliberately delete all raw and rollup history** and start a new collection:
+
+```sql
+select ash.stop();
+begin;
+truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+update ash.config
+set last_rollup_1m_ts = null, last_rollup_1h_ts = null;
+select ash.start('5 seconds');
+commit;
+```
+
+Stop external schedulers before this reset and restart them at the same
+configured cadence afterwards. The reset is optional and destructive; an
+ordinary `ash.start()` preserves the current cadence and retained history.
+
 ### CALL-able maintenance procedures
 
 Each **scheduled** collection or maintenance function has an admin-only
@@ -759,12 +783,15 @@ Postgres.
   cadence only after explicitly archiving and removing all retained history;
   pg_ash never clears it automatically. Changes require a `READ COMMITTED`
   transaction and fail promptly if a sampler or history writer is active.
+  Commit promptly: a successful cadence change blocks history writers until
+  its transaction ends; use a short transaction or an autocommit statement.
 - Older samples do not record their cadence. The guard prevents new cadence
   changes from reweighting history, but cannot repair mixed-cadence history
   collected before this guard. Installer re-apply preserves legacy data and
   config. If its cadence is outside 1–60 whole seconds, sampling skips and AAS
   readers raise an actionable error; raw evidence and `ash.status()` remain
-  available. Archive and explicitly remove all three history tiers before
+  available; `sample_interval_supported = false` and `skipped_samples` expose
+  the stopped collection. Archive and explicitly remove all three history tiers before
   selecting a supported cadence. External schedulers must actually run at
   the configured interval; this guard cannot measure their timing. Minute
   extrema remain sampling estimates: for example, exact 59-second sampling

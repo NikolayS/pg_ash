@@ -31,8 +31,12 @@ begin
   assert (select jsonb_agg(minute) from ash.rollup_1m as minute) = v_before.minute,
     'upgrade removed or changed minute legacy history';
 
+  assert (select value from ash.status() where metric = 'sample_interval_supported') = 'false',
+    'status must identify unsupported legacy cadence';
   assert ash.take_sample() = 0, 'unsupported legacy cadence continued sampling';
   call ash.run_take_sample();
+  assert (select skipped_samples from ash.config) = (v_before.config->>'skipped_samples')::int + 2,
+    'unsupported legacy calls must count both skipped samples';
   assert (select jsonb_agg(sample) from ash.sample as sample) = v_before.raw,
     'unsupported legacy CALL added raw samples';
   foreach v_reader in array array[

@@ -1193,6 +1193,7 @@ begin
 
   if v_sample_seconds is null or v_sample_seconds < 1 or v_sample_seconds > 60
      or v_sample_seconds <> trunc(v_sample_seconds) then
+    update ash.config set skipped_samples = skipped_samples + 1 where singleton;
     raise warning
       'ash.take_sample: unsupported legacy sample_interval; sampling skipped. '
       'Archive retained history and choose 1 to 60 whole seconds.';
@@ -3802,6 +3803,13 @@ begin
   metric := 'skipped_samples'; value := v_config.skipped_samples::text; return next;
   metric := 'current_slot'; value := v_config.current_slot::text; return next;
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
+  metric := 'sample_interval_supported';
+  value := (
+    extract(epoch from v_config.sample_interval) between 1 and 60
+    and extract(epoch from v_config.sample_interval)
+      = trunc(extract(epoch from v_config.sample_interval))
+  )::text;
+  return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
   metric := 'rotation_period_contract';
   value := 'day-granular; minimum 1 day';
@@ -8339,7 +8347,7 @@ comment on function ash.status() is
 $$Installation health snapshot (readable by monitoring roles): sampling state and interval, raw sample persistence, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
-$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., omitted interval resumes ash.config.sample_interval; fresh default 1 second; accepts 1–60 whole seconds) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally at exactly the configured interval. Refuses cadence changes while raw or either rollup tier retains history; never clears history automatically. Idempotent. Inverse: ash.stop(). Check with ash.status(). Must run as the ash schema owner (SET ROLE when needed). Explicit start reactivates local jobs, migrates recognized commands to CALL, and preserves custom commands. Same-owner managed names targeting another database are rejected before changes. Scheduling failures roll back every job/config change.$$;
+$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., omitted interval resumes ash.config.sample_interval; fresh default 1 second; accepts 1–60 whole seconds) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally at exactly the configured interval. Cadence changes with retained raw or rollup history raise SQLSTATE 55000; concurrent sampler/history writers raise 55P03. Invalid interval shapes return an error row. Never clears history automatically. Idempotent. Inverse: ash.stop(). Check with ash.status(). Must run as the ash schema owner (SET ROLE when needed). Explicit start reactivates local jobs, migrates recognized commands to CALL, and preserves custom commands. Same-owner managed names targeting another database are rejected before changes. Scheduling failures roll back every job/config change.$$;
 
 comment on function ash.stop() is
 $$Admin: stop sampling — atomically unschedules the pg_cron jobs created by ash.start() and disables sampling (or only disables sampling when pg_cron is absent). Must be called as the ash schema owner; visible managed jobs owned by another role and targeting this database make the call fail closed. Same-owner managed names targeting another database are rejected before changes. Returns one removed row with its real job ID for each job actually unscheduled; absent jobs are idempotent. If any existing job cannot be unscheduled, the error propagates and rolls back every job/config change from the call; ordinary unschedule errors are wrapped to name the job. Collected data is kept and remains readable. Inverse: ash.start().$$;
