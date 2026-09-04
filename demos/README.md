@@ -61,11 +61,11 @@ reproducible.
 ## pg_cron is not required — and this demo deliberately does not use it
 
 The harness drives `ash.take_sample()` itself, from an ordinary session. That is
-the **external scheduler** path, and it is the default here for two reasons:
-
-1. It is what pg_ash users on RDS, Cloud SQL, Supabase, AlloyDB and Neon
-   actually run, because those platforms do not give you pg_cron.
-2. It is the only path that works on an arbitrary CI runner.
+the **external scheduler** path. The harness uses it so reproduction does not
+depend on pg_cron being installed, configured, or permitted in the chosen
+database. Managed services may support pg_cron; availability depends on the
+provider, Postgres version, and configuration. Check those requirements when
+choosing the scheduler for your deployment.
 
 So the degraded no-cron mode is not a compromise in this harness — it is the
 mainline. `ash.status()` in the `status` scene says so on screen: the demo shows
