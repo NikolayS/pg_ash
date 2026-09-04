@@ -7,15 +7,38 @@ server with CREATEDB privileges; database names are unique to this process.
 from __future__ import annotations
 
 import os
+import re
+import sys
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-TAGS = [f"v1.{n}" for n in range(6)] + [
-    f"v2.0-alpha{n}" for n in range(1, 6)
-] + ["v2.0-beta1"]
+sys.path.insert(0, str(ROOT / "devel/scripts"))
+import ash_sql_chain as chain
+
+
+def tagged_origins(target_line: str) -> list[str]:
+    """Include immutable historical tags and any subsequently published RCs."""
+    names = subprocess.check_output(["git", "tag", "--list", "v*"],
+                                    cwd=ROOT, text=True).splitlines()
+    found = []
+    for tag in names:
+        match = chain.PAYLOAD_VERSION_RE.fullmatch(tag[1:])
+        if match is None:
+            continue
+        line = match.group("release_line")
+        if chain.version_key(line) > chain.version_key(target_line):
+            continue
+        stage = match.group("stage")
+        counter = int(re.search(r"(\d+)$", tag).group(1)) if stage else 0
+        found.append(((chain.version_key(line),
+                       {"alpha": 0, "beta": 1, "rc": 2, None: 3}[stage], counter), tag))
+    if not found:
+        raise RuntimeError("no supported immutable SQL release tags discovered")
+    return [tag for _key, tag in sorted(found)]
+
 
 
 def main() -> None:
@@ -27,18 +50,27 @@ def main() -> None:
         if not candidate_install.exists():
             candidate_install = ROOT / "sql/ash-install.sql"
         shutil.copy2(candidate_install, promoted / "sql/ash-install.sql")
-        staged = ROOT / "devel/sql/ash-1.5-to-2.0.sql"
-        if staged.exists():
+        migrations = chain.upgrades()
+        target_line = chain.validate_upgrade_graph(migrations, label="promoted")
+        for staged in (ROOT / "devel/sql").glob("ash-*-to-*.sql"):
             migration = staged.read_text().replace(
                 r"\ir ash-install.sql", r"\ir ../ash-install.sql"
             )
-            (promoted / "sql/migrations/ash-1.5-to-2.0.sql").write_text(migration)
-        wrapper = promoted / "sql/ash-1.5-to-2.0.sql"
-        canonical = promoted / "sql/migrations/ash-1.5-to-2.0.sql"
+            (promoted / "sql/migrations" / staged.name).write_text(migration)
+            (promoted / "sql" / staged.name).write_text(
+                r"\ir migrations/" + staged.name + "\n"
+            )
+        incoming = [path for dst, path in migrations.values() if dst == target_line]
+        if len(incoming) != 1:
+            raise RuntimeError("expected one cumulative migration to the candidate")
+        wrapper = promoted / "sql" / incoming[0].name
+        canonical = promoted / "sql/migrations" / incoming[0].name
         database = f"ash_promoted_{os.getpid()}"
         maintenance = os.environ.get("PGDATABASE", "postgres")
         env = {**os.environ, "PGDATABASE": database, "PAGER": "cat"}
         psql = ["psql", "--no-psqlrc", "--set=ON_ERROR_STOP=1",
+                "--host=" + os.environ.get("PGHOST", "localhost"),
+                "--username=" + os.environ.get("PGUSER", "postgres"),
                 "--no-align", "--tuples-only", "--quiet"]
 
         def run(args: list[str], *, db: str = database, cwd: Path = ROOT) -> str:
@@ -75,7 +107,7 @@ def main() -> None:
             assert snapshot() == expected_schema, "fresh candidate wrapper changed schema"
             print("fresh promoted install/canonical/wrapper reapply PASS", flush=True)
 
-            for tag in TAGS:
+            for tag in tagged_origins(target_line):
                 reset()
                 archived = temp / tag
                 archived.mkdir()
@@ -85,16 +117,24 @@ def main() -> None:
                                cwd=ROOT, check=True)
                 subprocess.run(["tar", "-xf", str(archive_file), "-C", str(archived)],
                                check=True)
-                source_name = {"v1.0": "ash--1.0.sql", "v1.1": "ash--1.1.sql"}.get(
-                    tag, "ash-install.sql")
-                install(archived / "sql" / source_name, cwd=archived)
+                source_line = chain.PAYLOAD_VERSION_RE.fullmatch(tag[1:]).group("release_line")
+                candidates = [archived / "sql" / name for name in (
+                    "ash-install.sql", f"ash--{source_line}.sql", f"ash-{source_line}.sql"
+                )]
+                source_install = next((path for path in candidates if path.exists()), None)
+                if source_install is None:
+                    raise RuntimeError(f"{tag}: no recognized tagged SQL installer")
+                install(source_install, cwd=archived)
                 run(["--command", "update ash.config set sample_interval = interval '5 seconds', "
                      "include_bg_workers = true where singleton"])
                 # Preserve the actual tagged origin before applying finalized
                 # historical edges and the rehearsed public candidate wrapper.
-                if tag.startswith("v1."):
-                    for minor in range(int(tag.split('.')[1]), 5):
-                        install(promoted / f"sql/migrations/ash-1.{minor}-to-1.{minor+1}.sql")
+                origin_paths, _ = chain.trace_upgrade_chain(
+                    source_line, migrations, label=f"{tag} promotion"
+                )
+                for path in origin_paths:
+                    if path.name != canonical.name:
+                        install(promoted / "sql/migrations" / path.name)
                 install(wrapper)
                 assert run(["--command", "select version from ash.config where singleton"]).strip() == expected_version, tag
                 assert run(["--command", "select sample_interval = interval '5 seconds' "
