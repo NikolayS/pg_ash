@@ -49,15 +49,11 @@ visible. `test.yml` is large; keep an eye on its size.
 
 ## Required status checks
 
-The `main-protected` ruleset (id `13093534`) currently has `deletion`,
-`non_fast_forward` and `pull_request` rules but **no `required_status_checks`
-rule**. Nothing at the ruleset level requires any check to have run, so a PR
-whose workflows never started — a fork PR pending workflow approval, a branch
-the trigger filters excluded, a workflow file over the size limit — is
-mergeable into `main` with zero evidence.
-
-Applying the payload below adds that rule. It preserves the existing rules
-verbatim; only the new `required_status_checks` entry is added.
+The `main-protected` ruleset (id `13093534`) requires the five contexts below.
+This configuration was applied and read back on 2026-09-04 during #249,
+preserving its existing deletion, non-fast-forward and pull-request rules.
+The checked-in payload documents that configuration; re-read the live ruleset
+before updating it so concurrent policy changes are preserved.
 
 ```bash
 gh api -X PUT repos/NikolayS/pg_ash/rulesets/13093534 \
