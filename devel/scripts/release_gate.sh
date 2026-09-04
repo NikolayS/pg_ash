@@ -274,6 +274,7 @@ start_container() {
   fi
 
   export PGPORT
+  export PGHOST=127.0.0.1
   export PGPASSWORD="${POSTGRES_PASSWORD}"
   export PGUSER="${POSTGRES_USER}"
   export PGDATABASE="${POSTGRES_DATABASE}"
@@ -393,12 +394,19 @@ run_ci_selection() {
 run_fresh_install() {
   assert_extension_state t t
   install_fresh
+  # New candidate tests precede the historical atomic-install range. The
+  # physical standby is a separately recorded runtime acceptance surface;
+  # this range runs the discriminating recovery seam on every server major.
+  run_ci_selection \
+    range \
+    "#122: disclose selected partial rollup source" \
+    "#222: recovery guard coverage on every PostgreSQL version"
   run_ci_selection \
     range \
     "Test SQL entrypoints fail atomically" \
     "Test uninstall" \
     --exclude \
-    "H-CI-3: end-to-end pg_cron fires ash.take_sample (#46)"
+    "H-CI-3: end-to-end pg_cron fires ash.run_take_sample (#46)"
 }
 
 run_upgrade_chain() {
@@ -484,7 +492,7 @@ run_cron_path() {
     "Verify pg_cron wiring" \
     "Test start/stop" \
     "Lifecycle ownership, job collisions and teardown atomicity" \
-    "H-CI-3: end-to-end pg_cron fires ash.take_sample (#46)" \
+    "H-CI-3: end-to-end pg_cron fires ash.run_take_sample (#46)" \
     "Test all interval formats (issue #2)" \
     "Test #61: status() works for non-superuser without cron.job access"
 }
