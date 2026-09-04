@@ -23,7 +23,9 @@ numbers. Missing stored observations can mean idle activity, missed sampling,
 or expired data. No sampler heartbeat is stored. data_points,
 buckets_with_data, and minutes_with_data cannot prove continuous sampling.
 The currently configured sampling interval weights historical observations;
-a cadence change or scheduler drift can invalidate comparisons.
+a cadence change or scheduler drift can invalidate comparisons. Coarse-cadence
+minute extrema are estimates: bucket boundaries can assign two tick weights
+to one minute even when the active-backend count did not increase.
 
 For an ash.report() payload:
 - aas_avg, aas_worst1m, aas_p99, and aas_p999 describe the one-minute series

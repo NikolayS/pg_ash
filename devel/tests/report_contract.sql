@@ -4,7 +4,9 @@
 -- Roll back fixture data, configuration, and dictionaries after the test.
 begin;
 truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
-update ash.config set sample_interval = interval '1 second' where singleton;
+update ash.config
+set sample_interval = interval '1 second', current_slot = 0
+where singleton;
 
 do $$
 declare
@@ -77,6 +79,8 @@ begin
     'class maxima are independent, not a decomposition of total peak';
   assert (v_report ->> 'top_queryids_available')::bool,
     'raw query IDs must be available independently of pg_stat_statements';
+  assert (v_report #> '{top_queryids_worst1m,total}') ? '424242(3.0)',
+    'total peak must attribute the retained raw query, not just expose a key';
   assert not (v_report ? 'vcpus'), 'omitted vcpus must remain absent';
   assert (ash.report(v_from, v_until, vcpus => 8) ->> 'vcpus')::int = 8,
     'vcpus is caller-supplied metadata';

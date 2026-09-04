@@ -551,8 +551,8 @@ Raw samples use a PGQ-style ring of partitions. Defaults:
 - `rollup_1h` retention is 5 years
 
 `ash.start()` checks rotation once a day. Multi-day periods work because early
-checks skip until the configured period is due; sub-day and fractional-day
-periods are rejected. The minute rollup must outlive the raw slot that rotation
+checks skip until at least 90% of `rotation_period` has elapsed; sub-day and
+fractional-day periods are rejected. The minute rollup must outlive the raw slot that rotation
 is about to truncate:
 
 ```text
@@ -702,6 +702,12 @@ frequency but can miss short bursts. One minute can miss an entire short
 incident and is useful only when that loss of detail is acceptable. Even
 one-second sampling cannot reliably establish the order of subsecond waits;
 that requires tracing or other evidence.
+
+Coarser sampling also makes minute extrema estimates sensitive to bucket
+boundaries. Two observations weighted at 59 seconds can contribute 118
+backend-seconds to one minute (1.97 AAS) even with one active backend. Bounding
+the interval does not remove this aliasing; one-second sampling reduces it.
+This remains part of [#137](https://github.com/NikolayS/pg_ash/issues/137).
 
 Measure sampler latency, WAL, storage growth, and scheduler lateness on the
 target workload, especially when the server is already saturated. Volume
