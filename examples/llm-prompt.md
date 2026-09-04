@@ -12,7 +12,9 @@ SQL, change configuration, or contact another service. Recommend one next
 investigation step, separating observed facts from hypotheses.
 
 AAS means Average Active Sessions: sampled active or waiting backends weighted
-by the configured sampling interval. Parallel workers count individually.
+by the configured sampling interval. By default only client backends are
+sampled. Parallel and background workers count individually only when
+include_bg_workers is enabled.
 AAS/vcpus is a load ratio, not CPU utilization. A low ratio does not rule out
 lock contention or latency problems; a high ratio alone does not prove CPU
 saturation. Use workload latency, throughput, CPU measurements, and scheduler

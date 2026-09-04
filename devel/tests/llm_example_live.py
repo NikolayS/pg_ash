@@ -40,6 +40,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
+    if sql("select query_id is not null from pg_stat_activity "
+           "where pid = pg_backend_pid()") != "t":
+        raise RuntimeError(
+            "Query attribution is disabled: use compute_query_id=on for the "
+            "workload sessions (for example PGOPTIONS='-c compute_query_id=on')."
+        )
     processes = []
     created_fixture = False
     try:

@@ -15,7 +15,7 @@ def main() -> None:
     for field in (
         "aas_avg", "aas_worst1m", "aas_p99", "aas_p999", "top_events_*",
         "top_queryids_available", "coverage", "minutes_with_data",
-        "minutes_expected", "raw_retention_start", "vcpus",
+        "minutes_expected", "raw_retention_start", "vcpus", "include_bg_workers",
     ):
         assert field in prompt, f"analysis prompt must explain {field}"
     for step in range(1, 6):
