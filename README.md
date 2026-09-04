@@ -706,6 +706,15 @@ Postgres.
   extrema remain sampling estimates: for example, exact 59-second sampling
   can place two observations in one minute and temporarily overstate its AAS.
   Persisted weighted time is still needed for a complete cadence solution.
+- When a stale minute rollup is the best available partial source, aggregate
+  readers keep that source and its values. If newer completed raw observations
+  in the requested window lack corresponding minute-rollup rows, they emit a
+  NOTICE with SQLSTATE `01000` and prefix `pg_ash partial source:` explaining
+  the omission and naming the watermark. Surface this diagnostic in clients
+  and preserve it with exported results; clients can suppress NOTICEs, and
+  the returned source label is **not** machine-readable proof of completeness.
+  Wait for rollup catch-up or narrow the window to inspect recent raw activity.
+  Source composition remains open in [issue #122](https://github.com/NikolayS/pg_ash/issues/122).
 - Successful idle sampler ticks write no row. `data_points`,
   `buckets_with_data`, and report `minutes_with_data` describe
   facts derived from stored activity, not verified sampling coverage; a

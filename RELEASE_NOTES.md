@@ -44,6 +44,14 @@ AAS-oriented 2.0 API:
 
 ## Changes since 2.0 beta 1
 
+- **Partial aggregate sources disclose omitted raw observations.** When the
+  best available minute rollup is stale and lacks newer completed raw grains
+  in the requested window, aggregate readers emit a `01000` NOTICE prefixed
+  `pg_ash partial source:` with catch-up/narrow-window guidance. Returned
+  values and source labels are unchanged and describe selected rollup rows;
+  clients must surface/preserve the advisory diagnostic. This does not add
+  source composition or machine-readable completeness metadata; #122 stays open.
+
 - **Cadence changes can no longer reweight retained history.** New sampling
   intervals must be 1–60 whole seconds; `ash.start()` without an interval
   resumes the configured cadence. Explicit interval changes and direct config

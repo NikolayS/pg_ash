@@ -4874,7 +4874,8 @@ $$;
  * When raw covers the window start, a rollup that is disabled, cannot cover it,
  * or lags the requested end falls back through _pick_source. Completeness for a
  * stalled rollup when the window starts before physical raw coverage remains
- * tracked by #122. Exact-query drills and samples bypass this and force raw.
+ * tracked by #122. Such results retain their selected source and values, but
+ * emit SQLSTATE 01000 NOTICE when recent completed raw activity is omitted. Exact-query drills and samples bypass this and force raw.
  * The source column stays honest — it names whatever was actually read.
  */
 create or replace function ash._pick_source_agg(
@@ -4882,10 +4883,15 @@ create or replace function ash._pick_source_agg(
   until timestamptz
 )
 returns text
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
+declare
+  v_source text;
+  v_watermark int4;
+  v_complete_until timestamptz := least(until, date_trunc('minute', now()));
+begin
   with fallback as (
     select ash._pick_source(since) as source
   )
@@ -4909,8 +4915,53 @@ as $$
               )
          ) then 'rollup_1m'
     else fallback.source
-  end
-  from fallback
+  end into v_source
+  from fallback;
+
+  /*
+   * Preserve the best-partial-source contract, but disclose proven omission:
+   * the selected minute rollup is stale and newer completed-minute raw
+   * activity actually exists inside this window. Missing rows alone do not
+   * prove a sampler outage, so do not infer incompleteness from sparse data.
+   * An unlogged standby cannot inspect the raw ring and must not probe it.
+   */
+  if v_source = 'rollup_1m' and since is not null and until is not null
+     and ash._raw_ring_readable() then
+    select last_rollup_1m_ts into v_watermark from ash.config where singleton;
+    if (v_watermark is null
+        or v_watermark < ash.ts_from_timestamptz(v_complete_until))
+       and exists (
+         select from ash.sample as sample_row
+         where sample_row.slot = any(ash._active_slots())
+           and sample_row.sample_ts >= ash.ts_from_timestamptz(since)
+           and sample_row.sample_ts < ash.ts_from_timestamptz(v_complete_until)
+           and (v_watermark is null or sample_row.sample_ts >= v_watermark)
+           and not exists (
+             select from ash.rollup_1m as minute_row
+             where minute_row.ts = (sample_row.sample_ts / 60) * 60
+               and minute_row.datid = sample_row.datid
+           )
+       ) then
+      raise notice using
+        errcode = '01000',
+        message = format(
+          'pg_ash partial source: rollup_1m watermark %s is behind the '
+          'requested complete-minute end %s; newer raw observations are omitted '
+          'from this result. Values describe only selected rollup rows.',
+          coalesce(ash.ts_to_timestamptz(v_watermark)::text, 'unknown'),
+          v_complete_until
+        ),
+        hint = format(
+          'Wait for minute rollup catch-up or ask an administrator to run '
+          'CALL ash.run_rollup_minute(). To inspect recent raw activity, '
+          'narrow since to %s or later. Clients must surface this NOTICE; '
+          'the returned source label is not a completeness guarantee.',
+          ash._raw_oldest_sample()
+        );
+    end if;
+  end if;
+  return v_source;
+end;
 $$;
 
 /*
