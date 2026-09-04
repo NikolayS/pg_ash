@@ -10,7 +10,9 @@ pg_ash is Active Session History (ASH) for Postgres, implemented in plain SQL an
 pg_ash samples `pg_stat_activity`, stores compact wait-event history in the
 database, and lets you answer "what was happening then?" after the problem is
 gone. It works on managed Postgres because it is not a C extension: no
-`shared_preload_libraries`, no provider approval, no restart.
+`shared_preload_libraries` entry or restart for pg_ash itself. The installing
+role still needs permission to create the schema; cross-role statistics and
+optional extensions have separate [privilege requirements](#privileges).
 
 ## Why pg_ash
 
@@ -23,18 +25,22 @@ Use pg_ash when you need:
 
 - incident reconstruction after the spike is gone
 - wait-event timelines without external agents
-- query attribution through `pg_stat_statements`
+- query IDs from `pg_stat_activity`, with optional SQL text through
+  `pg_stat_statements`
 - long-term AAS trends through rollups
 - a tool that can run on RDS, Cloud SQL, AlloyDB, Supabase, Neon, and similar
   managed platforms
 
 ## Quick start
 
-The current `main` branch contains the 2.0 beta 1 SQL in `sql/`.
+The current `main` branch contains the frozen 2.0 beta 1 SQL in `sql/`.
+Changes under `devel/sql/` are the development candidate, not a published
+release. See [the release process](docs/RELEASE_PROCESS.md).
+
+Neither pg_cron nor pg_stat_statements is required. The example below uses
+pg_cron if available; otherwise configure [external scheduling](#scheduling).
 
 ```sql
-create extension if not exists pg_stat_statements;
-
 \i sql/ash-install.sql
 
 select ash.start('1 second');
@@ -70,8 +76,9 @@ viewers and in a monochrome terminal.
 
 `ash.top('wait_event')` — the wait-event breakdown for the incident window,
 ranked by Average Active Sessions, with the share of total active time. When
-`Lock:transactionid` dominates, the database is not short of capacity — writers
-are queueing behind one another's row locks.
+`Lock:transactionid` dominates, sessions are waiting for other transactions to
+finish. Investigate transaction scope and blockers; this does not rule out
+other capacity constraints.
 
 ![pg_ash 2.0 investigation demo](assets/ash_demo.gif)
 
@@ -164,128 +171,118 @@ NULL instead of being filled with an hour average. Hour-only partial-window
 drills snap outward and disclose effective bounds/bucket; plain
 `top('database')` keeps minute precision through per-database `minute_counts`.
 
-## Investigation flow
+<a id="investigation-flow"></a>
 
-### 1. Is it bad now, or was it a spike?
+## LLM-assisted investigation
 
-```sql
-select period, source, bucket, buckets_with_data,
-       avg_aas, peak_aas, p99_aas
-from ash.periods();
+**Prompt:** "There was a performance issue about five minutes ago. Investigate."
+
+An LLM can follow the same five-step investigation as an operator: inspect
+load, find waits, locate the spike, identify affected queries, then inspect
+raw evidence. The [executable psql example](examples/llm-investigation.sql)
+runs these steps in a read-only transaction and chooses the drill window from
+the results. The snippets below show each step; the script supplies the
+variables from actual results. It needs an existing installation with recent activity:
+
+```bash
+psql -X -v ON_ERROR_STOP=1 -d mydb -f examples/llm-investigation.sql
 ```
 
-Typical output:
+For an older incident, pass explicit bounds, including the time zone:
 
-```text
- period | source    | bucket   | buckets_with_data | avg_aas | peak_aas | p99_aas
---------+-----------+----------+-------------------+---------+----------+---------
- 1m     | raw       | 00:01:00 |                 1 |    2.2  |     2.4  |    2.4
- 5m     | raw       | 00:01:00 |                 5 |    5.1  |    12.0  |   11.4
- 1h     | rollup_1m | 00:01:00 |                60 |    2.6  |    12.0  |    4.8
+```bash
+psql -X -v ON_ERROR_STOP=1 -d mydb \
+  -v since='2026-09-04T14:00:00+00' -v until='2026-09-04T14:10:00+00' \
+  -f examples/llm-investigation.sql
 ```
 
-`peak_aas` far above `avg_aas` means a short storm. Both high means sustained
-load.
+### 1. Check the big picture
 
-### 2. What kind of wait dominated?
+Freeze the window once so later queries answer the same question. In psql:
 
 ```sql
-select key, query_text, source, avg_aas, peak_aas, p99_aas,
-       backend_seconds, pct
-from ash.top(
-  'wait_event_type',
-  since => now() - interval '5 minutes',
-  order_by => 'peak'
+select now() - interval '10 minutes' as since, now() as until \gset
+select * from ash.aas(since => :'since', until => :'until');
+```
+
+Read average and peak AAS together with `source`, `effective_bucket`, and
+`buckets_with_data`. A peak above the average suggests concentrated load; it
+does not by itself establish an incident. Observation counts cannot distinguish
+idle sampling from a scheduler outage. Check scheduler health separately.
+
+### 2. Find the dominant waits
+
+```sql
+select * from ash.top(
+  'wait_event', since => :'since', until => :'until',
+  order_by => 'peak', n => 5
 );
 ```
 
-```text
- key    | query_text | source | avg_aas | peak_aas | p99_aas | backend_seconds | pct
---------+------------+--------+---------+----------+---------+-----------------+------
- Lock   |            | raw    |    4.6  |    12.0  |   11.2  |            4180 | 68.4
- CPU*   |            | raw    |    1.1  |     2.0  |    1.9  |             830 | 20.0
- IO     |            | raw    |    0.4  |     1.0  |    0.9  |             290 |  7.0
-```
+If `Lock:transactionid` leads, sessions were waiting for transactions. If
+`CPU*` leads, sessions were active with no reported wait: CPU execution and
+uninstrumented paths are both possible. The example chooses a wait from this
+output; a query waiting on a lock is not necessarily the blocker.
 
-`CPU*` means active backends with no reported wait event. The asterisk matters:
-it can be real CPU or an uninstrumented Postgres path.
-
-### 3. When did it land?
+### 3. Locate the spike
 
 ```sql
-select *
-from ash.timeline(
-  since => now() - interval '10 minutes',
-  bucket => '1 minute',
-  wait_event_type => 'Lock'
+select * from ash.timeline(
+  since => :'since', until => :'until',
+  bucket => '1 minute', wait_event => :'wait_event'
 );
 ```
 
-Use the busiest bucket as the next drill window.
+Here `wait_event` is the event selected in step 2. Use the busiest observed
+bucket as `spike_since` and its exclusive end as `spike_until`. The script
+checks the effective resolution before proceeding. A retained hour aggregate
+cannot establish the timing of a one-minute spike.
 
-### 4. Which query caused it?
+### 4. Identify the queries experiencing the wait
 
 ```sql
-select *
-from ash.top(
-  'query_id',
-  since => now() - interval '5 minutes',
-  wait_event => 'Lock:tuple',
-  order_by => 'peak',
-  n => 5
+select * from ash.top(
+  'query_id', since => :'spike_since', until => :'spike_until',
+  wait_event => :'wait_event', order_by => 'peak', n => 5
 );
 ```
 
-Then reverse the drill-down:
+`query_text` is included when pg_stat_statements can resolve it. Query IDs
+still work without that extension. Select a non-NULL query ID from the output;
+if none is available, report unattributed load rather than inventing SQL.
+
+Every explicit `query_id` filter and every query breakdown with a wait filter
+needs the raw wait-to-query link. If older rollup history covers the requested
+pre-raw interval, pg_ash raises with the retention boundary. Unfiltered
+`ash.top('query_id')` can use compacted rollups, where a NULL key accounts for
+unpreserved attribution and participates in the top `n` rows.
+
+### 5. Inspect the raw evidence
 
 ```sql
-select *
-from ash.top(
-  'wait_event',
-  since => now() - interval '5 minutes',
-  query_id => 8231004856741017
+select * from ash.samples(
+  since => :'spike_since', until => :'spike_until',
+  query_id => :query_id, n => 20
+);
+select * from ash.top(
+  'wait_event', since => :'spike_since', until => :'spike_until',
+  query_id => :query_id
 );
 ```
 
-Every explicit `query_id` filter reads raw samples: compacted rollups cannot
-prove either an exact count or a true zero. A query breakdown combined with a
-wait filter also needs the raw wait-to-query link. If coarser retained history
-would otherwise cover data before raw retention, pg_ash raises with the
-boundary instead of treating an omitted query as zero. On a young or
-post-reset install with no older rollup history, a default window may begin
-before the first sample and still reads the available raw rows — including
-after the first rollup covers only the same retained minute as raw.
+A supported conclusion is: "Query X experienced transaction-lock waits during
+this window; inspect its transaction scope and the blocking transaction."
+Stored samples do not identify the blocker, conflicting row values, or the
+order of subsecond events. Confirm those separately before changing the
+application. `SKIP LOCKED`, for example, changes which rows an operation
+processes and is not a general lock-contention remedy.
 
-An unfiltered `ash.top('query_id')` can use rollups efficiently. Rollup query
-IDs are compacted (low-volume IDs may be omitted, and hourly rows retain a top
-set), so named rows describe only preserved attribution. A `NULL` row carries
-everything not preserved — including uncaptured query IDs — and makes
-`backend_seconds` and the percentage denominator reconcile to total load. The
-residual competes for `n` like every named row, so use a large enough `n` when
-you need the full reconciliation.
-
-### 5. Pull raw evidence
-
-```sql
-select *
-from ash.samples(
-  since => now() - interval '10 minutes',
-  n => 20
-);
-```
-
-Dump a wider incident window with psql:
-
-```sql
-\copy (
-  select *
-  from ash.samples(
-    since => '2026-02-14 03:00',
-    until => '2026-02-14 03:05',
-    n => 10000000
-  )
-) to '/tmp/ash-incident.csv' csv header
-```
+In the [captured run](examples/README.md), 28 backend-seconds produced 0.23
+average AAS over two minutes and a 0.47 peak minute. One update accounted for
+all 14 tuple-lock backend-seconds. The next step was to inspect its blocking
+transaction, not infer one from the waiting query ID. Give a model the [provider-neutral analysis prompt](examples/llm-prompt.md)
+alongside that evidence or an `ash.report()` payload. pg_ash makes no calls to
+an LLM service. Review SQL text before sharing it outside your environment.
 
 ## Chart rendering
 
@@ -326,8 +323,7 @@ select * from ash.chart(since => now() - interval '1 hour', color => true) :colo
 
 ## Machine report
 
-`ash.report()` returns one JSONB payload for monitoring and health-assessment
-systems.
+`ash.report()` returns one JSONB payload for monitoring and incident analysis:
 
 ```sql
 select ash.report(
@@ -336,33 +332,55 @@ select ash.report(
 );
 ```
 
-It includes:
+| Field | Meaning |
+|---|---|
+| `aas_avg`, `aas_worst1m`, `aas_p99`, `aas_p999` | Average, maximum, and percentiles of the one-minute series over activity-bearing rollup minutes |
+| `cpu`, `io`, `ipc`, `lock`, `lwlock` | CPU*, IO, IPC, Lock, and LWLock classes respectively; CPU* is not measured CPU utilization |
+| `total` in each AAS object | The sum of those five classes in each minute; other captured classes are excluded |
+| `top_events_*` | Events for each non-CPU class's own extreme minute or percentile-minute set; parenthesized AAS rounds to one decimal |
+| `top_queryids_*` | Query IDs for raw-covered extreme minutes, with optional class keys; these objects do not contain SQL text |
+| `top_queryids_available` | Whether at least one extreme-minute attribution key is available; independent of pg_stat_statements |
+| `coverage` | Effective `from`, `to`, `source`, `minutes_expected`, `minutes_with_data`, and `raw_retention_start` |
+| `vcpus` | Optional caller-supplied core count, echoed unchanged; no scoring is performed |
 
-- `aas_avg`, `aas_worst1m`, `aas_p99`, `aas_p999`
-- wait classes: `total`, `cpu`, `io`, `ipc`, `lock`, `lwlock`
-- top wait events and top query IDs for extreme minutes
-- `top_queryids_available`, so scrapers can branch without guessing
-- `coverage`, so consumers can reconcile against `ash.aas()` and `ash.top()`;
-  its `minutes_with_data` counts activity-bearing rollup minutes, not verified
-  sampler heartbeats
+Class maxima can occur at different times. They are not a decomposition of the
+total peak and must not be added together. Parenthesized event/query AAS
+rounds to one decimal and need not match or sum to class AAS rounded to two
+decimals. Use a timeline and a common drill
+window to compare classes at the same time. AAS divided by vCPUs is a load
+ratio, not CPU utilization or an automatic health verdict; lock contention can
+hurt a workload even at low ratios.
 
-`ash.report()` reads `ash.rollup_1m` only. If a requested window exists only
-in raw samples or `ash.rollup_1h`, it returns SQL `NULL` and emits a NOTICE
-naming that alternate source; it does not synthesize per-minute class data.
+`minutes_with_data` counts activity-bearing rollup minutes, not sampler
+heartbeats. Missing observations can mean idle activity, missed sampling, or
+expired history; verify scheduler evidence separately. The report's averages
+and percentiles use those stored minutes, so they need not equal a full-window
+`ash.aas()` result. `raw_retention_start` is a logical planning boundary;
+physical raw availability determines whether extreme minutes can be attributed.
+A true `top_queryids_available` does not promise complete attribution for every
+class or every selected minute.
+
+Base metrics and top events read `ash.rollup_1m`. Top query IDs additionally
+read raw samples for eligible extreme minutes. If a requested window exists
+only in raw samples or `ash.rollup_1h`, it returns SQL `NULL` and emits a NOTICE
+naming that alternate source; it does not synthesize minute-rollup metrics.
 
 The payload contract is stable for the 2.0 minor line: keys may be added, not
-renamed or removed.
+renamed or removed. Consumers must tolerate additional keys and optional
+query-attribution keys. Use the [analysis prompt](examples/llm-prompt.md) to
+explain these semantics to an LLM.
 
 ## Admin API
 
 | Function | Purpose |
 |---|---|
-| `ash.start([every])` | Enable sampling and schedule jobs when pg_cron is available (1–59 whole seconds, whole minutes, or whole hours up to 23h) |
+| `ash.start([every])` | Resume sampling at the configured cadence, or set an explicit 1–60 whole-second cadence when all history tiers are empty |
 | `ash.stop()` | Disable sampling and unschedule pg_cron jobs |
-| `ash.status()` | Health, version, retention, partition, scheduler, and rollup state |
+| `ash.status()` | Configuration, stored-activity observations, retention, scheduler, and rollup state |
 | `ash.take_sample()` | Take one sample manually; normally called by the scheduler |
 | `ash.rotate()` | Rotate raw partitions and roll up endangered samples |
 | `ash.rebuild_partitions(n, 'yes')` | Recreate raw partitions; destructive for raw samples |
+| `ash.set_sample_persistence(mode)` | Set raw partitions to `logged` or `unlogged`; `unlogged` means a crash leaves the raw ring **empty** on recovery, and each conversion takes ACCESS EXCLUSIVE and rewrites the partitions |
 | `ash.rollup_minute([batch])` | Fold raw samples into `rollup_1m` |
 | `ash.rollup_hour()` | Fold minute rollups into `rollup_1h` |
 | `ash.rollup_cleanup()` | Delete expired rollup rows |
@@ -371,46 +389,193 @@ renamed or removed.
 | `ash.revoke_reader(role)` | Revoke the monitoring-reader bundle |
 | `ash.uninstall('yes')` | Drop pg_ash and unschedule jobs |
 
+The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
+and `uninstall()` to run as the `ash` schema owner, including when another
+superuser administers the installation. Use `SET ROLE` to the owner first.
+A failed lifecycle call rolls back its configuration, job and DDL changes.
+`stop()` reports only jobs actually removed, with their real IDs. A successful
+rebuild leaves sampling disabled until an explicit `start()`.
+
+Explicit `start()` reactivates local managed jobs and migrates recognized
+commands to `CALL`, while preserving custom command strings. An ordinary
+schema owner can repeat start and reactivate jobs without `cron.alter_job`
+privileges; reactivating an inactive job may allocate a new job ID. The pg_cron
+administrator must configure working scheduler connection defaults. Managed
+names owned by the same role but targeting another database cause an error
+before changes. Visible managed jobs owned by another role in this database
+also block start/teardown; resolve that ownership conflict deliberately before
+retrying.
+
+
 Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` confirmation token.
+
+### Primary-only writes and standby behavior
+
+pg_ash writes only on a primary. Physical standbys receive the `ash` schema
+and its stored history through streaming replication, but do not sample or
+roll up their own local activity.
+
+On a server in recovery, the five scheduler-facing routines
+`ash.take_sample()`, `ash.rotate()`, `ash.rollup_minute()`,
+`ash.rollup_hour()`, and `ash.rollup_cleanup()` emit an actionable NOTICE and
+return their neutral value (`0` or explicit recovery-skip text). This keeps a
+pg_cron job left behind after demotion from producing recurring errors. The
+explicit administrative entrypoints `ash.start()`, `ash.stop()`,
+`ash.rebuild_partitions()`, `ash.set_sample_persistence()`, `ash.uninstall()`,
+and state-changing `ash.set_debug_logging()` calls raise SQLSTATE `25006`;
+run them on the primary. Calling `ash.set_debug_logging(NULL)` remains a read.
+
+The installer likewise refuses to run on a standby: install pg_ash on the
+primary and let streaming replication carry it to replicas.
+
+With the default **logged** ring, every reader works on a standby. With an
+**unlogged** ring the samples are physically unreadable during recovery, and
+readers split into two groups there:
+
+- **Answer from the rollups**: `ash.aas()`, `ash.timeline()`, `ash.top()`,
+  `ash.periods()`, `ash.report()`, `ash.chart()`, `ash.summary()`, and
+  `ash.status()`. These degrade to rollup granularity rather than failing.
+  `ash.status()` reports the raw-sample rows as
+  `unknown (unlogged ring, in recovery)` — never as zero or "no samples",
+  since the samples do exist on the primary.
+- **Cannot answer, and say so**: `ash.samples()`, `ash.decode_sample()`,
+  `ash.decode_sample_at()`, and any exact per-query drill (passing
+  `query_id`, which forces raw attribution). These raise SQLSTATE `55000`
+  with a message naming the cause and the remedy — run it on the primary, or
+  switch the ring back with `ash.set_sample_persistence('logged')`.
+`ash.status()` reports `in_recovery = true` and warns that
+`sampling_enabled` is the primary's replicated configuration, not evidence of
+local sampling.
+
+### Starting a new collection cadence
+
+Keep the configured cadence while retained history is needed. An explicit
+cadence change with history raises SQLSTATE `55000`; contention raises `55P03`
+so the operator can retry. Invalid interval shapes return an `error` row from
+`ash.start()`.
+
+After exporting the history you want to keep, the installation owner can
+**deliberately delete all raw and rollup history** and start a new collection:
+
+```sql
+select ash.stop();
+begin;
+truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+update ash.config
+set last_rollup_1m_ts = null, last_rollup_1h_ts = null;
+select ash.start('5 seconds');
+commit;
+```
+
+Stop external schedulers before this reset and restart them at the same
+configured cadence afterwards. The reset is optional and destructive; an
+ordinary `ash.start()` preserves the current cadence and retained history.
+
+### CALL-able maintenance procedures
+
+Each **scheduled** collection or maintenance function has an admin-only
+procedure form for schedulers and automation. The interactive administrative
+entrypoints (`ash.start()`, `ash.stop()`, `ash.rebuild_partitions()`,
+`ash.uninstall()`) remain functions — a human runs those, not a scheduler:
+
+| Function | Procedure form |
+|---|---|
+| `ash.take_sample()` | `call ash.run_take_sample();` |
+| `ash.rotate()` | `call ash.run_rotate();` |
+| `ash.rollup_minute([batch])` | `call ash.run_rollup_minute();` or `call ash.run_rollup_minute(batch);` |
+| `ash.rollup_hour()` | `call ash.run_rollup_hour();` |
+| `ash.rollup_cleanup()` | `call ash.run_rollup_cleanup();` |
+
+This surface exists for routers and load balancers that route by statement
+kind. Such a router can classify `select ash.take_sample()` as a read, send it
+to a replica, and bypass the intended primary write path. `CALL` gives a router a distinct statement form to configure for the primary;
+routing is router-specific and must be verified. It also expresses that these
+routines are invoked for their side effects. If a maintenance call still reaches a physical standby, the
+procedure inherits the function's safe recovery no-op. The procedures are
+admin-only, are not included in the `ash.grant_reader()` bundle, and should
+receive only explicit minimal grants; do not grant schema-wide `EXECUTE`
+privileges.
+
+### Load-balanced blind spot
+
+On an installation that routes reads to replicas, pg_ash observes writes,
+post-write sticky reads, and background jobs that use the default consistency
+route because those sessions reach the primary. It does not observe ordinary
+read queries served by replicas: `ash.take_sample()` reads only the primary's
+local `pg_stat_activity`, while sampling on a standby is intentionally a
+no-op.
+
+The recorded workload mix is therefore write-skewed. Slow reads and replica
+saturation — the most common incident class in a load-balanced deployment —
+are precisely the activity pg_ash cannot show. Account for this blind spot
+when interpreting every chart, report, and top-query list. Per-replica
+coverage requires a different collection design and is tracked as a future
+item in [issue #227](https://github.com/NikolayS/pg_ash/issues/227).
+
+Both `ash.start()` and installer re-apply update recognized command text
+pg_ash scheduled. Customized commands are preserved with a notice naming the
+recommended form. Lifecycle changes under review are tracked in
+[#248](https://github.com/NikolayS/pg_ash/issues/248); follow the contract of the
+SQL version installed in your database.
 
 ## Scheduling
 
+`ash.start()` starts no process. It enables `ash.config.sampling_enabled`,
+records the sampling interval, and registers jobs when pg_cron is available.
+Calling it again does not duplicate the owned jobs. Omitting the interval
+resumes the configured cadence (one second on a fresh installation). pg_cron
+jobs persist across
+normal restarts, so restarting Postgres does not require another `ash.start()`.
+
+External schedulers also need sampling enabled: `ash.stop()` disables the
+switch, and subsequent `ash.take_sample()` calls return 0 and increment
+`skipped_samples`. A successful idle tick can also return 0. In `ash.status()`,
+`sampling_enabled` is configuration, `last_sample_ts` is the newest stored
+activity sample, and `missed_samples` counts interrupted calls. None is a
+sampler heartbeat; the metric names remain available for compatibility.
+
 pg_cron is optional. For pg_cron scheduling, install pg_ash in the database
 named by `cron.database_name`; it still observes activity from every database.
-With pg_cron installed, `ash.start('1 second')` schedules:
+With pg_cron installed, `ash.start('1 second')` schedules sampling, daily raw
+rotation checks, minute and hour rollups, and rollup cleanup.
 
-- sampling
-- raw partition rotation
-- minute and hour rollups
-- rollup cleanup
+Without pg_cron, call `ash.start('1 second')` and configure an external
+scheduler to invoke the sampler at that cadence. Use a persistent connection
+and deadlines anchored to a clock; a loop that sleeps one second after each
+query adds execution time to every interval. Monitor late or skipped ticks,
+and do not issue a burst of catch-up samples for timestamps already missed.
+A scheduler tick can execute:
 
-Without pg_cron, `ash.start()` records the intended interval and prints the
-external jobs to schedule. The minimum useful external loop is:
-
-```bash
-while true; do
-  psql -qAtX -d mydb -c "set statement_timeout = '500ms'; select ash.take_sample();"
-  sleep 1
-done
+```sql
+set statement_timeout = '500ms';
+call ash.run_take_sample();
 ```
 
-Also schedule maintenance:
+Also schedule maintenance, with the connection routed to the primary:
 
-```bash
-0 0 * * * psql -qAtX -d mydb -c "select ash.rotate();"
-* * * * * psql -qAtX -d mydb -c "select ash.rollup_minute();"
-1 * * * * psql -qAtX -d mydb -c "select ash.rollup_hour();"
-0 3 * * * psql -qAtX -d mydb -c "select ash.rollup_cleanup();"
+```cron
+0 0 * * * psql -X -v ON_ERROR_STOP=1 -d mydb -c "call ash.run_rotate();"
+* * * * * psql -X -v ON_ERROR_STOP=1 -d mydb -c "call ash.run_rollup_minute();"
+1 * * * * psql -X -v ON_ERROR_STOP=1 -d mydb -c "call ash.run_rollup_hour();"
+0 3 * * * psql -X -v ON_ERROR_STOP=1 -d mydb -c "call ash.run_rollup_cleanup();"
 ```
 
-At 1-second sampling, pg_cron `cron.job_run_details` can grow by about
-12 MiB/day. Prefer:
+The published beta accepts wider minute/hour intervals, but its historical
+AAS is weighted by the current configured interval. Keep the interval fixed
+while retaining that history. The development candidate's cadence safeguards
+are tracked in [#137](https://github.com/NikolayS/pg_ash/issues/137); use the
+candidate's catalog documentation when testing unreleased changes.
+
+pg_cron can add a `cron.job_run_details` row per invocation and has no automatic
+retention for this table. Monitor its growth, configure cleanup, or disable
+run logging:
 
 ```sql
 alter system set cron.log_run = off;
 ```
 
-This requires a restart because `cron.log_run` is postmaster-context.
+This requires a restart because `cron.log_run` is postmaster-context. Keep
+another source of scheduler-health evidence if run logging is disabled.
 
 ## Retention and storage
 
@@ -423,8 +588,8 @@ Raw samples use a PGQ-style ring of partitions. Defaults:
 - `rollup_1h` retention is 5 years
 
 `ash.start()` checks rotation once a day. Multi-day periods work because early
-checks skip until the configured period is due; sub-day and fractional-day
-periods are rejected. The minute rollup must outlive the raw slot that rotation
+checks skip until at least 90% of `rotation_period` has elapsed; sub-day and
+fractional-day periods are rejected. The minute rollup must outlive the raw slot that rotation
 is about to truncate:
 
 ```text
@@ -460,12 +625,46 @@ workload:
 | 100 | 50 MiB | 100 MiB |
 | 500 | 245 MiB | 490 MiB |
 
+### Reducing raw-sample WAL with unlogged partitions
+
+The raw `ash.sample_N` ring is logged by default. Operators who accept weaker
+raw-history durability can reduce its WAL with:
+
+```sql
+select ash.set_sample_persistence('unlogged');
+```
+
+The setting survives rotation, partition rebuilds, and installer re-apply.
+Changing a populated ring rewrites each partition whose persistence differs;
+matching partitions are left untouched. Restore the default with
+`select ash.set_sample_persistence('logged');`. `ash.status()` reports the
+configured mode as `sample_unlogged`.
+
+**Durability and operations trade-offs:**
+
+- A crash or immediate shutdown **TRUNCATES every unlogged partition**. The
+  raw ring is empty exactly when an incident post-mortem wants it. A clean
+  restart preserves the data. This is why the default is logged.
+- A promoted replica starts with an empty sample ring. Logged rollups survive,
+  so history continuity is kept at rollup granularity but not raw granularity.
+- Unlogged tables are not readable on standbys at all, so raw-sample readers cannot answer there. See the standby section above for which readers degrade to rollups and which raise.
+- Backups do **NOT** shrink: `pg_dump` without
+  `--no-unlogged-table-data` dumps unlogged contents.
+- Rollup tables stay logged always.
+
+Reducing sampling frequency is the alternative lever for the same WAL and
+storage problem and costs no durability, although it provides less temporal
+detail. For a new installation with no retained history, for example, use
+`ash.start('5 seconds')` before collecting samples.
+
 The corresponding historical rollup estimate was about 120 MiB per database
 for 5 years of trend data.
 
 ## Privileges
 
-Install and run sampling as a role that can read stats:
+The installing role needs permission to create the `ash` schema and its
+objects in the target database. For cross-role query attribution, an
+authorized administrator can grant the sampling role access to statistics:
 
 ```sql
 grant pg_read_all_stats to ash_owner;
@@ -510,9 +709,22 @@ surface from the catalog alone.
 
 ## Requirements
 
-- Postgres 14+
-- `pg_stat_statements` optional but recommended for `query_text`
-- `pg_cron` optional but recommended for built-in scheduling
+Postgres 14+ and the [installation privileges](#privileges). Neither optional
+integration is required for installation or wait analysis:
+
+| pg_cron | pg_stat_statements | Behavior |
+|---|---|---|
+| Present | Present | Built-in scheduling; query IDs and best-effort current SQL text from `ash.top()` and `ash.samples()` |
+| Present | Absent | Built-in scheduling; query IDs remain, while `query_text` is NULL |
+| Absent | Present | External scheduling; query IDs and best-effort current SQL text |
+| Absent | Absent | External scheduling; wait analysis and query IDs, without SQL text |
+
+Query IDs come from `pg_stat_activity`, subject to `compute_query_id` and
+statistics visibility. pg_stat_statements supplies current text, not historical
+SQL captured by pg_ash. `ash.report()` returns IDs without text in every mode;
+its attribution flag describes available raw history, not extension presence.
+Managed services expose different extension and scheduling options; both
+external scheduling and missing pg_stat_statements are supported paths.
 
 `compute_query_id` must be on for useful query attribution:
 
@@ -521,13 +733,32 @@ alter system set compute_query_id = 'on';
 select pg_reload_conf();
 ```
 
+### Choosing a sampling interval
+
+One second is the default starting point. Fifteen seconds reduces collection
+frequency but can miss short bursts. One minute can miss an entire short
+incident and is useful only when that loss of detail is acceptable. Even
+one-second sampling cannot reliably establish the order of subsecond waits;
+that requires tracing or other evidence.
+
+Coarser sampling also makes minute extrema estimates sensitive to bucket
+boundaries. Two observations weighted at 59 seconds can contribute 118
+backend-seconds to one minute (1.97 AAS) even with one active backend. Bounding
+the interval does not remove this aliasing; one-second sampling reduces it.
+This remains part of [#137](https://github.com/NikolayS/pg_ash/issues/137).
+
+Measure sampler latency, WAL, storage growth, and scheduler lateness on the
+target workload, especially when the server is already saturated. Volume
+depends on active sessions, query diversity, and database distribution, not
+just database size. No portable v2 overhead budget has been established.
+
 ## Compared to alternatives
 
 | | pg_ash | pg_wait_sampling / pgsentinel | External sampling |
 |---|---|---|---|
 | Install | `\i` SQL | C extension + restart | Agent and storage |
 | Managed Postgres | Yes | Usually no | Yes, with effort |
-| History survives restart | Yes | No | Depends |
+| History survives restart | Yes (logged default) | No | Depends |
 | Query with SQL | Yes | Yes | Usually no |
 | Storage | In database | Memory ring | External |
 | Sampling frequency | Usually 1s | Usually 10ms | Usually 15-60s |
@@ -544,15 +775,39 @@ Postgres.
   `query_id`, not historical SQL text.
 - The query map is capped at 50k entries per slot; volatile SQL comments can
   exhaust it faster on older Postgres versions.
-- Parallel workers share the leader query ID and count as separate active
-  backends.
-- 2.0 does not persist the cadence in force for historical samples. AAS readers
-  weight every stored appearance with the current
-  `ash.config.sample_interval`, so changing it rescales earlier raw and rollup
-  history. Keep the interval fixed while that history is needed. At intervals
-  greater than one minute, the full tick weight lands in one minute, so
-  one-minute peaks and report worst-minute values can exceed the concurrency
-  actually observed.
+- With `include_bg_workers` enabled, sampled parallel workers share the
+  leader query ID and count individually. By default only client backends
+  are sampled.
+- Sampling accepts 1–60 whole seconds. `ash.start()` without an interval resumes
+  the configured cadence; a fresh installation defaults to 1 second. Changing
+  cadence through `ash.start(interval)` or a direct config update is refused
+  while **any** raw, minute-rollup, or hour-rollup history remains. Start a new
+  cadence only after explicitly archiving and removing all retained history;
+  pg_ash never clears it automatically. Changes require a `READ COMMITTED`
+  transaction and fail promptly if a sampler or history writer is active.
+  Commit promptly: a successful cadence change blocks history writers until
+  its transaction ends; use a short transaction or an autocommit statement.
+- Older samples do not record their cadence. The guard prevents new cadence
+  changes from reweighting history, but cannot repair mixed-cadence history
+  collected before this guard. Installer re-apply preserves legacy data and
+  config. If its cadence is outside 1–60 whole seconds, sampling skips and AAS
+  readers raise an actionable error; raw evidence and `ash.status()` remain
+  available; `sample_interval_supported = false` and `skipped_samples` expose
+  the stopped collection. Archive and explicitly remove all three history tiers before
+  selecting a supported cadence. External schedulers must actually run at
+  the configured interval; this guard cannot measure their timing. Minute
+  extrema remain sampling estimates: for example, exact 59-second sampling
+  can place two observations in one minute and temporarily overstate its AAS.
+  Persisted weighted time is still needed for a complete cadence solution.
+- When a stale minute rollup is the best available partial source, aggregate
+  readers keep that source and its values. If newer completed raw observations
+  in the requested window lack corresponding minute-rollup rows, they emit a
+  NOTICE with SQLSTATE `01000` and prefix `pg_ash partial source:` explaining
+  the omission and naming the watermark. Surface this diagnostic in clients
+  and preserve it with exported results; clients can suppress NOTICEs, and
+  the returned source label is **not** machine-readable proof of completeness.
+  Wait for rollup catch-up or narrow the window to inspect recent raw activity.
+  Source composition remains open in [issue #122](https://github.com/NikolayS/pg_ash/issues/122).
 - Successful idle sampler ticks write no row. `data_points`,
   `buckets_with_data`, and report `minutes_with_data` describe
   facts derived from stored activity, not verified sampling coverage; a
@@ -577,11 +832,11 @@ python3 devel/scripts/ash_sql_chain.py fresh-install-path
 python3 devel/scripts/ash_sql_chain.py full-upgrade-chain
 ```
 
-Run the experimental demo recorder:
+Reproduce and inspect the documentation assets:
 
 ```bash
-cd demos
-make record
+make -C demos all
+make -C demos check
 ```
 
 ## License
