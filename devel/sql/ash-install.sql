@@ -321,7 +321,7 @@ create table if not exists ash.config (
 insert into ash.config (singleton) values (true) on conflict do nothing;
 
 comment on column ash.config.sample_interval is
-$$Current nominal sampler interval, not a historical record. In 2.0, sample and rollup rows do not persist the interval in force when collected, so AAS readers weight all retained appearances with this current value; changing it rescales history. Intervals greater than one minute can assign the full tick weight to one minute and overstate minute extrema. Successful idle ticks also write no sample row, so activity-row availability cannot distinguish idle sampling from an outage (issues #137 and #175).$$;
+$$Nominal sampler cadence: 1 to 60 whole seconds. Changing it is refused while any raw, minute-rollup, or hour-rollup history remains, because stored appearances have no per-row cadence. ash.start() without an interval resumes this value. The guard does not repair older mixed-cadence history; legacy values outside the supported range are preserved on upgrade but sampling and AAS readers refuse them. Successful idle ticks write no sample row, so activity-row availability cannot distinguish idle sampling from an outage (issues #137 and #175).$$;
 
 /*
  * Migration: add v1.4 columns if upgrading from pre-1.4. Must run before any
@@ -1134,6 +1134,7 @@ declare
   v_include_bg bool;
   v_debug_logging bool;
   v_sampling_enabled bool;
+  v_sample_seconds numeric;
   v_rec record;
   v_datid_rec record;
   v_data integer[];
@@ -1152,8 +1153,9 @@ begin
   end if;
 
   -- Get config (single read for all settings).
-  select sampling_enabled, include_bg_workers, debug_logging
-  into v_sampling_enabled, v_include_bg, v_debug_logging
+  select sampling_enabled, include_bg_workers, debug_logging,
+    extract(epoch from sample_interval)
+  into v_sampling_enabled, v_include_bg, v_debug_logging, v_sample_seconds
   from ash.config where singleton;
 
   if not v_sampling_enabled then
@@ -1161,6 +1163,14 @@ begin
     set skipped_samples = skipped_samples + 1
     where singleton;
 
+    return 0;
+  end if;
+
+  if v_sample_seconds is null or v_sample_seconds < 1 or v_sample_seconds > 60
+     or v_sample_seconds <> trunc(v_sample_seconds) then
+    raise warning
+      'ash.take_sample: unsupported legacy sample_interval; sampling skipped. '
+      'Archive retained history and choose 1 to 60 whole seconds.';
     return 0;
   end if;
 
@@ -2296,8 +2306,23 @@ as $$
   )
 $$;
 
--- Start sampling: create pg_cron jobs
-create or replace function ash.start(every interval default '1 second')
+/* Omitted start() intervals resume the existing installation, including after stop(). */
+create or replace function ash._configured_sample_interval()
+returns interval
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select sample_interval from ash.config where singleton
+$$;
+
+comment on function ash._configured_sample_interval() is
+  'Internal default for ash.start(): preserve the configured cadence; fresh installations default to one second.';
+
+-- Start sampling: create pg_cron jobs.
+create or replace function ash.start(
+  every interval default ash._configured_sample_interval()
+)
 returns table (job_type text, job_id bigint, status text)
 language plpgsql
 set search_path = pg_catalog, ash
@@ -2308,7 +2333,6 @@ declare
   v_cron_version text;
   v_seconds_exact numeric;
   v_seconds int;
-  v_hours int;
   v_schedule text;
   v_skip_nodename_update boolean := false;
   v_debug_logging boolean := false;
@@ -2370,58 +2394,33 @@ begin
   end if;
 
   /* Check the upper bound before the int cast so huge intervals stay errors. */
-  if v_seconds_exact > 82800 then
+  if v_seconds_exact > 60 then
     job_type := 'error';
     job_id := null;
     status := format(
-      'interval exceeds maximum 23 hours (82800s), got %s. '
-      'Use days or shorter interval.', every);
+      'interval exceeds maximum 60 seconds; use 1 to 60 whole seconds, got %s',
+      every);
     return next;
     return;
   end if;
 
   v_seconds := v_seconds_exact::int;
 
-  /*
-   * H-BUG-1: validate interval shape BEFORE branching on pg_cron
-   * availability. Previously, the no-pg_cron branch returned early (below),
-   * skipping the seconds/minutes/hours checks. Same input must produce the
-   * same accept/reject outcome regardless of whether pg_cron is installed.
-   *
-   * Build schedule string here (also used later when pg_cron is available):
-   * seconds format for <60s, cron format for 60s+.
-   */
-  if v_seconds <= 59 then
+  -- At 60 seconds the calendar schedule has no uneven boundary gap.
+  if v_seconds < 60 then
     v_schedule := v_seconds || ' seconds';
-  elsif v_seconds < 3600 then
-    -- Convert to cron: every N minutes.
-    if v_seconds % 60 <> 0 then
-      job_type := 'error';
-      job_id := null;
-      status := format(
-        'interval must be exact minutes (60s, 120s, etc.), got %s', every);
-      return next;
-      return;
-    end if;
-    v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
   else
-    -- Convert to cron: every N hours (limit to 23 hours max for step syntax).
-    if v_seconds % 3600 <> 0 then
-      job_type := 'error';
-      job_id := null;
-      status := format(
-        'interval must be exact hours (3600s, 7200s, etc., up to 23h), '
-        'got %s', every);
-      return next;
-      return;
-    end if;
-    v_hours := v_seconds / 3600;
-    if v_hours = 1 then
-      v_schedule := '0 * * * *';  -- every hour at minute 0
-    else
-      v_schedule := '0 */' || v_hours || ' * * *';  -- every N hours at minute 0
-    end if;
+    v_schedule := '*/1 * * * *';
   end if;
+
+  /*
+   * Validate the cadence change before creating/replacing any scheduler jobs.
+   * The config trigger serializes against the sampler and all retained tiers.
+   * Any later scheduling failure still rolls this update back atomically.
+   */
+  update ash.config
+  set sample_interval = every
+  where singleton;
 
   /*
    * Privilege check: without pg_read_all_stats (or superuser), query_id is
@@ -2511,10 +2510,11 @@ begin
     raise notice
       '  system cron:    * * * * * psql -qAtX -c '
       '"call ash.run_take_sample()" (for per-second, use a loop)';
-    raise notice '  psql:           CALL ash.run_take_sample() \watch 1';
+    raise notice '  psql:           CALL ash.run_take_sample() \watch %', v_seconds;
     raise notice
       '  any language:   execute "CALL ash.run_take_sample()" in a loop '
-      'with sleep';
+      'at exactly % second intervals; a different cadence makes AAS inaccurate',
+      v_seconds;
     raise notice
       'Also schedule CALL ash.run_rotate() at the rotation_period '
       'interval (default: daily).';
@@ -4451,23 +4451,122 @@ drop function if exists ash.aas_queries(interval, int);
 drop function if exists ash.aas_queries_at(timestamptz, timestamptz, int);
 
 /*
- * Configured sample interval in seconds (>= a tiny floor to avoid
- * div-by-zero). Each rollup count is one sample appearance =
- * sample_interval_secs of backend time, so
- * AAS = sum(count) * sample_interval_secs / wall_clock_seconds.
+ * Until samples and rollups persist weighted backend time, one retained
+ * history must use one cadence. Protect direct config writes as well as
+ * start(), and do not silently delete or reinterpret an older installation.
  */
+create or replace function ash._validate_sample_interval_update()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_seconds numeric := extract(epoch from new.sample_interval);
+begin
+  if v_seconds is null or v_seconds < 1 or v_seconds > 60
+     or v_seconds <> trunc(v_seconds) then
+    raise exception using
+      errcode = '23514',
+      message = 'pg_ash: sample_interval must be 1 to 60 whole seconds';
+  end if;
+
+  if tg_op = 'UPDATE' then
+    if new.sample_interval = old.sample_interval then
+      return new;
+    end if;
+  elsif exists (select from ash.config where singleton) then
+    -- Installer re-apply uses INSERT ... ON CONFLICT DO NOTHING.
+    return new;
+  end if;
+
+  /* A retained row committed after a repeatable snapshot could be invisible. */
+  if current_setting('transaction_isolation') <> 'read committed' then
+    raise exception using
+      errcode = '55000',
+      message = 'pg_ash: change sample_interval in a READ COMMITTED transaction',
+      hint = 'Commit the current transaction and retry at READ COMMITTED.';
+  end if;
+
+  /*
+   * The config row is already locked by UPDATE. Never wait for an active
+   * sampler or history writer that could in turn need that row. Table locks
+   * also cover direct INSERTs and remain held until transaction end, so a
+   * history-empty check cannot race with a concurrent writer.
+   */
+  if not pg_try_advisory_xact_lock(
+    hashtext('pg_ash')::int4,
+    hashtext('pg_ash_sampler')::int4
+  ) then
+    raise exception using
+      errcode = '55P03',
+      message = 'pg_ash: sampler is active; retry the sample_interval change';
+  end if;
+  lock table ash.sample, ash.rollup_1m, ash.rollup_1h in share mode nowait;
+
+  if exists (select from ash.sample)
+     or exists (select from ash.rollup_1m)
+     or exists (select from ash.rollup_1h) then
+    raise exception using
+      errcode = '55000',
+      message = 'pg_ash: cannot change sample_interval while retained history exists',
+      hint = 'Keep the current cadence. To start a new cadence, explicitly archive '
+        'and remove all raw, minute-rollup, and hour-rollup history first; '
+        'pg_ash never removes history automatically for a cadence change.';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists config_validate_sample_interval on ash.config;
+create trigger config_validate_sample_interval
+before insert or update of sample_interval on ash.config
+for each row execute function ash._validate_sample_interval_update();
+
+comment on function ash._validate_sample_interval_update() is
+  'Internal trigger: require 1 to 60 whole seconds, and refuse cadence changes while any retained history exists. Changes require READ COMMITTED and nonblocking sampler/history locks.';
+
+/* Preserve legacy config verbatim; an upgrade cannot infer its past cadence. */
+do $$
+declare
+  v_seconds numeric;
+begin
+  select extract(epoch from sample_interval) into v_seconds
+  from ash.config where singleton;
+  if v_seconds < 1 or v_seconds > 60 or v_seconds <> trunc(v_seconds) then
+    raise warning
+      'pg_ash: preserved unsupported legacy sample_interval (% seconds). '
+      'Sampling and AAS readers are disabled for this cadence. '
+      'Archive existing history, explicitly remove all three history tiers, '
+      'and choose 1 to 60 whole seconds. Existing mixed-cadence history '
+      'cannot be repaired automatically.', v_seconds;
+  end if;
+end;
+$$;
+
+/* Each retained appearance has the one cadence protected by the trigger. */
 create or replace function ash._sample_interval_secs()
 returns numeric
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
-  select greatest(
-           coalesce(extract(epoch from sample_interval)::numeric, 1),
-           0.001
-         )
-  from ash.config
-  where singleton
+declare
+  v_seconds numeric;
+begin
+  select extract(epoch from sample_interval) into v_seconds
+  from ash.config where singleton;
+  if v_seconds is null or v_seconds < 1 or v_seconds > 60
+     or v_seconds <> trunc(v_seconds) then
+    raise exception using
+      errcode = '55000',
+      message = 'pg_ash: unsupported legacy sample_interval; AAS weighting is unavailable',
+      hint = 'The supported cadence is 1 to 60 whole seconds. Archive and '
+        'explicitly remove retained raw/minute/hour history before changing '
+        'cadence. Older history has no cadence metadata and is not repaired '
+        'by an installer upgrade.';
+  end if;
+  return v_seconds;
+end;
 $$;
 
 --------------------------------------------------------------------------------
@@ -7879,7 +7978,7 @@ comment on function ash.status() is
 $$Installation health snapshot (readable by monitoring roles): sampling state and interval, raw sample persistence, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
-$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
+$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., omitted interval resumes ash.config.sample_interval; fresh default 1 second; accepts 1–60 whole seconds) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally at exactly the configured interval. Refuses cadence changes while raw or either rollup tier retains history; never clears history automatically. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
 
 comment on function ash.stop() is
 $$Admin: stop sampling — unschedules the pg_cron jobs created by ash.start() (or disables sampling when pg_cron is absent). Collected data is kept and remains readable. Inverse: ash.start().$$;
@@ -8045,6 +8144,7 @@ as $$
     '_register_wait', '_apply_sample_persistence',
     '_validate_rotation_period', '_record_rotate_failure',
     '_validate_rotation_config', '_validate_config_update',
+    '_configured_sample_interval', '_validate_sample_interval_update',
     /*
      * The privilege helpers and their canonical exclusion-list helper are
      * administrative. Granting grant_reader/revoke_reader to a monitoring

@@ -163,8 +163,7 @@ begin
 
   update ash.config
   set
-    sampling_enabled = true,
-    sample_interval = interval '1 second'
+    sampling_enabled = true
   where singleton;
 
   select ash.take_sample()
@@ -243,6 +242,9 @@ rollback;
 /* -------------------------------------------------------------------------
  * ash.start() / ash.stop(): exact cron and external-scheduler behavior.
  * ------------------------------------------------------------------------- */
+begin;
+-- Cadence-reschedule scenarios own an empty history, restored by rollback.
+truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
 do $feature_start_stop$
 declare
   v_expected_cron boolean :=
@@ -445,6 +447,7 @@ begin
   end if;
 end
 $feature_start_stop$;
+rollback;
 
 /* -------------------------------------------------------------------------
  * ash.rotate(): exact slot advance and lockstep partition/query-map truncate.
@@ -1046,7 +1049,7 @@ declare
 begin
   if v_expected_cron then
     perform *
-    from ash.start(interval '5 seconds');
+    from ash.start();
     assert (
       select pg_catalog.count(*)
       from cron.job

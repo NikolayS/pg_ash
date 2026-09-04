@@ -44,6 +44,15 @@ AAS-oriented 2.0 API:
 
 ## Changes since 2.0 beta 1
 
+- **Cadence changes can no longer reweight retained history.** New sampling
+  intervals must be 1–60 whole seconds; `ash.start()` without an interval
+  resumes the configured cadence. Explicit interval changes and direct config
+  updates are refused while raw or either rollup tier retains history, with
+  no automatic deletion. Unsupported legacy cadence/config/data survive
+  upgrade, but sampling skips and AAS weighting raises until the operator
+  explicitly archives/resets history and selects a supported cadence. This
+  contains issue #137; it does not infer or repair older mixed-cadence data.
+
 - **Raw sample WAL can be reduced with an opt-in unlogged ring.**
   `ash.set_sample_persistence('unlogged')` converts only raw `sample_N`
   partitions and is preserved by rotation, partition rebuilds, and installer
@@ -119,18 +128,14 @@ AAS-oriented 2.0 API:
 
 ## Known limitations
 
-- **Historical cadence and idle coverage are not persisted.** AAS readers
-  weight stored appearances with the current `ash.config.sample_interval`, so
-  changing it rescales earlier raw and rollup history. Successful idle sampler
-  ticks write no row; consequently `data_points`, `buckets_with_data`, and
-  report `minutes_with_data` are derived from stored activity and do not verify
-  successful sampling; they cannot distinguish sampled zero load from a
-  sampler outage. At sampling intervals greater than one minute, the full tick
-  weight is assigned to one minute, so one-minute peaks and report
-  worst-minute values can exceed observed concurrency. Keep cadence fixed and
-  monitor scheduler health independently. `ash.timeline()` now calls these
-  buckets “no stored observation,” but that catalog correction does not add
-  heartbeat storage. (issues #137 and #175)
+- **Historical cadence and idle coverage are not persisted.** The cadence
+  guard prevents future changes from reweighting retained history, but cannot
+  repair mixed-cadence data from older installations or verify external
+  scheduler timing. Successful idle sampler ticks write no row;
+  `data_points`, `buckets_with_data`, and report `minutes_with_data` describe
+  stored activity, not successful sampler heartbeats. Idle periods and
+  scheduler outages remain indistinguishable; monitor scheduler health
+  independently. (issues #137 and #175)
 
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See
