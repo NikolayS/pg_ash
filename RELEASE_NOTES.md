@@ -1,3 +1,16 @@
+# Unreleased development changes
+
+- Lifecycle operations now require the exact `ash` schema owner, including
+  when invoked by another superuser; use `SET ROLE` to the owner. Failed
+  start/stop/rebuild/uninstall calls roll back jobs, config and DDL together.
+  `stop()` returns real job IDs only for actual removals. A successful rebuild
+  leaves sampling disabled. (#203)
+- Explicit start reactivates local jobs while preserving custom commands and
+  migrating recognized commands to `CALL`. Non-superuser owners can repeat
+  start without `cron.alter_job` privileges; an inactive job may receive a new
+  ID when recreated. Cross-database managed-name collisions and visible
+  foreign-owner same-database jobs fail before changes. (#250)
+
 # pg_ash 2.0 beta 1 release notes
 
 2.0 beta 1 promotes the rewritten reader API from `devel/sql/` into the normal

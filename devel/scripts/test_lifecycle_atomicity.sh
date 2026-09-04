@@ -42,6 +42,11 @@ cleanup_issue_203() {
 
   trap - EXIT INT TERM
   stop_locker
+  "${psql_base[@]}" --quiet >/dev/null 2>&1 <<'SQL' || true
+select cron.unschedule(jobid) from cron.job
+where username = 'ash_issue_203_other_superuser';
+drop role if exists ash_issue_203_other_superuser;
+SQL
   exit "${exit_code}"
 }
 
@@ -503,6 +508,18 @@ reset role;
 do $$
 begin
   begin
+    perform ash.start(interval '5 seconds');
+    raise exception using
+      errcode = 'P0203',
+      message = 'start ignored a foreign-owned managed job';
+  exception
+    when sqlstate 'P0203' then
+      raise;
+    when object_not_in_prerequisite_state then
+      assert sqlerrm like '%ash_rollup_1m%ash_issue_203_other_superuser%',
+        'start refusal must name the foreign job and owner';
+  end;
+  begin
     perform ash.uninstall('yes');
     raise exception using
       errcode = 'P0203',
@@ -569,6 +586,24 @@ begin
     from cron.job where username = current_user
       and database = current_database()),
     'non-superuser schema owner must create five active jobs';
+  perform ash.start(interval '5 seconds');
+  assert (select count(*) = 5 and bool_and(active)
+    from cron.job where username = current_user
+      and database = current_database()),
+    'non-superuser second start must preserve five active jobs';
+end;
+$$;
+reset role;
+select cron.alter_job(job_id := jobid, active := false)
+from cron.job where username = 'ash_lifecycle_owner';
+set role ash_lifecycle_owner;
+do $$
+begin
+  perform ash.start(interval '5 seconds');
+  assert (select count(*) = 5 and bool_and(active)
+    from cron.job where username = current_user
+      and database = current_database()),
+    'non-superuser start must reactivate all five existing jobs';
   assert (select count(*) = 5 and count(job_id) = 5 from ash.stop()),
     'non-superuser schema owner must remove its own jobs';
   assert not (select sampling_enabled from ash.config where singleton),
