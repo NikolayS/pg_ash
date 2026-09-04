@@ -55,7 +55,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 "${psql_base[@]}" \
-  --command="select * from ash.stop(); select * from ash.start(interval '5 seconds');" \
+  --command="select * from ash.stop(); select * from ash.start((select sample_interval from ash.config where singleton));" \
   >/dev/null
 
 "${psql_base[@]}" <<'EOF'
@@ -196,7 +196,7 @@ begin
   end;
 
   begin
-    perform ash.start(interval '10 seconds');
+    perform ash.start((select sample_interval from ash.config where singleton));
     raise exception using
       errcode = 'P0203',
       message = 'ash.start() falsely reported success';
@@ -292,7 +292,9 @@ begin
   ), 'failed lifecycle calls changed the locked minute-rollup job';
   assert (
     select active
-           and schedule = '5 seconds'
+           and schedule = case when extract(epoch from v_original_interval) < 60
+             then extract(epoch from v_original_interval)::int || ' seconds'
+             else '*/1 * * * *' end
            and command =
              'set statement_timeout = ''500ms''; '
              'call ash.run_take_sample()'
@@ -361,7 +363,7 @@ begin
       v_second_count
     );
 
-  perform ash.start(interval '5 seconds');
+  perform ash.start((select sample_interval from ash.config where singleton));
   select jobid into strict v_sampler_job
   from cron.job
   where jobname = 'ash_sampler'
@@ -382,7 +384,7 @@ begin
   where username = current_user and database = current_database()
     and jobname in ('ash_sampler', 'ash_rotation', 'ash_rollup_1m',
                     'ash_rollup_1h', 'ash_rollup_gc');
-  perform ash.start(interval '5 seconds');
+  perform ash.start((select sample_interval from ash.config where singleton));
   assert (select count(*) = 5 and bool_and(active and command = 'select 1')
     from cron.job where username = current_user
       and database = current_database()
@@ -393,7 +395,7 @@ begin
   -- A role's named-job uniqueness spans databases. Never steal a collision.
   perform cron.alter_job(job_id := v_sampler_job, database := 'template1');
   begin
-    perform ash.start(interval '5 seconds');
+    perform ash.start((select sample_interval from ash.config where singleton));
     raise exception 'cross-database start falsely succeeded';
   exception when object_not_in_prerequisite_state then
     assert sqlerrm like '%ash_sampler%template1%',
@@ -431,7 +433,7 @@ declare
   v_false_successes text[] := '{}'::text[];
 begin
   begin
-    perform ash.start(interval '10 seconds');
+    perform ash.start((select sample_interval from ash.config where singleton));
     raise exception using
       errcode = 'P0203',
       message = 'cross-role ash.start() falsely reported success';
@@ -508,7 +510,7 @@ reset role;
 do $$
 begin
   begin
-    perform ash.start(interval '5 seconds');
+    perform ash.start((select sample_interval from ash.config where singleton));
     raise exception using
       errcode = 'P0203',
       message = 'start ignored a foreign-owned managed job';
@@ -581,12 +583,12 @@ grant select on cron.job to ash_lifecycle_owner;
 set role ash_lifecycle_owner;
 do $$
 begin
-  perform ash.start(interval '5 seconds');
+  perform ash.start((select sample_interval from ash.config where singleton));
   assert (select count(*) = 5 and bool_and(active)
     from cron.job where username = current_user
       and database = current_database()),
     'non-superuser schema owner must create five active jobs';
-  perform ash.start(interval '5 seconds');
+  perform ash.start((select sample_interval from ash.config where singleton));
   assert (select count(*) = 5 and bool_and(active)
     from cron.job where username = current_user
       and database = current_database()),
@@ -599,7 +601,7 @@ from cron.job where username = 'ash_lifecycle_owner';
 set role ash_lifecycle_owner;
 do $$
 begin
-  perform ash.start(interval '5 seconds');
+  perform ash.start((select sample_interval from ash.config where singleton));
   assert (select count(*) = 5 and bool_and(active)
     from cron.job where username = current_user
       and database = current_database()),

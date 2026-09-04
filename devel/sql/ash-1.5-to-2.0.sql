@@ -353,7 +353,7 @@ begin
     where
       trigger_row.tgrelid = v_relation_oid
       and not trigger_row.tgisinternal
-  ) <> 1
+  ) <> 2
      or not exists (
        select
        from pg_catalog.pg_trigger as trigger_row
@@ -363,6 +363,15 @@ begin
          and trigger_row.tgname = 'config_validate_rotation'
          and trigger_row.tgfoid =
            'ash._validate_config_update()'::regprocedure
+         and trigger_row.tgenabled = 'O'
+     )
+     or not exists (
+       select from pg_catalog.pg_trigger as trigger_row
+       where trigger_row.tgrelid = v_relation_oid
+         and not trigger_row.tgisinternal
+         and trigger_row.tgname = 'config_validate_sample_interval'
+         and trigger_row.tgfoid =
+           'ash._validate_sample_interval_update()'::regprocedure
          and trigger_row.tgenabled = 'O'
      ) then
     raise exception
@@ -655,6 +664,10 @@ begin
   on ash.config
   for each row
   execute function ash._validate_config_update();
+
+  create trigger config_validate_sample_interval
+  before insert or update of sample_interval on ash.config
+  for each row execute function ash._validate_sample_interval_update();
 
   v_owner_name := pg_catalog.pg_get_userbyid(v_owner_oid);
   execute format(
