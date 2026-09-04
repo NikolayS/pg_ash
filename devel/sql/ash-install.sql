@@ -1906,9 +1906,8 @@ $$;
 /*
  * Rebuild partitions: destructive admin function to change partition count.
  * All raw sample data is lost. Rollup tables survive.
- * WARNING: failure after acquiring lock leaves sampling_enabled = false.
- * Manual recovery:
- *   update ash.config set sampling_enabled = true; select ash.start();
+ * Failures roll back config, jobs, privileges and DDL together. A successful
+ * rebuild leaves sampling disabled; verify the rebuilt ring then call start().
  */
 create or replace function ash.rebuild_partitions(
   num_partitions int,
@@ -1925,12 +1924,30 @@ declare
   v_rotation_period interval;
   v_rollup_1m_retention_days int;
   v_sample_unlogged bool;
+  v_schema_owner text;
 begin
   if ash._in_recovery() then
     raise exception using
       errcode = '25006',
       message = 'cannot administer pg_ash on a standby: server is in '
         'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.rebuild_partitions must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
   end if;
 
   /*
@@ -2316,6 +2333,9 @@ declare
   v_cron_database text;
   v_stored_command text;
   v_canonical_command text;
+  v_unscheduled boolean;
+  v_schema_owner text;
+  v_cross_database_jobs text;
 begin
   if ash._in_recovery() then
     raise exception using
@@ -2323,6 +2343,45 @@ begin
       message = 'cannot administer pg_ash on a standby: server is in '
         'recovery; pg_ash must be administered on the primary';
   end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.start must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
+  end if;
+
+  if ash._pg_cron_available() then
+    select string_agg(format('%I (jobid %s, database %I)',
+      jobname, jobid, database), ', ' order by jobname, jobid)
+    into v_cross_database_jobs
+    from cron.job
+    where username = current_user
+      and database <> current_database()
+      and jobname = any(array['ash_sampler', 'ash_rotation', 'ash_rollup_1m',
+                             'ash_rollup_1h', 'ash_rollup_gc']);
+    if v_cross_database_jobs is not null then
+      raise exception using
+        errcode = 'object_not_in_prerequisite_state',
+        message = format(
+          'ash.start: managed job name(s) already target another database: '
+          '%s. Rename or unschedule them deliberately before retrying; '
+          'pg_cron job names are unique per role across databases.',
+          v_cross_database_jobs
+        );
+    end if;
+  end if;
+
 
   /*
    * Read debug_logging flag so we can trace the pg_cron detection /
@@ -2576,8 +2635,15 @@ begin
       coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
       or coalesce(current_setting('cron.host', true), 'localhost') = ''
       or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
-  exception when others then
-    v_skip_nodename_update := false;
+  exception when insufficient_privilege then
+    -- Non-superuser owners cannot read pg_cron's restricted settings. Keep
+    -- the administrator's cron.schedule defaults instead of attempting an
+    -- unauthorized UPDATE of cron.job and aborting an otherwise valid start.
+    v_skip_nodename_update := true;
+    raise notice
+      'ash.start: keeping pg_cron connection defaults; this role cannot '
+      'inspect cron host settings. The pg_cron administrator must configure '
+      'working connection defaults for scheduled jobs.';
   end;
 
   /*
@@ -2624,7 +2690,7 @@ begin
       ash._canonical_job_command('ash_sampler', v_stored_command);
 
     if v_canonical_command is null then
-      perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
+      perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule, active := true);
       raise notice
         'ash.start: ash_sampler has a customised command; preserving it. '
         'pg_ash writes through CALL now — if that command still uses '
@@ -2638,7 +2704,8 @@ begin
       perform cron.alter_job(
         job_id := v_sampler_job,
         schedule := v_schedule,
-        command := v_canonical_command
+        command := v_canonical_command,
+        active := true
       );
       status := format(
         'already exists — schedule updated to %s; command re-synced',
@@ -2703,7 +2770,8 @@ begin
     if v_canonical_command is null then
       perform cron.alter_job(
         job_id := v_rotation_job,
-        schedule := '0 0 * * *'
+        schedule := '0 0 * * *',
+        active := true
       );
       raise notice
         'ash.start: ash_rotation has a customised command; preserving it. '
@@ -2715,7 +2783,8 @@ begin
       perform cron.alter_job(
         job_id := v_rotation_job,
         schedule := '0 0 * * *',
-        command := v_canonical_command
+        command := v_canonical_command,
+        active := true
       );
       status :=
         'already exists — schedule reset to 0 0 * * *; command re-synced';
@@ -2764,11 +2833,27 @@ begin
     v_canonical_command := 'call ash.run_rollup_minute()';
   end if;
 
-  begin
-    perform cron.unschedule('ash_rollup_1m');
-  exception when others then
-    null;
-  end;
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rollup_1m'
+    and username = current_user
+    and database = current_database();
+  if v_rotation_job is not null then
+    begin
+      select cron.unschedule(v_rotation_job) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception 'cron.unschedule returned false for existing jobid %',
+          v_rotation_job;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.start: could not replace pg_cron job "%s" (jobid %s): %s',
+          'ash_rollup_1m', v_rotation_job, sqlerrm
+        );
+    end;
+  end if;
 
   select cron.schedule(
     'ash_rollup_1m',
@@ -2808,11 +2893,27 @@ begin
     v_canonical_command := 'call ash.run_rollup_hour()';
   end if;
 
-  begin
-    perform cron.unschedule('ash_rollup_1h');
-  exception when others then
-    null;
-  end;
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rollup_1h'
+    and username = current_user
+    and database = current_database();
+  if v_rotation_job is not null then
+    begin
+      select cron.unschedule(v_rotation_job) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception 'cron.unschedule returned false for existing jobid %',
+          v_rotation_job;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.start: could not replace pg_cron job "%s" (jobid %s): %s',
+          'ash_rollup_1h', v_rotation_job, sqlerrm
+        );
+    end;
+  end if;
 
   select cron.schedule(
     'ash_rollup_1h',
@@ -2851,11 +2952,27 @@ begin
     v_canonical_command := 'call ash.run_rollup_cleanup()';
   end if;
 
-  begin
-    perform cron.unschedule('ash_rollup_gc');
-  exception when others then
-    null;
-  end;
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rollup_gc'
+    and username = current_user
+    and database = current_database();
+  if v_rotation_job is not null then
+    begin
+      select cron.unschedule(v_rotation_job) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception 'cron.unschedule returned false for existing jobid %',
+          v_rotation_job;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.start: could not replace pg_cron job "%s" (jobid %s): %s',
+          'ash_rollup_gc', v_rotation_job, sqlerrm
+        );
+    end;
+  end if;
 
   select cron.schedule(
     'ash_rollup_gc',
@@ -2912,7 +3029,11 @@ language plpgsql
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_job_id bigint;
+  v_job record;
+  v_unscheduled boolean;
+  v_schema_owner text;
+  v_cross_database_jobs text;
+  v_foreign_jobs text;
 begin
   if ash._in_recovery() then
     raise exception using
@@ -2920,6 +3041,45 @@ begin
       message = 'cannot administer pg_ash on a standby: server is in '
         'recovery; pg_ash must be administered on the primary';
   end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.stop must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
+  end if;
+
+  if ash._pg_cron_available() then
+    select string_agg(format('%I (jobid %s, database %I)',
+      jobname, jobid, database), ', ' order by jobname, jobid)
+    into v_cross_database_jobs
+    from cron.job
+    where username = current_user
+      and database <> current_database()
+      and jobname = any(array['ash_sampler', 'ash_rotation', 'ash_rollup_1m',
+                             'ash_rollup_1h', 'ash_rollup_gc']);
+    if v_cross_database_jobs is not null then
+      raise exception using
+        errcode = 'object_not_in_prerequisite_state',
+        message = format(
+          'ash.stop: managed job name(s) already target another database: '
+          '%s. Rename or unschedule them deliberately before retrying; '
+          'pg_cron job names are unique per role across databases.',
+          v_cross_database_jobs
+        );
+    end if;
+  end if;
+
 
   -- Mark sampling as disabled.
   update ash.config set sampling_enabled = false where singleton;
@@ -2935,67 +3095,99 @@ begin
     return;
   end if;
 
-  -- Remove sampler job.
-  -- cron.job is cluster-wide; never unschedule another database's job.
-  select jobid into v_job_id
-  from cron.job
-  where jobname = 'ash_sampler'
-    and username = current_user
-    and database = current_database();
-
-  if v_job_id is not null then
-    perform cron.unschedule('ash_sampler');
-    job_type := 'sampler';
-    job_id := v_job_id;
-    status := 'removed';
-    return next;
+  /*
+   * A superuser schema owner can see jobs created by another role through an
+   * older ash.start() or a manual scheduler call. Refuse to declare this
+   * installation stopped while any such same-database managed-name row
+   * survives. Non-superuser owners cannot see another role's cron.job rows,
+   * so ash.start() is owner-bound above to prevent creating that state.
+   */
+  select string_agg(
+    format(
+      '%I (jobid %s, owner %I)',
+      cron_job.jobname,
+      cron_job.jobid,
+      cron_job.username
+    ),
+    ', ' order by cron_job.jobname, cron_job.username, cron_job.jobid
+  )
+  into v_foreign_jobs
+  from cron.job as cron_job
+  where cron_job.jobname = any(array[
+    'ash_sampler',
+    'ash_rotation',
+    'ash_rollup_1m',
+    'ash_rollup_1h',
+    'ash_rollup_gc'
+  ])
+    and cron_job.database = current_database()
+    and cron_job.username <> v_schema_owner;
+  if v_foreign_jobs is not null then
+    raise exception using
+      errcode = 'object_not_in_prerequisite_state',
+      message = format(
+        'ash.stop: managed pg_cron job(s) owned by another role still '
+        'target this database: %s. Unschedule them as their owning role(s) '
+        'before retrying.',
+        v_foreign_jobs
+      );
   end if;
 
-  -- Remove rotation job
-  select jobid into v_job_id
-  from cron.job
-  where jobname = 'ash_rotation'
-    and username = current_user
-    and database = current_database();
+  /*
+   * Resolve absence before calling cron.unschedule(): pg_cron raises the same
+   * generic error for an absent name that it uses for other lookup failures,
+   * so an exception handler cannot safely distinguish idempotency from a real
+   * failure. Scope every lookup to pg_cron's named-job uniqueness domain (the
+   * current role), remove the exact jobid, and report a row only after a real
+   * deletion.
+   */
+  for v_job in
+    select
+      managed.job_type,
+      managed.job_name,
+      cron_job.jobid
+    from (
+      values
+        (1, 'sampler'::text, 'ash_sampler'::text),
+        (2, 'rotation'::text, 'ash_rotation'::text),
+        (3, 'rollup_1m'::text, 'ash_rollup_1m'::text),
+        (4, 'rollup_1h'::text, 'ash_rollup_1h'::text),
+        (5, 'rollup_gc'::text, 'ash_rollup_gc'::text)
+    ) as managed(ordinal, job_type, job_name)
+    left join cron.job as cron_job
+      on cron_job.jobname = managed.job_name
+     and cron_job.username = current_user
+     and cron_job.database = current_database()
+    order by managed.ordinal
+  loop
+    if v_job.jobid is null then
+      continue;
+    end if;
 
-  if v_job_id is not null then
-    perform cron.unschedule('ash_rotation');
-    job_type := 'rotation';
-    job_id := v_job_id;
+    begin
+      select cron.unschedule(v_job.jobid) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception
+          'cron.unschedule returned false for existing jobid %',
+          v_job.jobid;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.stop: could not unschedule pg_cron job "%s" '
+          '(jobid %s): %s',
+          v_job.job_name,
+          v_job.jobid,
+          sqlerrm
+        );
+    end;
+
+    job_type := v_job.job_type;
+    job_id := v_job.jobid;
     status := 'removed';
     return next;
-  end if;
-
-  -- Remove rollup jobs (idempotent — tolerate missing jobs).
-  begin
-    perform cron.unschedule('ash_rollup_1m');
-    job_type := 'rollup_1m';
-    job_id := null;
-    status := 'removed';
-    return next;
-  exception when others then
-    null;
-  end;
-
-  begin
-    perform cron.unschedule('ash_rollup_1h');
-    job_type := 'rollup_1h';
-    job_id := null;
-    status := 'removed';
-    return next;
-  exception when others then
-    null;
-  end;
-
-  begin
-    perform cron.unschedule('ash_rollup_gc');
-    job_type := 'rollup_gc';
-    job_id := null;
-    status := 'removed';
-    return next;
-  exception when others then
-    null;
-  end;
+  end loop;
 
   return;
 end;
@@ -3109,12 +3301,30 @@ as $$
 declare
   v_rec record;
   v_jobs_removed int := 0;
+  v_schema_owner text;
 begin
   if ash._in_recovery() then
     raise exception using
       errcode = '25006',
       message = 'cannot administer pg_ash on a standby: server is in '
         'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.uninstall must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
   end if;
 
   if confirm is distinct from 'yes' then
@@ -7879,10 +8089,10 @@ comment on function ash.status() is
 $$Installation health snapshot (readable by monitoring roles): sampling state and interval, raw sample persistence, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
-$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
+$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status(). Must run as the ash schema owner (SET ROLE when needed). Explicit start reactivates local jobs, migrates recognized commands to CALL, and preserves custom commands. Same-owner managed names targeting another database are rejected before changes. Scheduling failures roll back every job/config change.$$;
 
 comment on function ash.stop() is
-$$Admin: stop sampling — unschedules the pg_cron jobs created by ash.start() (or disables sampling when pg_cron is absent). Collected data is kept and remains readable. Inverse: ash.start().$$;
+$$Admin: stop sampling — atomically unschedules the pg_cron jobs created by ash.start() and disables sampling (or only disables sampling when pg_cron is absent). Must be called as the ash schema owner; visible managed jobs owned by another role and targeting this database make the call fail closed. Same-owner managed names targeting another database are rejected before changes. Returns one removed row with its real job ID for each job actually unscheduled; absent jobs are idempotent. If any existing job cannot be unscheduled, the error propagates and rolls back every job/config change from the call; ordinary unschedule errors are wrapped to name the job. Collected data is kept and remains readable. Inverse: ash.start().$$;
 
 comment on function ash.take_sample() is
 $$Admin/internal: take one wait-event sample of pg_stat_activity into the current slot (the every-second worker that ash.start() schedules). Returns the number of active backends captured. Call manually only for testing; continuous sampling belongs to ash.start().$$;
@@ -7900,7 +8110,7 @@ comment on function ash.rollup_cleanup() is
 $$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Rotation deliberately does not require minute rollups that this cleanup is entitled to delete. Returns a summary of rows deleted.$$;
 
 comment on function ash.rebuild_partitions(int, text) is
-$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
+$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. Requires confirm => 'yes' and must be called as the ash schema owner. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild. Any job-stop or rebuild failure raises and rolls back jobs, config, raw data, and DDL; success deliberately leaves sampling disabled until ash.start() is called.$$;
 
 comment on function ash.set_sample_persistence(text) is
 $$Admin: set raw ash.sample_N partitions to logged or unlogged persistence (mode is case-insensitive and surrounding whitespace is ignored); other values raise SQLSTATE 22023 without changing config, and calls on a standby raise 25006. Updates ash.config.sample_unlogged so installer re-apply and ash.rebuild_partitions() create and reconcile every raw slot consistently. Matching partitions are untouched; converting populated partitions rewrites them. The partitioned ash.sample parent and ash.rollup_1m/ash.rollup_1h always remain logged. Unlogged mode reduces raw-sample WAL, but a crash or immediate shutdown truncates every raw partition, a promoted replica starts with an empty raw ring, and unlogged tables cannot be read on a standby; use only after accepting that post-mortem trade-off. A clean restart preserves unlogged data. pg_dump includes unlogged contents unless --no-unlogged-table-data is used. Returns and raises a NOTICE with the selected mode and exact conversion count.$$;
@@ -7909,7 +8119,7 @@ comment on function ash.set_debug_logging(bool) is
 $$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
 
 comment on function ash.uninstall(text) is
-$$Admin, DESTRUCTIVE: remove pg_ash entirely — unschedules jobs and drops schema ash with all collected data. Requires confirm => 'yes'.$$;
+$$Admin, DESTRUCTIVE: remove pg_ash entirely — unschedules jobs and drops schema ash with all collected data. Requires confirm => 'yes' and must be called as the ash schema owner. Success counts only jobs actually removed. If an existing pg_cron job cannot be unscheduled, or a visible managed job owned by another role targets this database, raises and leaves the schema, data, config, and all jobs unchanged.$$;
 
 /*
  * Helper: detect the schema that holds the pg_stat_statements view.

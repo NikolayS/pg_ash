@@ -3172,6 +3172,13 @@ jobs:
           $$;
           EOF
 
+      - name: "Lifecycle ownership, job collisions and teardown atomicity"
+        if: matrix.cron == 'on'
+        env:
+          PGPASSWORD: postgres
+        run: |
+          bash devel/scripts/test_lifecycle_atomicity.sh
+
       - name: "Test all interval formats (issue #2)"
         env:
           PGPASSWORD: postgres
