@@ -48,10 +48,14 @@ and waits with NULL text.
 Install the development candidate in an otherwise quiet disposable database,
 then run the live test. It creates and drops only its fixture table, starts
 sampling, and leaves the collected history available for inspection. Use
-standard libpq environment variables for the connection:
+standard libpq environment variables for the connection. Query attribution
+requires `compute_query_id = on` (or `auto` with a module that computes query
+IDs, such as preloaded pg_stat_statements). The explicit session setting below
+also works without a preloaded optional module:
 
 ```bash
 export PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGDATABASE=ash_example
+export PGOPTIONS='-c compute_query_id=on'
 createdb "$PGDATABASE"
 psql -X -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql
 python3 devel/tests/llm_example_live.py --output /tmp/llm-investigation-output.txt

@@ -470,24 +470,15 @@ item in [issue #227](https://github.com/NikolayS/pg_ash/issues/227).
 
 Both `ash.start()` and installer re-apply update recognized command text
 pg_ash scheduled. Customized commands are preserved with a notice naming the
-recommended form. In the development candidate, explicit `ash.start()` also
-reactivates the installation's managed jobs. Installer re-apply preserves an
-inactive job's state.
-
-Candidate lifecycle operations require the `ash` schema owner; `SET ROLE` to
-that owner is supported. Job-name collisions targeting another database are
-rejected before changes. Visible managed jobs owned by another role in the
-same database block stop/uninstall rather than being silently left running.
-Rebuild leaves sampling disabled; inspect `ash.status()` and resume explicitly.
-These contracts are release-gated changes under `devel/sql/`.
+recommended form. Lifecycle changes under review are tracked in
+[#248](https://github.com/NikolayS/pg_ash/issues/248); follow the contract of the
+SQL version installed in your database.
 
 ## Scheduling
 
 `ash.start()` starts no process. It enables `ash.config.sampling_enabled`,
 records the sampling interval, and registers jobs when pg_cron is available.
-Calling it again does not duplicate the owned jobs. In the development
-candidate, omitting `every` resumes the configured interval (one second on a
-fresh installation). pg_cron jobs persist across
+Calling it again does not duplicate the owned jobs. pg_cron jobs persist across
 normal restarts, so restarting Postgres does not require another `ash.start()`.
 
 External schedulers also need sampling enabled: `ash.stop()` disables the
@@ -737,8 +728,9 @@ Postgres.
   `query_id`, not historical SQL text.
 - The query map is capped at 50k entries per slot; volatile SQL comments can
   exhaust it faster on older Postgres versions.
-- Parallel workers share the leader query ID and count as separate active
-  backends.
+- With `include_bg_workers` enabled, sampled parallel workers share the
+  leader query ID and count individually. By default only client backends
+  are sampled.
 - 2.0 does not persist the cadence in force for historical samples. AAS readers
   weight every stored appearance with the current
   `ash.config.sample_interval`, so changing it rescales earlier raw and rollup
