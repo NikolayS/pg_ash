@@ -28,8 +28,9 @@ get CodeQL onto release branches, and is out of scope here.
 ## The `ci-required` aggregator
 
 `test.yml` ends with a `ci-required` job: `if: always()`, `needs: [docs-lint,
-test]`. Both named dependencies must exist and report `success`; skipped,
-failed, cancelled and malformed/missing evidence fail closed.
+test]`. Both named dependencies must exist, and every dependency supplied in
+`needs` must report `success`; skipped, failed, cancelled and malformed/missing
+evidence fail closed.
 `devel/scripts/test_ci_guards.py` tests those cases and the real-demo path
 selection. The stable check runs even after a dependency fails.
 
@@ -96,8 +97,8 @@ Two behaviours to keep in mind:
 - **Fork PRs need workflow approval.** With "require approval for all external
   contributors", a fork PR's workflows do not start until a maintainer
   approves them, so the required checks sit pending and the PR cannot be
-  merged. That is the hole being closed: today those PRs are mergeable with
-  nothing having run.
+  merged. Before required checks were enforced, those PRs could merge without
+  completed workflows.
 
 ### `strict_required_status_checks_policy`
 
@@ -129,3 +130,7 @@ verified on 2026-09-04. Update the hosted matrix and local gate defaults togethe
 The Docker release runner requires Bash 4+ (Homebrew Bash on macOS). It
 rejects the system Bash 3.2 before creating resources, and parallel workers
 reuse the invoking Bash executable.
+
+An RC gate result authorizes only the reviewed RC preparation workflow. Final
+`v2.0` tagging or publication still requires explicit owner approval; passing
+CI does not provide merge or final-release approval.

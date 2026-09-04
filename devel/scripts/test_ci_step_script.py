@@ -281,6 +281,15 @@ jobs:
         steps = self.parse(text)
         self.assertEqual(steps[0].run, "echo one\n")
 
+    def test_content_after_intermediate_comment_fails_loudly(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Bad boundary\n"
+            "        run: |\n          echo one\n"
+            "         # terminates scalar\n          echo two\n"
+        )
+        with self.assertRaisesRegex(ci_step_script.WorkflowError, "content resumes"):
+            self.parse(text)
+
     def test_current_workflow_integration(self) -> None:
         steps = ci_step_script.parse_workflow(ci_step_script.DEFAULT_WORKFLOW)
         names = [step.name for step in steps]

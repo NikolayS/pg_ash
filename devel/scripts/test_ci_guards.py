@@ -23,6 +23,16 @@ class RequiredJobsTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         ci_guards.require_jobs(needs)
 
+    def test_additional_dependencies_must_also_succeed(self):
+        for result in ("success", "skipped", "failure"):
+            needs = {name: {"result": "success"} for name in ("docs-lint", "test")}
+            needs["extra"] = {"result": result}
+            if result == "success":
+                ci_guards.require_jobs(needs)
+            else:
+                with self.assertRaises(ValueError):
+                    ci_guards.require_jobs(needs)
+
     def test_missing_and_malformed_evidence_do_not_pass(self):
         for needs in ({}, {"test": {"result": "success"}}, None, [],
                       {"docs-lint": {}, "test": {"result": "success"}}):
@@ -37,15 +47,20 @@ class DemoDecisionTests(unittest.TestCase):
                      "demos/fixtures/shape.tsv", "sql/ash-install.sql",
                      "README.md", ".github/workflows/demo.yml",
                      "examples/llm-investigation.sql"):
-            with self.subTest(path=path):
-                self.assertTrue(ci_guards.demo_needed("pull_request", [path]))
+            for event in ("push", "pull_request"):
+                with self.subTest(path=path, event=event):
+                    self.assertTrue(ci_guards.demo_needed(event, [path]))
 
     def test_manual_and_nightly_always_capture(self):
         for event in ("workflow_dispatch", "schedule"):
             self.assertTrue(ci_guards.demo_needed(event, []))
 
     def test_unrelated_changes_can_skip_expensive_capture(self):
-        self.assertFalse(ci_guards.demo_needed("pull_request", ["LICENSE"]))
+        for event in ("push", "pull_request"):
+            for paths in ([], [""], ["LICENSE"], ["docs/CI.md"],
+                          [".github/workflows/test.yml"], ["devel"]):
+                with self.subTest(event=event, paths=paths):
+                    self.assertFalse(ci_guards.demo_needed(event, paths))
 
     def test_unknown_event_fails_closed(self):
         with self.assertRaises(ValueError):
