@@ -337,14 +337,16 @@ select ash.report(
 | `aas_avg`, `aas_worst1m`, `aas_p99`, `aas_p999` | Average, maximum, and percentiles of the one-minute series over activity-bearing rollup minutes |
 | `cpu`, `io`, `ipc`, `lock`, `lwlock` | CPU*, IO, IPC, Lock, and LWLock classes respectively; CPU* is not measured CPU utilization |
 | `total` in each AAS object | The sum of those five classes in each minute; other captured classes are excluded |
-| `top_events_*` | Events for each non-CPU class's own extreme minute or percentile-minute set |
+| `top_events_*` | Events for each non-CPU class's own extreme minute or percentile-minute set; parenthesized AAS rounds to one decimal |
 | `top_queryids_*` | Query IDs for raw-covered extreme minutes, with optional class keys; these objects do not contain SQL text |
 | `top_queryids_available` | Whether at least one extreme-minute attribution key is available; independent of pg_stat_statements |
 | `coverage` | Effective `from`, `to`, `source`, `minutes_expected`, `minutes_with_data`, and `raw_retention_start` |
 | `vcpus` | Optional caller-supplied core count, echoed unchanged; no scoring is performed |
 
 Class maxima can occur at different times. They are not a decomposition of the
-total peak and must not be added together. Use a timeline and a common drill
+total peak and must not be added together. Parenthesized event/query AAS
+rounds to one decimal and need not match or sum to class AAS rounded to two
+decimals. Use a timeline and a common drill
 window to compare classes at the same time. AAS divided by vCPUs is a load
 ratio, not CPU utilization or an automatic health verdict; lock contention can
 hurt a workload even at low ratios.
