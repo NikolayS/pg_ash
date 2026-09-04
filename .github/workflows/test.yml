@@ -511,12 +511,21 @@ jobs:
           # A caller's interactive psql configuration must not turn each
           # installer statement into a savepoint and make a partial install
           # committable after the first error.
+          set +e
           printf '\\set ON_ERROR_ROLLBACK on\n\\i %s\ncommit;\n\\q\n' \
             "${install_path}" |
             python3 devel/scripts/run_with_pty.py \
+              --ready="ash_atomic_failure_test=# " \
               psql --no-psqlrc --host=localhost --username=postgres \
               --dbname=ash_atomic_failure_test \
               >"${failure_log_dir}/on-error-rollback.log" 2>&1
+          interactive_rc=$?
+          set -e
+          if (( interactive_rc != 0 )); then
+            cat "${failure_log_dir}/on-error-rollback.log" >&2
+            echo "interactive installer exit code: ${interactive_rc}" >&2
+            exit 1
+          fi
           if ! grep -Fq \
               "forced mid-install failure at ash.rollup_1m" \
               "${failure_log_dir}/on-error-rollback.log"; then
@@ -8886,7 +8895,8 @@ jobs:
   # One stable check name for the branch ruleset's required status checks.
   # The matrix contexts embed PG versions ("test (19beta3, on)") and change
   # every release, so requiring them by name would rot. Fails if any needed
-  # job failed or was cancelled; a job that never ran leaves this pending.
+  # job does not report success, including skipped/cancelled jobs; a workflow
+  # that never starts leaves this pending.
   ci-required:
     if: always()
     needs: [docs-lint, test]
