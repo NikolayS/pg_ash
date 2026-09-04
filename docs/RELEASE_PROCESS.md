@@ -61,14 +61,16 @@ addition that buries its actual change. Landing the copy on its own, where the
 whole diff is provably a copy, keeps every later PR's diff equal to its real
 delta.
 
-A reviewer can verify a claimed copy in one command:
+From the proposed release checkout, a reviewer can verify a claimed copy:
 
 ```bash
-git diff origin/main:sql/ash-install.sql <branch>:devel/sql/ash-install.sql
+git diff HEAD:sql/ash-install.sql HEAD:devel/sql/ash-install.sql
 ```
 
-Empty output means byte-identical. `shasum -a 256` on both paths is equivalent
-and easier to quote in a PR description.
+Empty output means byte-identical in that commit. Compare both sides from
+the same candidate: `origin/main` can still contain the preceding beta payload.
+`shasum -a 256 sql/ash-install.sql devel/sql/ash-install.sql` in a clean
+candidate checkout is equivalent and easier to quote in a PR description.
 
 All post-release SQL changes must be made in `devel/sql/`, not in released files
 under `sql/`. After a prerelease of the current line, its released cumulative

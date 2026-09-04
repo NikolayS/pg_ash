@@ -3905,8 +3905,11 @@ jobs:
               'ash.start must not claim pg_cron is absent from the cluster';
 
             assert position(
-              'Reads ash.rollup_1m only.' in v_report_comment
-            ) > 0, 'ash.report catalog comment must disclose rollup_1m-only input';
+              'Base metrics and top events read ash.rollup_1m' in v_report_comment
+            ) > 0, 'ash.report catalog comment must disclose its rollup base';
+            assert position(
+              'top query IDs additionally read raw samples' in v_report_comment
+            ) > 0, 'ash.report catalog comment must disclose raw attribution';
             assert position(
               'raw or rollup_1h has coverage' in v_report_comment
             ) > 0, 'ash.report comment must distinguish alternate coverage';
@@ -4030,23 +4033,23 @@ jobs:
           )"
           printf '%s\n' "$n5_out"
           if ! printf '%s\n' "$n5_out" | grep -Fq \
-              "raw has coverage, but report reads rollup_1m only and returns NULL"; then
+              "raw has coverage, but report base metrics require rollup_1m and return NULL"; then
             echo "FAIL: ash.report raw-only NOTICE missing" >&2
             exit 1
           fi
           if [ "$(printf '%s\n' "$n5_out" | grep -Fc \
-              "raw has coverage, but report reads rollup_1m only and returns NULL")" \
+              "raw has coverage, but report base metrics require rollup_1m and return NULL")" \
               -ne 1 ]; then
             echo "FAIL: ash.report raw-only NOTICE must occur exactly once" >&2
             exit 1
           fi
           if ! printf '%s\n' "$n5_out" | grep -Fq \
-              "rollup_1h has coverage, but report reads rollup_1m only and returns NULL"; then
+              "rollup_1h has coverage, but report base metrics require rollup_1m and return NULL"; then
             echo "FAIL: ash.report rollup_1h-only NOTICE missing" >&2
             exit 1
           fi
           if [ "$(printf '%s\n' "$n5_out" | grep -Fc \
-              "rollup_1h has coverage, but report reads rollup_1m only and returns NULL")" \
+              "rollup_1h has coverage, but report base metrics require rollup_1m and return NULL")" \
               -ne 1 ]; then
             echo "FAIL: ash.report must not claim sparse rollup_1h coverage" >&2
             exit 1
