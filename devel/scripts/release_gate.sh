@@ -13,6 +13,11 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+if ((BASH_VERSINFO[0] < 4)); then
+  echo 'release_gate: Bash 4+ is required; on macOS use Homebrew bash.' >&2
+  exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -865,7 +870,7 @@ run_all_majors() {
     child_summary="${parent_output}/pg_${safe_major}.tsv"
     RELEASE_GATE_OUTPUT_DIR="${child_output}" \
       RELEASE_GATE_SUMMARY="${child_summary}" \
-      "${BASH_SOURCE[0]}" "${major}" "${selector}" \
+      "${BASH}" "${BASH_SOURCE[0]}" "${major}" "${selector}" \
       >"${parent_output}/worker_${safe_major}.log" 2>&1 &
     pid=$!
     active_pids+=("${pid}")
