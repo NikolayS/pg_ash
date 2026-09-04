@@ -1,7 +1,7 @@
 # pg_cron-capable PostgreSQL image for the release gate.
 #
 # Keep the image tag separate from PostgreSQL's numeric major. In particular,
-# postgres:19beta2 exports PG_MAJOR=19, which is the value required by the
+# postgres:19beta3 exports PG_MAJOR=19, which is the value required by the
 # postgresql-19-cron package name.
 ARG POSTGRES_TAG=18
 FROM postgres:${POSTGRES_TAG}

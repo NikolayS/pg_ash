@@ -10,7 +10,7 @@
 #                 works on frozen input. It cannot notice that pg_ash's output
 #                 changed shape underneath it. Only demo-refresh catches that.
 #
-#   demo-refresh  nightly, on demand, and whenever demos/** or sql/** changes.
+#   demo-refresh  nightly, on demand, and when candidate SQL/consumers change.
 #                 ~3 min. Seeds a real PostgreSQL, re-captures every scene, and
 #                 records the reel. `make -C demos rot` compares the fresh
 #                 reader contract with fixtures/shape.tsv: a changed capture
@@ -121,8 +121,8 @@ jobs:
           python-version: '3.12'
 
       - name: Decide whether this run needs the full pass
-        # On push/PR, only when demos/** or sql/** actually changed. Schedules
-        # and manual dispatches always run.
+        # Include development SQL: it is the active installer between stamps.
+        # Schedules and manual dispatches always run.
         id: gate
         run: |
           set -Eeuo pipefail
@@ -138,9 +138,10 @@ jobs:
           # base tree and use a two-tree diff; any fetch/diff error must fail
           # this step, never turn the expensive gate into a false green.
           git fetch --no-tags --depth=1 origin "$base"
-          changed="$(git diff --name-only "$base" HEAD -- demos sql)"
-          if [ -n "$changed" ]; then echo "run=yes" >> "$GITHUB_OUTPUT"
-          else echo "run=no" >> "$GITHUB_OUTPUT"; fi
+          changed="$(git diff --name-only "$base" HEAD)"
+          needed="$(printf '%s\n' "$changed" \
+            | python3 devel/scripts/ci_guards.py demo-needed)"
+          echo "run=$needed" >> "$GITHUB_OUTPUT"
 
       - name: Start the runner's own PostgreSQL cluster
         if: steps.gate.outputs.run == 'yes'
@@ -217,12 +218,21 @@ jobs:
         # red is a check nobody reads. See demos/render/scene_shape.py.
         run: make -C demos rot
 
+      - name: Verify fresh capture evidence exists
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          set -euo pipefail
+          test -s demos/out/window.env
+          test -s demos/out/transcript.log
+          test -s assets/ash_demo.gif
+          test -s assets/ash_demo.mp4
+
       - name: Upload the artifacts a human can eyeball
         if: steps.gate.outputs.run == 'yes' && always()
         uses: actions/upload-artifact@v7
         with:
           name: demo-assets
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
           path: |
             assets/*.svg
@@ -233,6 +243,7 @@ jobs:
             demos/out/stderr.log
             demos/out/window.env
             demos/out/shots/*.ansi
+            demos/out/raw/**
 
       - name: Teardown
         if: always() && steps.gate.outputs.run == 'yes'

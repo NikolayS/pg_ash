@@ -2,8 +2,8 @@
 # Run the pg_ash release-gate surfaces against disposable Docker PostgreSQL.
 #
 # Usage:
-#   devel/scripts/release_gate.sh <14|15|16|17|18|19beta2> [surface|all]
-#   PG_MAJORS="14 15 16 17 18 19beta2" devel/scripts/release_gate.sh all
+#   devel/scripts/release_gate.sh <14|15|16|17|18|19beta3> [surface|all]
+#   PG_MAJORS="14 15 16 17 18 19beta3" devel/scripts/release_gate.sh all
 #
 # The GitHub Actions workflow remains the canonical source for the large
 # regression and upgrade assertion sets. ci_step_script.py selects its exact
@@ -13,6 +13,11 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+if ((BASH_VERSINFO[0] < 4)); then
+  echo 'release_gate: Bash 4+ is required; on macOS use Homebrew bash.' >&2
+  exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -20,13 +25,13 @@ readonly REPO_ROOT
 readonly DOCKERFILE="${REPO_ROOT}/devel/docker/Dockerfile"
 readonly CHAIN_HELPER="${SCRIPT_DIR}/ash_sql_chain.py"
 readonly CI_STEP_HELPER="${SCRIPT_DIR}/ci_step_script.py"
-readonly DEFAULT_MAJORS="14 15 16 17 18 19beta2"
+readonly DEFAULT_MAJORS="14 15 16 17 18 19beta3"
 readonly IMAGE_REPOSITORY="pg-ash-release-gate"
 readonly POSTGRES_USER="postgres"
 readonly POSTGRES_DATABASE="postgres"
 readonly POSTGRES_PASSWORD="pg_ash_release_gate"
 
-readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19beta2)
+readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19beta3)
 readonly -a SURFACES=(
   fresh-install
   upgrade-chain
@@ -58,7 +63,7 @@ Usage:
   devel/scripts/release_gate.sh all [surface|all]
 
 Supported majors:
-  14 15 16 17 18 19beta2
+  14 15 16 17 18 19beta3
 
 Supported surfaces:
   fresh-install
@@ -865,7 +870,7 @@ run_all_majors() {
     child_summary="${parent_output}/pg_${safe_major}.tsv"
     RELEASE_GATE_OUTPUT_DIR="${child_output}" \
       RELEASE_GATE_SUMMARY="${child_summary}" \
-      "${BASH_SOURCE[0]}" "${major}" "${selector}" \
+      "${BASH}" "${BASH_SOURCE[0]}" "${major}" "${selector}" \
       >"${parent_output}/worker_${safe_major}.log" 2>&1 &
     pid=$!
     active_pids+=("${pid}")
