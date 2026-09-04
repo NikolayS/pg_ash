@@ -34,7 +34,7 @@ failed, cancelled and malformed/missing evidence fail closed.
 selection. The stable check runs even after a dependency fails.
 
 It exists because the matrix contexts embed PostgreSQL versions — `test (14,
-on)`, `test (19beta2, on)` — and are renamed at every version bump. Requiring
+on)`, `test (19beta3, on)` — and are renamed at every version bump. Requiring
 those names directly means the ruleset silently stops covering a version the
 moment the matrix changes, or blocks every PR on a context that no longer
 exists. `ci-required` is one stable name that transitively covers the whole
@@ -121,3 +121,7 @@ Database matrix jobs have a 40-minute timeout and upload PostgreSQL logs on
 failure. The independent size guard fails at 460,000 bytes, before the known
 512,000-byte workflow failure boundary. Keep large assertions in external
 SQL/shell files without reducing behavior coverage.
+
+The current PG19 test image is `postgres:19beta3`, matching the
+[PostgreSQL beta information](https://www.postgresql.org/developer/beta/)
+verified on 2026-09-04. Update the hosted matrix and local gate defaults together.

@@ -138,8 +138,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PG19 is still beta, so the official image tag is 19beta2 until GA.
-        postgres: [14, 15, 16, 17, 18, 19beta2]
+        # PG19 is still beta, so the official image tag is 19beta3 until GA.
+        postgres: [14, 15, 16, 17, 18, 19beta3]
         # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
         # compares these as strings in the step-level `if`/conditionals.
         cron: ["on"]
@@ -8882,7 +8882,7 @@ jobs:
           echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
 
   # One stable check name for the branch ruleset's required status checks.
-  # The matrix contexts embed PG versions ("test (19beta2, on)") and change
+  # The matrix contexts embed PG versions ("test (19beta3, on)") and change
   # every release, so requiring them by name would rot. Fails if any needed
   # job failed or was cancelled; a job that never ran leaves this pending.
   ci-required:
