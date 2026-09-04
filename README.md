@@ -357,12 +357,13 @@ renamed or removed.
 
 | Function | Purpose |
 |---|---|
-| `ash.start([every])` | Enable sampling and schedule jobs when pg_cron is available (1–59 whole seconds, whole minutes, or whole hours up to 23h) |
+| `ash.start([every])` | Resume sampling at the configured cadence, or set an explicit 1–60 whole-second cadence when all history tiers are empty |
 | `ash.stop()` | Disable sampling and unschedule pg_cron jobs |
 | `ash.status()` | Health, version, retention, partition, scheduler, and rollup state |
 | `ash.take_sample()` | Take one sample manually; normally called by the scheduler |
 | `ash.rotate()` | Rotate raw partitions and roll up endangered samples |
 | `ash.rebuild_partitions(n, 'yes')` | Recreate raw partitions; destructive for raw samples |
+| `ash.set_sample_persistence(mode)` | Set raw partitions to `logged` or `unlogged`; `unlogged` means a crash leaves the raw ring **empty** on recovery, and each conversion takes ACCESS EXCLUSIVE and rewrites the partitions |
 | `ash.rollup_minute([batch])` | Fold raw samples into `rollup_1m` |
 | `ash.rollup_hour()` | Fold minute rollups into `rollup_1h` |
 | `ash.rollup_cleanup()` | Delete expired rollup rows |
@@ -372,6 +373,114 @@ renamed or removed.
 | `ash.uninstall('yes')` | Drop pg_ash and unschedule jobs |
 
 Only `ash.rebuild_partitions` and `ash.uninstall` require the exact `'yes'` confirmation token.
+
+### Primary-only writes and standby behavior
+
+pg_ash writes only on a primary. Physical standbys receive the `ash` schema
+and its stored history through streaming replication, but do not sample or
+roll up their own local activity.
+
+On a server in recovery, the five scheduler-facing routines
+`ash.take_sample()`, `ash.rotate()`, `ash.rollup_minute()`,
+`ash.rollup_hour()`, and `ash.rollup_cleanup()` emit an actionable NOTICE and
+return their neutral value (`0` or explicit recovery-skip text). This keeps a
+pg_cron job left behind after demotion from producing recurring errors. The
+explicit administrative entrypoints `ash.start()`, `ash.stop()`,
+`ash.rebuild_partitions()`, `ash.set_sample_persistence()`, `ash.uninstall()`,
+and state-changing `ash.set_debug_logging()` calls raise SQLSTATE `25006`;
+run them on the primary. Calling `ash.set_debug_logging(NULL)` remains a read.
+
+The installer likewise refuses to run on a standby: install pg_ash on the
+primary and let streaming replication carry it to replicas.
+
+With the default **logged** ring, every reader works on a standby. With an
+**unlogged** ring the samples are physically unreadable during recovery, and
+readers split into two groups there:
+
+- **Answer from the rollups**: `ash.aas()`, `ash.timeline()`, `ash.top()`,
+  `ash.periods()`, `ash.report()`, `ash.chart()`, `ash.summary()`, and
+  `ash.status()`. These degrade to rollup granularity rather than failing.
+  `ash.status()` reports the raw-sample rows as
+  `unknown (unlogged ring, in recovery)` — never as zero or "no samples",
+  since the samples do exist on the primary.
+- **Cannot answer, and say so**: `ash.samples()`, `ash.decode_sample()`,
+  `ash.decode_sample_at()`, and any exact per-query drill (passing
+  `query_id`, which forces raw attribution). These raise SQLSTATE `55000`
+  with a message naming the cause and the remedy — run it on the primary, or
+  switch the ring back with `ash.set_sample_persistence('logged')`.
+`ash.status()` reports `in_recovery = true` and warns that
+`sampling_enabled` is the primary's replicated configuration, not evidence of
+local sampling.
+
+### Starting a new collection cadence
+
+Keep the configured cadence while retained history is needed. An explicit
+cadence change with history raises SQLSTATE `55000`; contention raises `55P03`
+so the operator can retry. Invalid interval shapes return an `error` row from
+`ash.start()`.
+
+After exporting the history you want to keep, the installation owner can
+**deliberately delete all raw and rollup history** and start a new collection:
+
+```sql
+select ash.stop();
+begin;
+truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+update ash.config
+set last_rollup_1m_ts = null, last_rollup_1h_ts = null;
+select ash.start('5 seconds');
+commit;
+```
+
+Stop external schedulers before this reset and restart them at the same
+configured cadence afterwards. The reset is optional and destructive; an
+ordinary `ash.start()` preserves the current cadence and retained history.
+
+### CALL-able maintenance procedures
+
+Each **scheduled** collection or maintenance function has an admin-only
+procedure form for schedulers and automation. The interactive administrative
+entrypoints (`ash.start()`, `ash.stop()`, `ash.rebuild_partitions()`,
+`ash.uninstall()`) remain functions — a human runs those, not a scheduler:
+
+| Function | Procedure form |
+|---|---|
+| `ash.take_sample()` | `call ash.run_take_sample();` |
+| `ash.rotate()` | `call ash.run_rotate();` |
+| `ash.rollup_minute([batch])` | `call ash.run_rollup_minute();` or `call ash.run_rollup_minute(batch);` |
+| `ash.rollup_hour()` | `call ash.run_rollup_hour();` |
+| `ash.rollup_cleanup()` | `call ash.run_rollup_cleanup();` |
+
+This surface exists for routers and load balancers that route by statement
+kind. Such a router can classify `select ash.take_sample()` as a read, send it
+to a replica, and bypass the intended primary write path. `CALL` is
+unambiguously a write and expresses that these routines are invoked for their
+side effects. If a maintenance call still reaches a physical standby, the
+procedure inherits the function's safe recovery no-op. The procedures are
+admin-only, are not included in the `ash.grant_reader()` bundle, and should
+receive only explicit minimal grants; do not grant schema-wide `EXECUTE`
+privileges.
+
+### Load-balanced blind spot
+
+On an installation that routes reads to replicas, pg_ash observes writes,
+post-write sticky reads, and background jobs that use the default consistency
+route because those sessions reach the primary. It does not observe ordinary
+read queries served by replicas: `ash.take_sample()` reads only the primary's
+local `pg_stat_activity`, while sampling on a standby is intentionally a
+no-op.
+
+The recorded workload mix is therefore write-skewed. Slow reads and replica
+saturation — the most common incident class in a load-balanced deployment —
+are precisely the activity pg_ash cannot show. Account for this blind spot
+when interpreting every chart, report, and top-query list. Per-replica
+coverage requires a different collection design and is tracked as a future
+item in [issue #227](https://github.com/NikolayS/pg_ash/issues/227).
+
+Both `ash.start()` and installer re-apply re-sync only command text pg_ash
+itself scheduled. A command you have customised is left alone, with a notice
+naming the recommended form — so you can safely tune, say, the sampler's
+`statement_timeout` and keep calling `ash.start()`.
 
 ## Scheduling
 
@@ -389,7 +498,7 @@ external jobs to schedule. The minimum useful external loop is:
 
 ```bash
 while true; do
-  psql -qAtX -d mydb -c "set statement_timeout = '500ms'; select ash.take_sample();"
+  psql -qAtX -d mydb -c "set statement_timeout = '500ms'; call ash.run_take_sample();"
   sleep 1
 done
 ```
@@ -397,10 +506,10 @@ done
 Also schedule maintenance:
 
 ```bash
-0 0 * * * psql -qAtX -d mydb -c "select ash.rotate();"
-* * * * * psql -qAtX -d mydb -c "select ash.rollup_minute();"
-1 * * * * psql -qAtX -d mydb -c "select ash.rollup_hour();"
-0 3 * * * psql -qAtX -d mydb -c "select ash.rollup_cleanup();"
+0 0 * * * psql -qAtX -d mydb -c "call ash.run_rotate();"
+* * * * * psql -qAtX -d mydb -c "call ash.run_rollup_minute();"
+1 * * * * psql -qAtX -d mydb -c "call ash.run_rollup_hour();"
+0 3 * * * psql -qAtX -d mydb -c "call ash.run_rollup_cleanup();"
 ```
 
 At 1-second sampling, pg_cron `cron.job_run_details` can grow by about
@@ -459,6 +568,38 @@ workload:
 | 50 | 30 MiB | 60 MiB |
 | 100 | 50 MiB | 100 MiB |
 | 500 | 245 MiB | 490 MiB |
+
+### Reducing raw-sample WAL with unlogged partitions
+
+The raw `ash.sample_N` ring is logged by default. Operators who accept weaker
+raw-history durability can reduce its WAL with:
+
+```sql
+select ash.set_sample_persistence('unlogged');
+```
+
+The setting survives rotation, partition rebuilds, and installer re-apply.
+Changing a populated ring rewrites each partition whose persistence differs;
+matching partitions are left untouched. Restore the default with
+`select ash.set_sample_persistence('logged');`. `ash.status()` reports the
+configured mode as `sample_unlogged`.
+
+**Durability and operations trade-offs:**
+
+- A crash or immediate shutdown **TRUNCATES every unlogged partition**. The
+  raw ring is empty exactly when an incident post-mortem wants it. A clean
+  restart preserves the data. This is why the default is logged.
+- A promoted replica starts with an empty sample ring. Logged rollups survive,
+  so history continuity is kept at rollup granularity but not raw granularity.
+- Unlogged tables are not readable on standbys at all, so raw-sample readers cannot answer there. See the standby section above for which readers degrade to rollups and which raise.
+- Backups do **NOT** shrink: `pg_dump` without
+  `--no-unlogged-table-data` dumps unlogged contents.
+- Rollup tables stay logged always.
+
+Reducing sampling frequency is the alternative lever for the same WAL and
+storage problem and costs no durability, although it provides less temporal
+detail. For a new installation with no retained history, for example, use
+`ash.start('5 seconds')` before collecting samples.
 
 The corresponding historical rollup estimate was about 120 MiB per database
 for 5 years of trend data.
@@ -527,7 +668,7 @@ select pg_reload_conf();
 |---|---|---|---|
 | Install | `\i` SQL | C extension + restart | Agent and storage |
 | Managed Postgres | Yes | Usually no | Yes, with effort |
-| History survives restart | Yes | No | Depends |
+| History survives restart | Yes (logged default) | No | Depends |
 | Query with SQL | Yes | Yes | Usually no |
 | Storage | In database | Memory ring | External |
 | Sampling frequency | Usually 1s | Usually 10ms | Usually 15-60s |
@@ -546,13 +687,27 @@ Postgres.
   exhaust it faster on older Postgres versions.
 - Parallel workers share the leader query ID and count as separate active
   backends.
-- 2.0 does not persist the cadence in force for historical samples. AAS readers
-  weight every stored appearance with the current
-  `ash.config.sample_interval`, so changing it rescales earlier raw and rollup
-  history. Keep the interval fixed while that history is needed. At intervals
-  greater than one minute, the full tick weight lands in one minute, so
-  one-minute peaks and report worst-minute values can exceed the concurrency
-  actually observed.
+- Sampling accepts 1–60 whole seconds. `ash.start()` without an interval resumes
+  the configured cadence; a fresh installation defaults to 1 second. Changing
+  cadence through `ash.start(interval)` or a direct config update is refused
+  while **any** raw, minute-rollup, or hour-rollup history remains. Start a new
+  cadence only after explicitly archiving and removing all retained history;
+  pg_ash never clears it automatically. Changes require a `READ COMMITTED`
+  transaction and fail promptly if a sampler or history writer is active.
+  Commit promptly: a successful cadence change blocks history writers until
+  its transaction ends; use a short transaction or an autocommit statement.
+- Older samples do not record their cadence. The guard prevents new cadence
+  changes from reweighting history, but cannot repair mixed-cadence history
+  collected before this guard. Installer re-apply preserves legacy data and
+  config. If its cadence is outside 1–60 whole seconds, sampling skips and AAS
+  readers raise an actionable error; raw evidence and `ash.status()` remain
+  available; `sample_interval_supported = false` and `skipped_samples` expose
+  the stopped collection. Archive and explicitly remove all three history tiers before
+  selecting a supported cadence. External schedulers must actually run at
+  the configured interval; this guard cannot measure their timing. Minute
+  extrema remain sampling estimates: for example, exact 59-second sampling
+  can place two observations in one minute and temporarily overstate its AAS.
+  Persisted weighted time is still needed for a complete cadence solution.
 - Successful idle sampler ticks write no row. `data_points`,
   `buckets_with_data`, and report `minutes_with_data` describe
   facts derived from stored activity, not verified sampling coverage; a
