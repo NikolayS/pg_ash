@@ -560,7 +560,7 @@ failure_detail() {
   local detail
 
   detail="$(awk '
-    /::error::|ERROR:|FAILED|assertion failed|FATAL:/ {
+    /::error::|ERROR:|FAIL:|FAILED|assertion failed|FATAL:/ {
       sub(/^[[:space:]]+/, "")
       print
       exit
