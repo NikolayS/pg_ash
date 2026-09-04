@@ -48,15 +48,10 @@ def _without_eol(line: str) -> str:
 
 def _indent(line: str, *, line_number: int) -> int | None:
     """Return structural indentation, ignoring blank and comment-only lines."""
-    text = _without_eol(line)
-    leading = text[: len(text) - len(text.lstrip(" \t"))]
-    if "\t" in leading:
-        raise WorkflowError(
-            f"line {line_number}: tabs are not valid YAML indentation"
-        )
-    if not text.strip() or text.lstrip().startswith("#"):
+    indentation = _block_scalar_indent(line, line_number=line_number)
+    if line.lstrip().startswith("#"):
         return None
-    return len(leading)
+    return indentation
 
 
 def _block_scalar_indent(line: str, *, line_number: int) -> int | None:
@@ -64,9 +59,8 @@ def _block_scalar_indent(line: str, *, line_number: int) -> int | None:
 
     Unlike :func:`_indent`, a comment line reports its real indentation. Inside
     a literal block a ``#`` line indented at or beyond the content is ordinary
-    content (a shell comment), but one indented back to the parent's level ends
-    the scalar, exactly as YAML specifies. Treating it as content instead makes
-    the block appear to start at the comment's indentation.
+    content (a shell comment). The literal-block reader uses the first content
+    line to recognize a later dedented YAML comment as a block terminator.
     """
     text = _without_eol(line)
     leading = text[: len(text) - len(text.lstrip(" \t"))]
@@ -211,9 +205,18 @@ def _deindent_literal_block(
     run_line: int,
 ) -> str:
     block_end = end
+    first_content_indent = None
     for idx in range(start, end):
         indentation = _block_scalar_indent(lines[idx], line_number=idx + 1)
+        if indentation is None:
+            continue
         if indentation is not None and indentation <= parent_indent:
+            block_end = idx
+            break
+        if first_content_indent is None:
+            first_content_indent = indentation
+        elif (indentation < first_content_indent
+              and lines[idx].lstrip().startswith("#")):
             block_end = idx
             break
 

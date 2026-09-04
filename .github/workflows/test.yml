@@ -38,6 +38,9 @@ jobs:
       - name: Test CI step extractor
         run: python3 devel/scripts/test_ci_step_script.py -v
 
+      - name: Test mandatory-job and demo guards
+        run: python3 devel/scripts/test_ci_guards.py -v
+
       - name: Verify release tag matches payload stamp
         if: >-
           github.ref_type == 'tag' ||
@@ -131,6 +134,7 @@ jobs:
           fi
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -8853,6 +8857,22 @@ jobs:
 
           assert_ash_absent
 
+      - name: Collect PostgreSQL failure log
+        if: failure()
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker logs "$POSTGRES_CONTAINER" > postgres-failure.log 2>&1
+
+      - name: Upload PostgreSQL failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: postgres-failure-${{ matrix.postgres }}-${{ matrix.cron }}
+          path: postgres-failure.log
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Final summary
         env:
           PGPASSWORD: postgres
@@ -8869,16 +8889,10 @@ jobs:
     if: always()
     needs: [docs-lint, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert every required job succeeded
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          set -euo pipefail
-          echo "needed job results: ${RESULTS}"
-          for r in ${RESULTS}; do
-            case "${r}" in
-              success|skipped) ;;
-              *) echo "a required job reported: ${r}" >&2; exit 1 ;;
-            esac
-          done
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 devel/scripts/ci_guards.py required-jobs

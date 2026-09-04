@@ -271,6 +271,16 @@ jobs:
             self.parse(text)
         self.assertIn("tabs are not valid YAML indentation", str(caught.exception))
 
+    def test_comment_below_content_indent_ends_literal_block(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Comment boundary\n"
+            "        run: |\n          echo one\n"
+            "         # YAML comment below the content indentation\n"
+            "  other-job:\n    runs-on: ubuntu-latest\n"
+        )
+        steps = self.parse(text)
+        self.assertEqual(steps[0].run, "echo one\n")
+
     def test_current_workflow_integration(self) -> None:
         steps = ci_step_script.parse_workflow(ci_step_script.DEFAULT_WORKFLOW)
         names = [step.name for step in steps]

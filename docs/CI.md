@@ -28,8 +28,10 @@ get CodeQL onto release branches, and is out of scope here.
 ## The `ci-required` aggregator
 
 `test.yml` ends with a `ci-required` job: `if: always()`, `needs: [docs-lint,
-test]`, failing if any needed job reports anything other than `success` or
-`skipped`.
+test]`. Both named dependencies must exist and report `success`; skipped,
+failed, cancelled and malformed/missing evidence fail closed.
+`devel/scripts/test_ci_guards.py` tests those cases and the real-demo path
+selection. The stable check runs even after a dependency fails.
 
 It exists because the matrix contexts embed PostgreSQL versions — `test (14,
 on)`, `test (19beta2, on)` — and are renamed at every version bump. Requiring
@@ -45,7 +47,7 @@ check cannot detect if the required names all come from that same file — but a
 required check that never reports leaves the PR permanently pending, which is
 visible. `test.yml` is large; keep an eye on its size.
 
-## Required status checks (owner action)
+## Required status checks
 
 The `main-protected` ruleset (id `13093534`) currently has `deletion`,
 `non_fast_forward` and `pull_request` rules but **no `required_status_checks`
@@ -73,6 +75,7 @@ gh api repos/NikolayS/pg_ash/rulesets/13093534 \
 
 | Context | App | Why |
 | --- | --- | --- |
+| `size` | `github-actions` (15368) | Independent workflow-size guard, including release branches |
 | `ci-required` | `github-actions` (15368) | Stable rollup of `docs-lint` + the whole PG matrix |
 | `renderer (fixtures, no database)` | `github-actions` (15368) | Fast demo gate, runs on every PR, stable name |
 | `capture + reel (real PostgreSQL)` | `github-actions` (15368) | Real-database demo gate; runs on every PR |
@@ -80,16 +83,18 @@ gh api repos/NikolayS/pg_ash/rulesets/13093534 \
 
 Deliberately **not** required: the individual `test (N, on)` matrix contexts
 (version-coupled names, covered by `ci-required`), `Analyze (actions)` and
-`Analyze (python)` (CodeQL's per-language runs, rolled up by `CodeQL`), and
-`size` (only exists once #238 lands; add it then).
+`Analyze (python)` (CodeQL's per-language runs, rolled up by `CodeQL`).
 
 Two behaviours to keep in mind:
 
 - **A job skipped by a job-level `if:` still reports**, with conclusion
   `skipped`, and GitHub treats that as satisfying a required check. So
   `capture + reel (real PostgreSQL)` being required does not mean it always
-  really ran — its `if:` includes `github.event_name == 'pull_request'`, so on
-  PRs it does. A workflow skipped *entirely* (branch or path filter, or a file
+  really ran. The job runs on PRs, but its database steps are selected by
+  changed inputs: `devel/`, `sql/`, `demos/`, `examples/`, `assets/`, README
+  and the demo workflow. Manual/nightly runs always capture. Successful full
+  runs require fresh window/transcript files plus rendered artifacts.
+  A workflow skipped *entirely* (branch or path filter, or a file
   over the size limit) reports nothing, and the required check stays pending —
   the PR is blocked, which is the behaviour we want.
 - **Fork PRs need workflow approval.** With "require approval for all external
@@ -106,3 +111,17 @@ at once, each merge invalidates all the others and forces a rebase plus a full
 PG 14–19 matrix re-run — serialising the queue for little benefit, since the
 matrix is a schema/behaviour test rather than a semantic-conflict detector.
 Turn it on for a release line if a stale-merge incident ever justifies it.
+
+## Pre-tag dispatch verification
+
+The manual mechanism was successfully rehearsed on main `2c3286a` with its
+existing `v2.0-beta1` identity: [run 33924051160](https://github.com/NikolayS/pg_ash/actions/runs/33924051160),
+all nine jobs passed. This is not RC certification; repeat against the exact
+stamped candidate with its RC identity. A queued run with zero jobs requires
+investigation of workflow size, approval and runner scheduling, not an
+unbounded wait. See #247.
+
+Database matrix jobs have a 40-minute timeout and upload PostgreSQL logs on
+failure. The independent size guard fails at 460,000 bytes, before the known
+512,000-byte workflow failure boundary. Keep large assertions in external
+SQL/shell files without reducing behavior coverage.
