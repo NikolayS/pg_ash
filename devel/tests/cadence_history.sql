@@ -19,6 +19,7 @@ declare
   v_jobs_before jsonb;
   v_jobs_after jsonb;
   v_invalid interval;
+  v_cron_version text;
 begin
   insert into ash.sample (sample_ts, datid, active_count, data)
   select v_ts + tick, v_datid, 1, array[-v_wait::int, 1, 0]
@@ -128,6 +129,18 @@ begin
     assert (select to_jsonb(config) from ash.config as config) = v_before,
       'invalid direct update changed config';
   end loop;
+
+  if ash._pg_cron_available() then
+    select extversion into v_cron_version from pg_extension where extname = 'pg_cron';
+    update pg_extension set extversion = '1.4' where extname = 'pg_cron';
+    select to_jsonb(config) into v_before from ash.config as config;
+    select count(*) as errors into v_actual
+    from ash.start(interval '1 second') where job_type = 'error';
+    assert v_actual.errors = 1, 'old pg_cron did not reject subminute cadence';
+    assert (select to_jsonb(config) from ash.config as config) = v_before,
+      'old pg_cron rejection changed config';
+    update pg_extension set extversion = v_cron_version where extname = 'pg_cron';
+  end if;
 
   for seconds in 1..60 loop
     perform ash.start(seconds * interval '1 second');

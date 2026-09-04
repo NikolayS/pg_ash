@@ -2414,15 +2414,6 @@ begin
   end if;
 
   /*
-   * Validate the cadence change before creating/replacing any scheduler jobs.
-   * The config trigger serializes against the sampler and all retained tiers.
-   * Any later scheduling failure still rolls this update back atomically.
-   */
-  update ash.config
-  set sample_interval = every
-  where singleton;
-
-  /*
    * Privilege check: without pg_read_all_stats (or superuser), query_id is
    * hidden for activity owned by other roles and collapses to the sentinel 0,
    * silently skewing ash.top('query_id') and every query-attributed reader
@@ -2565,6 +2556,15 @@ begin
       'ash.start: unrecognized pg_cron version "%" — '
       'assuming modern (>= 1.5)', v_cron_version;
   end if;
+
+  /*
+   * Validate the cadence change before creating/replacing any scheduler jobs.
+   * The config trigger serializes against the sampler and all retained tiers.
+   * Any later scheduling failure still rolls this update back atomically.
+   */
+  update ash.config
+  set sample_interval = every
+  where singleton;
 
   /*
    * Detect whether we need to UPDATE cron.job.nodename after scheduling.

@@ -131,7 +131,9 @@ AAS-oriented 2.0 API:
 - **Historical cadence and idle coverage are not persisted.** The cadence
   guard prevents future changes from reweighting retained history, but cannot
   repair mixed-cadence data from older installations or verify external
-  scheduler timing. Successful idle sampler ticks write no row;
+  scheduler timing. Coarse subminute cadence can still overstate minute extrema
+  through bucket placement (for example, two 59-second observations in one
+  minute); this containment does not replace persisted weighted time. Successful idle sampler ticks write no row;
   `data_points`, `buckets_with_data`, and report `minutes_with_data` describe
   stored activity, not successful sampler heartbeats. Idle periods and
   scheduler outages remain indistinguishable; monitor scheduler health

@@ -677,7 +677,10 @@ Postgres.
   readers raise an actionable error; raw evidence and `ash.status()` remain
   available. Archive and explicitly remove all three history tiers before
   selecting a supported cadence. External schedulers must actually run at
-  the configured interval; this guard cannot measure their timing.
+  the configured interval; this guard cannot measure their timing. Minute
+  extrema remain sampling estimates: for example, exact 59-second sampling
+  can place two observations in one minute and temporarily overstate its AAS.
+  Persisted weighted time is still needed for a complete cadence solution.
 - Successful idle sampler ticks write no row. `data_points`,
   `buckets_with_data`, and report `minutes_with_data` describe
   facts derived from stored activity, not verified sampling coverage; a
