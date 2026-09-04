@@ -201,7 +201,11 @@ jobs:
         if: steps.gate.outputs.run == 'yes'
         env:
           ASH_BACKEND: local
-        run: make -C demos all
+        run: |
+          # Checkout contains these tracked reels. Removing them makes the
+          # post-capture existence checks prove this run recreated both.
+          rm -f -- assets/ash_demo.gif assets/ash_demo.mp4
+          make -C demos all
 
       - name: Demo-rot alarm
         if: steps.gate.outputs.run == 'yes'
