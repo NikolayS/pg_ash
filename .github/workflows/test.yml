@@ -3484,6 +3484,7 @@ jobs:
             commit;
           \endif
 
+          begin;
           do $$
           declare
             v_job_id bigint;
@@ -3682,6 +3683,7 @@ jobs:
             raise notice 'All interval format tests PASSED';
           end;
           $$;
+          rollback;
           EOF
 
       - name: "Test 2.0 reader API (behavioral)"

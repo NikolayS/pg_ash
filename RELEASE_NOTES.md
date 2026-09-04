@@ -48,7 +48,8 @@ AAS-oriented 2.0 API:
   intervals must be 1–60 whole seconds; `ash.start()` without an interval
   resumes the configured cadence. Explicit interval changes and direct config
   updates are refused while raw or either rollup tier retains history, with
-  no automatic deletion. Unsupported legacy cadence/config/data survive
+  no automatic deletion. Commit a successful change promptly: its locks block
+  history writers until transaction end. Unsupported legacy cadence/config/data survive
   upgrade, but sampling skips and AAS weighting raises until the operator
   explicitly archives/resets history and selects a supported cadence. This
   contains issue #137; it does not infer or repair older mixed-cadence data.

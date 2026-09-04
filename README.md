@@ -694,6 +694,8 @@ Postgres.
   cadence only after explicitly archiving and removing all retained history;
   pg_ash never clears it automatically. Changes require a `READ COMMITTED`
   transaction and fail promptly if a sampler or history writer is active.
+  Commit promptly: a successful cadence change blocks history writers until
+  its transaction ends; use a short transaction or an autocommit statement.
 - Older samples do not record their cadence. The guard prevents new cadence
   changes from reweighting history, but cannot repair mixed-cadence history
   collected before this guard. Installer re-apply preserves legacy data and
