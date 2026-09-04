@@ -460,7 +460,8 @@ run_feature_mode() {
 run_degraded_no_cron() {
   assert_extension_state f t
   install_fresh
-  psql_gate --file="${REPO_ROOT}/devel/tests/degraded_no_cron.sql"
+  # Reuse the canonical tagged workload, readiness check, and cleanup too.
+  CRON=off run_ci_selection step "Degraded mode: without pg_cron"
   run_feature_mode no-cron false true
 }
 
@@ -480,7 +481,8 @@ run_degraded_neither() {
   uninstall_if_present
   install_fresh
   assert_extension_state f f
-  psql_gate --file="${REPO_ROOT}/devel/tests/degraded_no_cron.sql"
+  # Reuse the canonical tagged workload, readiness check, and cleanup too.
+  CRON=off run_ci_selection step "Degraded mode: without pg_cron"
   run_feature_mode neither false false
 }
 
