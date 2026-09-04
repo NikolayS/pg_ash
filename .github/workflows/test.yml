@@ -6187,13 +6187,27 @@ jobs:
               )
               returning jobid into v_other_rotation_job;
 
-              perform 1 from ash.start();
+              begin
+                perform 1 from ash.start();
+                assert false, 'start accepted a foreign-owned managed job';
+              exception when object_not_in_prerequisite_state then
+                assert sqlerrm like '%ash_rotation%ash_issue162_other%',
+                  'foreign-owner refusal must identify the job and owner';
+              end;
+              assert not exists (
+                select from cron.job where jobname = 'ash_rotation'
+                  and username = current_user
+                  and database = current_database()
+              ), 'failed start created a duplicate local rotation job';
               assert (
                 select schedule
                 from cron.job
                 where jobid = v_other_rotation_job
               ) = '*/7 * * * *',
                 'ash.start changed another user''s rotation schedule';
+              -- Remove only this deliberately injected fixture, then retry.
+              delete from cron.job where jobid = v_other_rotation_job;
+              perform 1 from ash.start();
               assert (
                 select count(*)
                 from cron.job
