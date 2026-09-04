@@ -372,7 +372,8 @@ jobs:
           PGUSER: postgres
           PGDATABASE: postgres
           PGPASSWORD: postgres
-        run: python3 devel/scripts/test_cadence_concurrency.py
+        run: |
+          python3 devel/scripts/test_cadence_concurrency.py
 
       - name: "#137: preserve unsupported legacy cadence on upgrade"
         env:

@@ -35,7 +35,7 @@ tests from the integration and comprehensive release gate still required.
 | UNLOGGED restart experiment | **PASS:** clean restart retained raw/rollup counts `1/1`; immediate shutdown/recovery yielded `0/1`. Matches the intended raw-loss/rollup-preservation contract. |
 | Conversion lock-timeout experiment | **PASS for atomicity; documentation defect:** lock `sample_1`, attempt conversion, timeout after 5.01 seconds. Config remains `false`; all three partitions remain logged. No partially converted ring survives. |
 | Cadence conservation experiment | **FAIL:** two true 1-AAS minutes become 5 and 1 after cadence changes to five seconds; total 360 backend-seconds instead of 120. Two-minute cadence produces a one-minute peak of 2 from one observed backend. |
-| Complete Docker/visual release gate | **NOT RUN:** local Docker daemon unavailable; no combined final candidate exists yet. No claim of real standby promotion, all-origin upgrades or full visual acceptance is made. |
+| Complete Docker/visual release gate | **INITIAL AUDIT: NOT RUN** because Docker was unavailable. Docker is now available; CI #252 passed its seven-surface PG17 gate and #255 passed all-origin promotion rehearsals on PG18. The complete integrated gate and final visual/standby acceptance remain pending. |
 
 The isolated PostgreSQL instance was stopped after the experiments. Relevant
 SQL and transcripts, the raw samorev reports, PR metadata/diffs and checksums

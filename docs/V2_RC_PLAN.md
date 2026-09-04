@@ -257,8 +257,10 @@ claims as independently verified conclusions.
 
 Run against disposable real PostgreSQL instances. Hosted CI is necessary but
 does not replace the repository's Docker release gate or human inspection.
-The local Docker daemon was unavailable during the audit; isolated local PG18
-reproductions are supplementary evidence, not the complete release pass.
+Docker was unavailable during the initial audit and is now running. CI #252
+has passed its complete seven-surface PG17 Docker gate. The combined candidate
+still needs its own complete gate; isolated reproductions and component passes
+are supplementary evidence.
 
 | Surface | Required automated evidence | Manual acceptance |
 |---|---|---|
