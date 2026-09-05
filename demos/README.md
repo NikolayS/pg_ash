@@ -36,20 +36,21 @@ Read this before you look at a single number.
 > `pg_stat_activity` over real pgbench backends. No reader output is edited.
 
 Concretely, the seeder runs a real workload, samples it with pg_ash's real
-sampler, and then rewrites `ash.sample.sample_ts` so that one real second of
-load is filed as one virtual minute of history. It never invents a row, never
+sampler, and then rewrites `ash.sample.sample_ts` to distribute each short
+batch of observations across one virtual minute of history. It never invents a row, never
 edits a backend count, and never touches the packed wait/query array. That is
 the whole of the liberty taken, and it lives in one `UPDATE` in
 `lib/seed.sql` (`ash_demo.restamp`).
 
-**Time compression: 1 real second = 1 virtual minute.** 28 minutes of history
-arrives in about 20 seconds. The exact ratio in force for a given run is
-recorded in `out/window.env` as `ASH_COMPRESSION`.
+**Compressed mode uses virtual-minute weighting, not a fixed clock ratio.**
+Elapsed time depends on sample execution and workload duration as well as the
+configured pauses. `out/window.env` records a descriptive `ASH_COMPRESSION`
+label; it is not a measured compression ratio.
 
-`ASH_REAL_TIME=1` turns compression off entirely: the seeder then samples at the
-declared interval in real wall-clock time and skips the restamp. It takes about
-28 minutes and the assets are indistinguishable, which is the point — the switch
-exists so that claim can be checked rather than believed.
+`ASH_REAL_TIME=1` skips restamping and uses the declared sampling interval as
+the real pause between calls, plus their execution time. The default run takes
+roughly 28 minutes. Its observed counts, waits, and rendered shape can differ
+from compressed mode; the workload is stochastic.
 
 The seeder also keeps only samples for its own database. pg_ash samples the
 whole cluster by design; on a developer machine that would quietly fold every
@@ -290,7 +291,7 @@ ASH_UNTIL='2026-07-26 23:00:00-07'
 ASH_STORM_SINCE='2026-07-26 22:44:00-07'
 ASH_STORM_UNTIL='2026-07-26 22:49:00-07'
 ASH_STORM_EVENT='Lock:transactionid'
-ASH_COMPRESSION='1 real second = 1 virtual minute'
+ASH_COMPRESSION='virtual-minute weighting; elapsed time varies'
 ...
 ```
 

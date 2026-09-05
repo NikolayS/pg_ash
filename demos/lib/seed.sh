@@ -4,9 +4,9 @@
 #
 # The trick, in one sentence: run real pgbench load, sample it with pg_ash's own
 # ash.take_sample(), and then move the timestamps of the samples we just took
-# into the virtual minute they represent. One real second of load becomes one
-# virtual minute of history, so 28 minutes of believable ASH arrives in ~20
-# seconds instead of ~28 real minutes.
+# into the virtual minute they represent. A short batch of real observations
+# receives virtual-minute weights; elapsed time varies with execution and
+# workload duration. This is not a fixed real-to-virtual clock ratio.
 #
 # What is real: every sample, every wait event, every query id, every count.
 # What is shaped: which samples exist, and when they are considered to have
@@ -402,7 +402,7 @@ seed_write_window_env() {
                        wait_event => '$storm_event', n => 1) as top_row))       || e'\n' ||
       'ASH_COMPRESSION='  || quote_literal(
           case when '${ASH_REAL_TIME:-0}' = '1' then 'real time (no compression)'
-               else '1 real second = 1 virtual minute' end)                     || e'\n' ||
+               else 'virtual-minute weighting; elapsed time varies' end)                     || e'\n' ||
       'ASH_SEED_EPOCH='   || quote_literal(extract(epoch from now())::bigint::text) || e'\n' ||
       'ASH_SEED_MAX_TS='  || quote_literal((select max(sample_ts) from ash.sample)::text) || e'\n' ||
       'ASH_PG_VERSION='   || quote_literal(current_setting('server_version'))    || e'\n' ||
