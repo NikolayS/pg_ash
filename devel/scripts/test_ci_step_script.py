@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -322,6 +324,66 @@ jobs:
         self.assertIsNotNone(selected.run)
         self.assertTrue((selected.run or "").startswith("psql -h localhost"))
         self.assertIn("Schema and infrastructure tests PASSED", selected.run or "")
+
+
+class CapturedOutputAssertionsTests(unittest.TestCase):
+    """Exercise the actual cronless shell assertions with output above pipe capacity."""
+
+    required = [
+        "pg_cron is not available in this database.",
+        "current_setting('cron.database_name', true) = postgres names this database",
+        "current_setting('cron.database_name', true) is not set; configure pg_cron",
+        "current_setting('cron.database_name', true) = cron_control; install pg_ash in that database",
+        '\"call ash.run_take_sample()\" (for per-second, use a loop)',
+        r"CALL ash.run_take_sample() \watch 1",
+        'execute "CALL ash.run_take_sample()" in a loop',
+        "Also schedule CALL ash.run_rotate() at the rotation_period",
+        "Schedule rollup: CALL ash.run_rollup_minute() every minute",
+    ]
+    forbidden = [
+        "install pg_ash in (not set)",
+        "pg_cron is not installed",
+        '\"select ash.take_sample()\"',
+    ]
+
+    def check_output(self, lines: list[str]) -> subprocess.CompletedProcess[str]:
+        step = ci_step_script.select_named(
+            ci_step_script.parse_workflow(ci_step_script.DEFAULT_WORKFLOW),
+            ["Degraded mode: without pg_cron"],
+        )[0]
+        body = step.run or ""
+        start = body.index('printf \'%s\\n\' "$cronless_out"')
+        end = body.index("\ncleanup_cronless_workload", start)
+        # Long irrelevant diagnostics after matches trigger early-reader SIGPIPE
+        # with the former printf | grep -q checks on Linux and macOS.
+        output = "\n".join(lines) + "\n" + "diagnostic detail\n" * 131072
+        return subprocess.run(
+            [os.environ.get("BASH", "bash"), "-e", "-o", "pipefail", "-c",
+             'CRON=off; cronless_out="$(cat)"\n' + body[start:end]],
+            input=output, text=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, timeout=15, check=False,
+        )
+
+    def test_large_output_with_all_required_text_passes(self) -> None:
+        result = self.check_output(self.required)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_each_missing_required_text_fails_with_large_output(self) -> None:
+        for missing in self.required:
+            with self.subTest(missing=missing):
+                result = self.check_output([s for s in self.required if s != missing])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("FAIL:", result.stderr)
+
+    def test_each_forbidden_text_fails_with_large_output(self) -> None:
+        messages = ["recommended an impossible pg_ash target",
+                    "emitted the old cluster-wide pg_cron claim",
+                    "still recommends the SELECT sampler form"]
+        for forbidden, message in zip(self.forbidden, messages):
+            with self.subTest(forbidden=forbidden):
+                result = self.check_output([forbidden] + self.required)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":

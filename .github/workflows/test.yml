@@ -2524,13 +2524,13 @@ jobs:
           out=$(psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
                   -c "select ash.grant_reader('ash_qt_plain');" 2>&1)
           echo "$out"
-          echo "$out" | grep -q "ash_qt_plain lacks pg_read_all_stats" \
+          grep -q <<< "$out" "ash_qt_plain lacks pg_read_all_stats" \
             || { echo "FAIL: grant_reader must NOTICE that a non-pg_monitor role lacks pg_read_all_stats"; exit 1; }
           # a pg_monitor member already holds pg_read_all_stats -> no such NOTICE.
           out=$(psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
                   -c "select ash.grant_reader('ash_qt_mon');" 2>&1)
           echo "$out"
-          if echo "$out" | grep -q "lacks pg_read_all_stats"; then
+          if grep -q <<< "$out" "lacks pg_read_all_stats"; then
             echo "FAIL: grant_reader must NOT warn about pg_read_all_stats for a pg_monitor member"; exit 1;
           fi
 
@@ -4054,7 +4054,7 @@ jobs:
           EOF
           )"
           printf '%s\n' "$n5_out"
-          if ! printf '%s\n' "$n5_out" | grep -Fq \
+          if ! grep -Fq <<< "$n5_out" \
               "raw has coverage, but report base metrics require rollup_1m and return NULL"; then
             echo "FAIL: ash.report raw-only NOTICE missing" >&2
             exit 1
@@ -4065,7 +4065,7 @@ jobs:
             echo "FAIL: ash.report raw-only NOTICE must occur exactly once" >&2
             exit 1
           fi
-          if ! printf '%s\n' "$n5_out" | grep -Fq \
+          if ! grep -Fq <<< "$n5_out" \
               "rollup_1h has coverage, but report base metrics require rollup_1m and return NULL"; then
             echo "FAIL: ash.report rollup_1h-only NOTICE missing" >&2
             exit 1
@@ -4118,10 +4118,9 @@ jobs:
               -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" 2>&1
           )"
           printf '%s\n' "$reapply_out"
-          if ! printf '%s\n' "$reapply_out" \
-              | grep -F \
+          if ! grep -F <<< "$reapply_out" \
                   "WARNING:  pg_ash installer: restoring the full reader bundle for role(s)" \
-              | grep -Fq "ash_n4_reader"; then
+              | grep -F "ash_n4_reader" >/dev/null; then
             echo "FAIL: installer WARNING did not list ash_n4_reader" >&2
             exit 1
           fi
@@ -4825,14 +4824,14 @@ jobs:
 
           test "$psql_status" -eq 0
           test "$(printf '%s\n' "$output" | grep -Fc 'WARNING:  ash.decode_sample:')" -eq 3
-          printf '%s\n' "$output" | grep -Fxq 'marker_rows=0'
-          printf '%s\n' "$output" | grep -Fxq 'count_rows=0'
-          printf '%s\n' "$output" | grep -Fxq 'query_map_rows=0'
-          printf '%s\n' "$output" | grep -Fq \
+          grep -Fxq <<< "$output" 'marker_rows=0'
+          grep -Fxq <<< "$output" 'count_rows=0'
+          grep -Fxq <<< "$output" 'query_map_rows=0'
+          grep -Fq <<< "$output" \
             'ash.decode_sample: expected negative wait_id at position 1'
-          printf '%s\n' "$output" | grep -Fq \
+          grep -Fq <<< "$output" \
             'ash.decode_sample: non-positive count <NULL> at position 2'
-          printf '%s\n' "$output" | grep -Fq \
+          grep -Fq <<< "$output" \
             'ash.decode_sample: expected non-negative query_id at position 3'
 
       - name: "Release-gate fixes: negative interval, width clamp, decode_sample size cap"
@@ -9555,34 +9554,34 @@ jobs:
               -f devel/tests/degraded_no_cron.sql 2>&1
           )"
           printf '%s\n' "$cronless_out"
-          if ! printf '%s\n' "$cronless_out" | grep -Fq \
+          if ! grep -Fq <<< "$cronless_out" \
               "pg_cron is not available in this database."; then
             echo "FAIL: ash.start database-scoped pg_cron NOTICE missing" >&2
             exit 1
           fi
-          if ! printf '%s\n' "$cronless_out" | grep -Fq \
+          if ! grep -Fq <<< "$cronless_out" \
               "current_setting('cron.database_name', true) = postgres names this database"; then
             echo "FAIL: ash.start local cron.database_name guidance missing" >&2
             exit 1
           fi
           if [ "$CRON" = "off" ]; then
-            if ! printf '%s\n' "$cronless_out" | grep -Fq \
+            if ! grep -Fq <<< "$cronless_out" \
                 "current_setting('cron.database_name', true) is not set; configure pg_cron"; then
               echo "FAIL: ash.start unset cron.database_name guidance missing" >&2
               exit 1
             fi
-            if ! printf '%s\n' "$cronless_out" | grep -Fq \
+            if ! grep -Fq <<< "$cronless_out" \
                 "current_setting('cron.database_name', true) = cron_control; install pg_ash in that database"; then
               echo "FAIL: ash.start remote cron.database_name guidance missing" >&2
               exit 1
             fi
           fi
-          if printf '%s\n' "$cronless_out" | grep -Fq \
+          if grep -Fq <<< "$cronless_out" \
               "install pg_ash in (not set)"; then
             echo "FAIL: ash.start recommended an impossible pg_ash target" >&2
             exit 1
           fi
-          if printf '%s\n' "$cronless_out" | grep -Fq \
+          if grep -Fq <<< "$cronless_out" \
               "pg_cron is not installed"; then
             echo "FAIL: ash.start emitted the old cluster-wide pg_cron claim" >&2
             exit 1
@@ -9600,14 +9599,14 @@ jobs:
             'Also schedule CALL ash.run_rotate() at the rotation_period' \
             'Schedule rollup: CALL ash.run_rollup_minute() every minute'
           do
-            if ! printf '%s\n' "$cronless_out" | grep -Fq \
+            if ! grep -Fq <<< "$cronless_out" \
                 "$cronless_expected"; then
               echo "FAIL: external-scheduler guidance missing: $cronless_expected" >&2
               exit 1
             fi
           done
           # Negative: the legacy SELECT recommendation must be gone entirely.
-          if printf '%s\n' "$cronless_out" | grep -Fq \
+          if grep -Fq <<< "$cronless_out" \
               '"select ash.take_sample()"'; then
             echo "FAIL: ash.start still recommends the SELECT sampler form" >&2
             exit 1
