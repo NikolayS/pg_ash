@@ -2378,6 +2378,8 @@ declare
   v_seconds int;
   v_schedule text;
   v_skip_nodename_update boolean := false;
+  v_can_alter_job boolean := false;
+  v_job_was_inactive boolean := false;
   v_debug_logging boolean := false;
   v_pg_cron_available boolean;
   v_cron_database text;
@@ -2686,25 +2688,40 @@ begin
   where singleton;
 
   /*
-   * Detect whether we need to UPDATE cron.job.nodename after scheduling.
-   * Skip when cron.use_background_workers = on (nodename irrelevant)
-   * or cron.host is already '' or a socket path (cron.schedule() inherits it).
+   * pg_cron 1.3 has named scheduling but no alter_job. Probe its optional
+   * signature as an OID so an absent function yields NULL, not an error.
    */
-  begin
-    v_skip_nodename_update :=
-      coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
-      or coalesce(current_setting('cron.host', true), 'localhost') = ''
-      or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
-  exception when insufficient_privilege then
-    -- Non-superuser owners cannot read pg_cron's restricted settings. Keep
-    -- the administrator's cron.schedule defaults instead of attempting an
-    -- unauthorized UPDATE of cron.job and aborting an otherwise valid start.
+  v_can_alter_job := coalesce(pg_catalog.has_function_privilege(
+    pg_catalog.to_regprocedure(
+      'cron.alter_job(bigint,text,text,text,text,boolean)'
+    ), 'EXECUTE'
+  ), false);
+
+  /*
+   * Reading restricted cron settings does not imply permission to change
+   * cron.job (pg_monitor includes pg_read_all_settings). Respect both the
+   * table's grants and column-only UPDATE grants before choosing sockets.
+   */
+  if not pg_catalog.has_column_privilege('cron.job', 'nodename', 'UPDATE') then
     v_skip_nodename_update := true;
     raise notice
       'ash.start: keeping pg_cron connection defaults; this role cannot '
-      'inspect cron host settings. The pg_cron administrator must configure '
+      'update cron.job.nodename. The pg_cron administrator must configure '
       'working connection defaults for scheduled jobs.';
-  end;
+  else
+    begin
+      v_skip_nodename_update :=
+        coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
+        or coalesce(current_setting('cron.host', true), 'localhost') = ''
+        or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
+    exception when insufficient_privilege then
+      v_skip_nodename_update := true;
+      raise notice
+        'ash.start: keeping pg_cron connection defaults; this role cannot '
+        'inspect cron host settings. The pg_cron administrator must configure '
+        'working connection defaults for scheduled jobs.';
+    end;
+  end if;
 
   /*
    * (schedule string v_schedule already built above, before the pg_cron
@@ -2750,15 +2767,18 @@ begin
       ash._canonical_job_command('ash_sampler', v_stored_command);
 
     if v_canonical_command is null then
-      if pg_catalog.has_function_privilege(
-        'cron.alter_job(bigint,text,text,text,text,boolean)', 'EXECUTE'
-      ) then
-      perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule, active := true);
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_sampler_job, schedule := v_schedule, active := true
+        );
       else
         -- pg_cron grants named schedule/unschedule to ordinary job owners,
         -- but reserves alter_job. Upsert active jobs; replace only an inactive
         -- job so explicit start can reactivate it without privileged grants.
-        if not (select active from cron.job where jobid = v_sampler_job) then
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_sampler_job
+        );
+        if v_job_was_inactive then
           begin
             select cron.unschedule(v_sampler_job) into v_unscheduled;
             if v_unscheduled is distinct from true then
@@ -2773,6 +2793,9 @@ begin
         end if;
         select cron.schedule('ash_sampler', v_schedule,
           coalesce(v_canonical_command, v_stored_command)) into v_sampler_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_sampler_job;
+        end if;
       end if;
       raise notice
         'ash.start: ash_sampler has a customised command; preserving it. '
@@ -2784,20 +2807,21 @@ begin
         'already exists — schedule updated to %s; custom command preserved',
         v_schedule);
     else
-      if pg_catalog.has_function_privilege(
-        'cron.alter_job(bigint,text,text,text,text,boolean)', 'EXECUTE'
-      ) then
-      perform cron.alter_job(
-        job_id := v_sampler_job,
-        schedule := v_schedule,
-        command := v_canonical_command,
-        active := true
-      );
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_sampler_job,
+          schedule := v_schedule,
+          command := v_canonical_command,
+          active := true
+        );
       else
         -- pg_cron grants named schedule/unschedule to ordinary job owners,
         -- but reserves alter_job. Upsert active jobs; replace only an inactive
         -- job so explicit start can reactivate it without privileged grants.
-        if not (select active from cron.job where jobid = v_sampler_job) then
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_sampler_job
+        );
+        if v_job_was_inactive then
           begin
             select cron.unschedule(v_sampler_job) into v_unscheduled;
             if v_unscheduled is distinct from true then
@@ -2812,6 +2836,9 @@ begin
         end if;
         select cron.schedule('ash_sampler', v_schedule,
           coalesce(v_canonical_command, v_stored_command)) into v_sampler_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_sampler_job;
+        end if;
       end if;
       status := format(
         'already exists — schedule updated to %s; command re-synced',
@@ -2874,19 +2901,20 @@ begin
       ash._canonical_job_command('ash_rotation', v_stored_command);
 
     if v_canonical_command is null then
-      if pg_catalog.has_function_privilege(
-        'cron.alter_job(bigint,text,text,text,text,boolean)', 'EXECUTE'
-      ) then
-      perform cron.alter_job(
-        job_id := v_rotation_job,
-        schedule := '0 0 * * *',
-        active := true
-      );
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_rotation_job,
+          schedule := '0 0 * * *',
+          active := true
+        );
       else
         -- pg_cron grants named schedule/unschedule to ordinary job owners,
         -- but reserves alter_job. Upsert active jobs; replace only an inactive
         -- job so explicit start can reactivate it without privileged grants.
-        if not (select active from cron.job where jobid = v_rotation_job) then
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_rotation_job
+        );
+        if v_job_was_inactive then
           begin
             select cron.unschedule(v_rotation_job) into v_unscheduled;
             if v_unscheduled is distinct from true then
@@ -2901,6 +2929,9 @@ begin
         end if;
         select cron.schedule('ash_rotation', '0 0 * * *',
           coalesce(v_canonical_command, v_stored_command)) into v_rotation_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_rotation_job;
+        end if;
       end if;
       raise notice
         'ash.start: ash_rotation has a customised command; preserving it. '
@@ -2909,20 +2940,21 @@ begin
         'already exists — schedule reset to 0 0 * * *; '
         'custom command preserved';
     else
-      if pg_catalog.has_function_privilege(
-        'cron.alter_job(bigint,text,text,text,text,boolean)', 'EXECUTE'
-      ) then
-      perform cron.alter_job(
-        job_id := v_rotation_job,
-        schedule := '0 0 * * *',
-        command := v_canonical_command,
-        active := true
-      );
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_rotation_job,
+          schedule := '0 0 * * *',
+          command := v_canonical_command,
+          active := true
+        );
       else
         -- pg_cron grants named schedule/unschedule to ordinary job owners,
         -- but reserves alter_job. Upsert active jobs; replace only an inactive
         -- job so explicit start can reactivate it without privileged grants.
-        if not (select active from cron.job where jobid = v_rotation_job) then
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_rotation_job
+        );
+        if v_job_was_inactive then
           begin
             select cron.unschedule(v_rotation_job) into v_unscheduled;
             if v_unscheduled is distinct from true then
@@ -2937,6 +2969,9 @@ begin
         end if;
         select cron.schedule('ash_rotation', '0 0 * * *',
           coalesce(v_canonical_command, v_stored_command)) into v_rotation_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_rotation_job;
+        end if;
       end if;
       status :=
         'already exists — schedule reset to 0 0 * * *; command re-synced';

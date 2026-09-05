@@ -1,5 +1,11 @@
 # Unreleased development changes
 
+- A schema owner with `pg_monitor` can start libpq-backed pg_cron jobs without
+  write access to `cron.job`; connection defaults remain administrator-managed
+  when that permission is absent. Inactive sampler/rotation jobs receive the
+  same permitted socket adjustment as new jobs. Minute scheduling tolerates
+  pg_cron versions with named jobs but no optional `alter_job` API. (#260)
+
 - Lifecycle operations now require the exact `ash` schema owner, including
   when invoked by another superuser; use `SET ROLE` to the owner. Failed
   start/stop/rebuild/uninstall calls roll back jobs, config and DDL together.
