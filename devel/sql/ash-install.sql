@@ -2698,29 +2698,33 @@ begin
   ), false);
 
   /*
-   * Reading restricted cron settings does not imply permission to change
-   * cron.job (pg_monitor includes pg_read_all_settings). Respect both the
-   * table's grants and column-only UPDATE grants before choosing sockets.
+   * Only adjust connection fields when the configured libpq transport needs
+   * it. Background workers and existing socket defaults need no UPDATE.
    */
-  if not pg_catalog.has_column_privilege('cron.job', 'nodename', 'UPDATE') then
+  begin
+    v_skip_nodename_update :=
+      coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
+      or coalesce(current_setting('cron.host', true), 'localhost') = ''
+      or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
+  exception when insufficient_privilege then
+    v_skip_nodename_update := true;
+    raise notice
+      'ash.start: keeping pg_cron connection defaults; this role cannot '
+      'inspect cron host settings. The pg_cron administrator must configure '
+      'working connection defaults for scheduled jobs.';
+  end;
+
+  /*
+   * Settings visibility (including pg_monitor) does not imply job writes.
+   * Column-only UPDATE grants are sufficient for this one adjustment.
+   */
+  if not v_skip_nodename_update
+     and not pg_catalog.has_column_privilege('cron.job', 'nodename', 'UPDATE') then
     v_skip_nodename_update := true;
     raise notice
       'ash.start: keeping pg_cron connection defaults; this role cannot '
       'update cron.job.nodename. The pg_cron administrator must configure '
       'working connection defaults for scheduled jobs.';
-  else
-    begin
-      v_skip_nodename_update :=
-        coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
-        or coalesce(current_setting('cron.host', true), 'localhost') = ''
-        or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
-    exception when insufficient_privilege then
-      v_skip_nodename_update := true;
-      raise notice
-        'ash.start: keeping pg_cron connection defaults; this role cannot '
-        'inspect cron host settings. The pg_cron administrator must configure '
-        'working connection defaults for scheduled jobs.';
-    end;
   end if;
 
   /*
