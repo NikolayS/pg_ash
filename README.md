@@ -670,9 +670,11 @@ authorized administrator can grant the sampling role access to statistics:
 grant pg_read_all_stats to ash_owner;
 ```
 
-`pg_stat_activity.query_id` is visible only for activity owned by the current
-role unless the sampler has `pg_read_all_stats`. Without it, other users'
-activity collapses into unattributed `query_id = NULL` load.
+Statistics visibility depends on role membership and privileges. Superusers
+and roles with `pg_read_all_stats` can inspect all sessions. Without access to
+another session's state or query details, its activity can be omitted or lose
+query attribution; do not assume that all other users remain represented as
+unattributed load.
 
 The installer grants reader access to `pg_monitor` by default when possible.
 For another monitoring role:
