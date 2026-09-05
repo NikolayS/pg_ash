@@ -137,8 +137,8 @@ jobs:
           grep -Fq 'read raw samples for eligible extreme minutes.' README.md
           python3 devel/scripts/check_llm_docs.py
           grep -Fq 'it returns SQL `NULL` and emits a NOTICE' README.md
-          grep -Fq "function signatures are unchanged; parameter" RELEASE_NOTES.md
-          grep -Fq "names were de-prefixed." RELEASE_NOTES.md
+          grep -Fq "breaking reader API and removes parameter-name" RELEASE_NOTES.md
+          grep -Fq "lifecycle ownership behavior as described below" RELEASE_NOTES.md
           if grep -Fq "lifecycle/admin functions remain compatible" RELEASE_NOTES.md; then
             echo "Release notes must disclose de-prefixed parameter names" >&2
             exit 1
@@ -393,10 +393,25 @@ jobs:
           PGPASSWORD: postgres
         run: |
           set -Eeuo pipefail
-          trap 'dropdb -h localhost -U postgres --if-exists ash_cadence_legacy' EXIT
+          # This regression needs the pre-guard beta payload even after an RC
+          # stamp replaces sql/ash-install.sql. Pin both commit and file object;
+          # fetch the immutable commit when a shallow checkout lacks it.
+          legacy_commit=9a18ca0705c5c97c2ce2eb8db6647784a4db9fdd
+          legacy_blob=191f98f7bce9b39c7837a98a53575ab8a196f321
+          if ! git cat-file -e "${legacy_commit}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$legacy_commit"
+          fi
+          if test "$(git rev-parse "${legacy_commit}:sql/ash-install.sql")" != "$legacy_blob"; then
+            echo "Pinned beta1 installer blob does not match $legacy_blob" >&2
+            exit 1
+          fi
+          legacy_dir=$(mktemp -d)
+          trap 'dropdb -h localhost -U postgres --if-exists ash_cadence_legacy; rm -rf -- "$legacy_dir"' EXIT
+          git show "${legacy_commit}:sql/ash-install.sql" > "$legacy_dir/ash-install.sql"
+          printf 'Legacy beta1 installer: commit=%s blob=%s\n' "$legacy_commit" "$legacy_blob"
           createdb -h localhost -U postgres ash_cadence_legacy
           psql -h localhost -U postgres -d ash_cadence_legacy -v ON_ERROR_STOP=1 \
-            -v legacy_install_path=sql/ash-install.sql \
+            -v "legacy_install_path=$legacy_dir/ash-install.sql" \
             -v "install_path=$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" \
             -f devel/tests/cadence_legacy.sql
 

@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
-/* Dedicated database: install the released baseline before the new guard. */
+/* Dedicated database: install the pinned beta1 baseline before the new guard. */
 \i :legacy_install_path
 
 update ash.config set sample_interval = interval '2 minutes';
