@@ -66,8 +66,31 @@ def upgrades(
                 continue
             src, dst = match.group(1), match.group(2)
             if src in found:
-                prev = rel(found[src][1])
-                raise SystemExit(f"duplicate upgrade from {src}: {prev}, {rel(path)}")
+                previous_dst, previous_path = found[src]
+                # Only the cumulative migration of the current prerelease may
+                # be staged in place. Older/final edges remain immutable; a
+                # different target cannot disguise a disconnected migration.
+                released_line, prerelease = payload_version_parts(
+                    install_version(ROOT / "sql" / "ash-install.sql"),
+                    label="released installer",
+                )
+                dev_install = development_install_path()
+                dev_line = None
+                if dev_install.exists():
+                    dev_line, _ = payload_version_parts(
+                        install_version(dev_install), label="development installer"
+                    )
+                if not (
+                    directory == dev_install.parent
+                    and previous_path.parent == ROOT / "sql" / "migrations"
+                    and prerelease
+                    and previous_dst == dst == released_line == dev_line
+                    and dst == latest_released_version()
+                ):
+                    prev = rel(previous_path)
+                    raise SystemExit(
+                        f"duplicate upgrade from {src}: {prev}, {rel(path)}"
+                    )
             found[src] = (dst, path)
     if required and not found:
         raise SystemExit("no ash-X.Y-to-A.B.sql upgrade scripts found")
@@ -333,6 +356,13 @@ def emit_pinned_upgrade_chain(start: str) -> None:
 
     released_migration_dir = ROOT / "sql" / "migrations"
     first_path = paths[0]
+    if first_path.parent == development_install_path().parent:
+        # A staged refresh of the current prerelease supersedes the released
+        # wrapper during development. Its public include layout is rehearsed
+        # in the promotion test; do not run the old wrapper first and publish
+        # an intermediate schema outside the new migration transaction.
+        emit_upgrade_paths(paths)
+        return
     if first_path.parent != released_migration_dir:
         raise SystemExit(
             f"pinned upgrade from {start} must begin with a released migration, "
@@ -365,7 +395,15 @@ def emit_reapply_chain() -> None:
     # recreate (e.g. 2.0 drops the 1.x readers and ash._to_sample_ts),
     # re-applying them on a current install fails by design.
     current = latest_released_version()
-    emit_upgrade_paths(upgrade_chain_paths(current, label="reapply"))
+    paths = upgrade_chain_paths(current, label="reapply")
+    # A same-line staged cumulative migration must exercise normalization on
+    # reapply, not merely replay its installer. Validation above proves that
+    # replacing this released edge is permitted for the current prerelease.
+    for _src, (dst, path) in upgrades().items():
+        if dst == current and path.parent == development_install_path().parent:
+            paths.insert(0, path)
+            break
+    emit_upgrade_paths(paths)
 
 
 def main() -> None:

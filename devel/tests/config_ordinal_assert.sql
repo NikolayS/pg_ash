@@ -39,7 +39,8 @@ begin
     'last_rollup_1h_ts',
     'insert_errors',
     'register_wait_cap_hits',
-    'consecutive_rotate_failures'
+    'consecutive_rotate_failures',
+    'sample_unlogged'
   ]::text[],
     format('ash.config column order differs: %s', v_columns);
 
@@ -80,6 +81,8 @@ begin
     'register_wait_cap_hits default was not applied';
   assert v_config.consecutive_rotate_failures = 0,
     'consecutive_rotate_failures default was not applied';
+  assert not v_config.sample_unlogged,
+    'sample_unlogged default should be false';
 
   select pg_get_userbyid(relation.relowner)
   into v_owner
@@ -127,6 +130,23 @@ begin
         'ash._validate_config_update()'::regprocedure
       and trigger_row.tgenabled = 'O'
   ), 'config rotation validation trigger was not preserved';
+
+  assert exists (
+    select from pg_trigger as trigger_row
+    where trigger_row.tgrelid = 'ash.config'::regclass
+      and not trigger_row.tgisinternal
+      and trigger_row.tgname = 'config_validate_sample_interval'
+      and trigger_row.tgfoid =
+        'ash._validate_sample_interval_update()'::regprocedure
+      and trigger_row.tgenabled = 'O'
+  ), 'config cadence validation trigger was not preserved';
+  begin
+    update ash.config set sample_interval = interval '61 seconds'
+    where singleton;
+    assert false, 'normalized config accepted an unsupported cadence';
+  exception when check_violation then
+    null;
+  end;
 
   assert to_regclass('ash.config_ordinal_debug_idx') is not null,
     'custom config index was not preserved';
