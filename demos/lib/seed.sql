@@ -135,8 +135,12 @@ begin
   if v_moved = 0 then
     raise exception
       'ash_demo.restamp: virtual minute % captured no samples at all — '
-      'the workload was not running, or sampling is disabled', idx
-      using errcode = 'no_data_found';
+      'no qualifying activity was stored', idx
+      using errcode = 'no_data_found',
+        hint = 'Check ash.status() for enabled sampling, supported cadence, '
+               'and skipped/missed/error counters. Short queries can be idle '
+               'at sampling instants over TCP. Increase ASH_READ_SPAN_CALM '
+               'and ASH_READ_SPAN_TAIL as documented in demos/README.md.';
   end if;
 end;
 $$;
