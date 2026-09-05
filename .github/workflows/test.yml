@@ -30,6 +30,20 @@ jobs:
       - name: Test release stamp checker
         run: python3 devel/scripts/test_release_stamp.py -v
 
+      # Lives here, not in `test`, on purpose: this suite parses test.yml, and
+      # a job inside that workflow's matrix cannot be trusted to report on the
+      # parseability of the file it was scheduled from. docs-lint needs no
+      # database and runs on every event, so a break is loud and immediate.
+      # Without this the suite had no gate at all and #243 reached main.
+      - name: Test CI step extractor
+        run: python3 devel/scripts/test_ci_step_script.py -v
+
+      - name: Test mandatory-job and demo guards
+        run: python3 devel/scripts/test_ci_guards.py -v
+
+      - name: Test interactive SQL runner
+        run: python3 devel/scripts/test_run_with_pty.py -v
+
       - name: Verify release tag matches payload stamp
         if: >-
           github.ref_type == 'tag' ||
@@ -123,11 +137,12 @@ jobs:
           fi
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        # PG19 is still beta, so the official image tag is 19beta2 until GA.
-        postgres: [14, 15, 16, 17, 18, 19beta2]
+        # PG19 is still beta, so the official image tag is 19beta3 until GA.
+        postgres: [14, 15, 16, 17, 18, 19beta3]
         # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
         # compares these as strings in the step-level `if`/conditionals.
         cron: ["on"]
@@ -496,13 +511,21 @@ jobs:
           # A caller's interactive psql configuration must not turn each
           # installer statement into a savepoint and make a partial install
           # committable after the first error.
+          set +e
           printf '\\set ON_ERROR_ROLLBACK on\n\\i %s\ncommit;\n\\q\n' \
             "${install_path}" |
-            script --quiet --return \
-              --command \
-              "psql --no-psqlrc --host=localhost --username=postgres --dbname=ash_atomic_failure_test" \
-              /dev/null \
+            python3 devel/scripts/run_with_pty.py \
+              --ready="ash_atomic_failure_test=# " \
+              psql --no-psqlrc --host=localhost --username=postgres \
+              --dbname=ash_atomic_failure_test \
               >"${failure_log_dir}/on-error-rollback.log" 2>&1
+          interactive_rc=$?
+          set -e
+          if (( interactive_rc != 0 )); then
+            cat "${failure_log_dir}/on-error-rollback.log" >&2
+            echo "interactive installer exit code: ${interactive_rc}" >&2
+            exit 1
+          fi
           if ! grep -Fq \
               "forced mid-install failure at ash.rollup_1m" \
               "${failure_log_dir}/on-error-rollback.log"; then
@@ -8845,6 +8868,22 @@ jobs:
 
           assert_ash_absent
 
+      - name: Collect PostgreSQL failure log
+        if: failure()
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker logs "$POSTGRES_CONTAINER" > postgres-failure.log 2>&1
+
+      - name: Upload PostgreSQL failure log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: postgres-failure-${{ matrix.postgres }}-${{ matrix.cron }}
+          path: postgres-failure.log
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Final summary
         env:
           PGPASSWORD: postgres
@@ -8854,23 +8893,18 @@ jobs:
           echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
 
   # One stable check name for the branch ruleset's required status checks.
-  # The matrix contexts embed PG versions ("test (19beta2, on)") and change
+  # The matrix contexts embed PG versions ("test (19beta3, on)") and change
   # every release, so requiring them by name would rot. Fails if any needed
-  # job failed or was cancelled; a job that never ran leaves this pending.
+  # job does not report success, including skipped/cancelled jobs; a workflow
+  # that never starts leaves this pending.
   ci-required:
     if: always()
     needs: [docs-lint, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert every required job succeeded
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          set -euo pipefail
-          echo "needed job results: ${RESULTS}"
-          for r in ${RESULTS}; do
-            case "${r}" in
-              success|skipped) ;;
-              *) echo "a required job reported: ${r}" >&2; exit 1 ;;
-            esac
-          done
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 devel/scripts/ci_guards.py required-jobs

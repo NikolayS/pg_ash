@@ -31,6 +31,7 @@
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
+          { "context": "size", "integration_id": 15368 },
           { "context": "ci-required", "integration_id": 15368 },
           { "context": "renderer (fixtures, no database)", "integration_id": 15368 },
           { "context": "capture + reel (real PostgreSQL)", "integration_id": 15368 },
