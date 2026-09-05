@@ -33,9 +33,9 @@ Use pg_ash when you need:
 
 ## Quick start
 
-The current `main` branch contains the frozen 2.0 beta 1 SQL in `sql/`.
-Changes under `devel/sql/` are the development candidate, not a published
-release. See [the release process](docs/RELEASE_PROCESS.md).
+This checkout contains the `2.0-rc1` release-candidate SQL in `sql/`.
+The matching `devel/sql/ash-install.sql` is a byte-identical baseline for the
+next development cycle. See [the release process](docs/RELEASE_PROCESS.md).
 
 Neither pg_cron nor pg_stat_statements is required. The example below uses
 pg_cron if available; otherwise configure [external scheduling](#scheduling).
@@ -91,10 +91,12 @@ For the latest stable v1.5 tag, check out `v1.5` first and use:
 \i sql/ash-install.sql
 ```
 
-## Upgrade to 2.0
+## Upgrade to 2.0 rc 1
 
 2.0 is a breaking reader-API release. Upgrade scripts are cumulative; run the
-missing scripts in order.
+missing scripts in order. From 1.5 or an earlier 2.0 prerelease, including
+`2.0-beta1`, run only `sql/migrations/ash-1.5-to-2.0.sql`. The same migration
+is safe to reapply to `2.0-rc1`.
 
 ```sql
 \i sql/migrations/ash-1.0-to-1.1.sql
@@ -105,7 +107,7 @@ missing scripts in order.
 \i sql/migrations/ash-1.5-to-2.0.sql
 
 select * from ash.status() where metric = 'version';
--- version | 2.0-beta1
+-- version | 2.0-rc1
 ```
 
 The old root-level upgrade paths, such as `sql/ash-1.5-to-2.0.sql`, are kept as

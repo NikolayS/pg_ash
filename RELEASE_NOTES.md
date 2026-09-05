@@ -1,34 +1,15 @@
-# Unreleased development changes
+# pg_ash 2.0 rc 1 release notes
 
-- A schema owner with `pg_monitor` can start libpq-backed pg_cron jobs without
-  write access to `cron.job`; connection defaults remain administrator-managed
-  when that permission is absent. Inactive sampler/rotation jobs receive the
-  same permitted socket adjustment as new jobs. Minute scheduling tolerates
-  pg_cron versions with named jobs but no optional `alter_job` API. (#260)
+This release candidate stamps the tested 2.0 installer as `2.0-rc1`. Fresh
+installs use `\i sql/ash-install.sql`; upgrades from 1.5 or an earlier 2.0
+prerelease use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any
+missing 1.x migrations. The same migration is safe to reapply to `2.0-rc1`.
+Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for compatibility.
 
-- Lifecycle operations now require the exact `ash` schema owner, including
-  when invoked by another superuser; use `SET ROLE` to the owner. Failed
-  start/stop/rebuild/uninstall calls roll back jobs, config and DDL together.
-  `stop()` returns real job IDs only for actual removals. A successful rebuild
-  leaves sampling disabled. (#203)
-- Explicit start reactivates local jobs while preserving custom commands and
-  migrating recognized commands to `CALL`. Non-superuser owners can repeat
-  start without `cron.alter_job` privileges; an inactive job may receive a new
-  ID when recreated. Cross-database managed-name collisions and visible
-  foreign-owner same-database jobs fail before changes. (#250)
-
-# pg_ash 2.0 beta 1 release notes
-
-2.0 beta 1 promotes the rewritten reader API from `devel/sql/` into the normal
-release SQL path. Fresh installs use `\i sql/ash-install.sql`; upgrades from
-1.5 use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any missing 1.x
-migrations. Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for
-compatibility.
-
-This is a breaking reader-API release. Sampling, storage, rollups, scheduler
-functions, and lifecycle/admin function signatures are unchanged; parameter
-names were de-prefixed. The 1.x reader surface has been replaced by the
-AAS-oriented 2.0 API:
+The 2.0 line introduces a breaking reader API and removes parameter-name
+prefixes. RC1 also changes cadence safeguards, storage options, scheduler
+procedures, and lifecycle ownership behavior as described below. The 1.x
+reader surface has been replaced by the AAS-oriented 2.0 API:
 
 | 1.x | 2.0 |
 |---|---|
@@ -49,7 +30,7 @@ AAS-oriented 2.0 API:
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.
-- **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the finalized 2.0
+- **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the 2.0 release-candidate
   installer, removes stale 1.x and earlier draft reader functions, and restores
   eligible explicit reader-function grants. Roles that held the full
   reader-function bundle receive the full current reader bundle; the installer
@@ -58,10 +39,27 @@ AAS-oriented 2.0 API:
   bundle to `pg_monitor` on a best-effort basis; opt out with
   `select ash.revoke_reader('pg_monitor');`.
 - **Postgres 19 beta support.** CI now covers Postgres 14 through 19, using the
-  official `postgres:19beta1` image until the GA `postgres:19` image exists.
+  official `postgres:19beta3` image for this release candidate.
 - **Docs refreshed.** README examples now use the 2.0 named-argument API.
 
 ## Changes since 2.0 beta 1
+
+- A schema owner with `pg_monitor` can start libpq-backed pg_cron jobs without
+  write access to `cron.job`; connection defaults remain administrator-managed
+  when that permission is absent. Inactive sampler/rotation jobs receive the
+  same permitted socket adjustment as new jobs. Minute scheduling tolerates
+  pg_cron versions with named jobs but no optional `alter_job` API. (#260)
+
+- Lifecycle operations now require the exact `ash` schema owner, including
+  when invoked by another superuser; use `SET ROLE` to the owner. Failed
+  start/stop/rebuild/uninstall calls roll back jobs, config and DDL together.
+  `stop()` returns real job IDs only for actual removals. A successful rebuild
+  leaves sampling disabled. (#203)
+- Explicit start reactivates local jobs while preserving custom commands and
+  migrating recognized commands to `CALL`. Non-superuser owners can repeat
+  start without `cron.alter_job` privileges; an inactive job may receive a new
+  ID when recreated. Cross-database managed-name collisions and visible
+  foreign-owner same-database jobs fail before changes. (#250)
 
 - **Partial aggregate sources disclose omitted raw observations.** When the
   best available minute rollup is stale and lacks newer completed raw grains
