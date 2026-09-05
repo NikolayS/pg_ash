@@ -494,6 +494,7 @@ run_cron_path() {
     "Verify pg_cron wiring" \
     "Test start/stop" \
     "Lifecycle ownership, job collisions and teardown atomicity" \
+    "Owner cron settings and column privileges" \
     "H-CI-3: end-to-end pg_cron fires ash.run_take_sample (#46)" \
     "Test all interval formats (issue #2)" \
     "Test #61: status() works for non-superuser without cron.job access"
