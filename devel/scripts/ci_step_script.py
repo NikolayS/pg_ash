@@ -240,7 +240,8 @@ def _deindent_literal_block(
     if not nonblank_indents:
         return ""
 
-    content_indent = min(nonblank_indents)
+    # YAML infers literal indentation from its first non-empty line.
+    content_indent = nonblank_indents[0]
     if content_indent <= parent_indent:
         raise WorkflowError(
             f"line {run_line}: run block content must be indented more than "

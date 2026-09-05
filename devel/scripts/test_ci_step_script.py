@@ -290,6 +290,24 @@ jobs:
         with self.assertRaisesRegex(ci_step_script.WorkflowError, "content resumes"):
             self.parse(text)
 
+    def test_noncomment_below_content_indent_is_rejected(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Bad content indent\n"
+            "        run: |\n          echo one\n         echo two\n"
+        )
+        with self.assertRaisesRegex(
+            ci_step_script.WorkflowError, "line 7: inconsistent indentation"
+        ):
+            self.parse(text)
+
+    def test_deeper_shell_content_keeps_its_indentation(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Shell indentation\n"
+            "        run: |\n          if true; then\n"
+            "            echo one\n          fi\n"
+        )
+        self.assertEqual(self.parse(text)[0].run, "if true; then\n  echo one\nfi\n")
+
     def test_current_workflow_integration(self) -> None:
         steps = ci_step_script.parse_workflow(ci_step_script.DEFAULT_WORKFLOW)
         names = [step.name for step in steps]
