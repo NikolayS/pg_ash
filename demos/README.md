@@ -95,6 +95,36 @@ Measured wall-clock on an M-series MacBook against a local PostgreSQL 18.3:
 `seed` 22 s, `stills` 23 s, `demo` 155 s (75 s of that is the recording itself,
 which runs in real time by construction), `all` about 3 minutes, `check` 1 s.
 
+### Workload timing and an empty baseline
+
+The defaults are starting points for shaping a real workload. Over TCP to a
+VM or container, short read queries can spend most sampling instants idle,
+even after the readiness probe has seen an active backend. A zero-sample
+minute fails the seed rather than fabricating activity. Check `ash.status()`
+for enabled sampling, a supported interval, and skipped/missed/error counters.
+If collection is healthy, increase the real range-query work per request.
+This profile passed the full capture and shape checks from macOS to Docker
+Postgres 18.4:
+
+```bash
+ASH_BACKEND=docker \
+ASH_READ_SPAN_CALM=50000 ASH_READ_SPAN_TAIL=50000 \
+make -C demos all
+```
+
+These knobs change the workload, not stored backend counts or reader output.
+Hardware and transport still affect the result; all shape assertions remain
+required. The default 1,500-row calm query produced only 1 stored observation
+in a 20-tick probe on that setup, versus 15 with 50,000 rows. This is a demo
+reproduction profile, not an overhead benchmark or a universal sizing rule.
+
+The default `ASH_SPM=12` requests 12 ticks per **virtual** minute and sets the
+stored sampling weight to `60 / 12 = 5` seconds. Compressed mode pauses only
+0.04 real seconds between ticks before restamping the observations; the
+5-second weight is not its wall-clock collection cadence. `ASH_REAL_TIME=1`
+uses 5-second pauses and skips restamping. The LLM walkthrough under
+`examples/` separately uses real one-second sampling without compression.
+
 ### Prerequisites, honestly
 
 **Tier 1 — stills. This is the whole list.**
