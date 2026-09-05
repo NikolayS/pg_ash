@@ -36,20 +36,21 @@ Read this before you look at a single number.
 > `pg_stat_activity` over real pgbench backends. No reader output is edited.
 
 Concretely, the seeder runs a real workload, samples it with pg_ash's real
-sampler, and then rewrites `ash.sample.sample_ts` so that one real second of
-load is filed as one virtual minute of history. It never invents a row, never
+sampler, and then rewrites `ash.sample.sample_ts` to distribute each short
+batch of observations across one virtual minute of history. It never invents a row, never
 edits a backend count, and never touches the packed wait/query array. That is
 the whole of the liberty taken, and it lives in one `UPDATE` in
 `lib/seed.sql` (`ash_demo.restamp`).
 
-**Time compression: 1 real second = 1 virtual minute.** 28 minutes of history
-arrives in about 20 seconds. The exact ratio in force for a given run is
-recorded in `out/window.env` as `ASH_COMPRESSION`.
+**Compressed mode uses virtual-minute weighting, not a fixed clock ratio.**
+Elapsed time depends on sample execution and workload duration as well as the
+configured pauses. `out/window.env` records a descriptive `ASH_COMPRESSION`
+label; it is not a measured compression ratio.
 
-`ASH_REAL_TIME=1` turns compression off entirely: the seeder then samples at the
-declared interval in real wall-clock time and skips the restamp. It takes about
-28 minutes and the assets are indistinguishable, which is the point — the switch
-exists so that claim can be checked rather than believed.
+`ASH_REAL_TIME=1` skips restamping and uses the declared sampling interval as
+the real pause between calls, plus their execution time. The default run takes
+roughly 28 minutes. Its observed counts, waits, and rendered shape can differ
+from compressed mode; the workload is stochastic.
 
 The seeder also keeps only samples for its own database. pg_ash samples the
 whole cluster by design; on a developer machine that would quietly fold every
@@ -61,11 +62,11 @@ reproducible.
 ## pg_cron is not required — and this demo deliberately does not use it
 
 The harness drives `ash.take_sample()` itself, from an ordinary session. That is
-the **external scheduler** path, and it is the default here for two reasons:
-
-1. It is what pg_ash users on RDS, Cloud SQL, Supabase, AlloyDB and Neon
-   actually run, because those platforms do not give you pg_cron.
-2. It is the only path that works on an arbitrary CI runner.
+the **external scheduler** path. The harness uses it so reproduction does not
+depend on pg_cron being installed, configured, or permitted in the chosen
+database. Managed services may support pg_cron; availability depends on the
+provider, Postgres version, and configuration. Check those requirements when
+choosing the scheduler for your deployment.
 
 So the degraded no-cron mode is not a compromise in this harness — it is the
 mainline. `ash.status()` in the `status` scene says so on screen: the demo shows
@@ -94,6 +95,36 @@ make -C demos down       # remove only a database/container this run created
 Measured wall-clock on an M-series MacBook against a local PostgreSQL 18.3:
 `seed` 22 s, `stills` 23 s, `demo` 155 s (75 s of that is the recording itself,
 which runs in real time by construction), `all` about 3 minutes, `check` 1 s.
+
+### Workload timing and an empty baseline
+
+The defaults are starting points for shaping a real workload. Over TCP to a
+VM or container, short read queries can spend most sampling instants idle,
+even after the readiness probe has seen an active backend. A zero-sample
+minute fails the seed rather than fabricating activity. Check `ash.status()`
+for enabled sampling, a supported interval, and skipped/missed/error counters.
+If collection is healthy, increase the real range-query work per request.
+This profile passed the full capture and shape checks from macOS to Docker
+Postgres 18.4:
+
+```bash
+ASH_BACKEND=docker \
+ASH_READ_SPAN_CALM=50000 ASH_READ_SPAN_TAIL=50000 \
+make -C demos all
+```
+
+These knobs change the workload, not stored backend counts or reader output.
+Hardware and transport still affect the result; all shape assertions remain
+required. The default 1,500-row calm query produced only 1 stored observation
+in a 20-tick probe on that setup, versus 15 with 50,000 rows. This is a demo
+reproduction profile, not an overhead benchmark or a universal sizing rule.
+
+The default `ASH_SPM=12` requests 12 ticks per **virtual** minute and sets the
+stored sampling weight to `60 / 12 = 5` seconds. Compressed mode pauses only
+0.04 real seconds between ticks before restamping the observations; the
+5-second weight is not its wall-clock collection cadence. `ASH_REAL_TIME=1`
+uses 5-second pauses and skips restamping. The LLM walkthrough under
+`examples/` separately uses real one-second sampling without compression.
 
 ### Prerequisites, honestly
 
@@ -260,7 +291,7 @@ ASH_UNTIL='2026-07-26 23:00:00-07'
 ASH_STORM_SINCE='2026-07-26 22:44:00-07'
 ASH_STORM_UNTIL='2026-07-26 22:49:00-07'
 ASH_STORM_EVENT='Lock:transactionid'
-ASH_COMPRESSION='1 real second = 1 virtual minute'
+ASH_COMPRESSION='virtual-minute weighting; elapsed time varies'
 ...
 ```
 
