@@ -1,0 +1,164 @@
+Pager usage is off.
+Null display is "(null)".
+BEGIN
+SET
+SET
+Step 1: load, effective bounds, and stored observations
+period_start|period_end|source|effective_bucket|buckets_expected|buckets_with_data|avg_aas|peak_aas|p99_aas|backend_seconds
+2026-09-04 22:24:00+00|2026-09-04 22:26:00+00|rollup_1m|00:01:00|2|1|0.23|0.47|0.47|28.00
+(1 row)
+Step 2: wait events ranked by peak AAS
+key|query_text|source|period_start|period_end|effective_bucket|avg_aas|peak_aas|p99_aas|backend_seconds|pct
+Lock:tuple|(null)|rollup_1m|2026-09-04 22:24:00+00|2026-09-04 22:26:00+00|00:01:00|0.12|0.23|0.23|14.00|50.00
+Lock:transactionid|(null)|rollup_1m|2026-09-04 22:24:00+00|2026-09-04 22:26:00+00|00:01:00|0.06|0.12|0.12|7.00|25.00
+Timeout:PgSleep|(null)|rollup_1m|2026-09-04 22:24:00+00|2026-09-04 22:26:00+00|00:01:00|0.06|0.12|0.12|7.00|25.00
+(3 rows)
+Step 3: locate the selected event in time
+bucket_start|source|data_points|avg_aas|peak_aas|p99_aas
+2026-09-04 22:24:00+00|rollup_1m|0|(null)|(null)|(null)
+2026-09-04 22:25:00+00|rollup_1m|1|0.23|0.23|0.23
+(2 rows)
+Step 4: queries experiencing the selected wait
+key|query_text|source|period_start|period_end|effective_bucket|avg_aas|peak_aas|p99_aas|backend_seconds|pct
+547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2|raw|2026-09-04 22:25:00+00|2026-09-04 22:26:00+00|00:01:00|0.23|0.23|0.23|14.00|100.00
+(1 row)
+Step 5: raw samples and the selected query wait profile
+sample_time|database_name|active_backends|wait_event|query_id|query_text
+2026-09-04 22:25:07+00|postgres|4|Lock:transactionid|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:07+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:07+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:06+00|postgres|4|Lock:transactionid|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:06+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:06+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:05+00|postgres|4|Lock:transactionid|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:05+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:05+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:04+00|postgres|4|Lock:transactionid|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:04+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:04+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:03+00|postgres|4|Lock:transactionid|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:03+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:03+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:02+00|postgres|4|Lock:transactionid|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:02+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:02+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:01+00|postgres|4|Lock:transactionid|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+2026-09-04 22:25:01+00|postgres|4|Lock:tuple|547209963972766369|update public.pgash_llm_demo_orders set status = $1 where id = $2
+(20 rows)
+key|query_text|source|period_start|period_end|effective_bucket|avg_aas|peak_aas|p99_aas|backend_seconds|pct
+Lock:tuple|(null)|raw|2026-09-04 22:25:00+00|2026-09-04 22:26:00+00|00:01:00|0.23|0.23|0.23|14.00|66.67
+Lock:transactionid|(null)|raw|2026-09-04 22:25:00+00|2026-09-04 22:26:00+00|00:01:00|0.12|0.12|0.12|7.00|33.33
+(2 rows)
+Optional report: NULL means no usable minute-rollup observations.
+jsonb_pretty
+{
+    "aas_avg": {
+        "io": 0.00,
+        "cpu": 0.00,
+        "ipc": 0.00,
+        "lock": 0.35,
+        "total": 0.35,
+        "lwlock": 0.00
+    },
+    "aas_p99": {
+        "io": 0.00,
+        "cpu": 0.00,
+        "ipc": 0.00,
+        "lock": 0.35,
+        "total": 0.35,
+        "lwlock": 0.00
+    },
+    "aas_p999": {
+        "io": 0.00,
+        "cpu": 0.00,
+        "ipc": 0.00,
+        "lock": 0.35,
+        "total": 0.35,
+        "lwlock": 0.00
+    },
+    "coverage": {
+        "to": "2026-09-04T22:26:00+00:00",
+        "from": "2026-09-04T22:24:00+00:00",
+        "source": "rollup_1m",
+        "minutes_expected": 2,
+        "minutes_with_data": 1,
+        "raw_retention_start": "2026-09-03T22:22:00+00:00"
+    },
+    "aas_worst1m": {
+        "io": 0.00,
+        "cpu": 0.00,
+        "ipc": 0.00,
+        "lock": 0.35,
+        "total": 0.35,
+        "lwlock": 0.00
+    },
+    "top_events_p99": {
+        "io": [
+        ],
+        "ipc": [
+        ],
+        "lock": [
+            "tuple(0.2)",
+            "transactionid(0.1)"
+        ],
+        "lwlock": [
+        ]
+    },
+    "top_events_p999": {
+        "io": [
+        ],
+        "ipc": [
+        ],
+        "lock": [
+            "tuple(0.2)",
+            "transactionid(0.1)"
+        ],
+        "lwlock": [
+        ]
+    },
+    "top_queryids_p99": {
+        "lock": [
+            "547209963972766369(0.4)"
+        ],
+        "total": [
+            "547209963972766369(0.4)"
+        ]
+    },
+    "top_queryids_p999": {
+        "lock": [
+            "547209963972766369(0.4)"
+        ],
+        "total": [
+            "547209963972766369(0.4)"
+        ]
+    },
+    "top_events_worst1m": {
+        "io": [
+        ],
+        "ipc": [
+        ],
+        "lock": [
+            "tuple(0.2)",
+            "transactionid(0.1)"
+        ],
+        "lwlock": [
+        ]
+    },
+    "top_queryids_worst1m": {
+        "io": [
+        ],
+        "ipc": [
+        ],
+        "lock": [
+            "547209963972766369(0.4)"
+        ],
+        "total": [
+            "547209963972766369(0.4)"
+        ],
+        "lwlock": [
+        ]
+    },
+    "top_queryids_available": true
+}
+(1 row)
+ROLLBACK
