@@ -111,6 +111,7 @@ create temp table b3_start_result (
   job_id bigint,
   status text
 ) on commit drop;
+truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
 update ash.config
 set sample_interval = interval '7 seconds',
     sampling_enabled = false
@@ -125,8 +126,8 @@ declare
   v_cron_available boolean := ash._pg_cron_available();
 begin
   assert (select sample_interval from ash.config where singleton)
-    = interval '1 second',
-    'B3 precondition: ash.start() default did not replace 7 seconds';
+    = interval '7 seconds',
+    'B3 precondition: ash.start() default did not preserve 7 seconds';
   assert (select sampling_enabled from ash.config where singleton),
     'B3 precondition: ash.start() default did not enable sampling';
 
@@ -148,7 +149,7 @@ begin
     ), 'B3 ash.start() cron result was not successful';
     assert v_sampler_status in (
       'created',
-      'already exists — schedule updated to 1 seconds'
+      'already exists — schedule updated to 7 seconds; command re-synced'
     ), 'B3 ash.start() sampler status mismatch: '
       || v_sampler_status;
   else
@@ -159,7 +160,7 @@ begin
       select array_agg(status order by result_order)
       from b3_start_result
     ) = array[
-      'interval set to 00:00:01 — schedule externally '
+      'interval set to 00:00:07 — schedule externally '
         '(pg_cron not available)',
       (
         select format(

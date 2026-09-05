@@ -48,13 +48,27 @@ def _without_eol(line: str) -> str:
 
 def _indent(line: str, *, line_number: int) -> int | None:
     """Return structural indentation, ignoring blank and comment-only lines."""
+    indentation = _block_scalar_indent(line, line_number=line_number)
+    if line.lstrip().startswith("#"):
+        return None
+    return indentation
+
+
+def _block_scalar_indent(line: str, *, line_number: int) -> int | None:
+    """Indentation for block-scalar termination; None only for blank lines.
+
+    Unlike :func:`_indent`, a comment line reports its real indentation. Inside
+    a literal block a ``#`` line indented at or beyond the content is ordinary
+    content (a shell comment). The literal-block reader uses the first content
+    line to recognize a later dedented YAML comment as a block terminator.
+    """
     text = _without_eol(line)
     leading = text[: len(text) - len(text.lstrip(" \t"))]
     if "\t" in leading:
         raise WorkflowError(
             f"line {line_number}: tabs are not valid YAML indentation"
         )
-    if not text.strip() or text.lstrip().startswith("#"):
+    if not text.strip():
         return None
     return len(leading)
 
@@ -191,9 +205,28 @@ def _deindent_literal_block(
     run_line: int,
 ) -> str:
     block_end = end
+    first_content_indent = None
     for idx in range(start, end):
-        indentation = _indent(lines[idx], line_number=idx + 1)
-        if indentation is not None and indentation <= parent_indent:
+        indentation = _block_scalar_indent(lines[idx], line_number=idx + 1)
+        if indentation is None:
+            continue
+        if indentation <= parent_indent:
+            block_end = idx
+            break
+        if first_content_indent is None:
+            first_content_indent = indentation
+        elif (indentation < first_content_indent
+              and lines[idx].lstrip().startswith("#")):
+            for later in range(idx + 1, end):
+                later_indent = _block_scalar_indent(lines[later], line_number=later + 1)
+                if later_indent is None or lines[later].lstrip().startswith("#"):
+                    continue
+                if later_indent <= parent_indent:
+                    break
+                raise WorkflowError(
+                    f"line {later + 1}: content resumes after a dedented comment "
+                    f"terminated the run block at line {run_line}"
+                )
             block_end = idx
             break
 
@@ -207,7 +240,8 @@ def _deindent_literal_block(
     if not nonblank_indents:
         return ""
 
-    content_indent = min(nonblank_indents)
+    # YAML infers literal indentation from its first non-empty line.
+    content_indent = nonblank_indents[0]
     if content_indent <= parent_indent:
         raise WorkflowError(
             f"line {run_line}: run block content must be indented more than "

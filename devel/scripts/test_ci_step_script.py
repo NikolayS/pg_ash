@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -154,6 +156,160 @@ class WorkflowParserTests(unittest.TestCase):
             b"second\0echo done\n\0",
         )
 
+    # ---- issue #243: a dedented comment must end a run block ----
+
+    # The workflow is fine; the parser was not. Before the fix the reader
+    # skipped comment lines when looking for the end of a `run: |` block, so a
+    # comment at job indentation was swallowed as block content, dragged the
+    # computed content indentation down to its own, and raised. Any step that
+    # is the last one in its job trips this the moment another job follows.
+    DEDENTED_COMMENT = """\
+jobs:
+  test:
+    steps:
+      - name: Last step
+        run: |
+          echo hi
+%s
+  other-job:
+    runs-on: ubuntu-latest
+"""
+
+    def test_dedented_comment_terminates_run_block(self) -> None:
+        text = self.DEDENTED_COMMENT % (
+            "  # One stable check name for the branch ruleset."
+        )
+        steps = self.parse(text)
+        self.assertEqual([step.name for step in steps], ["Last step"])
+        # Exact body: the comment must not leak in, and nothing may be trimmed.
+        self.assertEqual(steps[0].run, "echo hi\n")
+
+    def test_dedented_comment_and_no_comment_agree(self) -> None:
+        """The comment is the only difference, so the body must be identical."""
+        with_comment = self.parse(self.DEDENTED_COMMENT % "  # trailing note")
+        without_comment = self.parse(self.DEDENTED_COMMENT % "")
+        self.assertEqual(
+            [step.run for step in with_comment],
+            [step.run for step in without_comment],
+        )
+
+    def test_comment_indented_into_the_block_stays_content(self) -> None:
+        """A shell comment inside `run: |` is content, not a terminator.
+
+        This is the over-correction guard: terminating on any comment at all
+        would silently truncate most real steps in this repository.
+        """
+        text = """\
+jobs:
+  test:
+    steps:
+      - name: Shell comments
+        run: |
+          # explain the next line
+          echo hi
+            # deeper still
+          echo bye
+
+  other-job:
+    runs-on: ubuntu-latest
+"""
+        steps = self.parse(text)
+        self.assertEqual(
+            steps[0].run,
+            "# explain the next line\necho hi\n  # deeper still\necho bye\n",
+        )
+
+    def test_blank_lines_inside_a_block_are_preserved(self) -> None:
+        text = """\
+jobs:
+  test:
+    steps:
+      - name: Blanks
+        run: |
+          echo one
+
+          echo two
+  # dedented comment right after a blank-containing block
+  other-job:
+    runs-on: ubuntu-latest
+"""
+        steps = self.parse(text)
+        self.assertEqual(steps[0].run, "echo one\n\necho two\n")
+
+    def test_under_indented_content_is_not_newly_tolerated(self) -> None:
+        """Characterization: the fix must not loosen anything for content.
+
+        Note on issue #243's wording. It asks that "a genuinely under-indented
+        content line still raises". Measured against the pre-fix parser, it
+        never did: a non-comment line at or below the block's parent
+        indentation has always simply ended the scalar, and the
+        `content_indent <= parent_indent` guard was only ever reachable through
+        the comment path -- which is the bug itself. Rather than invent a new
+        error to satisfy the wording, this pins the pre-existing behaviour so a
+        later change cannot quietly relax it: the block ends at the dedented
+        line and that line's text never becomes part of the body.
+        """
+        text = """\
+jobs:
+  test:
+    steps:
+      - name: Bad indent
+        run: |
+          echo one
+      echo two
+  other-job:
+    runs-on: ubuntu-latest
+"""
+        steps = self.parse(text)
+        self.assertEqual(steps[0].run, "echo one\n")
+        self.assertNotIn("echo two", steps[0].run or "")
+
+    def test_tabs_are_still_rejected_when_ending_a_block(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Tabbed\n"
+            "        run: |\n          echo hi\n\t# tabbed comment\n"
+        )
+        with self.assertRaises(ci_step_script.WorkflowError) as caught:
+            self.parse(text)
+        self.assertIn("tabs are not valid YAML indentation", str(caught.exception))
+
+    def test_comment_below_content_indent_ends_literal_block(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Comment boundary\n"
+            "        run: |\n          echo one\n"
+            "         # YAML comment below the content indentation\n"
+            "  other-job:\n    runs-on: ubuntu-latest\n"
+        )
+        steps = self.parse(text)
+        self.assertEqual(steps[0].run, "echo one\n")
+
+    def test_content_after_intermediate_comment_fails_loudly(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Bad boundary\n"
+            "        run: |\n          echo one\n"
+            "         # terminates scalar\n          echo two\n"
+        )
+        with self.assertRaisesRegex(ci_step_script.WorkflowError, "content resumes"):
+            self.parse(text)
+
+    def test_noncomment_below_content_indent_is_rejected(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Bad content indent\n"
+            "        run: |\n          echo one\n         echo two\n"
+        )
+        with self.assertRaisesRegex(
+            ci_step_script.WorkflowError, "line 7: inconsistent indentation"
+        ):
+            self.parse(text)
+
+    def test_deeper_shell_content_keeps_its_indentation(self) -> None:
+        text = (
+            "jobs:\n  test:\n    steps:\n      - name: Shell indentation\n"
+            "        run: |\n          if true; then\n"
+            "            echo one\n          fi\n"
+        )
+        self.assertEqual(self.parse(text)[0].run, "if true; then\n  echo one\nfi\n")
+
     def test_current_workflow_integration(self) -> None:
         steps = ci_step_script.parse_workflow(ci_step_script.DEFAULT_WORKFLOW)
         names = [step.name for step in steps]
@@ -168,6 +324,66 @@ class WorkflowParserTests(unittest.TestCase):
         self.assertIsNotNone(selected.run)
         self.assertTrue((selected.run or "").startswith("psql -h localhost"))
         self.assertIn("Schema and infrastructure tests PASSED", selected.run or "")
+
+
+class CapturedOutputAssertionsTests(unittest.TestCase):
+    """Exercise the actual cronless shell assertions with output above pipe capacity."""
+
+    required = [
+        "pg_cron is not available in this database.",
+        "current_setting('cron.database_name', true) = postgres names this database",
+        "current_setting('cron.database_name', true) is not set; configure pg_cron",
+        "current_setting('cron.database_name', true) = cron_control; install pg_ash in that database",
+        '\"call ash.run_take_sample()\" (for per-second, use a loop)',
+        r"CALL ash.run_take_sample() \watch 1",
+        'execute "CALL ash.run_take_sample()" in a loop',
+        "Also schedule CALL ash.run_rotate() at the rotation_period",
+        "Schedule rollup: CALL ash.run_rollup_minute() every minute",
+    ]
+    forbidden = [
+        "install pg_ash in (not set)",
+        "pg_cron is not installed",
+        '\"select ash.take_sample()\"',
+    ]
+
+    def check_output(self, lines: list[str]) -> subprocess.CompletedProcess[str]:
+        step = ci_step_script.select_named(
+            ci_step_script.parse_workflow(ci_step_script.DEFAULT_WORKFLOW),
+            ["Degraded mode: without pg_cron"],
+        )[0]
+        body = step.run or ""
+        start = body.index('printf \'%s\\n\' "$cronless_out"')
+        end = body.index("\ncleanup_cronless_workload", start)
+        # Long irrelevant diagnostics after matches trigger early-reader SIGPIPE
+        # with the former printf | grep -q checks on Linux and macOS.
+        output = "\n".join(lines) + "\n" + "diagnostic detail\n" * 131072
+        return subprocess.run(
+            [os.environ.get("BASH", "bash"), "-e", "-o", "pipefail", "-c",
+             'CRON=off; cronless_out="$(cat)"\n' + body[start:end]],
+            input=output, text=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, timeout=15, check=False,
+        )
+
+    def test_large_output_with_all_required_text_passes(self) -> None:
+        result = self.check_output(self.required)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_each_missing_required_text_fails_with_large_output(self) -> None:
+        for missing in self.required:
+            with self.subTest(missing=missing):
+                result = self.check_output([s for s in self.required if s != missing])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("FAIL:", result.stderr)
+
+    def test_each_forbidden_text_fails_with_large_output(self) -> None:
+        messages = ["recommended an impossible pg_ash target",
+                    "emitted the old cluster-wide pg_cron claim",
+                    "still recommends the SELECT sampler form"]
+        for forbidden, message in zip(self.forbidden, messages):
+            with self.subTest(forbidden=forbidden):
+                result = self.check_output([forbidden] + self.required)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":
