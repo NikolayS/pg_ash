@@ -1,5 +1,11 @@
 # pg_ash 2.0 release-candidate preparation plan
 
+> Historical audit snapshot from 2026-09-04. The findings and pending-work
+> statements below describe the original review, not the current candidate.
+> Current execution status and exact-commit evidence are maintained in
+> [tracker #248](https://github.com/NikolayS/pg_ash/issues/248) and
+> [integration PR #256](https://github.com/NikolayS/pg_ash/pull/256).
+
 Audit date: 2026-09-04. Target: **`v2.0-rc1`**, with payload version
 **`2.0-rc1`**. Status: **not ready to stamp or tag**.
 

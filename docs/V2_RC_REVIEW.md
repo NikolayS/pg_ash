@@ -1,5 +1,11 @@
 # v2 RC preparation: review evidence, 2026-09-04
 
+> Historical audit snapshot from 2026-09-04. The findings and pending-work
+> statements below describe the original review, not the current candidate.
+> Current execution status and exact-commit evidence are maintained in
+> [tracker #248](https://github.com/NikolayS/pg_ash/issues/248) and
+> [integration PR #256](https://github.com/NikolayS/pg_ash/pull/256).
+
 Verdict: **do not stamp or tag yet**. The [finalization plan](V2_RC_PLAN.md)
 describes how to reach `v2.0-rc1`. This record separates completed review and
 tests from the integration and comprehensive release gate still required.
