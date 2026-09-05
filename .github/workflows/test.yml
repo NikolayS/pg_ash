@@ -400,6 +400,13 @@ jobs:
             -v "install_path=$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)" \
             -f devel/tests/cadence_legacy.sql
 
+      - name: "Owner cron settings and column privileges"
+        if: matrix.cron == 'on'
+        env:
+          CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          python3 devel/scripts/test_owner_cron_settings.py
+
       - name: "#224: optional unlogged raw sample ring"
         env:
           PGPASSWORD: postgres
