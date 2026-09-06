@@ -346,6 +346,7 @@ select ash.report(
 | `top_queryids_available` | Whether at least one extreme-minute attribution key is available; independent of pg_stat_statements |
 | `coverage` | Effective `from`, `to`, `source`, `minutes_expected`, `minutes_with_data`, and `raw_retention_start` |
 | `vcpus` | Optional caller-supplied core count, echoed unchanged; no scoring is performed |
+| `cluster_name` | Included when the Postgres `cluster_name` setting is nonempty; echoed unchanged |
 
 Class maxima can occur at different times. They are not a decomposition of the
 total peak and must not be added together. Parenthesized event/query AAS
