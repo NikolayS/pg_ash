@@ -405,8 +405,11 @@ Explicit `start()` reactivates local managed jobs and migrates recognized
 commands to `CALL`, while preserving custom command strings. An ordinary
 schema owner can repeat start and reactivate jobs without `cron.alter_job`
 privileges; reactivating an inactive job may allocate a new job ID. The pg_cron
-administrator must configure working scheduler connection defaults. Managed
-names owned by the same role but targeting another database cause an error
+administrator must configure working scheduler connection defaults. The three
+rollup jobs are recreated on each `start()`: their custom commands survive,
+but per-job connection settings do not. They use scheduler defaults with the
+permitted socket adjustment; do not rely on a custom rollup endpoint surviving
+`start()`. Managed names owned by the same role but targeting another database cause an error
 before changes. Visible managed jobs owned by another role in this database
 also block start/teardown; resolve that ownership conflict deliberately before
 retrying.
