@@ -13,8 +13,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-if ((BASH_VERSINFO[0] < 4)); then
-  echo 'release_gate: Bash 4+ is required; on macOS use Homebrew bash.' >&2
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  echo 'release_gate: Bash 4.4+ is required; on macOS use Homebrew bash.' >&2
   exit 2
 fi
 
