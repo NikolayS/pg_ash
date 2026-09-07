@@ -210,13 +210,12 @@ def _deindent_literal_block(
         indentation = _block_scalar_indent(lines[idx], line_number=idx + 1)
         if indentation is None:
             continue
-        if indentation <= parent_indent:
-            block_end = idx
-            break
-        if first_content_indent is None:
-            first_content_indent = indentation
-        elif (indentation < first_content_indent
-              and lines[idx].lstrip().startswith("#")):
+        is_comment = lines[idx].lstrip().startswith("#")
+        if is_comment and (
+            indentation <= parent_indent
+            or (first_content_indent is not None
+                and indentation < first_content_indent)
+        ):
             for later in range(idx + 1, end):
                 later_indent = _block_scalar_indent(lines[later], line_number=later + 1)
                 if later_indent is None or lines[later].lstrip().startswith("#"):
@@ -229,6 +228,11 @@ def _deindent_literal_block(
                 )
             block_end = idx
             break
+        if indentation <= parent_indent:
+            block_end = idx
+            break
+        if first_content_indent is None:
+            first_content_indent = indentation
 
     block_lines = list(lines[start:block_end])
     nonblank_indents = [

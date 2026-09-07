@@ -184,6 +184,21 @@ jobs:
         # Exact body: the comment must not leak in, and nothing may be trimmed.
         self.assertEqual(steps[0].run, "echo hi\n")
 
+    def test_content_after_dedented_comment_fails_at_every_indent(self) -> None:
+        for indent in range(10):
+            with self.subTest(indent=indent):
+                text = (
+                    "jobs:\n  test:\n    steps:\n"
+                    "      - name: Must not truncate\n        run: |\n"
+                    "          echo before\n"
+                    + " " * indent + "# YAML comment\n\n"
+                    + "# another comment\n          exit 99\n"
+                )
+                with self.assertRaisesRegex(
+                    ci_step_script.WorkflowError, "content resumes"
+                ):
+                    self.parse(text)
+
     def test_dedented_comment_and_no_comment_agree(self) -> None:
         """The comment is the only difference, so the body must be identical."""
         with_comment = self.parse(self.DEDENTED_COMMENT % "  # trailing note")
