@@ -17,6 +17,9 @@ declare
   v_expected jsonb;
   v_actual jsonb;
   v_report jsonb;
+  v_aas record;
+  v_compare record;
+  v_count bigint;
 begin
   insert into ash.rollup_1m (
     ts, datid, samples, peak_backends, wait_counts, query_counts
@@ -66,6 +69,41 @@ begin
             v_reader, v_bounds, v_expected, v_actual);
       end loop;
     end loop;
+  end loop;
+
+  -- The epoch conversion clamps extreme dates; keep the clamped seconds
+  -- minute-aligned too, rather than producing a zero-span post-horizon read.
+  truncate ash.rollup_1m;
+  for v_bounds in
+    select * from (values
+      ('1000-01-01'::timestamptz, '1000-01-02'::timestamptz),
+      ('3000-01-01'::timestamptz, '3000-01-02'::timestamptz)
+    ) as bounds(since, until)
+  loop
+    select * into v_aas from ash.aas(v_bounds.since, v_bounds.until);
+    assert v_aas.source = 'none' and v_aas.avg_aas = 0
+      and v_aas.backend_seconds = 0 and v_aas.buckets_with_data = 0
+      and v_aas.period_end > v_aas.period_start,
+      format('extreme-date aas must stay empty with positive span: %s', v_aas);
+    select count(*) into v_count
+    from ash.timeline(v_bounds.since, v_bounds.until) as t
+    where t.data_points <> 0;
+    assert v_count = 0, 'extreme-date timeline must have no observed data';
+    select count(*) into v_count
+    from ash.top('wait_event_type', v_bounds.since, v_bounds.until);
+    assert v_count = 0, 'extreme-date top must be empty';
+    select count(*) into v_count
+    from ash.chart(v_bounds.since, v_bounds.until);
+    assert v_count = 0, 'extreme-date chart must be empty';
+    select * into v_compare from ash.compare(
+      v_bounds.since, v_bounds.until, v_bounds.since, v_bounds.until);
+    assert v_compare.avg_aas_1 is null and v_compare.avg_aas_2 is null
+      and v_compare.avg_delta is null,
+      'extreme-date compare must preserve uncovered NULL semantics';
+    select count(*) into v_count from ash.compare(
+      v_bounds.since, v_bounds.until, v_bounds.since, v_bounds.until,
+      'wait_event_type');
+    assert v_count = 0, 'extreme-date dimensional compare must be empty';
   end loop;
   raise notice 'reader fractional bounds PASSED';
 end $$;
