@@ -3266,6 +3266,7 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          python3 devel/scripts/test_lifecycle_cleanup.py
           bash devel/scripts/test_lifecycle_atomicity.sh
 
       - name: "Test all interval formats (issue #2)"
