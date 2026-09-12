@@ -2,6 +2,18 @@
 
 Use the exact candidate commit recorded in [RC PR #262](https://github.com/NikolayS/pg_ash/pull/262). This is a prerelease preparation branch; no RC tag or main merge has occurred. The complete stamped-commit test pass and remaining samorev reviews are tracked there and in [#248](https://github.com/NikolayS/pg_ash/issues/248). Final v2.0 publication requires explicit owner approval.
 
+## Staged review fixes
+
+[PR #267](https://github.com/NikolayS/pg_ash/pull/267) stages additional
+review fixes in `devel/sql/ash-install.sql`. Until a reviewed release-stamp
+promotion copies them to `sql/`, the public installer below does **not** contain
+those fixes and installer parity is not expected on the repair branch.
+For fresh development testing, use `devel/sql/ash-install.sql`; for development
+upgrade paths, use the discovery-based commands in [RELEASE_PROCESS](RELEASE_PROCESS.md).
+Do not treat the unchanged `2.0-rc1` version string as proof of source identity:
+record the exact commit and installer hash. Repeat release verification after
+promotion; the earlier public-installer results do not certify these changes.
+
 ## Install and upgrade rehearsal
 
 Use a disposable Postgres instance (not merely a quiet database); pg_ash samples activity from every database. PostgreSQL 14–18 and 19 beta 3 are the test targets; beta coverage is not a PostgreSQL 19 GA support claim.
