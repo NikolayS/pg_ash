@@ -3764,6 +3764,8 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/reader_api_behavioral.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/reader_fractional_bounds.sql
 
       - name: "Test 2.0: report totals and formatting edges"
         env:
