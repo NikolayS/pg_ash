@@ -327,7 +327,15 @@ select * from ash.chart(since => now() - interval '1 hour', color => true) :colo
 
 ## Machine report
 
-`ash.report()` returns one JSONB payload for monitoring and incident analysis:
+`ash.report()` returns one JSONB payload for monitoring and incident analysis.
+It floors both requested endpoints to minute boundaries. Equal or same-minute
+bounds expand to one minute (capped at the integer timestamp horizon). The
+effective interval is half-open: `[coverage.from, coverage.to)`. For example,
+`10:00:20` through `10:01:20` reads `[10:00:00, 10:01:00)`; equal bounds at
+`10:00:20` read that same minute. Use the returned coverage bounds when
+reconciling results, not the original fractional endpoints.
+
+Example:
 
 ```sql
 select ash.report(
