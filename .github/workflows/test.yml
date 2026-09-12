@@ -40,6 +40,7 @@ jobs:
       - name: Test CI step extractor
         run: |
           python3 devel/scripts/test_ci_step_script.py -v
+          python3 devel/scripts/test_partial_rollup_checker.py -v
 
       - name: Test mandatory-job and demo guards
         run: |
@@ -3266,6 +3267,7 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          python3 devel/scripts/test_lifecycle_cleanup.py
           bash devel/scripts/test_lifecycle_atomicity.sh
 
       - name: "Test all interval formats (issue #2)"
@@ -3762,6 +3764,8 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/reader_api_behavioral.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/reader_fractional_bounds.sql
 
       - name: "Test 2.0: report totals and formatting edges"
         env:

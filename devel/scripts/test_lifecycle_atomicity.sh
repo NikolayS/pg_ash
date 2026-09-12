@@ -15,6 +15,7 @@ psql_base=(
 locker_application="pg_ash_issue_203_lock_holder"
 locker_shell_pid=""
 locker_backend_pid=""
+other_superuser_created=false
 
 stop_locker() {
   local shell_pid="${locker_shell_pid}"
@@ -42,11 +43,14 @@ cleanup_issue_203() {
 
   trap - EXIT INT TERM
   stop_locker
-  "${psql_base[@]}" --quiet >/dev/null 2>&1 <<'SQL' || true
+  if [[ "${other_superuser_created}" == true ]]; then
+    "${psql_base[@]}" --quiet >/dev/null 2>&1 <<'SQL' || true
 select cron.unschedule(jobid) from cron.job
-where username = 'ash_issue_203_other_superuser';
+where username = 'ash_issue_203_other_superuser'
+  and database = current_database();
 drop role if exists ash_issue_203_other_superuser;
 SQL
+  fi
   exit "${exit_code}"
 }
 
@@ -425,7 +429,14 @@ begin
 end;
 $$;
 
-create role ash_issue_203_other_superuser superuser;
+EOF
+
+# Arm role cleanup only after this invocation successfully creates the fixture.
+# A pre-existing role (or an earlier failure) must retain its jobs and identity.
+"${psql_base[@]}" --command="create role ash_issue_203_other_superuser superuser;"
+other_superuser_created=true
+
+"${psql_base[@]}" <<'EOF'
 set role ash_issue_203_other_superuser;
 
 do $$
@@ -566,6 +577,7 @@ select cron.unschedule('ash_rollup_1m');
 reset role;
 drop role ash_issue_203_other_superuser;
 EOF
+other_superuser_created=false
 
 trap - EXIT INT TERM
 

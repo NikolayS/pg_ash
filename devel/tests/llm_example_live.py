@@ -10,6 +10,7 @@ import argparse
 import pathlib
 import subprocess
 import time
+import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PSQL = ["psql", "-X", "-v", "ON_ERROR_STOP=1"]
@@ -46,6 +47,9 @@ def main() -> None:
             "Query attribution is disabled: use compute_query_id=on for the "
             "workload sessions (for example PGOPTIONS='-c compute_query_id=on')."
         )
+    fixture_id = uuid.uuid4().hex
+    blocker_app = f'pgash_llm_blocker_{fixture_id}'
+    waiter_app = f'pgash_llm_waiter_{fixture_id}'
     processes = []
     created_fixture = False
     try:
@@ -57,22 +61,22 @@ def main() -> None:
         created_fixture = True
         sql("select * from ash.start('1 second')")
         blocker = subprocess.Popen(
-            PSQL + ["-qAt", "-c", "set application_name = 'pgash_llm_blocker'; "
+            PSQL + ["-qAt", "-c", f"set application_name = '{blocker_app}'; "
                     "begin; update public.pgash_llm_demo_orders "
                     "set status = 'processing' where id = 1; "
                     "select pg_sleep(3600); commit"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         processes.append(blocker)
-        wait_for_count("pgash_llm_blocker", 1)
+        wait_for_count(blocker_app, 1)
         for _ in range(3):
             processes.append(subprocess.Popen(
-                PSQL + ["-qAt", "-c", "set application_name = 'pgash_llm_waiter'; "
+                PSQL + ["-qAt", "-c", f"set application_name = '{waiter_app}'; "
                         "update public.pgash_llm_demo_orders "
                         "set status = 'shipped' where id = 1"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             ))
-        wait_for_count("pgash_llm_waiter", 3)
+        wait_for_count(waiter_app, 3)
         deadline = time.monotonic()
         for _ in range(7):
             time.sleep(max(0, deadline - time.monotonic()))
@@ -81,7 +85,8 @@ def main() -> None:
         # Release the blocker explicitly after the final sample. Its long
         # sleep is a bounded fallback, not a deadline racing CI startup.
         sql("select pg_cancel_backend(pid) from pg_stat_activity "
-            "where application_name = 'pgash_llm_blocker'")
+            f"where application_name = '{blocker_app}' "
+            "and datname = current_database() and usename = current_user")
         _, blocker_stderr = blocker.communicate(timeout=5)
         assert blocker.returncode != 0 and "canceling statement" in blocker_stderr
         for process in processes[1:]:
@@ -125,9 +130,18 @@ def main() -> None:
             args.output.write_text(result.stdout)
         print(f"LLM example PASSED (pg_stat_statements={pgss}); window {bounds}")
     finally:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
+        try:
+            if processes:
+                # Terminating psql alone can leave its server transaction
+                # holding the fixture lock until pg_sleep finishes. Release
+                # only this invocation's tagged sessions before dropping it.
+                sql("select pg_terminate_backend(pid) from pg_stat_activity "
+                    "where datname = current_database() and usename = current_user "
+                    f"and application_name in ('{blocker_app}', '{waiter_app}')")
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
                 process.communicate(timeout=5)
         if created_fixture:
             sql("drop table public.pgash_llm_demo_orders")

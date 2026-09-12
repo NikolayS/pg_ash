@@ -127,7 +127,7 @@ The current PG19 test image is `postgres:19beta3`, matching the
 [PostgreSQL beta information](https://www.postgresql.org/developer/beta/)
 verified on 2026-09-04. Update the hosted matrix and local gate defaults together.
 
-The Docker release runner requires Bash 4+ (Homebrew Bash on macOS). It
+The Docker release runner requires Bash 4.4+ (Homebrew Bash on macOS). It
 rejects the system Bash 3.2 before creating resources, and parallel workers
 reuse the invoking Bash executable.
 
