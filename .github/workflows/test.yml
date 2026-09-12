@@ -40,6 +40,7 @@ jobs:
       - name: Test CI step extractor
         run: |
           python3 devel/scripts/test_ci_step_script.py -v
+          python3 devel/scripts/test_partial_rollup_checker.py -v
 
       - name: Test mandatory-job and demo guards
         run: |

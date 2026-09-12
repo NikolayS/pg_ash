@@ -27,6 +27,7 @@ select count(*) from ash.periods(:'until');
 \echo partial-reader-chart
 select count(*) from ash.chart(:'since', :'until');
 
+\echo partial-source-value-check
 do $$
 declare
   v_since timestamptz := date_trunc('minute', now()) - interval '2 hours';
