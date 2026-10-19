@@ -5553,6 +5553,7 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_datid oid;
+  v_slots smallint[];
 begin
   if database is not null then
     select db.oid into v_datid from pg_database as db
@@ -5563,13 +5564,13 @@ begin
   end if;
 
   if source = 'raw' then
+    v_slots := ash._active_slots_for_at(
+      ash.ts_to_timestamptz(start_ts), ash.ts_to_timestamptz(end_ts));
     return query
     with mins as (
       select distinct (sample_row.sample_ts / 60) * 60 as mts
       from ash.sample as sample_row
-      where sample_row.slot = any(ash._active_slots_for_at(
-                       ash.ts_to_timestamptz(start_ts),
-                       ash.ts_to_timestamptz(end_ts)))
+      where sample_row.slot = any(v_slots)
         and sample_row.sample_ts >= start_ts
         and sample_row.sample_ts < end_ts
         and (v_datid is null or sample_row.datid = v_datid)
@@ -5585,9 +5586,7 @@ begin
       cross join lateral generate_series(
         0, greatest(sample_row.data[data_idx + 1] - 1, -1)
       ) as backend(n)
-      where sample_row.slot = any(ash._active_slots_for_at(
-                       ash.ts_to_timestamptz(start_ts),
-                       ash.ts_to_timestamptz(end_ts)))
+      where sample_row.slot = any(v_slots)
         and sample_row.sample_ts >= start_ts
         and sample_row.sample_ts < end_ts
         and sample_row.data[data_idx] < 0
@@ -6292,6 +6291,7 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_datid oid;
+  v_slots smallint[];
   v_tbl text;
   v_disp constant text :=
     '(case when event_map.event = event_map.type then event_map.event '
@@ -6311,6 +6311,8 @@ begin
   end if;
 
   if source = 'raw' then
+    v_slots := ash._active_slots_for_at(
+      ash.ts_to_timestamptz(start_ts), ash.ts_to_timestamptz(end_ts));
     return query
     with expanded as (
       select (sample_row.sample_ts / 60) * 60 as mts,
@@ -6323,9 +6325,7 @@ begin
       cross join lateral generate_series(
         0, greatest(sample_row.data[data_idx + 1] - 1, -1)
       ) as backend(n)
-      where sample_row.slot = any(ash._active_slots_for_at(
-                       ash.ts_to_timestamptz(start_ts),
-                       ash.ts_to_timestamptz(end_ts)))
+      where sample_row.slot = any(v_slots)
         and sample_row.sample_ts >= start_ts
         and sample_row.sample_ts < end_ts
         and sample_row.data[data_idx] < 0
