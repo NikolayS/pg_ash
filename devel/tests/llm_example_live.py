@@ -131,20 +131,25 @@ def main() -> None:
         print(f"LLM example PASSED (pg_stat_statements={pgss}); window {bounds}")
     finally:
         try:
-            if processes:
-                # Terminating psql alone can leave its server transaction
-                # holding the fixture lock until pg_sleep finishes. Release
-                # only this invocation's tagged sessions before dropping it.
-                sql("select pg_terminate_backend(pid) from pg_stat_activity "
-                    "where datname = current_database() and usename = current_user "
-                    f"and application_name in ('{blocker_app}', '{waiter_app}')")
+            try:
+                if processes:
+                    # Wait for only this invocation's tagged backends to exit;
+                    # terminating psql alone can leave server locks behind.
+                    sql("select pg_terminate_backend(pid, 5000) from pg_stat_activity "
+                        "where datname = current_database() and usename = current_user "
+                        f"and application_name in ('{blocker_app}', '{waiter_app}')")
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
         finally:
-            for process in processes:
-                if process.poll() is None:
-                    process.terminate()
-                process.communicate(timeout=5)
-        if created_fixture:
-            sql("drop table public.pgash_llm_demo_orders")
+            if created_fixture:
+                sql("drop table public.pgash_llm_demo_orders")
 
 
 if __name__ == "__main__":

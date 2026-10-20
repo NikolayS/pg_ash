@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Live failure cleanup regression; needs an owned disposable pg_ash database."""
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -12,8 +13,21 @@ import llm_example_live as example
 class CleanupTests(unittest.TestCase):
     def test_failed_readiness_releases_server_transactions(self):
         original = example.wait_for_count
-        for failure_at in (1, 3):
-            with self.subTest(failure_at=failure_at):
+        communicate = subprocess.Popen.communicate
+        for failure_at, inject_timeout in ((1, False), (3, False), (1, True)):
+            with self.subTest(failure_at=failure_at, inject_timeout=inject_timeout):
+                timed_out = False
+
+                def communicate_with_timeout(process, *args, **kwargs):
+                    nonlocal timed_out
+                    if inject_timeout and not timed_out and any(
+                        str(arg).startswith("set application_name = 'pgash_llm_blocker_")
+                        for arg in process.args
+                    ):
+                        timed_out = True
+                        raise subprocess.TimeoutExpired(process.args, 5)
+                    return communicate(process, *args, **kwargs)
+
                 def fail_after_ready(application, expected):
                     original(application, expected)
                     if expected == failure_at:
@@ -25,9 +39,11 @@ class CleanupTests(unittest.TestCase):
                 start = time.monotonic()
                 with patch.dict(os.environ, PGOPTIONS=options), \
                         patch.object(sys, 'argv', ['llm_example_live.py']), \
+                        patch.object(subprocess.Popen, 'communicate', communicate_with_timeout), \
                         patch.object(example, 'wait_for_count', fail_after_ready):
                     with self.assertRaisesRegex(RuntimeError, 'injected readiness failure'):
                         example.main()
+                self.assertEqual(timed_out, inject_timeout)
                 elapsed = time.monotonic() - start
                 self.assertEqual(example.sql(
                     "select count(*) from pg_stat_activity "
