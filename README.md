@@ -31,13 +31,19 @@ Use pg_ash when you need:
 - a tool that can run on RDS, Cloud SQL, AlloyDB, Supabase, Neon, and similar
   managed platforms
 
+## RC upgrade safety
+
+Test upgrades on a disposable instance first. Keep a verified backup before upgrading.
+There is no supported SQL downgrade.
+Restore the verified pre-upgrade backup to a separate database or instance with the previous application/API version.
+Do not use `ash.uninstall()` as an upgrade rollback; it removes collected data.
+The [archived RC1 rehearsal procedure](https://github.com/NikolayS/pg_ash/blob/v2.0-rc1/docs/RC1_TEST_GUIDE.md) includes scheduler-isolation and restore checks.
+
 ## Quick start
 
 This checkout contains the `2.0-rc1` release-candidate SQL in `sql/`.
 The matching `devel/sql/ash-install.sql` is a byte-identical baseline for the
 next development cycle. See [the release process](docs/RELEASE_PROCESS.md).
-For install, upgrade, and recovery rehearsals on a disposable instance, use
-[the RC1 owner test guide](docs/RC1_TEST_GUIDE.md).
 
 Neither pg_cron nor pg_stat_statements is required. The example below uses
 pg_cron if available; otherwise configure [external scheduling](#scheduling).

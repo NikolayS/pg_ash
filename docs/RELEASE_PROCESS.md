@@ -148,7 +148,7 @@ it is the published release payload.
 ## Release stamp
 
 Do not start a release-stamp PR until the development candidate has passed the
-entire comprehensive release gate in `AGENTS.md`. The stamp is the mechanical
+entire comprehensive release gate in `CLAUDE.md`. The stamp is the mechanical
 promotion and identity step after that clean result, not a substitute for it.
 
 Right before tagging any prerelease or final release, use a release-stamp PR to
