@@ -31,6 +31,12 @@ Use pg_ash when you need:
 - a tool that can run on RDS, Cloud SQL, AlloyDB, Supabase, Neon, and similar
   managed platforms
 
+## RC upgrade safety
+
+Test upgrades on a disposable instance first. Keep a verified backup before upgrading.
+There is no supported SQL downgrade. Restore the pre-upgrade backup to roll back.
+Do not use `ash.uninstall()` as an upgrade rollback; it removes collected data.
+
 ## Quick start
 
 This checkout contains the `2.0-rc1` release-candidate SQL in `sql/`.
