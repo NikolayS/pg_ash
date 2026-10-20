@@ -3,6 +3,7 @@
 -- Real minute-rollup readers must floor timestamps before int4 rounding.
 -- Keep neighboring minutes distinct so shifted windows change the results.
 begin;
+set local time zone 'UTC';
 truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
 update ash.config set sample_interval = interval '1 second' where singleton;
 
@@ -35,6 +36,15 @@ begin
   v_report := ash.report(v_from, v_until);
   assert (v_report #>> '{aas_avg,total}')::numeric = 1.5;
   assert (v_report #>> '{coverage,minutes_expected}')::int = 2;
+
+  -- UTC grain boundaries must not shift under a second-resolution offset.
+  set local time zone interval '30 seconds';
+  select * into v_aas from ash.aas(
+    v_from + interval '20 seconds', v_until + interval '20 seconds');
+  assert v_aas.backend_seconds = 180 and v_aas.avg_aas = 1.5
+    and v_aas.period_start = v_from and v_aas.period_end = v_until,
+    format('session time zone shifted UTC reader bounds: %s', v_aas);
+  set local time zone 'UTC';
 
   -- Below the rounding boundary, at the boundary, and just before rollover.
   foreach v_offset in array array[

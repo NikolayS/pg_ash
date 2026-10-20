@@ -5810,8 +5810,8 @@ begin
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
   -- Floor before rounding, then align again after the int4 horizon clamp.
-  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from)) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to)) / 60) * 60;
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   /*
    * overflow-safe empty/degenerate-window guard (#63): never let
    * v_start_ts + 60 wrap past INT4_MAX near the 2094 epoch horizon.
@@ -6031,8 +6031,8 @@ begin
       'ash.timeline: since must be less than or equal to until';
   end if;
 
-  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from)) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to)) / 60) * 60;
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
@@ -6677,8 +6677,8 @@ begin
   end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
-  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from)) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to)) / 60) * 60;
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
@@ -7122,13 +7122,13 @@ begin
    * while a wait/query breakdown over that same physical source is hourly.
    */
   v_requested_bucket_secs := extract(epoch from bucket);
-  v_start1 := (ash.ts_from_timestamptz(date_trunc('minute', v_from1)) / 60) * 60;
-  v_end1 := (ash.ts_from_timestamptz(date_trunc('minute', v_to1)) / 60) * 60;
+  v_start1 := (ash.ts_from_timestamptz(date_trunc('minute', v_from1, 'UTC')) / 60) * 60;
+  v_end1 := (ash.ts_from_timestamptz(date_trunc('minute', v_to1, 'UTC')) / 60) * 60;
   if v_end1 <= v_start1 then
     v_end1 := least(v_start1::bigint + 60, 2147483647)::int4;
   end if;
-  v_start2 := (ash.ts_from_timestamptz(date_trunc('minute', v_from2)) / 60) * 60;
-  v_end2 := (ash.ts_from_timestamptz(date_trunc('minute', v_to2)) / 60) * 60;
+  v_start2 := (ash.ts_from_timestamptz(date_trunc('minute', v_from2, 'UTC')) / 60) * 60;
+  v_end2 := (ash.ts_from_timestamptz(date_trunc('minute', v_to2, 'UTC')) / 60) * 60;
   if v_end2 <= v_start2 then
     v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
   end if;
@@ -8083,8 +8083,8 @@ begin
   end if;
 
   width := least(greatest(width, 1), 500);
-  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from)) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to)) / 60) * 60;
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
