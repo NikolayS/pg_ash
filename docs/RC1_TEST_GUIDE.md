@@ -16,7 +16,7 @@ promotion; the earlier public-installer results do not certify these changes.
 
 ## Install and upgrade rehearsal
 
-Use a disposable Postgres instance (not merely a quiet database); pg_ash samples activity from every database. PostgreSQL 14–18 and 19 beta 3 are the test targets; beta coverage is not a PostgreSQL 19 GA support claim.
+Use a disposable Postgres instance (not merely a quiet database); pg_ash samples activity from every database. PostgreSQL 14–18 and 19 RC1 are the test targets; prerelease coverage is not a PostgreSQL 19 GA support claim.
 
 ```bash
 export PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres

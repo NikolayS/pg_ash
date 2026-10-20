@@ -35,7 +35,7 @@ evidence fail closed.
 selection. The stable check runs even after a dependency fails.
 
 It exists because the matrix contexts embed PostgreSQL versions — `test (14,
-on)`, `test (19beta3, on)` — and are renamed at every version bump. Requiring
+on)`, `test (19rc1, on)` — and are renamed at every version bump. Requiring
 those names directly means the ruleset silently stops covering a version the
 moment the matrix changes, or blocks every PR on a context that no longer
 exists. `ci-required` is one stable name that transitively covers the whole
@@ -123,9 +123,11 @@ failure. The independent size guard fails at 460,000 bytes, before the known
 512,000-byte workflow failure boundary. Keep large assertions in external
 SQL/shell files without reducing behavior coverage.
 
-The current PG19 test image is `postgres:19beta3`, matching the
+The current PG19 test image is `postgres:19rc1`, matching the
 [PostgreSQL beta information](https://www.postgresql.org/developer/beta/)
-verified on 2026-09-04. Update the hosted matrix and local gate defaults together.
+verified on 2026-10-20. The older beta3 server is ABI-incompatible with the
+current PGDG pg_cron package. Update the hosted matrix and local gate defaults
+together; prerelease coverage is not a PostgreSQL 19 GA support claim.
 
 The Docker release runner requires Bash 4.4+ (Homebrew Bash on macOS). It
 rejects the system Bash 3.2 before creating resources, and parallel workers
