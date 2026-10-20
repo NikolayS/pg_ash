@@ -17,6 +17,7 @@ class CleanupTests(unittest.TestCase):
         for failure_at, inject_timeout in ((1, False), (3, False), (1, True)):
             with self.subTest(failure_at=failure_at, inject_timeout=inject_timeout):
                 timed_out = False
+                cleanup_start = None
 
                 def communicate_with_timeout(process, *args, **kwargs):
                     nonlocal timed_out
@@ -29,14 +30,15 @@ class CleanupTests(unittest.TestCase):
                     return communicate(process, *args, **kwargs)
 
                 def fail_after_ready(application, expected):
+                    nonlocal cleanup_start
                     original(application, expected)
                     if expected == failure_at:
+                        cleanup_start = time.monotonic()
                         raise RuntimeError('injected readiness failure')
 
                 # Bound the broken implementation too: a disconnected client
                 # can leave pg_sleep holding a lock until this server timeout.
                 options = os.environ.get('PGOPTIONS', '') + ' -c statement_timeout=8000'
-                start = time.monotonic()
                 with patch.dict(os.environ, PGOPTIONS=options), \
                         patch.object(sys, 'argv', ['llm_example_live.py']), \
                         patch.object(subprocess.Popen, 'communicate', communicate_with_timeout), \
@@ -44,7 +46,8 @@ class CleanupTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'injected readiness failure'):
                         example.main()
                 self.assertEqual(timed_out, inject_timeout)
-                elapsed = time.monotonic() - start
+                self.assertIsNotNone(cleanup_start)
+                elapsed = time.monotonic() - cleanup_start
                 self.assertEqual(example.sql(
                     "select count(*) from pg_stat_activity "
                     "where datname=current_database() "
