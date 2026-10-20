@@ -2,8 +2,8 @@
 # Run the pg_ash release-gate surfaces against disposable Docker PostgreSQL.
 #
 # Usage:
-#   devel/scripts/release_gate.sh <14|15|16|17|18|19beta3> [surface|all]
-#   PG_MAJORS="14 15 16 17 18 19beta3" devel/scripts/release_gate.sh all
+#   devel/scripts/release_gate.sh <14|15|16|17|18|19rc1> [surface|all]
+#   PG_MAJORS="14 15 16 17 18 19rc1" devel/scripts/release_gate.sh all
 #
 # The GitHub Actions workflow remains the canonical source for the large
 # regression and upgrade assertion sets. ci_step_script.py selects its exact
@@ -13,8 +13,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-if ((BASH_VERSINFO[0] < 4)); then
-  echo 'release_gate: Bash 4+ is required; on macOS use Homebrew bash.' >&2
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  echo 'release_gate: Bash 4.4+ is required; on macOS use Homebrew bash.' >&2
   exit 2
 fi
 
@@ -25,13 +25,13 @@ readonly REPO_ROOT
 readonly DOCKERFILE="${REPO_ROOT}/devel/docker/Dockerfile"
 readonly CHAIN_HELPER="${SCRIPT_DIR}/ash_sql_chain.py"
 readonly CI_STEP_HELPER="${SCRIPT_DIR}/ci_step_script.py"
-readonly DEFAULT_MAJORS="14 15 16 17 18 19beta3"
+readonly DEFAULT_MAJORS="14 15 16 17 18 19rc1"
 readonly IMAGE_REPOSITORY="pg-ash-release-gate"
 readonly POSTGRES_USER="postgres"
 readonly POSTGRES_DATABASE="postgres"
 readonly POSTGRES_PASSWORD="pg_ash_release_gate"
 
-readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19beta3)
+readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19rc1)
 readonly -a SURFACES=(
   fresh-install
   upgrade-chain
@@ -63,7 +63,7 @@ Usage:
   devel/scripts/release_gate.sh all [surface|all]
 
 Supported majors:
-  14 15 16 17 18 19beta3
+  14 15 16 17 18 19rc1
 
 Supported surfaces:
   fresh-install

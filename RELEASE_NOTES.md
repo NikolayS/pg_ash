@@ -38,17 +38,21 @@ reader surface has been replaced by the AAS-oriented 2.0 API:
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
   `select ash.revoke_reader('pg_monitor');`.
-- **Postgres 19 beta support.** CI now covers Postgres 14 through 19, using the
-  official `postgres:19beta3` image for this release candidate.
+- **Postgres 19 prerelease testing.** CI covers Postgres 14–18 and 19 RC1.
+  This release candidate uses the official `postgres:19rc1` image.
+  Prerelease testing does not establish Postgres 19 GA support.
 - **Docs refreshed.** README examples now use the 2.0 named-argument API.
 
 ## Changes since 2.0 beta 1
 
 - A schema owner with `pg_monitor` can start libpq-backed pg_cron jobs without
-  write access to `cron.job`; connection defaults remain administrator-managed
-  when that permission is absent. Inactive sampler/rotation jobs receive the
-  same permitted socket adjustment as new jobs. Minute scheduling tolerates
-  pg_cron versions with named jobs but no optional `alter_job` API. (#260)
+  write access to `cron.job`. Without that permission, the administrator manages
+  connection defaults. Reactivation through `alter_job` preserves sampler and
+  rotation connection settings. Without `alter_job`, the fallback recreates
+  inactive sampler and rotation jobs with the same permitted socket adjustment
+  as new jobs.
+  Minute scheduling supports pg_cron versions with named jobs but no optional
+  `alter_job` API. (#260)
 
 - Lifecycle operations now require the exact `ash` schema owner, including
   when invoked by another superuser; use `SET ROLE` to the owner. Failed

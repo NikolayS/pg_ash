@@ -12,7 +12,8 @@ result = subprocess.run(
 print(result.stdout, end='')
 assert result.returncode == 0, 'partial-source SQL assertions failed'
 markers = [f'partial-reader-{reader}' for reader in ('aas', 'timeline', 'top', 'periods', 'chart')]
-markers += ['partial-source-null-watermark', 'partial-source-negative']
+markers += ['partial-source-value-check', 'partial-source-null-watermark',
+            'partial-source-negative']
 for marker, following in zip(markers, markers[1:]):
     section = result.stdout.split(marker + '\n', 1)[1].split(following + '\n', 1)[0]
     assert 'NOTICE:  01000: pg_ash partial source:' in section, f'{marker}: missing diagnostic'
