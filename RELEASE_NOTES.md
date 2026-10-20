@@ -45,6 +45,13 @@ reader surface has been replaced by the AAS-oriented 2.0 API:
 
 ## Changes since 2.0 beta 1
 
+- **Filtered raw readers avoid repeated slot selection.** Each helper selects retained slots once per call, rather than once per scanned row. (#269)
+  [Dedicated-fixture measurements](https://github.com/NikolayS/pg_ash/pull/267#issuecomment-6282719259) show 23x faster custom plans and 12x faster generic plans.
+  These results do not establish general production throughput.
+
+- **Aggregate boundaries use UTC minute floors.** Readers floor fractional endpoints before timestamp conversion.
+  Reports use the same UTC boundaries for retained raw-query attribution, including second-resolution session offsets. (#267)
+
 - A schema owner with `pg_monitor` can start libpq-backed pg_cron jobs without
   write access to `cron.job`. Without that permission, the administrator manages
   connection defaults. Reactivation through `alter_job` preserves sampler and

@@ -1,19 +1,25 @@
 # pg_ash 2.0 rc 1 owner test guide
 
-Use the exact candidate commit recorded in [RC PR #262](https://github.com/NikolayS/pg_ash/pull/262). This is a prerelease preparation branch; no RC tag or main merge has occurred. The complete stamped-commit test pass and remaining samorev reviews are tracked there and in [#248](https://github.com/NikolayS/pg_ash/issues/248). Final v2.0 publication requires explicit owner approval.
+Use the exact candidate SHA and validation evidence recorded in [stamp PR #272](https://github.com/NikolayS/pg_ash/pull/272).
+[PR #262](https://github.com/NikolayS/pg_ash/pull/262) preserves preparation history, not the final payload identity.
+The owner authorized RC1 publication from `release/2.0-rc1` after all gates pass.
+Final v2.0 publication requires separate owner approval.
 
-## Staged review fixes
+## Promoted review fixes
 
-[PR #267](https://github.com/NikolayS/pg_ash/pull/267) stages additional
-review fixes in `devel/sql/ash-install.sql`. The public installer below does
-**not** contain these fixes yet. A reviewed release-stamp promotion must copy
-them to `sql/`. The installer copies need not match on this repair branch.
+[PR #267](https://github.com/NikolayS/pg_ash/pull/267) contains the accepted review fixes.
+The accepted development source is `06b608abc4d93991c4fdae46a3cae37b7585f733`.
+Its [complete development gate](https://github.com/NikolayS/pg_ash/pull/262#issuecomment-6283155076) passed all 42 Docker cells, recovery checks, and demo reproduction.
 
-For fresh development testing, use `devel/sql/ash-install.sql`.
-For development upgrades, use the discovery commands in [RELEASE_PROCESS](RELEASE_PROCESS.md).
-The unchanged `2.0-rc1` version string does not prove source identity.
-Record the exact commit and installer hash. Repeat release verification after
-promotion. Earlier public-installer results do not certify these changes.
+This release stamp copies that exact installer into `sql/ash-install.sql`.
+The `devel/sql/ash-install.sql` baseline remains byte-identical.
+Both fresh installs and the existing cumulative migration now contain the reader fixes.
+Installer SHA256: `da1abdd506d2d37efdce58dc0e9df4c07dcb5311f344acf9e0c27bf5b22a4c06`.
+
+The version string alone does not prove source identity.
+Record the exact candidate commit and installer hash with test evidence.
+The stamp PR must pass the complete gate again before publication.
+The owner authorized `v2.0-rc1` from `release/2.0-rc1`; this does not merge main.
 
 ## Install and upgrade rehearsal
 
@@ -92,17 +98,21 @@ Run on the quiet disposable instance with pg_ash installed. The helper produces 
 
 Rebuild the demos using the demo README prerequisites. For the tested macOS-to-Docker profile, run `ASH_BACKEND=docker ASH_READ_SPAN_CALM=50000 ASH_READ_SPAN_TAIL=50000 make -C demos all`. Defaults may produce an empty baseline when short reads are mostly idle at sampling instants over TCP; inspect the new sampler-state/counter hint before tuning real workload spans. The demo seeder deliberately restamps real samples into virtual minutes; its 5-second weight comes from 12 ticks per virtual minute, while compressed pauses are 0.04 real seconds plus execution. Elapsed compression is variable; it is not evidence of an observed 28-minute incident or production overhead. The LLM helper above does not restamp observations. Review chart/top-event/top-query/periods/status/report PNGs and representative reel frames for readable labels, clipping, terminal glyphs and honest semantics. Do not hand-edit output or recordings.
 
-## Evidence and remaining release gates
+## Historical development evidence (superseded)
 
-The accepted development source `6dee7b8be4af99c80bfa398753360bd0e00e1515` passed all 42 Docker cells across PostgreSQL 14–18 and 19 beta 3, the real PG18 physical recovery suite, all eight screenshots and three reel frames, both real LLM variants, partial-warning export with the expected expired-attribution error, and the documented tuned demo profile. Its archive contains 682 files and verified live container/server/extension provenance for all 42 cells; SHA256 is `ddf72038d0ca80385010d34469fe3d0b0214deddfb628803d3373c2bec7a3641`.
+The historical development source `6dee7b8be4af99c80bfa398753360bd0e00e1515` passed all 42 Docker cells across PostgreSQL 14–18 and 19 beta 3, the real PG18 physical recovery suite, all eight screenshots and three reel frames, both real LLM variants, partial-warning export with the expected expired-attribution error, and the documented tuned demo profile. Its archive contains 682 files and verified live container/server/extension provenance for all 42 cells; SHA256 is `ddf72038d0ca80385010d34469fe3d0b0214deddfb628803d3373c2bec7a3641`.
 
-That development pass does not certify a subsequent stamped commit. [PR #262](https://github.com/NikolayS/pg_ash/pull/262) records the exact stamped SHA, repeated 42-cell/manual results, required hosted checks and pre-tag workflow-dispatch rehearsal. The dispatch must use `release_tag=v2.0-rc1`; it creates no tag. A later owner-approved main merge still requires the exact-main gate and dispatch before any RC-only tag/publication.
+## Current release gates
 
-Preserve each model review report with its source SHA. Track current review status
-in the pending-scope ledger linked from the RC PR. A successful reviewer
-connection or health probe does not prove a passing review or complete source
-coverage. Do not merge or tag while the review gate remains unresolved.
-Resolve each concrete finding in the ledger. Repeat full exact-commit
-verification before certification.
+The historical pass above does not certify the latest review fixes or the final stamp.
+[PR #262](https://github.com/NikolayS/pg_ash/pull/262) records historical preparation results only.
+[Stamp PR #272](https://github.com/NikolayS/pg_ash/pull/272) must record its exact SHA, complete repeated gate, hosted checks, and pre-tag dispatch.
+Use `release_tag=v2.0-rc1` for that dispatch; it creates no tag.
+The current authorization publishes RC1 from the release branch, not from main.
 
-The owner packet includes the checksummed archive, manifests, real output artifacts, original default-demo failure diagnosis, commands/controllers and the review ledger. Bulk logs remain outside source history. This functional evidence does not establish production overhead, full heartbeat coverage, exact coarse-cadence extrema, or complete raw/rollup source composition.
+Preserve each review report and its source SHA in [stamp PR #272](https://github.com/NikolayS/pg_ash/pull/272).
+A successful model connection does not prove a passing review or complete source coverage.
+Do not merge or tag while the exact candidate has unresolved review findings.
+Resolve each concrete finding in that PR. Repeat full exact-commit verification before certification.
+
+The historical owner packet includes the checksummed archive, manifests, real output artifacts, original default-demo failure diagnosis, commands/controllers and the review ledger. Bulk logs remain outside source history. This functional evidence does not establish production overhead, full heartbeat coverage, exact coarse-cadence extrema, or complete raw/rollup source composition.
