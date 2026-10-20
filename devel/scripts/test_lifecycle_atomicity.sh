@@ -141,7 +141,11 @@ if [[ ! "${locker_backend_pid}" =~ ^[0-9]+$ ]]; then
 fi
 
 "${psql_base[@]}" <<'EOF'
-set lock_timeout = '500ms';
+begin;
+-- Keep cron workers from taking the config row between expected job-lock
+-- failures. Otherwise start() can time out before reaching the locked job.
+select singleton from ash.config where singleton for update;
+set local lock_timeout = '500ms';
 
 do $$
 declare
@@ -330,7 +334,7 @@ begin
 end;
 $$;
 
-reset lock_timeout;
+commit;
 EOF
 
 stop_locker
