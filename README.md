@@ -34,8 +34,10 @@ Use pg_ash when you need:
 ## RC upgrade safety
 
 Test upgrades on a disposable instance first. Keep a verified backup before upgrading.
-There is no supported SQL downgrade. Restore the pre-upgrade backup to roll back.
+There is no supported SQL downgrade.
+Restore the verified pre-upgrade backup to a separate database or instance with the previous application/API version.
 Do not use `ash.uninstall()` as an upgrade rollback; it removes collected data.
+The [archived RC1 rehearsal procedure](https://github.com/NikolayS/pg_ash/blob/v2.0-rc1/docs/RC1_TEST_GUIDE.md) includes scheduler-isolation and restore checks.
 
 ## Quick start
 
