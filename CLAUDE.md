@@ -1,4 +1,4 @@
-# AGENTS.md
+# CLAUDE.md
 
 ## Engineering Standards
 
