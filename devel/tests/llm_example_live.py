@@ -84,9 +84,10 @@ def main() -> None:
             deadline += 1
         # Release the blocker explicitly after the final sample. Its long
         # sleep is a bounded fallback, not a deadline racing CI startup.
-        sql("select pg_cancel_backend(pid) from pg_stat_activity "
+        # Signal as the login user, even when PGOPTIONS sets another role.
+        sql("set role none; select pg_cancel_backend(pid) from pg_stat_activity "
             f"where application_name = '{blocker_app}' "
-            "and datname = current_database() and usename = current_user")
+            "and datname = current_database() and usename = session_user")
         _, blocker_stderr = blocker.communicate(timeout=5)
         assert blocker.returncode != 0 and "canceling statement" in blocker_stderr
         for process in processes[1:]:
@@ -135,8 +136,9 @@ def main() -> None:
                 if processes:
                     # Wait for only this invocation's tagged backends to exit;
                     # terminating psql alone can leave server locks behind.
-                    sql("select pg_terminate_backend(pid, 5000) from pg_stat_activity "
-                        "where datname = current_database() and usename = current_user "
+                    sql("set role none; "
+                        "select pg_terminate_backend(pid, 5000) from pg_stat_activity "
+                        "where datname = current_database() and usename = session_user "
                         f"and application_name in ('{blocker_app}', '{waiter_app}')")
             finally:
                 for process in processes:
