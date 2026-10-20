@@ -105,16 +105,14 @@ The historical development source `6dee7b8be4af99c80bfa398753360bd0e00e1515` pas
 ## Current release gates
 
 The historical pass above does not certify the latest review fixes or the final stamp.
-[PR #262](https://github.com/NikolayS/pg_ash/pull/262) records historical results and the current release evidence.
+[PR #262](https://github.com/NikolayS/pg_ash/pull/262) records historical preparation results only.
 [Stamp PR #272](https://github.com/NikolayS/pg_ash/pull/272) must record its exact SHA, complete repeated gate, hosted checks, and pre-tag dispatch.
 Use `release_tag=v2.0-rc1` for that dispatch; it creates no tag.
 The current authorization publishes RC1 from the release branch, not from main.
 
-Preserve each model review report with its source SHA. Track current review status
-in the pending-scope ledger linked from the RC PR. A successful reviewer
-connection or health probe does not prove a passing review or complete source
-coverage. Do not merge or tag while the review gate remains unresolved.
-Resolve each concrete finding in the ledger. Repeat full exact-commit
-verification before certification.
+Preserve each review report and its source SHA in [stamp PR #272](https://github.com/NikolayS/pg_ash/pull/272).
+A successful model connection does not prove a passing review or complete source coverage.
+Do not merge or tag while the exact candidate has unresolved review findings.
+Resolve each concrete finding in that PR. Repeat full exact-commit verification before certification.
 
-The owner packet includes the checksummed archive, manifests, real output artifacts, original default-demo failure diagnosis, commands/controllers and the review ledger. Bulk logs remain outside source history. This functional evidence does not establish production overhead, full heartbeat coverage, exact coarse-cadence extrema, or complete raw/rollup source composition.
+The historical owner packet includes the checksummed archive, manifests, real output artifacts, original default-demo failure diagnosis, commands/controllers and the review ledger. Bulk logs remain outside source history. This functional evidence does not establish production overhead, full heartbeat coverage, exact coarse-cadence extrema, or complete raw/rollup source composition.
