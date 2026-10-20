@@ -5,18 +5,21 @@ Use the exact candidate commit recorded in [RC PR #262](https://github.com/Nikol
 ## Staged review fixes
 
 [PR #267](https://github.com/NikolayS/pg_ash/pull/267) stages additional
-review fixes in `devel/sql/ash-install.sql`. Until a reviewed release-stamp
-promotion copies them to `sql/`, the public installer below does **not** contain
-those fixes and installer parity is not expected on the repair branch.
-For fresh development testing, use `devel/sql/ash-install.sql`; for development
-upgrade paths, use the discovery-based commands in [RELEASE_PROCESS](RELEASE_PROCESS.md).
-Do not treat the unchanged `2.0-rc1` version string as proof of source identity:
-record the exact commit and installer hash. Repeat release verification after
-promotion; the earlier public-installer results do not certify these changes.
+review fixes in `devel/sql/ash-install.sql`. The public installer below does
+**not** contain these fixes yet. A reviewed release-stamp promotion must copy
+them to `sql/`. The installer copies need not match on this repair branch.
+
+For fresh development testing, use `devel/sql/ash-install.sql`.
+For development upgrades, use the discovery commands in [RELEASE_PROCESS](RELEASE_PROCESS.md).
+The unchanged `2.0-rc1` version string does not prove source identity.
+Record the exact commit and installer hash. Repeat release verification after
+promotion. Earlier public-installer results do not certify these changes.
 
 ## Install and upgrade rehearsal
 
-Use a disposable Postgres instance (not merely a quiet database); pg_ash samples activity from every database. PostgreSQL 14–18 and 19 RC1 are the test targets; prerelease coverage is not a PostgreSQL 19 GA support claim.
+Use a disposable Postgres instance, not merely a quiet database.
+pg_ash samples activity from every database. The test targets are Postgres 14–18
+and 19 RC1. Prerelease testing does not establish Postgres 19 GA support.
 
 ```bash
 export PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres
@@ -95,6 +98,11 @@ The accepted development source `6dee7b8be4af99c80bfa398753360bd0e00e1515` passe
 
 That development pass does not certify a subsequent stamped commit. [PR #262](https://github.com/NikolayS/pg_ash/pull/262) records the exact stamped SHA, repeated 42-cell/manual results, required hosted checks and pre-tag workflow-dispatch rehearsal. The dispatch must use `release_tag=v2.0-rc1`; it creates no tag. A later owner-approved main merge still requires the exact-main gate and dispatch before any RC-only tag/publication.
 
-All model review reports are preserved with their source SHA. Track the current status of each exact-source review in the pending-scope ledger linked from the RC PR. A successful reviewer connection or health probe is not a passing review and does not establish complete source coverage. No merge/tag is authorized while the review gate remains unresolved. Review the pending-scope ledger linked from the RC PR, resolve each concrete finding, and repeat full exact-commit verification before certification.
+Preserve each model review report with its source SHA. Track current review status
+in the pending-scope ledger linked from the RC PR. A successful reviewer
+connection or health probe does not prove a passing review or complete source
+coverage. Do not merge or tag while the review gate remains unresolved.
+Resolve each concrete finding in the ledger. Repeat full exact-commit
+verification before certification.
 
 The owner packet includes the checksummed archive, manifests, real output artifacts, original default-demo failure diagnosis, commands/controllers and the review ledger. Bulk logs remain outside source history. This functional evidence does not establish production overhead, full heartbeat coverage, exact coarse-cadence extrema, or complete raw/rollup source composition.

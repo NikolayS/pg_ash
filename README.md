@@ -328,12 +328,14 @@ select * from ash.chart(since => now() - interval '1 hour', color => true) :colo
 ## Machine report
 
 `ash.report()` returns one JSONB payload for monitoring and incident analysis.
-Inverted requested bounds raise an error. Otherwise, it floors both endpoints
-to minute boundaries. Equal or ordered same-minute bounds expand to one minute (capped at the integer timestamp horizon). The
-effective interval is half-open: `[coverage.from, coverage.to)`. For example,
-`10:00:20` through `10:01:20` reads `[10:00:00, 10:01:00)`; equal bounds at
-`10:00:20` read that same minute. Use the returned coverage bounds when
-reconciling results, not the original fractional endpoints.
+The function rejects inverted bounds. Otherwise, it rounds both endpoints down
+to UTC minute boundaries. Equal or ordered same-minute bounds expand to one
+minute, unless the integer timestamp limit prevents this.
+
+The effective interval is half-open: `[coverage.from, coverage.to)`.
+For example, `10:00:20` through `10:01:20` reads `[10:00:00, 10:01:00)`.
+Equal bounds at `10:00:20` read that same minute.
+Use the returned coverage bounds to compare results, not the original fractional endpoints.
 
 Example:
 
@@ -413,12 +415,12 @@ Explicit `start()` reactivates local managed jobs and migrates recognized
 commands to `CALL`, while preserving custom command strings. An ordinary
 schema owner can repeat start and reactivate jobs without `cron.alter_job`
 privileges; reactivating an inactive job may allocate a new job ID. The pg_cron
-administrator must configure working scheduler connection defaults. The three
-rollup jobs are recreated on each `start()`: their custom commands survive,
-but per-job connection settings do not. They use scheduler defaults with the
-permitted socket adjustment; do not rely on a custom rollup endpoint surviving
-`start()`. Managed names owned by the same role but targeting another database cause an error
-before changes. Visible managed jobs owned by another role in this database
+administrator must configure working scheduler connection defaults.
+Each `start()` recreates the three rollup jobs. It preserves their custom
+commands, but replaces their per-job connection settings with scheduler defaults
+and the permitted socket adjustment. Do not rely on custom rollup endpoints
+after `start()`. Managed names owned by the same role but targeting another
+database cause an error before changes. Visible managed jobs owned by another role in this database
 also block start/teardown; resolve that ownership conflict deliberately before
 retrying.
 

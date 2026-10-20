@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Engineering Standards
 
@@ -6,12 +6,21 @@ Follow the rules at https://gitlab.com/postgres-ai/rules/-/tree/main/rules — a
 
 SQL style guide: https://gitlab.com/postgres-ai/rules/-/blob/main/rules/development__db-sql-style-guide.mdc
 
+### Language
+
+At least 80% of sentences must follow ASD-STE100 Simplified Technical English.
+Apply this to changed docs, comments, help text, reports, and PR descriptions.
+Use at most 20 words per procedural sentence and 25 per descriptive sentence.
+Use active voice, simple words, consistent terms, and one instruction per sentence.
+Keep technical names and meaning exact. Preserve quoted text and logs.
+Review changed prose against `writing__simplified-technical-english.mdc`; avoid unrelated rewrites.
+
 ## Deployment
 
 CI via GitHub Actions:
 
 - **test.yml**: runs on pushes, PRs, and manual pre-tag dispatches — tests
-  across PostgreSQL 14, 15, 16, 17, 18, 19 beta
+  across Postgres 14, 15, 16, 17, 18, and 19 RC1
 - Tests: fresh development install, discovered full upgrade chain up to the in-progress release, schema equivalence between fresh install and upgrade chain, idempotent re-apply of discovered re-apply-safe upgrade scripts, degraded mode (no pgss/pg_cron)
 - Version schema: `vMAJOR.MINOR` (e.g. `v1.3`). Tag on main after all PRs merged.
 

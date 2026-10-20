@@ -72,9 +72,10 @@ the same candidate: `origin/main` can still contain the preceding beta payload.
 `shasum -a 256 sql/ash-install.sql devel/sql/ash-install.sql` in a clean
 candidate checkout is equivalent and easier to quote in a PR description.
 
-That same-commit check proves only that the recreated development baseline is
-identical to the promoted installer. Separately verify promotion provenance
-against the exact development commit that passed review and the full gate:
+This check proves that both installer copies match in the same commit.
+It does not prove that they match the accepted source.
+Compare the promoted installer with the exact development commit that passed
+review and the full gate:
 
 ```bash
 # Set reviewed_sha to the full accepted development commit SHA, not a moving ref.
@@ -82,11 +83,10 @@ git diff "${reviewed_sha}:devel/sql/ash-install.sql" HEAD:sql/ash-install.sql
 ```
 
 Only the reviewed release-identity header and version stamps should differ.
-Any executable difference needs review and testing; two identical copies at
-HEAD do not prove that the promoted implementation was previously accepted.
-Record the full reviewed and candidate SHAs with both comparisons. Do not use
-`origin/main` as a substitute for the accepted development SHA: the reviewed
-feature branch may not be merged yet, and the branch tip can move.
+Review any executable difference. Test it before acceptance.
+Record the full reviewed and candidate SHAs with both comparisons.
+Do not substitute `origin/main` for the accepted development SHA.
+The reviewed feature branch may still await merge, and branch tips can move.
 
 All post-release SQL changes must be made in `devel/sql/`, not in released files
 under `sql/`. After a prerelease of the current line, its released cumulative
@@ -148,7 +148,7 @@ it is the published release payload.
 ## Release stamp
 
 Do not start a release-stamp PR until the development candidate has passed the
-entire comprehensive release gate in `CLAUDE.md`. The stamp is the mechanical
+entire comprehensive release gate in `AGENTS.md`. The stamp is the mechanical
 promotion and identity step after that clean result, not a substitute for it.
 
 Right before tagging any prerelease or final release, use a release-stamp PR to
