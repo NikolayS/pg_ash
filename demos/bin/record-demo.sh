@@ -491,12 +491,12 @@ fg     = sgr(t['ui']['fg'])
 inner  = cols - 2
 body = [
     ("", fg),
-    ("  pg_ash 2.0  —  Active Session History for PostgreSQL", accent),
+    ("  pg_ash  —  Active Session History for Postgres", accent),
     ("", fg),
-    ("  Pure SQL. No extension, no restart.", fg),
-    ("  Installs with \\i on RDS, Cloud SQL, Supabase, AlloyDB and Neon.", fg),
+    ("  The spike is gone. What was Postgres waiting for?", fg),
+    ("  Find the window. Rank waits. Identify affected statements.", fg),
     ("", fg),
-    ("  Something spiked a few minutes ago. Let's find out what.", dim),
+    ("  Real samples. Compressed timeline. No edited query results.", dim),
     ("", fg),
 ]
 out = [accent + '╭' + '─' * inner + '╮' + RESET]
@@ -557,15 +557,14 @@ fi
 drv_hold 1.6
 
 # --- the investigation ------------------------------------------------------
-# One \echo of narration, then the scene. The narration is what turns six
-# query results into a story: triage -> locate -> which wait -> which query ->
-# is this actually abnormal.
+# One \echo of narration, then the scene. The narration turns four
+# query results into an investigation: locate -> wait -> query -> baseline.
 NARRATION_status='-- Q0: is pg_ash collecting? no pg_cron here, so: external scheduler'
 NARRATION_periods='-- Q1: triage. how much history is there, and is this a spike?'
-NARRATION_chart='-- Q2: when did it land, and which wait class? (24-bit colour)'
-NARRATION_top_event='-- Q3: the exact wait event during the spike'
-NARRATION_top_query='-- Q4: which statement is stuck on it?'
-NARRATION_compare='-- Q5: incident vs the calm baseline. is this really abnormal?'
+NARRATION_chart='-- 1. The incident ended. Find the spike in the stored history.'
+NARRATION_top_event='-- 2. Lock waits dominate this incident window.'
+NARRATION_top_query='-- 3. These statements experienced the selected lock wait.'
+NARRATION_compare='-- 4. Compare the incident with a calm baseline.'
 
 while IFS=$'\t' read -r name hold title markers sql; do
   [ -n "$name" ] || continue
@@ -586,8 +585,8 @@ while IFS=$'\t' read -r name hold title markers sql; do
 done < "$REEL_TSV"
 
 # --- closing lines ----------------------------------------------------------
-drv_note '-- Root cause: concurrent UPDATEs contending on one row.' 1.6
-drv_note '-- pg_ash: pure SQL, no extension, no restart. Works everywhere.' 3.4
+drv_note '-- Evidence: lock contention. The waiting query does not identify its blocker.' 2.0
+drv_note '-- Next: inspect transaction scope. Reproduce a change with the lock lab.' 3.0
 
 prev="$(drv_title)"
 drv_type '\q'

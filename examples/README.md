@@ -78,3 +78,98 @@ The test takes about 10–75 seconds because it waits for an actual minute
 boundary. Its synthetic counterpart, `devel/tests/report_contract.sql`, tests
 required report keys and exact semantic relationships inside a transaction
 that rolls back all fixture changes. Required-key checks accept additive keys.
+
+<a id="beforeafter-lock-lab"></a>
+
+## Hands-on lab: investigate, shorten the transaction, verify
+
+Run [lock-lab.py](lock-lab.py) on a quiet, disposable server with Python 3.10+ and `psql`.
+This low-load lab uses one row, one lock holder, and three waiting updates.
+It does not require `pg_stat_statements` or `pg_cron`.
+
+The first run holds a transaction open during eight seconds of client-side work.
+The script closes every workload connection before it investigates the stored history.
+It ranks waits, locates lock waiting, attributes query IDs, and prints raw evidence.
+Then it moves the client-side work after `commit` and repeats the same four updates.
+The script checks committed work and sampled lock observations in both phases.
+It never uses `pg_sleep()` to create the incident.
+
+From the repository root, create an isolated instance:
+
+```bash
+export LAB_CONTAINER="ash_demo_lock_lab_$(date +%s)"
+export POSTGRES_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+docker run -d --name "$LAB_CONTAINER" --memory=256m --cpus=1 \
+  -e POSTGRES_PASSWORD -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
+  -p 127.0.0.1::5432 postgres:18 -c log_connections=on
+export PGHOST=127.0.0.1 PGUSER=postgres PGDATABASE=ash_demo_lock_lab
+export PGPORT="$(docker port "$LAB_CONTAINER" 5432/tcp | cut -d: -f2)"
+export PGPASSWORD="$POSTGRES_PASSWORD"
+# Wait for the published TCP endpoint, not the temporary initialization server.
+for attempt in $(seq 1 30); do
+  pg_isready -q -d postgres && break
+  sleep 1
+done
+createdb "$PGDATABASE"
+psql -X -v ON_ERROR_STOP=1 -f sql/ash-install.sql
+python3 examples/lock-lab.py
+```
+
+The container publishes Postgres only on host loopback.
+Its listener accepts the Docker port forward; remote clients cannot use that host binding.
+Use `postgres:17` to repeat the lab on Postgres 17.
+The script requires an empty pg_ash history and an `ash_demo*` database.
+Connect as both the database owner and the `ash` schema owner.
+Use a database without `pg_cron`; the script owns these manual sample calls.
+Do not run another sampler or workload on this instance.
+
+The lab takes about two minutes because it waits for real minute boundaries.
+It prints a new evidence directory under `/tmp/pgash-lock-lab-*`.
+The directory contains fixed-window SQL, reader output, session logs, and absolute sample-call timestamps.
+Use `--output /path/to/new-directory` to choose a location; existing paths are refused.
+For example, replay the investigation while the database still exists:
+
+```bash
+psql -X -v ON_ERROR_STOP=1 -f /tmp/pgash-lock-lab-<run-id>/before.sql
+psql -X -v ON_ERROR_STOP=1 -f /tmp/pgash-lock-lab-<run-id>/after.sql
+```
+
+Each phase uses eight one-second sample ticks and a separate, completed 60-second reader window.
+The windows are half-open: `[since, until)`.
+They never overlap; timestamps and stored observations remain unchanged.
+The reader's minute AAS includes the full minute denominator, not only the eight sampled ticks.
+Do not interpret it as continuous minute coverage.
+
+A passing run reports 24 sampled Lock backend-observations before the change and zero afterward.
+Both phases must commit four updates.
+At the one-second configured interval, 24 backend-observations represent 24 estimated lock-wait backend-seconds.
+This supports reduced observed lock waiting for this controlled fixture.
+It does not establish latency, throughput, production impact, or absence of sub-second waits.
+Missing stored rows alone prove neither idle activity nor scheduler health.
+The separate tick log records the actual manual sample calls.
+Historical query IDs identify statements that waited, not the blocking session or row values.
+Optional SQL text comes from current `pg_stat_statements`, not an archived query-text store.
+
+### Verified functional results
+
+Both final runs used the same script on 2026-10-21 UTC, without optional extensions.
+Each pair used equal, non-overlapping 60-second reader windows.
+
+| Postgres | Before window (UTC) | After window (UTC) | Ticks per phase | Committed updates per phase | Sampled Lock observations, before → after |
+|---|---|---|---|---|---|
+| 17 | 19:35–19:36 | 19:36–19:37 | 8 | 4 | 24 → 0 |
+| 18 | 19:37–19:38 | 19:38–19:39 | 8 | 4 | 24 → 0 |
+
+[The Postgres 18 capture](lock-lab-output.txt) includes unchanged reader output, sample-call timestamps, and sampler counters.
+Both runs left sampler error counters unchanged and removed their fixture tables.
+These are functional results for this fixture, not a production performance claim.
+
+### Cleanup
+
+The script drops only its uniquely named fixture table and leaves history for inspection.
+Remove the disposable container after you inspect the results:
+
+```bash
+docker rm -f "$LAB_CONTAINER"
+unset PGPASSWORD POSTGRES_PASSWORD
+```

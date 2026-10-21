@@ -1,16 +1,57 @@
-# pg_ash demo harness
+# pg_ash demos
 
-Every image in `README.md` and `docs/`, plus the animated reel, regenerated from
-**real** pg_ash query output against a **real** PostgreSQL, with one command:
+## Watch
+
+[Watch the incident investigation](../README.md#watch-an-incident-investigation).
+The reel starts after the incident ends.
+It follows four questions:
+
+1. When did load rise?
+2. What were sessions waiting for?
+3. Which statements experienced that wait?
+4. What changed from the baseline?
+
+Each scene uses actual pg_ash reader output.
+The timeline is compressed by restamping real observations; it is not a real-time recording of the incident.
+Backend counts and reader results are not edited.
+See [collection method](#collection-method-and-timing) below.
+
+## Try
+
+[Run the before/after lock lab](../examples/README.md#beforeafter-lock-lab).
+It uses real elapsed time and requires no renderer.
+The lab changes transaction scope, then compares the sampled lock waits.
+It is a functional demonstration, not an overhead benchmark.
+
+## Reproduce the assets
+
+Run from the repository root on a disposable Postgres instance:
 
 ```sh
+make -C demos doctor
 make -C demos all
+make -C demos down
 ```
 
-No Docker required. No browser required. No hand-cropping, and nothing that only
-works on one laptop.
+`doctor` lists missing dependencies before collection starts.
+The default backend uses your local libpq connection settings.
+For an isolated Docker backend, use:
 
----
+```sh
+ASH_BACKEND=docker \
+ASH_READ_SPAN_CALM=50000 ASH_READ_SPAN_TAIL=50000 \
+make -C demos all
+ASH_BACKEND=docker make -C demos down
+```
+
+This workload profile passed prior capture checks over TCP.
+Hardware and transport still affect the result.
+Do not run the workload against production.
+The backend rejects unsafe database names and preserves resources it does not own.
+
+All stills and the reel share one frozen window.
+The scene list is [scenes/scenes.tsv](scenes/scenes.tsv).
+Collection settings and history availability remain available as stills; they do not delay the incident story.
 
 ## What it produces
 
@@ -26,9 +67,7 @@ image means adding one line to that file.
 
 ---
 
-## Honesty boundary
-
-Read this before you look at a single number.
+## Collection method and timing
 
 > The harness shapes **which** real samples exist and **when** they are
 > considered to have been taken. Every number in every asset is pg_ash
@@ -68,8 +107,7 @@ database. Managed services may support pg_cron; availability depends on the
 provider, Postgres version, and configuration. Check those requirements when
 choosing the scheduler for your deployment.
 
-So the degraded no-cron mode is not a compromise in this harness — it is the
-mainline. `ash.status()` in the `status` scene says so on screen: the demo shows
+`ash.status()` in the `status` scene says so on screen: the demo shows
 `pg_cron_available` as `no (use external scheduler)`, because that is the truth
 of how it was collected.
 
@@ -92,9 +130,9 @@ make -C demos down       # remove only a database/container this run created
 
 `make help` prints the same list plus every knob.
 
-Measured wall-clock on an M-series MacBook against a local PostgreSQL 18.3:
-`seed` 22 s, `stills` 23 s, `demo` 155 s (75 s of that is the recording itself,
-which runs in real time by construction), `all` about 3 minutes, `check` 1 s.
+The reel holds each result long enough to read it.
+Actual capture time depends on query execution, typing, and rendering.
+The run log records elapsed times.
 
 ### Workload timing and an empty baseline
 
@@ -197,7 +235,7 @@ Whether that is still valid is decided by the *data*, not by a clock:
 against what is in the table right now, so a reseed, a stray sampler or a
 dropped database all fail it with exit 3.
 
-`make render` skips the 75-second tmux recording and redoes everything from
+`make render` skips the tmux recording and redoes everything from
 `agg` onwards against the cast already in `out/`. That is the loop for anything
 to do with the theme, the window chrome, the palette or the size budget.
 
