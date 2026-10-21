@@ -389,6 +389,15 @@ jobs:
         run: |
           python3 devel/scripts/test_cadence_concurrency.py
 
+      - name: "Sample timestamp and late commits"
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGDATABASE: postgres
+          PGPASSWORD: postgres
+        run: |
+          python3 devel/scripts/test_sample_clock.py
+
       - name: "#137: preserve unsupported legacy cadence on upgrade"
         env:
           PGPASSWORD: postgres
