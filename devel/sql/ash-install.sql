@@ -68,8 +68,8 @@ end $$;
  * a temp table now; the matching block at the very end of this script
  * re-applies them to the recreated functions and drops the snapshot. The
  * argument signature is captured alongside the name so the restore can put
- * the grant back on the exact same overload and never widen a role that
- * held only one overload of a function.
+ * the grant back on the exact same overload. Required new dependencies are
+ * handled explicitly by the restore below.
  * PUBLIC (grantee oid 0, which has no pg_roles row) is intentionally
  * excluded: the hardening block below re-applies the REVOKE-from-PUBLIC
  * posture on every install.
@@ -9015,10 +9015,12 @@ end $$;
  *     (a genuine cross-version signature change — the case this restore
  *     exists to cover) does it fall back to every current overload of the
  *     name.
+ *   * The legacy query-text wrapper also needs its database-aware dependency.
+ *     Its grantees retain that EXECUTE privilege with the same grant option.
  * This mirrors what CREATE OR REPLACE would have preserved: function names
  * that no longer exist (removed/renamed) are skipped, roles dropped
- * mid-script are skipped, and a role with only partial FUNCTION grants is
- * not widened. Roles that held the FULL pre-upgrade reader-function bundle
+ * mid-script are skipped, and a role with only partial FUNCTION grants gets
+ * no unrelated privileges. Roles with the FULL pre-upgrade reader-function bundle
  * (detected in the snapshot block at the top of this script) are additionally
  * re-run through ash.grant_reader() afterwards, so they can also execute
  * helpers introduced by this version — otherwise the readers they kept would
@@ -9045,6 +9047,10 @@ begin
       and (
         -- the snapshotted overload still exists: restore exactly it
         pg_catalog.pg_get_function_identity_arguments(proc.oid) = func_acl.args
+        or (
+          proc.oid = 'ash._pgss_query_text(bigint,integer,oid)'::regprocedure
+          and func_acl.args = 'query_id bigint, maxlen integer'
+        )
         -- the snapshotted overload is gone (signature changed): fall back
         -- to restoring every current overload of the name
         or not exists (
