@@ -4266,8 +4266,8 @@ jobs:
           alter extension pg_stat_statements set schema ash_pgss_ext;
           select ash._apply_pgss_search_path();
 
-          -- (1) Catalog form: every pgss-probing reader lists the pgss schema
-          -- before public, and the catalog-derived set has not drifted.
+          -- (1) Readers with public in search_path must put the pgss schema first.
+          -- The catalog-derived set must not drift.
           do $$
           declare
             r record;
@@ -4286,7 +4286,7 @@ jobs:
               if r.cfg like 'search_path=%' then
                 v_ext_pos := position('ash_pgss_ext' in r.cfg);
                 v_pub_pos := position('public' in r.cfg);
-                if v_ext_pos = 0 or v_ext_pos > v_pub_pos then
+                if v_pub_pos > 0 and (v_ext_pos = 0 or v_ext_pos > v_pub_pos) then
                   v_bad := v_bad || r.proname || ' ';
                 end if;
               end if;
