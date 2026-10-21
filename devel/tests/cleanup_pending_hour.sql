@@ -1,6 +1,7 @@
 \set ON_ERROR_STOP on
 
 begin;
+set local timezone = 'UTC';
 
 do $$
 declare
