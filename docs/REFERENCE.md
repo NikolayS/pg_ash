@@ -1,57 +1,13 @@
 # pg_ash reference
 
 Installation, reader semantics, and operations for this checkout.
-Start with the [incident walkthrough](../README.md#investigate-an-incident).
+Start with an [agent-led incident investigation](../README.md#investigate-an-incident-with-an-agent).
 
-- [Upgrade](#upgrade-to-20-rc-1)
 - [Reader API](#reader-api) and [machine report](#machine-report)
 - [Admin API](#admin-api) and [scheduling](#scheduling)
 - [Retention](#retention-and-storage) and [privileges](#privileges)
 - [Requirements](#requirements) and [known limits](#known-limits)
-
-## Upgrade to 2.0 rc 1
-
-Test upgrades on a disposable instance first.
-Keep a verified backup before upgrading.
-There is no supported SQL downgrade.
-Restore the backup to a separate instance with the previous application/API version.
-Do not use `ash.uninstall()` as rollback; it removes collected data.
-The [archived RC1 rehearsal](https://github.com/NikolayS/pg_ash/blob/v2.0-rc1/docs/RC1_TEST_GUIDE.md) includes scheduler-isolation and restore checks.
-
-2.0 is a breaking reader-API release. Upgrade scripts are cumulative; run the
-missing scripts in order. From 1.5 or an earlier 2.0 prerelease, including
-`2.0-beta1`, run only `sql/migrations/ash-1.5-to-2.0.sql`. The same migration
-is safe to reapply to `2.0-rc1`.
-
-```sql
-\i sql/migrations/ash-1.0-to-1.1.sql
-\i sql/migrations/ash-1.1-to-1.2.sql
-\i sql/migrations/ash-1.2-to-1.3.sql
-\i sql/migrations/ash-1.3-to-1.4.sql
-\i sql/migrations/ash-1.4-to-1.5.sql
-\i sql/migrations/ash-1.5-to-2.0.sql
-
-select * from ash.status() where metric = 'version';
--- version | 2.0-rc1
-```
-
-The old root-level upgrade paths, such as `sql/ash-1.5-to-2.0.sql`, are kept as
-compatibility wrappers. New docs and scripts should use `sql/migrations/`.
-
-The old 1.x reader functions are gone in 2.0:
-
-| 1.x | 2.0 |
-|---|---|
-| `top_waits`, `top_by_type` | `top('wait_event')`, `top('wait_event_type')` |
-| `top_queries`, `top_queries_with_text` | `top('query_id')` |
-| `wait_timeline` | `timeline(...)` |
-| `timeline_chart` | `chart(...)` |
-| `activity_summary` | `summary(...)` |
-| `query_waits(q)` | `top('wait_event', query_id => q)` |
-| `event_queries(e)` | `top('query_id', wait_event => e)` |
-| `samples_by_database` | `top('database')` |
-
-Full mapping: [`blueprints/AAS_EXAMPLES.md`](../blueprints/AAS_EXAMPLES.md).
+- [Upgrade from an existing installation](#upgrade-to-20-rc-1)
 
 ## Reader API
 
@@ -100,15 +56,19 @@ drills snap outward and disclose effective bounds/bucket; plain
 
 <a id="investigation-flow"></a>
 
-## LLM-assisted investigation
+<a id="llm-assisted-investigation"></a>
+
+## Agent-led investigation
 
 **Prompt:** "There was a performance issue about five minutes ago. Investigate."
 
-An LLM can follow the same five-step investigation as an operator: inspect
-load, find waits, locate the spike, identify affected queries, then inspect
-raw evidence. The [executable psql example](../examples/llm-investigation.sql)
-runs these steps in a read-only transaction and chooses the drill window from
-the results. The snippets below show each step; the script supplies the
+Give a tool-enabled agent the [investigation task](../examples/llm-prompt.md#task-1-investigate-a-completed-incident).
+It executes read-only queries, chooses the next drill from observed results,
+and stops when retention or resolution cannot support attribution.
+The [executable psql example](../examples/llm-investigation.sql)
+is a deterministic reference replay, not an autonomous agent. It runs in a
+read-only transaction and chooses the drill window from the results.
+The snippets below show the available SQL tools; the script supplies the
 variables from actual results. It needs an existing installation with recent activity:
 
 ```bash
@@ -207,7 +167,7 @@ processes and is not a general lock-contention remedy.
 In the [captured run](../examples/README.md), 28 backend-seconds produced 0.23
 average AAS over two minutes and a 0.47 peak minute. One update accounted for
 all 14 tuple-lock backend-seconds. The next step was to inspect its blocking
-transaction, not infer one from the waiting query ID. Give a model the [provider-neutral analysis prompt](../examples/llm-prompt.md)
+transaction, not infer one from the waiting query ID. Give a model the [agent task and evidence contract](../examples/llm-prompt.md)
 alongside that evidence or an `ash.report()` payload. pg_ash makes no calls to
 an LLM service. Review SQL text before sharing it outside your environment.
 
@@ -305,7 +265,7 @@ naming that alternate source; it does not synthesize minute-rollup metrics.
 
 The payload contract is stable for the 2.0 minor line: keys may be added, not
 renamed or removed. Consumers must tolerate additional keys and optional
-query-attribution keys. Use the [analysis prompt](../examples/llm-prompt.md) to
+query-attribution keys. Use the [evidence contract](../examples/llm-prompt.md#evidence-contract) to
 explain these semantics to an LLM.
 
 ## Admin API
@@ -772,6 +732,50 @@ Postgres.
 - Advisory-lock squat DoS is possible for roles that can intentionally hold
   pg_ash's advisory locks. See
   [SECURITY.md](../SECURITY.md#advisory-lock-squat-dos).
+
+## Upgrade to 2.0 rc 1
+
+Test upgrades on a disposable instance first.
+Keep a verified backup before upgrading.
+There is no supported SQL downgrade.
+Restore the backup to a separate instance with the previous application/API version.
+Do not use `ash.uninstall()` as rollback; it removes collected data.
+The [archived RC1 rehearsal](https://github.com/NikolayS/pg_ash/blob/v2.0-rc1/docs/RC1_TEST_GUIDE.md) includes scheduler-isolation and restore checks.
+
+2.0 is a breaking reader-API release. Upgrade scripts are cumulative; run the
+missing scripts in order. From 1.5 or an earlier 2.0 prerelease, including
+`2.0-beta1`, run only `sql/migrations/ash-1.5-to-2.0.sql`. The same migration
+is safe to reapply to `2.0-rc1`.
+
+```sql
+\i sql/migrations/ash-1.0-to-1.1.sql
+\i sql/migrations/ash-1.1-to-1.2.sql
+\i sql/migrations/ash-1.2-to-1.3.sql
+\i sql/migrations/ash-1.3-to-1.4.sql
+\i sql/migrations/ash-1.4-to-1.5.sql
+\i sql/migrations/ash-1.5-to-2.0.sql
+
+select * from ash.status() where metric = 'version';
+-- version | 2.0-rc1
+```
+
+The old root-level upgrade paths, such as `sql/ash-1.5-to-2.0.sql`, are kept as
+compatibility wrappers. New docs and scripts should use `sql/migrations/`.
+
+The old 1.x reader functions are gone in 2.0:
+
+| 1.x | 2.0 |
+|---|---|
+| `top_waits`, `top_by_type` | `top('wait_event')`, `top('wait_event_type')` |
+| `top_queries`, `top_queries_with_text` | `top('query_id')` |
+| `wait_timeline` | `timeline(...)` |
+| `timeline_chart` | `chart(...)` |
+| `activity_summary` | `summary(...)` |
+| `query_waits(q)` | `top('wait_event', query_id => q)` |
+| `event_queries(e)` | `top('query_id', wait_event => e)` |
+| `samples_by_database` | `top('database')` |
+
+Full mapping: [`blueprints/AAS_EXAMPLES.md`](../blueprints/AAS_EXAMPLES.md).
 
 ## Development
 

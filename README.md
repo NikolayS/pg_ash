@@ -8,7 +8,8 @@
 **The spike is gone. Find what Postgres was waiting for.**
 
 pg_ash keeps sampled activity history inside Postgres.
-Use SQL to find when load rose, which waits dominated, and which statements experienced them.
+Give an agent SQL access to investigate when load rose, which waits dominated,
+and which statements experienced them.
 It is plain SQL and PL/pgSQL, not a C extension.
 pg_ash itself needs no `shared_preload_libraries` entry or restart.
 Installation permissions and statistics visibility still apply.
@@ -20,13 +21,14 @@ Three sessions waiting throughout ten seconds contribute 30 backend-seconds.
 Across a 60-second window, that is 0.5 AAS.
 AAS measures sampled activity, not CPU utilization or query latency.
 
-## Watch, try, or operate
+## Ask an agent, watch, or operate
 
 | Goal | Start here |
 |---|---|
-| See an investigation | [Watch the demo](#watch-an-incident-investigation) |
-| Reproduce and change the workload | [Run the before/after lab](examples/README.md#beforeafter-lock-lab) |
-| Investigate an existing installation | [Follow the SQL walkthrough](#investigate-an-incident) |
+| Give an agent an incident | [Agent task](#investigate-an-incident-with-an-agent) |
+| See the SQL investigation | [Watch the demo](#watch-an-incident-investigation) |
+| Have an agent verify a change | [Agent-led before/after lab](examples/README.md#beforeafter-lock-lab) |
+| Investigate an existing installation | [SQL tools](#sql-tools-for-the-investigation) |
 | Install pg_ash | [Quick start](#quick-start) |
 | Configure production collection | [Scheduling](docs/REFERENCE.md#scheduling), [privileges](docs/REFERENCE.md#privileges), and [retention](docs/REFERENCE.md#retention-and-storage) |
 | Look up a function or limitation | [Reference](docs/REFERENCE.md) |
@@ -35,6 +37,7 @@ AAS measures sampled activity, not CPU utilization or query latency.
 
 ![A completed incident investigated with pg_ash](assets/ash_demo.gif)
 
+This reel is a scripted SQL replay, not a recording of an autonomous agent.
 The incident has ended before this investigation starts.
 The demo finds its time window, ranks waits, identifies affected statements, and compares the incident with a calm baseline.
 The conclusion is evidence of lock contention, not identification of the blocking session.
@@ -44,7 +47,12 @@ Reader output and backend counts are not edited.
 The [before/after lab](examples/README.md#beforeafter-lock-lab) uses real elapsed time without restamping.
 See [demo reproduction](demos/README.md) for the full collection method.
 
-## Try a measured change
+## Ask an agent to verify a change
+
+Give your coding agent the [lab task](examples/llm-prompt.md#task-2-verify-a-transaction-scope-change).
+It inspects the transaction scope, runs the disposable fixture, independently
+queries both saved windows, and checks equal committed work before drawing a conclusion.
+The fixture is deterministic; the agent must verify its evidence, not just quote its exit code.
 
 The [lock lab](examples/README.md#beforeafter-lock-lab) moves client-side work outside a transaction.
 Each phase commits the same four updates and records eight one-second sample calls.
@@ -112,8 +120,33 @@ Do not use `ash.uninstall()` as rollback: it deletes collected data.
 Follow the [upgrade procedure](docs/REFERENCE.md#upgrade-to-20-rc-1).
 
 <a id="investigation-flow"></a>
+<a id="investigate-an-incident"></a>
 
-## Investigate an incident
+## Investigate an incident with an agent
+
+Give this task to an agent with a SQL tool or terminal access to `psql`.
+Supply the connection through your existing environment and replace the incident bounds:
+
+```text
+Investigate the Postgres incident from 2026-10-21 14:00:00+00 to
+2026-10-21 14:10:00+00 using pg_ash. Read examples/llm-prompt.md,
+Task 1, and follow its evidence contract. Execute read-only queries;
+do not just generate a SQL checklist.
+
+Check retained history and resolution, locate the spike, then choose
+wait and query filters from actual results. Compare with a verified
+normal, equal-duration baseline. Branch or stop if the evidence is
+missing or too coarse. Return the queries, observed results, strongest
+supported finding, and the next check. Do not change this database.
+```
+
+The [full agent tasks](examples/llm-prompt.md) define the tool loop and stop conditions.
+pg_ash supplies evidence through SQL; it does not run the agent or call an LLM.
+The following SQL illustrates the tools the agent can select, not a required fixed plan.
+The [read-only reference script](examples/llm-investigation.sql) is a reproducible
+fallback, not an autonomous agent.
+
+### SQL tools for the investigation
 
 Use one fixed window for every step.
 Replace these bounds with the incident time, including its time zone:
@@ -192,13 +225,14 @@ Check the effective bounds and source when comparing older history.
 The [before/after lab](examples/README.md#beforeafter-lock-lab) demonstrates that workflow.
 The [read-only investigation script](examples/llm-investigation.sql) selects drill bounds from actual results.
 
-## Use the same evidence with an LLM
+## Export evidence when the agent has no SQL access
 
 ```sql
 select ash.report(since => :'since', until => :'until');
 ```
 
-Give the report and [analysis prompt](examples/llm-prompt.md) to your chosen model.
+Give the report and [evidence contract](examples/llm-prompt.md#evidence-contract) to your chosen model.
+This is offline analysis, not an agentic investigation: the model cannot run follow-up queries.
 pg_ash makes no LLM service calls.
 Review SQL text before sharing it outside your environment.
 The [captured walkthrough](examples/README.md) shows a supported conclusion and its limits.

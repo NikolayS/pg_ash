@@ -3,6 +3,8 @@
 ## Watch
 
 [Watch the incident investigation](../README.md#watch-an-incident-investigation).
+The reel is a scripted SQL replay, not an autonomous agent recording.
+For tool-using agent tasks, start with the [agentic examples](../examples/README.md).
 The reel starts after the incident ends.
 It follows four questions:
 
@@ -18,7 +20,7 @@ See [collection method](#collection-method-and-timing) below.
 
 ## Try
 
-[Run the before/after lock lab](../examples/README.md#beforeafter-lock-lab).
+[Give an agent the before/after lock lab](../examples/README.md#beforeafter-lock-lab).
 It uses real elapsed time and requires no renderer.
 The lab changes transaction scope, then compares the sampled lock waits.
 It is a functional demonstration, not an overhead benchmark.

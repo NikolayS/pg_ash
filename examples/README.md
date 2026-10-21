@@ -1,9 +1,22 @@
-# LLM investigation example
+# Agentic pg_ash examples
 
-[llm-investigation.sql](llm-investigation.sql) is a read-only psql investigation
-of an existing pg_ash installation. It freezes a window, ranks waits, selects
-an observed minute, attributes the selected wait to query IDs, and retrieves
-raw evidence. [llm-prompt.md](llm-prompt.md) explains the evidence to any LLM.
+Start with a task, not a sequence of SQL to copy:
+
+- [Investigate a completed incident](llm-prompt.md#task-1-investigate-a-completed-incident):
+  the agent executes read-only queries, chooses drill bounds and filters from
+  returned evidence, and changes direction or stops when history is insufficient.
+- [Verify a transaction-scope change](llm-prompt.md#task-2-verify-a-transaction-scope-change):
+  the agent inspects the workload, predicts the effect, runs an isolated lab,
+  and independently checks the recorded before/after evidence.
+
+Use your existing tool-enabled coding or database agent. No provider-specific
+SDK or model service is built into pg_ash. An offline model that only receives
+an exported report cannot perform the follow-up queries in these tasks.
+
+[llm-investigation.sql](llm-investigation.sql) is a read-only reference and replay
+script. [lock-lab.py](lock-lab.py) is a deterministic workload fixture. Neither
+script is an autonomous agent. The captures below verify these SQL/workload
+fixtures; they are not transcripts of agent runs.
 
 ## Captured run
 
@@ -29,7 +42,7 @@ across the one activity-bearing minute. `ash.aas()` includes that wait class
 and uses the disclosed two-minute window. Treating these as interchangeable
 metrics would misread the evidence.
 
-A supported LLM response would be:
+A supported finding from this evidence would be:
 
 > The selected update experienced tuple and transaction-ID lock waits during
 > the 22:25 UTC minute. This supports lock contention as the next investigation
@@ -81,7 +94,10 @@ that rolls back all fixture changes. Required-key checks accept additive keys.
 
 <a id="beforeafter-lock-lab"></a>
 
-## Hands-on lab: investigate, shorten the transaction, verify
+## Agent-led lab: investigate, shorten the transaction, verify
+
+Give your agent [Task 2](llm-prompt.md#task-2-verify-a-transaction-scope-change).
+The commands below are its reproducible setup and can also be run manually.
 
 Run [lock-lab.py](lock-lab.py) on a quiet, disposable server with Python 3.10+ and `psql`.
 This low-load lab uses one row, one lock holder, and three waiting updates.
