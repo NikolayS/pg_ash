@@ -6773,7 +6773,8 @@ begin
   v_extrema_supported := v_grain_secs <= v_requested_bucket_secs;
 
   if database is not null then
-    select db.oid into v_datid from pg_database as db
+    select db.oid into v_datid
+    from pg_database as db
     where db.datname = database;
   end if;
 
