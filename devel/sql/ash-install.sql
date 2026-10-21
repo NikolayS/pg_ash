@@ -6282,7 +6282,8 @@ returns table (
   ts int4,
   key text,
   key_num bigint,
-  cnt numeric
+  cnt numeric,
+  datid oid
 )
 language plpgsql
 stable
@@ -6373,9 +6374,10 @@ begin
                     '<oid:' || decoded.datid || '>')
            end,
            case when dimension = 'query_id' then decoded.qid else null end,
-           count(*)::numeric
+           count(*)::numeric,
+           case when dimension = 'query_id' then decoded.datid end
     from decoded
-    group by 1, 2, 3;
+    group by 1, 2, 3, 5;
     return;
   end if;
 
@@ -6442,7 +6444,8 @@ begin
       grains.mts,
       grains.database_key,
       null::bigint,
-      sum(grains.cnt)::numeric
+      sum(grains.cnt)::numeric,
+      null::oid
     from grains
     where grains.mts >= start_ts
       and grains.mts < end_ts
@@ -6459,7 +6462,8 @@ begin
     return query execute format($q$
       select rollup.ts,
              %s as key, null::bigint as key_num,
-             sum(rollup.wait_counts[pos + 1])::numeric as cnt
+             sum(rollup.wait_counts[pos + 1])::numeric as cnt,
+             null::oid
       from %s as rollup
       cross join generate_subscripts(rollup.wait_counts, 1) as pos
       join ash.wait_event_map as event_map
@@ -6494,7 +6498,8 @@ begin
         rollup.ts,
         keyed.query_id::text as key,
         keyed.query_id::bigint as key_num,
-        sum(keyed.cnt)::numeric as cnt
+        sum(keyed.cnt)::numeric as cnt,
+        rollup.datid
       from %s as rollup
       cross join lateral (
         select coalesce(
@@ -6545,7 +6550,7 @@ begin
             and ($4 is null or keyed.query_id = $4)
           )
         )
-      group by rollup.ts, keyed.query_id
+      group by rollup.ts, keyed.query_id, rollup.datid
     $q$, v_tbl)
     using start_ts, end_ts, v_datid, query_id;
 
@@ -6559,7 +6564,8 @@ begin
                (select coalesce(sum(rollup.query_counts[pos + 1]), 0)
                 from generate_subscripts(rollup.query_counts, 1) as pos
                 where pos %% 2 = 1
-                  and rollup.query_counts[pos] = $4)::numeric as cnt
+                  and rollup.query_counts[pos] = $4)::numeric as cnt,
+               null::oid
         from %s as rollup
         left join pg_database as db on db.oid = rollup.datid
         where rollup.ts >= $1 and rollup.ts < $2
@@ -6579,7 +6585,8 @@ begin
                 where pos %% 2 = 1
                   and ($4 is null or event_map.type = $4)
                   and ($5 is null or %s = $5
-                       or event_map.event = $5))::numeric as cnt
+                       or event_map.event = $5))::numeric as cnt,
+               null::oid
         from %s as rollup
         left join pg_database as db on db.oid = rollup.datid
         where rollup.ts >= $1 and rollup.ts < $2
@@ -6772,12 +6779,6 @@ begin
   )::int4;
   v_extrema_supported := v_grain_secs <= v_requested_bucket_secs;
 
-  if database is not null then
-    select db.oid into v_datid
-    from pg_database as db
-    where db.datname = database;
-  end if;
-
   /*
    * pgss presence/readability probe, schema-qualified from the catalog (#115):
    * name resolution SKIPS search_path schemas the caller lacks USAGE on, so an
@@ -6799,6 +6800,7 @@ begin
   for
     key,
     v_key_num,
+    v_datid,
     source,
     period_start,
     period_end,
@@ -6820,7 +6822,8 @@ begin
       grain_by_row.ts,
       grain_by_row.key,
       grain_by_row.key_num,
-      grain_by_row.cnt
+      grain_by_row.cnt,
+      grain_by_row.datid
     from ash._grain_by(v_start_ts, v_end_ts, v_read_source, dimension,
            wait_event_type, wait_event, query_id, database) as grain_by_row
   ),
@@ -6829,16 +6832,18 @@ begin
       (source_keyed.ts / v_grain_secs) * v_grain_secs as gstart,
       source_keyed.key,
       max(source_keyed.key_num) as key_num,
-      sum(source_keyed.cnt) as cnt
+      sum(source_keyed.cnt) as cnt,
+      source_keyed.datid
     from source_keyed
-    group by 1, source_keyed.key
+    group by 1, source_keyed.key, source_keyed.datid
   ),
   keyed as (
     select
       (keyed_grains.gstart / v_bucket_secs) * v_bucket_secs as bstart,
       keyed_grains.key,
       keyed_grains.key_num,
-      keyed_grains.cnt
+      keyed_grains.cnt,
+      keyed_grains.datid
     from keyed_grains
   ),
   /*
@@ -6861,7 +6866,8 @@ begin
     from coverage_grains
   ),
   keys as (
-    select keyed.key, max(keyed.key_num) as key_num, sum(keyed.cnt) as total
+    select keyed.key, max(keyed.key_num) as key_num, sum(keyed.cnt) as total,
+           case when count(distinct keyed.datid) = 1 then min(keyed.datid) end as datid
     from keyed
     group by keyed.key
     having sum(keyed.cnt) > 0
@@ -6886,7 +6892,7 @@ begin
     from keyed group by keyed.key, keyed.bstart
   ),
   key_bucket as (
-    select top_keys.key, top_keys.key_num, top_keys.total, covered.bstart,
+    select top_keys.key, top_keys.key_num, top_keys.total, top_keys.datid, covered.bstart,
            coalesce(key_bucket_data.bcnt, 0) as bcnt
     from top_keys
     cross join covered
@@ -6895,7 +6901,7 @@ begin
       and key_bucket_data.bstart = covered.bstart
   ),
   per_key as (
-    select key_bucket.key, key_bucket.key_num, key_bucket.total,
+    select key_bucket.key, key_bucket.key_num, key_bucket.total, key_bucket.datid,
            round(key_bucket.total * v_si
                  / (v_end_ts - v_start_ts)::numeric, 2) as avg_aas,
            case when v_extrema_supported then
@@ -6911,11 +6917,12 @@ begin
                    )::numeric, 2)
            end as p99_aas
     from key_bucket
-    group by key_bucket.key, key_bucket.key_num, key_bucket.total
+    group by key_bucket.key, key_bucket.key_num, key_bucket.total, key_bucket.datid
   )
   select
     per_key.key,
     per_key.key_num,
+    per_key.datid,
     v_source,
     ash.ts_to_timestamptz(v_start_ts),
     ash.ts_to_timestamptz(v_end_ts),
@@ -6935,7 +6942,8 @@ begin
   limit greatest(n, 0)
   loop
     query_text := null;
-    if dimension = 'query_id' and v_has_pgss and v_key_num is not null then
+    if dimension = 'query_id' and v_has_pgss
+       and v_key_num is not null and v_datid is not null then
       -- schema-qualified single lookup point (#115); returns null on any
       -- failure, never text from a shadowing relation.
       query_text := ash._pgss_query_text(v_key_num, 100, v_datid);
@@ -7231,7 +7239,10 @@ begin
   )
   select
     coalesce(window1.key, window2.key),
-    coalesce(window1.query_text, window2.query_text),
+    case when database is not null
+           or window1.key is null or window2.key is null
+           or window1.query_text = window2.query_text
+         then coalesce(window1.query_text, window2.query_text) end,
     v_source1,
     v_source2,
     ash.ts_to_timestamptz(v_start1),
