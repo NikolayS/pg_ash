@@ -99,6 +99,11 @@ begin
     assert v_actual.source = 'rollup_1h' and v_actual.query_text is not distinct from v_expected,
       'hourly top must preserve database-scoped query text';
   end loop;
+  -- Dropped databases can leave pgss rows. Remove only this fixture's entries.
+  execute format('select %I.pg_stat_statements_reset(0, $1, 0)', v_pgss_schema)
+    using v_datid_a;
+  execute format('select %I.pg_stat_statements_reset(0, $1, 0)', v_pgss_schema)
+    using v_datid_b;
   raise notice 'PASS: real query ID collision, samples, raw/hourly top, compare, and unscoped ambiguity';
 end;
 $$;
