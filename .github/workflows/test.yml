@@ -4302,7 +4302,7 @@ jobs:
                 where c like 'search_path=%'
                   and (',' || replace(split_part(c, '=', 2), ' ', '') || ',') like '%,public,%'
               );
-            assert v_bad = '_pgss_query_text _pgss_query_text _samples compare samples summary top',
+            assert v_bad = '_pgss_query_text _samples compare samples summary top',
               'unexpected pgss-reader set (drift?): ' || coalesce(v_bad, '<none>');
             raise notice 'pgss shadow mitigation (catalog) PASSED';
           end $$;

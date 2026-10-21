@@ -1,6 +1,8 @@
 -- Real pg_stat_statements entries with equal query IDs and different SQL text.
 -- Aliases do not affect these query IDs on supported Postgres versions.
 \set ON_ERROR_STOP on
+select exists (select 1 from pg_extension where extname = 'pg_stat_statements') as has_pgss \gset
+\if :has_pgss
 select current_database() as test_database \gset
 create database ash_query_text_a;
 create database ash_query_text_b;
@@ -42,7 +44,6 @@ begin
   assert ash._pgss_query_text(v_unique_qid) = 'select octet_length(md5($1)) as ash_reader_unique'
      and ash._pgss_query_text(v_unique_qid, 6) = 'select',
     'legacy helper signatures must preserve unambiguous text and maxlen';
-
 
   execute format('insert into ash.query_map_%s (query_id) values ($1) on conflict (query_id) do update set query_id = excluded.query_id returning id', v_slot)
     into v_map_id using v_qid_a;
@@ -111,3 +112,6 @@ rollback;
 \connect :test_database
 drop database ash_query_text_a;
 drop database ash_query_text_b;
+\else
+\echo 'SKIP: pg_stat_statements not installed on this PG major'
+\endif

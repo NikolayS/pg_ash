@@ -7316,7 +7316,7 @@ create or replace function ash._pgss_query_text(
 returns text
 language sql
 stable
-set search_path = pg_catalog, ash, public
+set search_path = pg_catalog, ash
 as $$
   select ash._pgss_query_text($1, $2, null::oid);
 $$;
