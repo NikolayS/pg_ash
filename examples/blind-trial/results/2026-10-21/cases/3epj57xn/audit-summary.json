@@ -1,0 +1,65 @@
+{
+  "case_id": "3epj57xn",
+  "actual_models": [
+    "gpt-6.1-sol"
+  ],
+  "runtime_transcript_filename": "rollout-2026-10-21T22-01-18-01a1607b-a519-7df1-ab31-e2c7829d84c1.jsonl",
+  "runtime_transcript_sha256": "32ecaffe9023051cbc5ebda114e8973f1e58ead9cd1b95d83a53f05b31239f42",
+  "started_at": "2026-10-21T22:01:18.398Z",
+  "completed_at": "2026-10-21T22:02:52.388Z",
+  "elapsed_seconds": 93.99,
+  "orchestration_calls": 10,
+  "nested_exec_command_calls": 12,
+  "nested_apply_patch_calls": 0,
+  "documentation_lookup_operations_including_listing": 6,
+  "documentation_content_lookups": 5,
+  "documentation_operations": [
+    "ls /tmp/pgash-blind-trial-20261021/investigators/docs",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/README.md",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/examples/llm-prompt.md",
+    "rg -n \"ash.status|ash.aas|ash.samples|ash.timeline|###.*top|###.*status\" /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md",
+    "sed -n '15,175p' /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md",
+    "rg -n -i 'idle|ClientRead|state|transaction' /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md"
+  ],
+  "sql_wrapper_calls": 5,
+  "wrapper_rows_excluded_outside_runtime": 0,
+  "sql_select_with_submitted": 28,
+  "sql_select_with_attempted": 28,
+  "sql_select_with_successful": 28,
+  "all_sql_statements_submitted_including_transaction_control": 40,
+  "sql_error_count": 0,
+  "failures": [],
+  "agent_retries": 0,
+  "sql_wrapper_elapsed_seconds_total": 2.006,
+  "launch_frozen_hashes_match": {
+    "/tmp/pgash-blind-trial-20261021/investigators/3epj57xn/psql": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/3epj57xn/answer-sealed.json": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/3epj57xn/investigator-prompt.txt": true
+  },
+  "answer_certified": true,
+  "observed_mechanism": "Client:ClientRead",
+  "sample_export_summary": [
+    {
+      "event": "Client:ClientRead",
+      "query_id": -9127212586606946335,
+      "query_text": "select payload from records where id = $1",
+      "decoded_rows": 64,
+      "distinct_ticks": 32,
+      "first": "2026-10-21 21:59:20+00:00",
+      "last": "2026-10-21 22:00:11+00:00"
+    }
+  ],
+  "scores": {
+    "window": 2,
+    "mechanism": 2,
+    "query": 2,
+    "evidence": 2,
+    "next_check": 2
+  },
+  "score_total": 10,
+  "classification": "solved",
+  "confident_causal_or_blocker_fabrication": false,
+  "boundary_audit": "All tool inputs inspected: only frozen docs, supplied SQL wrapper, and own artifacts. No wrapper-source/setup/controller/answer/other-case/GitHub reads, no delegation.",
+  "sanitization_changed_tool_archive": false,
+  "report_sha256": "c5b1cc7058632bbbbae9ff7d0d0d7c5edd790787163826fbcbce60815cbeb6f7"
+}

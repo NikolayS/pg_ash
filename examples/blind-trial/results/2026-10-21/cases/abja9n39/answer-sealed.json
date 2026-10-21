@@ -1,0 +1,44 @@
+{
+  "case_id": "abja9n39",
+  "frozen_rubric_sha256": "317d392b51e1f2954c60a489f07126e6756782cac2661622bd03841a35deda86",
+  "mechanism": "transactionid",
+  "expected": {
+    "event": "Lock:transactionid",
+    "query": "update records set value = value + 1 where id = $1",
+    "acceptable": "Rows blocked waiting for a transaction to finish; blocker identity and transaction intent cannot be recovered from ASH alone.",
+    "unsupported": "Specific blocking PID, owner, long transaction root cause or query plan problem proved by ASH alone."
+  },
+  "observed_windows": [
+    {
+      "window": {
+        "index": 1,
+        "start": "2026-10-21T21:57:17.266517+00:00",
+        "end": "2026-10-21T21:57:31.290489+00:00"
+      },
+      "ash_matching_rows": 28,
+      "independent_matching_observations": 28,
+      "query_ids": [
+        -1016721775295826782
+      ],
+      "valid": true
+    },
+    {
+      "window": {
+        "index": 2,
+        "start": "2026-10-21T21:57:51.290829+00:00",
+        "end": "2026-10-21T21:58:09.311261+00:00"
+      },
+      "ash_matching_rows": 36,
+      "independent_matching_observations": 36,
+      "query_ids": [
+        -1016721775295826782
+      ],
+      "valid": true
+    }
+  ],
+  "certified_at": "2026-10-21T21:58:44.647943+00:00",
+  "service_sessions_remaining": [],
+  "sampler_errors_or_skips": [],
+  "rollup_rows": 1,
+  "certified": true
+}

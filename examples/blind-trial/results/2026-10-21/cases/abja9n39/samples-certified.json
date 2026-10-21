@@ -1,0 +1,778 @@
+[
+  {
+    "sample_time": "2026-10-21 21:58:09+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:09+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:09+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:08+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:08+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:08+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:07+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:07+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:07+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:06+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:06+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:06+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:05+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:05+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:05+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:04+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:04+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:04+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:03+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:03+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:03+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:02+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:02+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:02+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:01+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:01+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:01+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:00+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:00+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:58:00+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:59+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:59+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:59+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:58+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:58+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:58+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:57+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:57+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:57+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:56+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:56+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:56+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:55+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:55+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:55+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:54+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:54+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:54+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:53+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:53+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:53+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:52+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:52+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:52+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:31+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:31+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:31+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:30+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:30+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:30+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:29+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:29+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:29+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:28+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:28+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:28+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:27+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:27+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:27+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:26+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:26+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:26+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:25+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:25+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:25+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:24+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:24+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:24+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:23+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:23+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:23+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:22+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:22+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:22+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:21+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:21+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:21+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:20+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:20+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:20+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:19+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:19+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:19+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:18+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:18+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:18+00:00",
+    "database_name": "appdb",
+    "active_backends": 3,
+    "wait_event": "Lock:transactionid",
+    "query_id": -1016721775295826782,
+    "query_text": "update records set value = value + $2 where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:57:17+00:00",
+    "database_name": "appdb",
+    "active_backends": 1,
+    "wait_event": "Client:ClientRead",
+    "query_id": 159435708526309938,
+    "query_text": "update records set value = value + $1 where id in ($2 /*, ... */)"
+  }
+]

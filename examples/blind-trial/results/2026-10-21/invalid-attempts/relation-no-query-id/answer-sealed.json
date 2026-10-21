@@ -1,0 +1,40 @@
+{
+  "case_id": "ssfjwgh2",
+  "frozen_rubric_sha256": "317d392b51e1f2954c60a489f07126e6756782cac2661622bd03841a35deda86",
+  "mechanism": "relation",
+  "expected": {
+    "event": "Lock:relation",
+    "query": "select payload from records where id = $1",
+    "acceptable": "Heavyweight relation-lock contention on the sampled select; inspect live pg_locks/pg_blocking_pids if recurring.",
+    "unsupported": "Exact blocker SQL or exact lock mode identified from historical ASH alone."
+  },
+  "observed_windows": [
+    {
+      "window": {
+        "index": 1,
+        "start": "2026-10-21T22:04:32.094109+00:00",
+        "end": "2026-10-21T22:04:46.115388+00:00"
+      },
+      "ash_matching_rows": 28,
+      "independent_matching_observations": 28,
+      "query_ids": [],
+      "valid": false
+    },
+    {
+      "window": {
+        "index": 2,
+        "start": "2026-10-21T22:05:06.115944+00:00",
+        "end": "2026-10-21T22:05:24.136407+00:00"
+      },
+      "ash_matching_rows": 36,
+      "independent_matching_observations": 36,
+      "query_ids": [],
+      "valid": false
+    }
+  ],
+  "certified_at": "2026-10-21T22:05:59.201809+00:00",
+  "service_sessions_remaining": [],
+  "sampler_errors_or_skips": [],
+  "rollup_rows": 1,
+  "certified": false
+}

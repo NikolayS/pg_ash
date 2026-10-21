@@ -1,0 +1,87 @@
+{
+  "combined_executable_commit": "fe3e7b4dc56f5be9977624de7c549165bc180882",
+  "combined_is_local_cherry_pick_integration": true,
+  "public_component_heads": {
+    "277": {
+      "number": 277,
+      "title": "fix(cleanup): retain pending hourly input",
+      "headRefOid": "4e190a0f60248553630378f55e21e40be8a3d256",
+      "baseRefOid": "db96e305939cb1e9375e8b2029de27020fa57743",
+      "headRefName": "fix-retain-pending-hour-input"
+    },
+    "280": {
+      "number": 280,
+      "title": "fix: compare coverage against effective windows",
+      "headRefOid": "74879d9897a01835c3541c190c7c0a40096a94e1",
+      "baseRefOid": "db96e305939cb1e9375e8b2029de27020fa57743",
+      "headRefName": "fix-compare-effective-coverage"
+    },
+    "281": {
+      "number": 281,
+      "title": "fix(sample): read clock after sampler lock",
+      "headRefOid": "4b43e056cab48dd704dd3c8b421a5414fa57f3da",
+      "baseRefOid": "db96e305939cb1e9375e8b2029de27020fa57743",
+      "headRefName": "fix-sample-clock-after-lock"
+    },
+    "282": {
+      "number": 282,
+      "title": "fix: scope query text by database identity",
+      "headRefOid": "cb4e1527a630d83d6685e6d64f11d3fe326919db",
+      "baseRefOid": "db96e305939cb1e9375e8b2029de27020fa57743",
+      "headRefName": "fix-query-text-database-identity"
+    }
+  },
+  "byte_verification": {
+    "at": "2026-10-21T22:03:07.540667+00:00",
+    "checks": [
+      {
+        "path": "/tmp/pgash-blind-trial-20261021/artifacts/ash-install.sql",
+        "commit": "fe3e7b4dc56f5be9977624de7c549165bc180882",
+        "source_path": "devel/sql/ash-install.sql",
+        "sha256": "94b3d80b6864999922bd9d70794dac4073e8e10e5d11f918d2a0947adf6b6444",
+        "byte_identical": true
+      },
+      {
+        "path": "/tmp/pgash-blind-trial-20261021/investigators/docs/README.md",
+        "commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+        "source_path": "README.md",
+        "sha256": "32aee4774f106e96df4fa1a55c911848f0f4d908fd6e18fe074e4012083179a7",
+        "byte_identical": true
+      },
+      {
+        "path": "/tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md",
+        "commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+        "source_path": "docs/REFERENCE.md",
+        "sha256": "06c551880647ee449ea3a19f90aacd77b1a0d757cd991688c558f255940f304c",
+        "byte_identical": true
+      },
+      {
+        "path": "/tmp/pgash-blind-trial-20261021/investigators/docs/examples/llm-prompt.md",
+        "commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+        "source_path": "examples/llm-prompt.md",
+        "sha256": "5e65d33bab68506fccc01b528f6629adb37a5550058f7d7b68e6b8a977703810",
+        "byte_identical": true
+      },
+      {
+        "path": "/tmp/pgash-blind-trial-20261021/investigators/docs/examples/llm-investigation.sql",
+        "commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+        "source_path": "examples/llm-investigation.sql",
+        "sha256": "38ad22b23d6f6dd5b3173307438102b032249dc25d258ed2a0dec224b0df7d5d",
+        "byte_identical": true
+      }
+    ]
+  },
+  "trial_docs_commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+  "later_docs_not_tested": "69d27037348b8c14713aac9db9ab0f5a410a0913",
+  "documentation_files": {
+    "at": "2026-10-21T22:06:04.152481+00:00",
+    "source_commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+    "canonical_file_map_sha256": "60a9323583ac3cc55d292ec82f2a77366030ce8a8791fb481df75e3deddafe17",
+    "files": {
+      "README.md": "32aee4774f106e96df4fa1a55c911848f0f4d908fd6e18fe074e4012083179a7",
+      "docs/REFERENCE.md": "06c551880647ee449ea3a19f90aacd77b1a0d757cd991688c558f255940f304c",
+      "examples/llm-investigation.sql": "38ad22b23d6f6dd5b3173307438102b032249dc25d258ed2a0dec224b0df7d5d",
+      "examples/llm-prompt.md": "5e65d33bab68506fccc01b528f6629adb37a5550058f7d7b68e6b8a977703810"
+    }
+  }
+}

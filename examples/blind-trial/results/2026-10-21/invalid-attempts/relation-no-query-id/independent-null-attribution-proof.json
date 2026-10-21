@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-21T22:07:48.312096+00:00",
+  "count": 64,
+  "query_id_null_count": 64,
+  "queries": [
+    "select payload from records where id = $1"
+  ],
+  "states": [
+    "active"
+  ],
+  "blocker_pid_arrays_present": 64,
+  "original_certificate_sha256": "c4c5c20f9f96095cab3e429b297dd749fd1760f5c91c57d59d8598167c9822ac"
+}

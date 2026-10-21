@@ -1,0 +1,6 @@
+Investigate the performance incident using pg_ash.
+
+SQL connection command (psql-compatible): /tmp/pgash-blind-trial-20261021/investigators/3epj57xn/psql
+Public pg_ash documentation: /tmp/pgash-blind-trial-20261021/investigators/docs
+
+Use only that SQL connection and documentation. Do not inspect connection-wrapper source, credentials, other filesystem material, Docker, workload/setup/controller files, other cases, GitHub, or answer keys. Read-only investigation; do not change database state. Do not delegate. You have up to 15 minutes; stop earlier when ready. Write your findings and supporting SQL/evidence, uncertainties, and useful next check to /tmp/pgash-blind-trial-20261021/investigators/3epj57xn/report.md and return the report. You may write your own query scripts in your case directory. Do not seek additional context.

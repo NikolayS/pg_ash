@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-21T22:11:15.400138+00:00",
+  "replaces": "ssfjwgh2",
+  "controller_sha256": "ffdda72c14f3078e7c996ce4135cf477e828cc6c33ab2c6c498969e235a3d976",
+  "harness_sha256": "8c3e2bb1b1d4e3416fc38aa79e7354ced334d794cc6c516dfce37b95a23224b4",
+  "rubric_sha256": "317d392b51e1f2954c60a489f07126e6756782cac2661622bd03841a35deda86",
+  "sql_sha256": "94b3d80b6864999922bd9d70794dac4073e8e10e5d11f918d2a0947adf6b6444",
+  "docs_commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+  "change": "Fresh case; warm same SELECT via extended prepared execution before blocker. No criteria, ASH rows, or timestamps changed.",
+  "source": "https://raw.githubusercontent.com/postgres/postgres/REL_18_STABLE/src/backend/tcop/postgres.c",
+  "parent_clearance": "Fifth workload certified and ended at 22:09:11 UTC before this replacement started."
+}

@@ -1,0 +1,44 @@
+{
+  "case_id": "3epj57xn",
+  "frozen_rubric_sha256": "317d392b51e1f2954c60a489f07126e6756782cac2661622bd03841a35deda86",
+  "mechanism": "idletx",
+  "expected": {
+    "event": "Client:ClientRead",
+    "query": "select payload from records where id = $1",
+    "acceptable": "ClientRead with independently retained idle-in-transaction state; historical client wait alone cannot prove client/network pathology. Last query is not necessarily executing.",
+    "unsupported": "Active slow SELECT or network failure proved from ClientRead alone."
+  },
+  "observed_windows": [
+    {
+      "window": {
+        "index": 1,
+        "start": "2026-10-21T21:59:19.648946+00:00",
+        "end": "2026-10-21T21:59:33.664587+00:00"
+      },
+      "ash_matching_rows": 28,
+      "independent_matching_observations": 28,
+      "query_ids": [
+        -9127212586606946335
+      ],
+      "valid": true
+    },
+    {
+      "window": {
+        "index": 2,
+        "start": "2026-10-21T21:59:53.665163+00:00",
+        "end": "2026-10-21T22:00:11.680007+00:00"
+      },
+      "ash_matching_rows": 36,
+      "independent_matching_observations": 36,
+      "query_ids": [
+        -9127212586606946335
+      ],
+      "valid": true
+    }
+  ],
+  "certified_at": "2026-10-21T22:00:46.851372+00:00",
+  "service_sessions_remaining": [],
+  "sampler_errors_or_skips": [],
+  "rollup_rows": 1,
+  "certified": true
+}
