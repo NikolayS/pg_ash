@@ -12,7 +12,7 @@ declare
 begin
   -- Cover first-run catch-up and catch-up with an existing hourly watermark.
   foreach v_initialized in array array[false, true] loop
-    truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+    truncate ash.rollup_1m, ash.rollup_1h;
     update ash.config
     set rollup_1m_retention_days = 2,
       rollup_1h_retention_days = 7,
