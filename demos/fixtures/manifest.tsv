@@ -1,8 +1,8 @@
-status	3748c60347e6acaa5f39007eb6f1157bbbf0bdb9d5db6b353cc4cb5241df7f0e	pg_ash 2.0 — is it collecting?
-periods	a5cabf0292e8ac69a074457e3b87ffc8213979857f90d86ec1face432f6bca3e	ash.periods() — what do I even have?
-chart	7adec15902200c480e7ed002b4153bb961ee2cfbe1827838045d5394e2bc9e54	ash.chart() — AAS by wait event
-top_event	9625128ed0917ad59f41aa5b624fe747afe0bec4e39941d46c7ba68cd4b8c229	ash.top('wait_event') — the exact wait
-top_query	d8843bcda15a8bc498f312a37c8e2c7f3db9fa7bfe40ec8a21512684bb1ebc1c	ash.top('query_id') — which statement?
-compare	995bfc462998f289bc4b9a5518162a6312857e9cfb2321e74b36c26e0eb4e64a	ash.compare() — incident vs baseline
-summary	816a7f61ce72c19acf440b8c69bcdb0a1f07ee304d2547fc65269ae7dbaeb8f1	ash.summary() — the one-paragraph verdict
-report	7ace646609377622c617810ad131ab3cfb289826799976b7553ed90563784c06	ash.report() — hand this to an LLM
+status	13df03331aa35b028b830105cef7439aabdfc1ad8fa8893d36dec1742cd7aa9b	Collection settings
+periods	1ffcf392f3450ea4fdc778cc8637e058dd45df1a5879face152e97375eb31ccd	Available history
+chart	2bd47413077e1e3a3cbcb57baba18a71387dabf3c669d7b02f14da23eac0f7af	1. When did load rise?
+top_event	4e7ebecefd1b38f5978167b5ba47559220fc6ecdfa249e91437981208f6ae8fa	2. What were sessions waiting for?
+top_query	1fe8c470ba75e749a240685e817c676cd134ccda93ecce240223b14f078526ff	3. Which statements experienced this wait?
+compare	e152bebac186c87b1f48ea4c84a22293b5f2a4e37a0018a7c19d36c8a3f70fe7	4. What changed from the baseline?
+summary	b785b5b02be21e8909ab269d2d20d6ba5b1181b41aa6ec32be9027e374aff750	ash.summary() — the one-paragraph verdict
+report	cf37b1fea93de7b5317f462138dd9059cbfe4dfb0d1eaf856e0d8f5577641920	ash.report() — hand this to an LLM
