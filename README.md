@@ -611,6 +611,12 @@ Raw samples use a PGQ-style ring of partitions. Defaults:
 - `rollup_1m` retention is 30 days
 - `rollup_1h` retention is 5 years
 
+In the development candidate, cleanup keeps expired minute rows needed by pending hourly aggregation.
+They remain until hourly aggregation completes or their destination hour expires under hourly retention.
+Hourly retention expires whole hours by their start timestamp.
+If hourly aggregation stops, this backlog can grow for up to 5 years with default settings.
+Monitor `last_rollup_1h_ts` and rollup row counts in `ash.status()`; restore hourly aggregation to clear the backlog.
+
 `ash.start()` checks rotation once a day. Multi-day periods work because early
 checks skip until at least 90% of `rotation_period` has elapsed; sub-day and
 fractional-day periods are rejected. The minute rollup must outlive the raw slot that rotation
