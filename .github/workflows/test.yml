@@ -3767,6 +3767,8 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/reader_fractional_bounds.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/query_text_database.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/raw_slot_selection.sql
 
       - name: "Test 2.0: report totals and formatting edges"
@@ -4300,7 +4302,7 @@ jobs:
                 where c like 'search_path=%'
                   and (',' || replace(split_part(c, '=', 2), ' ', '') || ',') like '%,public,%'
               );
-            assert v_bad = '_pgss_query_text _samples compare samples summary top',
+            assert v_bad = '_pgss_query_text _pgss_query_text _samples compare samples summary top',
               'unexpected pgss-reader set (drift?): ' || coalesce(v_bad, '<none>');
             raise notice 'pgss shadow mitigation (catalog) PASSED';
           end $$;

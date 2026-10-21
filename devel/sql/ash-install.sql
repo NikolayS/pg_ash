@@ -6655,6 +6655,7 @@ declare
   v_has_pgss boolean := false;
   v_pgss_schema text;
   v_key_num bigint;
+  v_datid oid;
 begin
   if v_from > v_to then
     raise exception
@@ -6777,6 +6778,10 @@ begin
    * unqualified reference could fall through to a planted
    * public.pg_stat_statements and flip v_has_pgss on attacker data.
    */
+  if database is not null then
+    select db.oid into v_datid from pg_database as db
+    where db.datname = database;
+  end if;
   v_pgss_schema := case when dimension = 'query_id'
                         then ash._pgss_schema() end;
   if v_pgss_schema is not null then
@@ -6931,7 +6936,7 @@ begin
     if dimension = 'query_id' and v_has_pgss and v_key_num is not null then
       -- schema-qualified single lookup point (#115); returns null on any
       -- failure, never text from a shadowing relation.
-      query_text := ash._pgss_query_text(v_key_num, 100);
+      query_text := ash._pgss_query_text(v_key_num, 100, v_datid);
     end if;
     return next;
   end loop;
@@ -7270,11 +7275,13 @@ $$;
  * caller lacks USAGE on, so an unqualified reference could fall through to a
  * planted public.pg_stat_statements and leak attacker-controlled query_text.
  * Returns null when unavailable (including permission-denied on the real
- * pgss schema) — degraded, never spoofed.
+ * pgss schema) — degraded, never spoofed. Query IDs are database-local.
+ * Unscoped lookups return NULL when more than one database has the query ID.
  */
 create or replace function ash._pgss_query_text(
   query_id bigint,
-  maxlen int default 80
+  maxlen int,
+  database_oid oid
 )
 returns text
 language plpgsql
@@ -7290,14 +7297,28 @@ begin
   end if;
   begin
     execute format(
-      'select left(query, $1) from %I.pg_stat_statements '
-      'where queryid = $2 limit 1', v_pgss_schema)
-      into v_text using maxlen, query_id;
+      'select left(min(query), $1) from %I.pg_stat_statements '
+      'where queryid = $2 and ($3 is null or dbid = $3) '
+      'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+      into v_text using maxlen, query_id, database_oid;
   exception when others then
     v_text := null;
   end;
   return v_text;
 end;
+$$;
+
+-- Preserve existing calls. Without a database, only an unambiguous lookup is safe.
+create or replace function ash._pgss_query_text(
+  query_id bigint,
+  maxlen int default 80
+)
+returns text
+language sql
+stable
+set search_path = pg_catalog, ash, public
+as $$
+  select ash._pgss_query_text($1, $2, null::oid);
 $$;
 
 /*
@@ -7424,7 +7445,7 @@ begin
     resolved.active_count,
     resolved.wait_event,
     resolved.qid,
-    case when v_has_pgss then ash._pgss_query_text(resolved.qid, 80)
+    case when v_has_pgss then ash._pgss_query_text(resolved.qid, 80, resolved.datid)
          else null end
   from resolved
   left join pg_database as db on db.oid = resolved.datid
