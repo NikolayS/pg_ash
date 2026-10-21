@@ -360,9 +360,10 @@ expand_sql() {
   V_SINCE="$ASH_SINCE" V_UNTIL="$ASH_UNTIL" \
   V_BASE_SINCE="$ASH_BASE_SINCE" V_BASE_UNTIL="$ASH_BASE_UNTIL" \
   V_STORM_SINCE="$ASH_STORM_SINCE" V_STORM_UNTIL="$ASH_STORM_UNTIL" \
+  V_STORM_EVENT="$ASH_STORM_EVENT" \
   python3 - <<'PY'
 import os, sys
-names = ['BASE_SINCE', 'BASE_UNTIL', 'STORM_SINCE', 'STORM_UNTIL', 'SINCE', 'UNTIL']
+names = ['BASE_SINCE', 'BASE_UNTIL', 'STORM_SINCE', 'STORM_UNTIL', 'STORM_EVENT', 'SINCE', 'UNTIL']
 sql = os.environ['ASH_SQL']
 mode = os.environ['ASH_MODE']
 for n in names:                       # longest first: $BASE_SINCE before $SINCE
@@ -521,6 +522,7 @@ PSQLRC="$ASH_DEMO_DIR/lib/psqlrc.demo" exec psql \\
   -v SINCE="$ASH_SINCE" -v UNTIL="$ASH_UNTIL" \\
   -v BASE_SINCE="$ASH_BASE_SINCE" -v BASE_UNTIL="$ASH_BASE_UNTIL" \\
   -v STORM_SINCE="$ASH_STORM_SINCE" -v STORM_UNTIL="$ASH_STORM_UNTIL" \\
+  -v STORM_EVENT="$ASH_STORM_EVENT" \\
   -L "$TRANSCRIPT"
 LAUNCHEOF
 chmod +x "$LAUNCH"
