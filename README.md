@@ -53,6 +53,19 @@ Reader output and backend counts are not edited.
 The [before/after lab](examples/README.md#beforeafter-lock-lab) uses real elapsed time without restamping.
 See [demo reproduction](demos/README.md) for the full collection method.
 
+## A blind agent trial
+
+Five fresh Sol 6.1 agents investigated five separate Postgres containers with
+only a SQL connection, pg_ash documentation, and a neutral investigation task.
+All five identified the observed mechanism in 64–94 seconds: transaction-ID
+locks, relation locks, client-input waits, active/no-wait execution, and explicit sleeps.
+They preserved the distinction between evidence and an unproven root cause.
+
+[Read the independent scoring and limitations](https://github.com/NikolayS/pg_ash/issues/285#issuecomment-6327804037),
+or inspect the [reproducible harness and raw evidence](https://github.com/NikolayS/pg_ash/pull/288).
+This was one controlled five-case trial, not a general success rate. No case had
+a verified normal baseline; two rejected setup fixtures are disclosed separately.
+
 <a id="investigation-flow"></a>
 <a id="investigate-an-incident"></a>
 <a id="llm-assisted-investigation"></a>
