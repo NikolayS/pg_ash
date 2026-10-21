@@ -4721,6 +4721,7 @@ declare
   v_1h_retention int;
   v_cutoff_1m int4;
   v_cutoff_1h int4;
+  v_last_1h_ts int4;
 begin
   if ash._in_recovery() then
     raise notice
@@ -4742,8 +4743,8 @@ begin
     return 'cleanup: skipped — another rollup operation in progress';
   end if;
 
-  select rollup_1m_retention_days, rollup_1h_retention_days
-  into v_1m_retention, v_1h_retention
+  select rollup_1m_retention_days, rollup_1h_retention_days, last_rollup_1h_ts
+  into v_1m_retention, v_1h_retention, v_last_1h_ts
   from ash.config where singleton;
 
   v_cutoff_1m := ash.ts_from_timestamptz(
@@ -4753,7 +4754,10 @@ begin
     now() - (v_1h_retention || ' days')::interval
   );
 
-  delete from ash.rollup_1m where ts < v_cutoff_1m;
+  -- Keep pending hourly input after downtime. An expired hour needs no input.
+  delete from ash.rollup_1m
+  where ts < v_cutoff_1m
+    and (ts < v_last_1h_ts or (ts / 3600) * 3600 < v_cutoff_1h);
   get diagnostics v_1m_deleted = row_count;
 
   delete from ash.rollup_1h where ts < v_cutoff_1h;

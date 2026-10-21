@@ -389,6 +389,15 @@ jobs:
         run: |
           python3 devel/scripts/test_cadence_concurrency.py
 
+      - name: "Cleanup preserves pending hourly input"
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGDATABASE: postgres
+          PGPASSWORD: postgres
+        run: |
+          psql -v ON_ERROR_STOP=1 -f devel/tests/cleanup_pending_hour.sql
+
       - name: "#137: preserve unsupported legacy cadence on upgrade"
         env:
           PGPASSWORD: postgres
@@ -5991,13 +6000,13 @@ jobs:
               'precondition expected exactly 1 minute-rollup row';
 
             /*
-             * Model the shipped minute job advancing normally before the
-             * daily cleanup and rotation jobs run.
+             * Model both rollup jobs completing before daily cleanup and rotation.
              */
             update ash.config
             set last_rollup_1m_ts = ash.ts_from_timestamptz(
               date_trunc('minute', now())
-            )
+            ),
+              last_rollup_1h_ts = ash.ts_from_timestamptz(date_trunc('hour', now()))
             where singleton;
             select ash.rollup_cleanup() into v_result_text;
             assert v_result_text =
@@ -7675,7 +7684,12 @@ jobs:
               (v_recent_ts, 0::oid, 10, 2, '{}'::int4[], '{}'::int8[])
             on conflict (ts, datid) do nothing;
 
-            -- Run cleanup with default 30-day retention
+            -- This fixture models completed hourly aggregation before cleanup.
+            update ash.config
+            set last_rollup_1h_ts = ash.ts_from_timestamptz(date_trunc('hour', now()))
+            where singleton;
+
+            -- Run cleanup with default 30-day retention.
             select ash.rollup_cleanup() into v_result;
             assert v_result like 'cleanup:%', 'cleanup should return message';
 
