@@ -6772,16 +6772,17 @@ begin
   )::int4;
   v_extrema_supported := v_grain_secs <= v_requested_bucket_secs;
 
+  if database is not null then
+    select db.oid into v_datid from pg_database as db
+    where db.datname = database;
+  end if;
+
   /*
    * pgss presence/readability probe, schema-qualified from the catalog (#115):
    * name resolution SKIPS search_path schemas the caller lacks USAGE on, so an
    * unqualified reference could fall through to a planted
    * public.pg_stat_statements and flip v_has_pgss on attacker data.
    */
-  if database is not null then
-    select db.oid into v_datid from pg_database as db
-    where db.datname = database;
-  end if;
   v_pgss_schema := case when dimension = 'query_id'
                         then ash._pgss_schema() end;
   if v_pgss_schema is not null then
