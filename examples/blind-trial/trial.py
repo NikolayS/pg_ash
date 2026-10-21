@@ -431,23 +431,46 @@ def run(keep):
             thread.join(timeout=5)
 
 
+def inspect_for_cleanup(case, manifest):
+    container_id = case['container_id']
+    try:
+        inspected = json.loads(sh(['docker', 'container', 'inspect', container_id]))[0]
+    except subprocess.CalledProcessError as exc:
+        absent = ('Error response from daemon: No such container: ' + container_id,
+                  'Error: No such container: ' + container_id)
+        if exc.returncode == 1 and (exc.stderr or '').strip() in absent:
+            return False
+        raise
+    validate_owned(case, inspected, manifest)
+    return True
+
+
 def cleanup():
     manifest = json.loads((PRIVATE / 'manifest.json').read_text())
     cases = [case for case in manifest['cases'] if case.get('container_id')]
-    # Validate every resource first; a mismatch must remove nothing.
+    # Inspect immutable IDs, never a reusable name. Validate all before removal.
+    present = {case['container_id']: inspect_for_cleanup(case, manifest) for case in cases}
+    ledger = PRIVATE / 'cleanup.json'
+    outcomes = {entry['container_id']: entry
+                for entry in json.loads(ledger.read_text())} if ledger.exists() else {}
     for case in cases:
-        inspected = json.loads(sh(['docker', 'inspect', case['container']]))[0]
-        validate_owned(case, inspected, manifest)
-    outcomes = []
-    for case in cases:
-        dest = PRIVATE / case['id']
-        captured = subprocess.run(['docker', 'logs', '--timestamps', case['container']],
-                                  check=True, text=True, capture_output=True)
-        (dest / 'container.stdout.log').write_text(captured.stdout)
-        (dest / 'container.stderr.log').write_text(captured.stderr)
-        sh(['docker', 'rm', '-f', '-v', case['container']])
-        outcomes.append({'container': case['container'], 'removed': now()})
-    dump(PRIVATE / 'cleanup.json', outcomes)
+        container_id = case['container_id']
+        if present[container_id]:
+            dest = PRIVATE / case['id']
+            captured = subprocess.run(['docker', 'logs', '--timestamps', container_id],
+                                      check=True, text=True, capture_output=True)
+            (dest / 'container.stdout.log').write_text(captured.stdout)
+            (dest / 'container.stderr.log').write_text(captured.stderr)
+            sh(['docker', 'rm', '-f', '-v', container_id])
+            outcomes[container_id] = {'container': case['container'], 'container_id': container_id,
+                                      'state': 'removed', 'at': now()}
+        elif container_id not in outcomes:
+            outcomes[container_id] = {'container': case['container'], 'container_id': container_id,
+                                      'state': 'already_absent', 'at': now()}
+        # A crash after removal is safe: the next run sees this ID as absent.
+        temporary = ledger.with_suffix('.tmp')
+        dump(temporary, list(outcomes.values()))
+        os.replace(temporary, ledger)
 
 
 def main():

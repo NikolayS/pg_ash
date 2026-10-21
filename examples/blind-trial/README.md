@@ -119,7 +119,10 @@ Stop the foreground sampler with Ctrl-C before cleanup. A run-directory lock
 rejects concurrent controllers and cleanup while that process is active.
 Cleanup validates every container's exact ID, name, prefix and unique run label
 before removing any resource, then preserves server stdout/stderr and removes
-only those five containers and their volumes. Never use a prefix-wide prune.
+only recorded immutable IDs and their volumes. A missing recorded ID is retained
+as already absent; a different container reusing its name is never touched. An
+atomic progress ledger after each resource makes interrupted cleanup resumable.
+Never use a prefix-wide prune.
 
 ```sh
 python3 examples/blind-trial/trial.py manifest --run-dir /tmp/blind-run
