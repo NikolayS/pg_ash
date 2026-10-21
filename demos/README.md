@@ -62,7 +62,7 @@ Collection settings and history availability remain available as stills; they do
 | `assets/<scene>.svg` | `make stills` | the primary still. Vector, byte-deterministic, crisp at any zoom |
 | `assets/<scene>.png` | `make stills` | `ASH_SCALE`× raster of the same SVG (default 2×) |
 | `assets/ash_demo.gif` | `make demo` | the reel |
-| `assets/ash_demo.mp4` | `make demo` | same render, ~40% smaller; what docs sites want |
+| `assets/ash_demo.mp4` | `make demo` | same render, with pause, seek, and full-screen player controls |
 
 The scene list is data, not code: `scenes/scenes.tsv`. Adding a documentation
 image means adding one line to that file.

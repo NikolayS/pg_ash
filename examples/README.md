@@ -107,6 +107,9 @@ The first run holds a transaction open during eight seconds of client-side work.
 The script closes every workload connection before it investigates the stored history.
 It ranks waits, locates lock waiting, attributes query IDs, and prints raw evidence.
 Then it moves the client-side work after `commit` and repeats the same four updates.
+In that phase, all four updates finish before sampling starts; the holder
+stays connected but idle while the client-side work continues.
+The after ticks therefore contain no sampled workload backends.
 The script checks committed work and sampled lock observations in both phases.
 It never uses `pg_sleep()` to create the incident.
 
@@ -159,7 +162,8 @@ Do not interpret it as continuous minute coverage.
 A passing run reports 24 sampled Lock backend-observations before the change and zero afterward.
 Both phases must commit four updates.
 At the one-second configured interval, 24 backend-observations represent 24 estimated lock-wait backend-seconds.
-This supports reduced observed lock waiting for this controlled fixture.
+This supports the transaction-lifetime change in this controlled fixture,
+not a comparison under equal concurrent load during sampling.
 It does not establish latency, throughput, production impact, or absence of sub-second waits.
 Missing stored rows alone prove neither idle activity nor scheduler health.
 The separate tick log records the actual manual sample calls.

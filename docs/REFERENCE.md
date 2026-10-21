@@ -54,22 +54,24 @@ NULL instead of being filled with an hour average. Hour-only partial-window
 drills snap outward and disclose effective bounds/bucket; plain
 `top('database')` keeps minute precision through per-database `minute_counts`.
 
+Every explicit `query_id` filter and every query breakdown with a wait filter
+needs the raw wait-to-query link. If older rollup history covers the requested
+pre-raw interval, pg_ash raises with the retention boundary. Unfiltered
+`ash.top('query_id')` can use compacted rollups, where a NULL key accounts for
+unpreserved attribution and participates in the top `n` rows.
+
 <a id="investigation-flow"></a>
 
 <a id="llm-assisted-investigation"></a>
 
 ## Agent-led investigation
 
-**Prompt:** "There was a performance issue about five minutes ago. Investigate."
-
-Give a tool-enabled agent the [investigation task](../examples/llm-prompt.md#task-1-investigate-a-completed-incident).
-It executes read-only queries, chooses the next drill from observed results,
-and stops when retention or resolution cannot support attribution.
-The [executable psql example](../examples/llm-investigation.sql)
-is a deterministic reference replay, not an autonomous agent. It runs in a
-read-only transaction and chooses the drill window from the results.
-The snippets below show the available SQL tools; the script supplies the
-variables from actual results. It needs an existing installation with recent activity:
+Give a tool-enabled agent the [self-contained incident task](../README.md#investigate-an-incident-with-an-agent).
+The [SQL walkthrough](../README.md#sql-tools-for-the-investigation) illustrates
+the available tools; the agent chooses its next query from observed evidence.
+The [executable psql example](../examples/llm-investigation.sql) is a separate,
+deterministic five-step replay, not an autonomous agent. It selects its drill
+window from actual results and needs an existing installation with recent activity:
 
 ```bash
 psql -X -v ON_ERROR_STOP=1 -d mydb -f examples/llm-investigation.sql
@@ -83,93 +85,11 @@ psql -X -v ON_ERROR_STOP=1 -d mydb \
   -f examples/llm-investigation.sql
 ```
 
-### 1. Check the big picture
-
-Freeze the window once so later queries answer the same question. In psql:
-
-```sql
-select now() - interval '10 minutes' as since, now() as until \gset
-select * from ash.aas(since => :'since', until => :'until');
-```
-
-Read average and peak AAS together with `source`, `effective_bucket`, and
-`buckets_with_data`. A peak above the average suggests concentrated load; it
-does not by itself establish an incident. Observation counts cannot distinguish
-idle sampling from a scheduler outage. Check scheduler health separately.
-
-### 2. Find the dominant waits
-
-```sql
-select * from ash.top(
-  'wait_event', since => :'since', until => :'until',
-  order_by => 'peak', n => 5
-);
-```
-
-If `Lock:transactionid` leads, sessions were waiting for transactions. If
-`CPU*` leads, sessions were active with no reported wait: CPU execution and
-uninstrumented paths are both possible. The example chooses a wait from this
-output; a query waiting on a lock is not necessarily the blocker.
-
-### 3. Locate the spike
-
-```sql
-select * from ash.timeline(
-  since => :'since', until => :'until',
-  bucket => '1 minute', wait_event => :'wait_event'
-);
-```
-
-Here `wait_event` is the event selected in step 2. Use the busiest observed
-bucket as `spike_since` and its exclusive end as `spike_until`. The script
-checks the effective resolution before proceeding. A retained hour aggregate
-cannot establish the timing of a one-minute spike.
-
-### 4. Identify the queries experiencing the wait
-
-```sql
-select * from ash.top(
-  'query_id', since => :'spike_since', until => :'spike_until',
-  wait_event => :'wait_event', order_by => 'peak', n => 5
-);
-```
-
-`query_text` is included when pg_stat_statements can resolve it. Query IDs
-still work without that extension. Select a non-NULL query ID from the output;
-if none is available, report unattributed load rather than inventing SQL.
-
-Every explicit `query_id` filter and every query breakdown with a wait filter
-needs the raw wait-to-query link. If older rollup history covers the requested
-pre-raw interval, pg_ash raises with the retention boundary. Unfiltered
-`ash.top('query_id')` can use compacted rollups, where a NULL key accounts for
-unpreserved attribution and participates in the top `n` rows.
-
-### 5. Inspect the raw evidence
-
-```sql
-select * from ash.samples(
-  since => :'spike_since', until => :'spike_until',
-  query_id => :query_id, n => 20
-);
-select * from ash.top(
-  'wait_event', since => :'spike_since', until => :'spike_until',
-  query_id => :query_id
-);
-```
-
-A supported conclusion is: "Query X experienced transaction-lock waits during
-this window; inspect its transaction scope and the blocking transaction."
-Stored samples do not identify the blocker, conflicting row values, or the
-order of subsecond events. Confirm those separately before changing the
-application. `SKIP LOCKED`, for example, changes which rows an operation
-processes and is not a general lock-contention remedy.
-
-In the [captured run](../examples/README.md), 28 backend-seconds produced 0.23
-average AAS over two minutes and a 0.47 peak minute. One update accounted for
-all 14 tuple-lock backend-seconds. The next step was to inspect its blocking
-transaction, not infer one from the waiting query ID. Give a model the [agent task and evidence contract](../examples/llm-prompt.md)
-alongside that evidence or an `ash.report()` payload. pg_ash makes no calls to
-an LLM service. Review SQL text before sharing it outside your environment.
+The [captured run](../examples/README.md#captured-run) shows the script's actual
+output and supported conclusion. For offline analysis, supply the
+[evidence contract](../examples/llm-prompt.md#evidence-contract) with the results
+or an `ash.report()` payload. pg_ash makes no calls to an LLM service.
+Review SQL text before sharing it outside your environment.
 
 ## Chart rendering
 
