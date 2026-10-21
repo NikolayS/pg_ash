@@ -4,9 +4,11 @@
 select exists (select 1 from pg_extension where extname = 'pg_stat_statements') as has_pgss \gset
 \if :has_pgss
 select current_database() as test_database \gset
+create role ash_query_text_reader;
 create database ash_query_text_a;
 create database ash_query_text_b;
 \connect ash_query_text_a
+set role ash_query_text_reader;
 select 42 as ash_reader_database_a;
 select octet_length(md5('ash_reader_unique')) as ash_reader_unique;
 \connect ash_query_text_b
@@ -15,6 +17,7 @@ select 42 as ash_reader_database_b;
 begin;
 truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
 update ash.config set sample_interval = interval '1 second';
+select ash.grant_reader('ash_query_text_reader');
 do $$
 declare
   v_pgss_schema text := ash._pgss_schema();
@@ -89,6 +92,36 @@ begin
   assert ash._pgss_query_text(v_qid_a) is null,
     'legacy helper must return NULL for ambiguous database identity';
 
+  -- pgss hides other users' IDs, not their database IDs. Visible IDs alone
+  -- cannot prove uniqueness for a plain reader's unscoped lookup.
+  execute 'set local role ash_query_text_reader';
+  assert not pg_has_role(current_user, 'pg_read_all_stats', 'USAGE'),
+    'fixture reader must not inherit statistics privileges';
+  execute format('select count(distinct dbid) from %I.pg_stat_statements where queryid = $1', v_pgss_schema)
+    into v_count using v_qid_a;
+  assert v_count = 1, 'restricted reader must see the matching ID in only one database';
+  execute format('select count(*) from %I.pg_stat_statements where dbid = $1 and queryid is null', v_pgss_schema)
+    into v_count using v_datid_b;
+  assert v_count > 0, 'restricted reader must have hidden IDs in the other database';
+  select * into strict v_actual from ash.top('query_id', v_from, v_from + interval '1 minute');
+  assert v_actual.key = v_qid_a::text and v_actual.query_text is null,
+    format('restricted unscoped top returned unrelated SQL text: %s', row_to_json(v_actual));
+  assert ash._pgss_query_text(v_qid_a) is null,
+    'legacy helper must not treat hidden IDs as proof of uniqueness';
+  assert ash._pgss_query_text(v_qid_a, 9, v_datid_a) = 'select $1',
+    'restricted database-scoped helper must retain own text and maxlen';
+  foreach v_database in array array['ash_query_text_a', 'ash_query_text_b']::name[] loop
+    v_expected := case when v_database = 'ash_query_text_a'
+      then 'select $1 as ash_reader_database_a' else null end;
+    select * into strict v_actual from ash.samples(v_from, v_from + interval '1 minute', database => v_database);
+    assert v_actual.query_text is not distinct from v_expected,
+      'restricted samples must preserve pgss text visibility';
+    select * into strict v_actual from ash.top('query_id', v_from, v_from + interval '1 minute', database => v_database);
+    assert v_actual.query_text is not distinct from v_expected,
+      'restricted database-scoped top must preserve pgss text visibility';
+  end loop;
+  execute 'reset role';
+
   -- Hourly readers must also carry the database filter into enrichment.
   insert into ash.rollup_1h (ts, datid, samples, peak_backends, wait_counts, query_counts)
   values (ash.ts_from_timestamptz(v_hour), v_datid_a, 60, 1, array[v_cpu, 60], array[v_qid_a, 60]),
@@ -100,6 +133,11 @@ begin
     assert v_actual.source = 'rollup_1h' and v_actual.query_text is not distinct from v_expected,
       'hourly top must preserve database-scoped query text';
   end loop;
+  execute 'set local role ash_query_text_reader';
+  select * into strict v_actual from ash.top('query_id', v_hour, v_hour + interval '1 hour');
+  assert v_actual.source = 'rollup_1h' and v_actual.query_text is null,
+    'restricted hourly top must not treat hidden IDs as proof of uniqueness';
+  execute 'reset role';
   -- Dropped databases can leave pgss rows. Remove only this fixture's entries.
   execute format('select %I.pg_stat_statements_reset(0, $1, 0)', v_pgss_schema)
     using v_datid_a;
@@ -112,6 +150,7 @@ rollback;
 \connect :test_database
 drop database ash_query_text_a;
 drop database ash_query_text_b;
+drop role ash_query_text_reader;
 \else
 \echo 'SKIP: pg_stat_statements not installed on this PG major'
 \endif

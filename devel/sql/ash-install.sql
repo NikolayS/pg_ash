@@ -7278,7 +7278,7 @@ $$;
  * planted public.pg_stat_statements and leak attacker-controlled query_text.
  * Returns null when unavailable (including permission-denied on the real
  * pgss schema) — degraded, never spoofed. Query IDs are database-local.
- * Unscoped lookups return NULL when more than one database has the query ID.
+ * Unscoped lookups return NULL when matching or hidden IDs span databases.
  */
 create or replace function ash._pgss_query_text(
   query_id bigint,
@@ -7298,9 +7298,12 @@ begin
     return null;
   end if;
   begin
+    -- Other users' hidden IDs can collide in another database. Count those
+    -- databases too, but select text only from visible matching IDs.
     execute format(
-      'select left(min(query), $1) from %I.pg_stat_statements '
-      'where queryid = $2 and ($3 is null or dbid = $3) '
+      'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
+      'where (queryid = $2 or ($3 is null and queryid is null)) '
+      'and ($3 is null or dbid = $3) '
       'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
       into v_text using maxlen, query_id, database_oid;
   exception when others then
