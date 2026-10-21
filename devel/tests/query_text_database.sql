@@ -1,0 +1,248 @@
+-- Real pg_stat_statements entries with equal query IDs and different SQL text.
+-- Aliases do not affect these query IDs on supported Postgres versions.
+\set ON_ERROR_STOP on
+select exists (select 1 from pg_extension where extname = 'pg_stat_statements') as has_pgss \gset
+\if :has_pgss
+select current_database() as test_database \gset
+create role ash_query_text_reader;
+create database ash_query_text_a;
+create database ash_query_text_b;
+\connect ash_query_text_a
+set role ash_query_text_reader;
+select 42 as ash_reader_database_a;
+select octet_length(md5('ash_reader_unique')) as ash_reader_unique;
+\connect ash_query_text_b
+select 42 as ash_reader_database_b;
+\connect :test_database
+begin;
+truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+update ash.config set sample_interval = interval '1 second';
+select ash.grant_reader('ash_query_text_reader');
+do $$
+declare
+  v_pgss_schema text := ash._pgss_schema();
+  v_database name;
+  v_datid_a oid := (select oid from pg_database where datname = 'ash_query_text_a');
+  v_datid_b oid := (select oid from pg_database where datname = 'ash_query_text_b');
+  v_qid_a bigint;
+  v_qid_b bigint;
+  v_unique_qid bigint;
+  v_slot smallint := ash.current_slot();
+  v_map_id integer;
+  v_cpu smallint := ash._register_wait('active', 'CPU*', 'CPU*');
+  v_from timestamptz := date_trunc('minute', now()) - interval '1 minute';
+  v_hour timestamptz := date_trunc('hour', now()) - interval '2 days';
+  v_expected text;
+  v_actual record;
+  v_window record;
+  v_count integer;
+begin
+  assert v_pgss_schema is not null, 'fixture requires real pg_stat_statements';
+  execute format('select queryid from %I.pg_stat_statements where dbid = $1 and query = $2', v_pgss_schema)
+    into strict v_qid_a using v_datid_a, 'select $1 as ash_reader_database_a';
+  execute format('select queryid from %I.pg_stat_statements where dbid = $1 and query = $2', v_pgss_schema)
+    into strict v_qid_b using v_datid_b, 'select $1 as ash_reader_database_b';
+  assert v_qid_a = v_qid_b, 'fixture must produce a real cross-database query ID collision';
+  execute format('select queryid from %I.pg_stat_statements where dbid = $1 and query = $2', v_pgss_schema)
+    into strict v_unique_qid using v_datid_a, 'select octet_length(md5($1)) as ash_reader_unique';
+  assert ash._pgss_query_text(v_unique_qid) = 'select octet_length(md5($1)) as ash_reader_unique'
+     and ash._pgss_query_text(v_unique_qid, 6) = 'select',
+    'legacy helper signatures must preserve unambiguous text and maxlen';
+
+  execute format('insert into ash.query_map_%s (query_id) values ($1) on conflict (query_id) do update set query_id = excluded.query_id returning id', v_slot)
+    into v_map_id using v_qid_a;
+  insert into ash.sample (sample_ts, datid, active_count, data, slot)
+  values (ash.ts_from_timestamptz(v_from), v_datid_a, 1, array[-v_cpu, 1, v_map_id], v_slot),
+         (ash.ts_from_timestamptz(v_from), v_datid_b, 1, array[-v_cpu, 1, v_map_id], v_slot);
+
+  -- Both public sample rows must carry their own database's SQL text.
+  select count(*) into v_count from ash.samples(v_from, v_from + interval '1 minute');
+  assert v_count = 2, 'fixture must expose exactly two raw sample rows';
+  foreach v_database in array array['ash_query_text_a', 'ash_query_text_b']::name[] loop
+    v_expected := case when v_database = 'ash_query_text_a'
+      then 'select $1 as ash_reader_database_a' else 'select $1 as ash_reader_database_b' end;
+    select * into strict v_actual from ash.samples(v_from, v_from + interval '1 minute')
+    where database_name = v_database;
+    assert v_actual.query_id = v_qid_a and v_actual.query_text is not distinct from v_expected,
+      format('samples returned another database SQL text: %s', row_to_json(v_actual));
+    select * into strict v_actual from ash.top('query_id', v_from, v_from + interval '1 minute', database => v_database);
+    assert v_actual.key = v_qid_a::text and v_actual.query_text is not distinct from v_expected,
+      format('top returned another database SQL text: %s', row_to_json(v_actual));
+    select * into strict v_actual from ash.compare(v_from, v_from + interval '1 minute',
+      v_from, v_from + interval '1 minute', dimension => 'query_id', database => v_database);
+    assert v_actual.query_text is not distinct from v_expected and v_actual.avg_delta = 0,
+      'compare must preserve database-scoped query text';
+  end loop;
+
+  -- Default monitoring grants must include the database-aware helper.
+  execute 'set local role pg_monitor';
+  select * into strict v_actual from ash.samples(v_from, v_from + interval '1 minute',
+    database => 'ash_query_text_a');
+  assert v_actual.query_text = 'select $1 as ash_reader_database_a',
+    'pg_monitor must execute the database-aware helper';
+  execute 'reset role';
+  assert ash._pgss_query_text(v_qid_a, 9, v_datid_a) = 'select $1',
+    'database-aware helper must preserve maxlen';
+  assert ash._pgss_query_text(v_qid_a, 80, 0::oid) is null,
+    'a database without the query must not fall back to another database';
+
+  -- A cross-database aggregate has no single database identity for this key.
+  select * into strict v_actual from ash.top('query_id', v_from, v_from + interval '1 minute');
+  assert v_actual.key = v_qid_a::text and v_actual.query_text is null,
+    'unscoped top must not choose arbitrary text from colliding databases';
+  assert ash._pgss_query_text(v_qid_a) is null,
+    'legacy helper must return NULL for ambiguous database identity';
+
+  -- pgss hides other users' IDs, not their database IDs. Visible IDs alone
+  -- cannot prove uniqueness for a plain reader's unscoped lookup.
+  execute 'set local role ash_query_text_reader';
+  assert not pg_has_role(current_user, 'pg_read_all_stats', 'USAGE'),
+    'fixture reader must not inherit statistics privileges';
+  execute format('select count(distinct dbid) from %I.pg_stat_statements where queryid = $1', v_pgss_schema)
+    into v_count using v_qid_a;
+  assert v_count = 1, 'restricted reader must see the matching ID in only one database';
+  execute format('select count(*) from %I.pg_stat_statements where dbid = $1 and queryid is null', v_pgss_schema)
+    into v_count using v_datid_b;
+  assert v_count > 0, 'restricted reader must have hidden IDs in the other database';
+  select * into strict v_actual from ash.top('query_id', v_from, v_from + interval '1 minute');
+  assert v_actual.key = v_qid_a::text and v_actual.query_text is null,
+    format('restricted unscoped top returned unrelated SQL text: %s', row_to_json(v_actual));
+  assert ash._pgss_query_text(v_qid_a) is null,
+    'legacy helper must not treat hidden IDs as proof of uniqueness';
+  assert ash._pgss_query_text(v_qid_a, 9, v_datid_a) = 'select $1',
+    'restricted database-scoped helper must retain own text and maxlen';
+  foreach v_database in array array['ash_query_text_a', 'ash_query_text_b']::name[] loop
+    v_expected := case when v_database = 'ash_query_text_a'
+      then 'select $1 as ash_reader_database_a' else null end;
+    select * into strict v_actual from ash.samples(v_from, v_from + interval '1 minute', database => v_database);
+    assert v_actual.query_text is not distinct from v_expected,
+      'restricted samples must preserve pgss text visibility';
+    select * into strict v_actual from ash.top('query_id', v_from, v_from + interval '1 minute', database => v_database);
+    assert v_actual.query_text is not distinct from v_expected,
+      'restricted database-scoped top must preserve pgss text visibility';
+  end loop;
+  execute 'reset role';
+
+  -- Hourly readers must also carry the database filter into enrichment.
+  insert into ash.rollup_1h (ts, datid, samples, peak_backends, wait_counts, query_counts)
+  values (ash.ts_from_timestamptz(v_hour), v_datid_a, 60, 1, array[v_cpu, 60], array[v_qid_a, 60]),
+         (ash.ts_from_timestamptz(v_hour), v_datid_b, 60, 1, array[v_cpu, 60], array[v_qid_b, 60]);
+  foreach v_database in array array['ash_query_text_a', 'ash_query_text_b']::name[] loop
+    v_expected := case when v_database = 'ash_query_text_a'
+      then 'select $1 as ash_reader_database_a' else 'select $1 as ash_reader_database_b' end;
+    select * into strict v_actual from ash.top('query_id', v_hour, v_hour + interval '1 hour', database => v_database);
+    assert v_actual.source = 'rollup_1h' and v_actual.query_text is not distinct from v_expected,
+      'hourly top must preserve database-scoped query text';
+  end loop;
+  execute 'set local role ash_query_text_reader';
+  select * into strict v_actual from ash.top('query_id', v_hour, v_hour + interval '1 hour');
+  assert v_actual.source = 'rollup_1h' and v_actual.query_text is null,
+    'restricted hourly top must not treat hidden IDs as proof of uniqueness';
+  execute 'reset role';
+  update ash.sample set sample_ts = sample_ts + 60 where datid = v_datid_b;
+  select * into strict v_actual from ash.compare(v_from, v_from + interval '1 minute',
+    v_from + interval '1 minute', v_from + interval '2 minutes', dimension => 'query_id');
+  assert v_actual.query_text is null and v_actual.avg_delta = 0,
+    'compare must not select one database text for different source identities';
+  update ash.sample set sample_ts = sample_ts - 60 where datid = v_datid_b;
+
+  -- ASH retains both identities after pgss loses one database's entries.
+  insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+  values (ash.ts_from_timestamptz(v_from - interval '2 hours'), v_datid_a, 60, 1, array[v_cpu, 60], array[v_qid_a, 60]),
+         (ash.ts_from_timestamptz(v_from - interval '2 hours'), v_datid_b, 60, 1, array[v_cpu, 60], array[v_qid_b, 60]);
+  execute format('select %I.pg_stat_statements_reset(0, $1, 0)', v_pgss_schema)
+    using v_datid_b;
+  execute format('select count(*) from %I.pg_stat_statements where dbid = $1', v_pgss_schema)
+    into v_count using v_datid_b;
+  assert v_count = 0, 'pgss must have no entries for the second database';
+  assert ash._pgss_query_text(v_qid_a, 100, v_datid_a) = 'select $1 as ash_reader_database_a',
+    'pgss must retain the first database text';
+
+  update ash.sample set sample_ts = sample_ts + 60 where datid = v_datid_b;
+  select * into strict v_actual from ash.compare(v_from, v_from + interval '1 minute',
+    v_from + interval '1 minute', v_from + interval '2 minutes', dimension => 'query_id');
+  assert v_actual.query_text is null and v_actual.avg_delta = 0,
+    'compare must not reuse visible text for a different database with no pgss entry';
+  update ash.sample set sample_ts = sample_ts - 60 where datid = v_datid_b;
+
+  for v_window in
+    select * from (values
+      ('raw', v_from, interval '1 minute', 2),
+      ('rollup_1m', v_from - interval '2 hours', interval '1 minute', 120),
+      ('rollup_1h', v_hour, interval '1 hour', 120)
+    ) as windows(source, since, span, backend_seconds)
+  loop
+    select * into strict v_actual from ash.top('query_id', v_window.since, v_window.since + v_window.span);
+    assert v_actual.source = v_window.source and v_actual.key = v_qid_a::text
+       and v_actual.backend_seconds = v_window.backend_seconds and v_actual.query_text is null,
+      format('pgss reset must not hide ASH database ambiguity: %s', row_to_json(v_actual));
+    select * into strict v_actual from ash.compare(v_window.since, v_window.since + v_window.span,
+      v_window.since, v_window.since + v_window.span, dimension => 'query_id');
+    assert v_actual.query_text is null and v_actual.avg_delta = 0,
+      'compare must preserve ASH database ambiguity after pgss reset';
+    foreach v_database in array array['ash_query_text_a', 'ash_query_text_b']::name[] loop
+      v_expected := case when v_database = 'ash_query_text_a'
+        then 'select $1 as ash_reader_database_a' else null end;
+      select * into strict v_actual from ash.top('query_id', v_window.since,
+        v_window.since + v_window.span, database => v_database);
+      assert v_actual.source = v_window.source and v_actual.query_text is not distinct from v_expected,
+        'scoped top must retain surviving text without another database fallback';
+    end loop;
+  end loop;
+  select * into strict v_actual from ash.top('query_id', v_from, v_from + interval '1 minute',
+    wait_event_type => 'CPU*');
+  assert v_actual.query_text is null and v_actual.backend_seconds = 2,
+    'wait-filtered raw top must preserve ASH database ambiguity';
+
+  delete from ash.sample where datid = v_datid_b;
+  delete from ash.rollup_1m where datid = v_datid_b;
+  delete from ash.rollup_1h where datid = v_datid_b;
+  for v_window in
+    select * from (values
+      ('raw', v_from, interval '1 minute'),
+      ('rollup_1m', v_from - interval '2 hours', interval '1 minute'),
+      ('rollup_1h', v_hour, interval '1 hour')
+    ) as windows(source, since, span)
+  loop
+    select * into strict v_actual from ash.top('query_id', v_window.since, v_window.since + v_window.span);
+    assert v_actual.source = v_window.source and v_actual.query_text = 'select $1 as ash_reader_database_a',
+      'unscoped top must retain text for a unique ASH database';
+    select * into strict v_actual from ash.compare(v_window.since, v_window.since + v_window.span,
+      v_window.since, v_window.since + v_window.span, dimension => 'query_id');
+    assert v_actual.query_text = 'select $1 as ash_reader_database_a' and v_actual.avg_delta = 0,
+      'unscoped compare must retain consistent text for a unique ASH database';
+  end loop;
+  select * into strict v_actual from ash.compare(v_from, v_from + interval '1 minute',
+    v_from + interval '1 minute', v_from + interval '2 minutes', dimension => 'query_id');
+  assert v_actual.query_text = 'select $1 as ash_reader_database_a' and v_actual.avg_delta is null,
+    'unscoped compare must retain text when only one window contains the key';
+  update ash.sample set datid = v_datid_b;
+  update ash.rollup_1m set datid = v_datid_b;
+  update ash.rollup_1h set datid = v_datid_b;
+  for v_window in
+    select * from (values
+      ('raw', v_from, interval '1 minute'),
+      ('rollup_1m', v_from - interval '2 hours', interval '1 minute'),
+      ('rollup_1h', v_hour, interval '1 hour')
+    ) as windows(source, since, span)
+  loop
+    select * into strict v_actual from ash.top('query_id', v_window.since, v_window.since + v_window.span);
+    assert v_actual.source = v_window.source and v_actual.query_text is null,
+      'unscoped top must not use pgss text from a database absent from its ASH rows';
+  end loop;
+  -- Dropped databases can leave pgss rows. Remove only this fixture's entries.
+  execute format('select %I.pg_stat_statements_reset(0, $1, 0)', v_pgss_schema)
+    using v_datid_a;
+  execute format('select %I.pg_stat_statements_reset(0, $1, 0)', v_pgss_schema)
+    using v_datid_b;
+  raise notice 'PASS: real query ID collision, samples, raw/hourly top, compare, and unscoped ambiguity';
+end;
+$$;
+rollback;
+\connect :test_database
+drop database ash_query_text_a;
+drop database ash_query_text_b;
+drop role ash_query_text_reader;
+\else
+\echo 'SKIP: pg_stat_statements not installed on this PG major'
+\endif
