@@ -692,7 +692,9 @@ jobs:
             'select * from ash.decode_sample_at(now())' \
             'select * from ash.aas(query_id := 12345)' \
             'select * from ash.timeline(query_id := 12345)' \
-            "select * from ash.top('wait_event', query_id := 12345)"
+            "select * from ash.top('wait_event', query_id := 12345)" \
+            "select * from ash.compare(now() - interval '2 minutes', now() - interval '1 minute', now() - interval '1 minute', now(), dimension => 'query_id', wait_event_type => 'CPU*')" \
+            "select * from ash.compare(now() - interval '2 minutes', now() - interval '1 minute', now() - interval '1 minute', now(), dimension => 'query_id', wait_event => 'CPU*')"
           do
             raw_only_out="$(docker exec "$CONTAINER_ID" psql -U postgres \
               -p 5433 -v ON_ERROR_STOP=1 -tAc "$raw_only" 2>&1 || true)"

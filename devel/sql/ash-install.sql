@@ -7008,6 +7008,7 @@ declare
   v_grain2 int4;
   v_source1 text;
   v_source2 text;
+  v_datid oid;
   v_exact_query boolean;
   v_extrema_mismatch boolean;
 begin
@@ -7097,6 +7098,7 @@ begin
                      );
 
     if v_exact_query then
+      perform ash._require_raw_ring('exact query attribution');
       v_source1 := 'raw';
       v_source2 := 'raw';
     else
@@ -7167,25 +7169,39 @@ begin
       v_grain1 <> v_grain2
       or v_effective_bucket_secs1 <> v_effective_bucket_secs2;
 
-    -- Match top()'s read source and effective bounds. Only database limits coverage.
-    select exists (
-      select 1 from ash._grain_counts(v_start1, v_end1,
-        case when v_source1 in ('rollup_1h', 'rollup_1h_flat')
-                       and dimension = 'database'
-                       and wait_event_type is null and wait_event is null
-                       and query_id is null
-             then 'rollup_1h_minutes' else v_source1 end,
-        database => database)
-    ) into v_cov1;
-    select exists (
-      select 1 from ash._grain_counts(v_start2, v_end2,
-        case when v_source2 in ('rollup_1h', 'rollup_1h_flat')
-                       and dimension = 'database'
-                       and wait_event_type is null and wait_event is null
-                       and query_id is null
-             then 'rollup_1h_minutes' else v_source2 end,
-        database => database)
-    ) into v_cov2;
+    -- Minute rollup plans share aas() coverage, including sparse database detail.
+    -- Raw and hourly plans need only source-row existence, not decoded counts.
+    select db.oid into v_datid from pg_database as db where db.datname = database;
+    select case
+      when v_source1 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start1), ash.ts_to_timestamptz(v_end1)))::smallint[])
+          and s.sample_ts >= v_start1 and s.sample_ts < v_end1
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain1 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start1 and h.ts < v_end1
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov1
+    end into v_cov1;
+    select case
+      when v_source2 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start2), ash.ts_to_timestamptz(v_end2)))::smallint[])
+          and s.sample_ts >= v_start2 and s.sample_ts < v_end2
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain2 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start2 and h.ts < v_end2
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov2
+    end into v_cov2;
   end if;
 
   if not v_cov1 then
