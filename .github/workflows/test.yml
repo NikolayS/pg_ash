@@ -396,7 +396,11 @@ jobs:
           PGDATABASE: postgres
           PGPASSWORD: postgres
         run: |
-          python3 devel/scripts/test_sample_clock.py
+          # This multi-session test commits rollups. Keep them out of later reader fixtures.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'create database ash_sample_clock_test'
+          trap "psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'drop database ash_sample_clock_test'" EXIT
+          psql -h localhost -U postgres -d ash_sample_clock_test -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
+          PGDATABASE=ash_sample_clock_test python3 devel/scripts/test_sample_clock.py
 
       - name: "#137: preserve unsupported legacy cadence on upgrade"
         env:
