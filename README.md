@@ -616,6 +616,7 @@ They remain until hourly aggregation completes or their destination hour expires
 Hourly retention expires whole hours by their start timestamp.
 If hourly aggregation stops, this backlog can grow for up to 5 years with default settings.
 Monitor `last_rollup_1h_ts` and rollup row counts in `ash.status()`; restore hourly aggregation to clear the backlog.
+An absent `last_rollup_1h_ts` means hourly aggregation has not completed; `rollup_1m_oldest` shows the oldest retained minute.
 
 `ash.start()` checks rotation once a day. Multi-day periods work because early
 checks skip until at least 90% of `rotation_period` has elapsed; sub-day and
