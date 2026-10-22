@@ -7551,6 +7551,20 @@ jobs:
           drop role ash_closure_bare;
           EOF
 
+      - name: "Issue #299: status explains pg_cron row visibility"
+        if: matrix.cron == 'on'
+        env:
+          PGPASSWORD: postgres
+        run: |
+          HAS_CRON=$(psql -h localhost -U postgres -d postgres -tAX -c \
+            "select exists (select from pg_extension where extname='pg_cron')")
+          if [ "$HAS_CRON" != "t" ]; then
+            echo "pg_cron not installed — skipping #299 row visibility test"
+            exit 0
+          fi
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f devel/tests/status_cron_visibility.sql
+
       - name: "Test #61: status() works for non-superuser without cron.job access"
         if: matrix.cron == 'on'
         env:
@@ -7636,7 +7650,7 @@ jobs:
           reset role;
 
           -- Sub-test: GRANT USAGE on schema cron and assert the role now
-          -- sees real cron_job_* rows instead of the cron_jobs fallback.
+          -- sees its own job, with a hint about other jobs hidden by RLS.
           -- pg_cron RLS filters cron.job by `username = current_user`, so
           -- the sentinel ash_sampler job has to be scheduled BY the
           -- reader role (or its username altered) for status() to see it.
@@ -7655,16 +7669,16 @@ jobs:
             v_fallback text;
             v_jobs int;
           begin
-            -- Fallback row must NOT appear when the caller has access.
+            -- Table access does not bypass pg_cron row-level security.
             select value into v_fallback
             from ash.status() where metric = 'cron_jobs';
-            assert v_fallback is null,
-              'expected no cron_jobs fallback row when granted, got: ' || coalesce(v_fallback, '<null>');
+            assert v_fallback like '%row-level security%',
+              'expected RLS visibility hint, got: ' || coalesce(v_fallback, '<null>');
 
             -- Real per-job rows must appear (sentinel ash_sampler scheduled above).
             select count(*) into v_jobs
             from ash.status()
-            where metric like 'cron_job_%';
+            where metric ~ '^cron_job_';
             assert v_jobs > 0,
               'expected at least one cron_job_* row when granted, got 0';
 
@@ -9752,6 +9766,7 @@ jobs:
             '"call ash.run_take_sample()" (for per-second, use a loop)' \
             'CALL ash.run_take_sample() \watch 1' \
             'execute "CALL ash.run_take_sample()" in a loop' \
+            'To sample, execute CALL ash.run_take_sample()' \
             'Also schedule CALL ash.run_rotate() at the rotation_period' \
             'Schedule rollup: CALL ash.run_rollup_minute() every minute'
           do

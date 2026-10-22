@@ -1,6 +1,7 @@
 do $$
 declare
   v_rec record;
+  v_guidance jsonb;
   v_status_val text;
   v_before bigint;
   v_after bigint;
@@ -11,11 +12,20 @@ declare
   v_sampled int;
 begin
   -- start() should work without pg_cron (no error, prints hints)
-  select status into v_status_val
-  from ash.start('1 second')
-  where job_type = 'sampler';
+  select jsonb_object_agg(job_type, status) into v_guidance
+  from ash.start('1 second');
+  v_status_val := v_guidance ->> 'sampler';
   assert v_status_val like '%schedule externally%',
     'start() without pg_cron should say schedule externally, got: ' || v_status_val;
+  assert v_status_val like '%CALL ash.run_take_sample()%'
+    and v_status_val like '%pg_cron not available in this database%',
+    'sampler guidance must use CALL and database-scoped availability';
+  assert v_guidance ->> 'rotation' like '%schedule CALL ash.run_rotate() externally%',
+    'rotation guidance must use CALL';
+  assert v_guidance ->> 'rollup' =
+    'schedule CALL ash.run_rollup_minute() every minute, CALL ash.run_rollup_hour() '
+    'at minute 1 every hour, CALL ash.run_rollup_cleanup() daily',
+    'rollup guidance must use CALL for all three jobs';
 
   /*
    * A preloaded pg_cron registers cron.database_name as postmaster-only even
@@ -39,6 +49,8 @@ begin
   limit 1;
   assert v_status_val like '%external scheduler%',
     'stop() without pg_cron should mention external scheduler, got: ' || v_status_val;
+  assert v_status_val like 'pg_cron is not available in this database%',
+    'stop() must not claim pg_cron is uninstalled cluster-wide';
 
   -- status() should show pg_cron_available = no
   select value into v_status_val

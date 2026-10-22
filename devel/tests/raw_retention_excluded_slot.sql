@@ -160,19 +160,19 @@ begin
       select array_agg(status order by result_order)
       from b3_start_result
     ) = array[
-      'interval set to 00:00:07 — schedule externally '
-        '(pg_cron not available)',
+      'interval set to 00:00:07 — schedule externally with CALL ash.run_take_sample() '
+        '(pg_cron not available in this database)',
       (
         select format(
-          'rotation_period is %s — schedule ash.rotate() externally',
+          'rotation_period is %s — schedule CALL ash.run_rotate() externally',
           rotation_period
         )
         from ash.config
         where singleton
       ),
-      'schedule ash.rollup_minute() every minute, '
-        'ash.rollup_hour() at minute 1 every hour, '
-        'ash.rollup_cleanup() daily'
+      'schedule CALL ash.run_rollup_minute() every minute, '
+        'CALL ash.run_rollup_hour() at minute 1 every hour, '
+        'CALL ash.run_rollup_cleanup() daily'
     ], 'B3 ash.start() external statuses mismatch';
     assert not exists (
       select from b3_start_result
