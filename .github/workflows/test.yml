@@ -9348,13 +9348,19 @@ jobs:
           reset role;
           -- stray manual grant on an admin function in the drop list: must be SCRUBBED
           grant execute on function ash.rebuild_partitions(int, text) to lp_stray;
+          grant execute on function ash._register_wait(text, text, text),
+            ash._merge_wait_counts(integer[]), ash._merge_query_counts(bigint[]),
+            ash._truncate_pairs(bigint[], integer) to lp_stray with grant option;
+          -- take_sample was never in the historical DROP scrub set.
+          grant execute on function ash.take_sample() to lp_stray;
           -- Replacing an admin must retain its OID but remove delegated grants.
           create temp table lp_start_oid as
             select 'ash.start(interval)'::regprocedure::oid as oid;
           grant usage on schema ash to lp_stray;
           grant execute on function ash.start(interval) to lp_stray with grant option;
           set role lp_stray;
-          grant execute on function ash.start(interval) to lp_admin_delegate;
+          grant execute on function ash.start(interval),
+            ash._truncate_pairs(bigint[], integer) to lp_admin_delegate;
           reset role;
           -- single-overload grant: must NOT widen to the sibling overload
           grant execute on function ash.decode_sample(integer[], smallint) to lp_overload;
@@ -9427,6 +9433,17 @@ jobs:
             assert not has_function_privilege('lp_stray', 'ash.start(interval)', 'EXECUTE')
               and not has_function_privilege('lp_admin_delegate', 'ash.start(interval)', 'EXECUTE'),
               'admin grant option and delegated grant must both be removed';
+            assert not exists (
+              select from pg_proc as proc
+              where proc.pronamespace = 'ash'::regnamespace
+                and proc.proname in ('_register_wait', '_merge_wait_counts',
+                                    '_merge_query_counts', '_truncate_pairs')
+                and has_function_privilege('lp_stray', proc.oid, 'EXECUTE')
+            ) and not has_function_privilege('lp_admin_delegate',
+                'ash._truncate_pairs(bigint[],integer)', 'EXECUTE'),
+              'historically dropped admin helpers must lose direct and delegated grants';
+            assert has_function_privilege('lp_stray', 'ash.take_sample()', 'EXECUTE'),
+              'historical scrub must not expand to other admin routines';
             assert 'ash.start(interval)'::regprocedure::oid = (select oid from lp_start_oid),
               'unchanged admin OID must survive grant hardening';
             assert not has_function_privilege('lp_reader', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
