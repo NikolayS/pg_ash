@@ -9315,12 +9315,38 @@ jobs:
             create role lp_query;
             create role lp_query_grant;
             create role lp_query_delegate;
+            create role lp_admin_delegate;
+            create role lp_schema_owner;
+            create role lp_owner_delegate;
           end $$;
 
           -- legitimate reader: must SURVIVE re-apply (guards the #107 fix)
           select ash.grant_reader('lp_reader');
+          -- Schema ownership can differ from routine ownership.
+          select ash.grant_reader('lp_schema_owner');
+          alter schema ash owner to lp_schema_owner;
+          grant execute on function ash.start(interval), ash.grant_reader(name),
+            ash.revoke_reader(name), ash.set_debug_logging(bool)
+            to lp_schema_owner with grant option;
+          set role lp_schema_owner;
+          grant execute on function ash.start(interval) to lp_owner_delegate;
+          reset role;
           -- stray manual grant on an admin function in the drop list: must be SCRUBBED
           grant execute on function ash.rebuild_partitions(int, text) to lp_stray;
+          grant execute on function ash._register_wait(text, text, text),
+            ash._merge_wait_counts(integer[]), ash._merge_query_counts(bigint[]),
+            ash._truncate_pairs(bigint[], integer) to lp_stray with grant option;
+          -- take_sample was never in the historical DROP scrub set.
+          grant execute on function ash.take_sample() to lp_stray;
+          -- Replacing an admin must retain its OID but remove delegated grants.
+          create temp table lp_start_oid as
+            select 'ash.start(interval)'::regprocedure::oid as oid;
+          grant usage on schema ash to lp_stray;
+          grant execute on function ash.start(interval) to lp_stray with grant option;
+          set role lp_stray;
+          grant execute on function ash.start(interval),
+            ash._truncate_pairs(bigint[], integer) to lp_admin_delegate;
+          reset role;
           -- single-overload grant: must NOT widen to the sibling overload
           grant execute on function ash.decode_sample(integer[], smallint) to lp_overload;
 
@@ -9336,6 +9362,9 @@ jobs:
               'precondition: legacy-only grants must not already include the new dependency';
             assert has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
               'precondition: stray admin grant present before re-apply';
+            assert has_function_privilege('lp_stray', 'ash.start(interval)', 'EXECUTE WITH GRANT OPTION')
+              and has_function_privilege('lp_admin_delegate', 'ash.start(interval)', 'EXECUTE'),
+              'precondition: admin grant option and delegated grant must exist';
             assert has_function_privilege('lp_overload', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
               'precondition: array overload granted';
             assert not has_function_privilege('lp_overload', 'ash.decode_sample(integer)', 'EXECUTE'),
@@ -9344,6 +9373,26 @@ jobs:
 
           -- re-apply the installer: drop/recreate + snapshot/restore + hardening
           \i /tmp/ash_fresh_install.sql
+
+          do $$ begin
+            assert not exists (
+              select from pg_proc as proc
+              where proc.pronamespace = 'ash'::regnamespace
+                and proc.proname in ('start', 'grant_reader', 'revoke_reader',
+                                    'set_debug_logging')
+                and not has_function_privilege('lp_schema_owner', proc.oid, 'EXECUTE')
+            ), 'schema owner lost admin EXECUTE across re-apply';
+            assert not has_function_privilege('lp_schema_owner', 'ash.start(interval)',
+                                             'EXECUTE WITH GRANT OPTION')
+              and not has_function_privilege('lp_owner_delegate', 'ash.start(interval)', 'EXECUTE'),
+              'historical scrub must remove owner grant options and delegated grants';
+          end $$;
+          set role lp_schema_owner;
+          do $$ begin
+            assert ash.set_debug_logging(null) =
+              (select 'debug_logging = ' || debug_logging::text from ash.config where singleton);
+          end $$;
+          reset role;
 
           -- A NULL query ID still executes the wrapper's SECURITY INVOKER dependency.
           -- This privilege regression also runs without optional pg_stat_statements.
@@ -9366,6 +9415,22 @@ jobs:
             -- (2) admin-function grant must be scrubbed and NOT restored after hardening
             assert not has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
               'admin EXECUTE grant re-established after hardening (defense-in-depth regression)';
+            assert not has_function_privilege('lp_stray', 'ash.start(interval)', 'EXECUTE')
+              and not has_function_privilege('lp_admin_delegate', 'ash.start(interval)', 'EXECUTE'),
+              'admin grant option and delegated grant must both be removed';
+            assert not exists (
+              select from pg_proc as proc
+              where proc.pronamespace = 'ash'::regnamespace
+                and proc.proname in ('_register_wait', '_merge_wait_counts',
+                                    '_merge_query_counts', '_truncate_pairs')
+                and has_function_privilege('lp_stray', proc.oid, 'EXECUTE')
+            ) and not has_function_privilege('lp_admin_delegate',
+                'ash._truncate_pairs(bigint[],integer)', 'EXECUTE'),
+              'historically dropped admin helpers must lose direct and delegated grants';
+            assert has_function_privilege('lp_stray', 'ash.take_sample()', 'EXECUTE'),
+              'historical scrub must not expand to other admin routines';
+            assert 'ash.start(interval)'::regprocedure::oid = (select oid from lp_start_oid),
+              'unchanged admin OID must survive grant hardening';
             assert not has_function_privilege('lp_reader', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
               'reader must not gain admin function EXECUTE';
             assert not has_function_privilege('lp_reader', 'ash.take_sample()', 'EXECUTE'),
@@ -9406,12 +9471,13 @@ jobs:
           end $$;
           reset role;
 
-          drop owned by lp_reader, lp_stray, lp_overload, lp_query, lp_query_grant, lp_query_delegate;
+          alter schema ash owner to postgres;
+          drop owned by lp_reader, lp_stray, lp_overload, lp_query, lp_query_grant, lp_query_delegate, lp_admin_delegate, lp_schema_owner, lp_owner_delegate;
           select ash.uninstall('yes');
           drop role lp_reader;
           drop role lp_stray;
           drop role lp_overload;
-          drop role lp_query, lp_query_grant, lp_query_delegate;
+          drop role lp_query, lp_query_grant, lp_query_delegate, lp_admin_delegate, lp_schema_owner, lp_owner_delegate;
           EOF
 
       - name: "Migration rollback includes installer and config normalization"
