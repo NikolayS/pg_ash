@@ -40,13 +40,12 @@ The default backend uses your local libpq connection settings.
 For an isolated Docker backend, use:
 
 ```sh
-ASH_BACKEND=docker \
-ASH_READ_SPAN_CALM=50000 ASH_READ_SPAN_TAIL=50000 \
-make -C demos all
+ASH_BACKEND=docker make -C demos all
 ASH_BACKEND=docker make -C demos down
 ```
 
-This workload profile passed prior capture checks over TCP.
+Start with the default workload.
+Use the [empty-baseline profile](#workload-timing-and-an-empty-baseline) only when short reads produce empty minutes.
 Hardware and transport still affect the result.
 Do not run the workload against production.
 The backend rejects unsafe database names and preserves resources it does not own.
@@ -144,8 +143,8 @@ even after the readiness probe has seen an active backend. A zero-sample
 minute fails the seed rather than fabricating activity. Check `ash.status()`
 for enabled sampling, a supported interval, and skipped/missed/error counters.
 If collection is healthy, increase the real range-query work per request.
-This profile passed the full capture and shape checks from macOS to Docker
-Postgres 18.4:
+Use this profile only to address empty baseline minutes.
+It passed capture and shape checks from macOS to Docker Postgres 18.4:
 
 ```bash
 ASH_BACKEND=docker \
@@ -153,9 +152,11 @@ ASH_READ_SPAN_CALM=50000 ASH_READ_SPAN_TAIL=50000 \
 make -C demos all
 ```
 
-These knobs change the workload, not stored backend counts or reader output.
-Hardware and transport still affect the result; all shape assertions remain
-required. The default 1,500-row calm query produced only 1 stored observation
+These knobs increase real query work, not stored backend counts or reader output.
+They can also increase calm AAS and push a lock event below the chart cutoff.
+This profile is not a general fix for ranking failures.
+All shape assertions remain required.
+The default 1,500-row calm query produced only 1 stored observation
 in a 20-tick probe on that setup, versus 15 with 50,000 rows. This is a demo
 reproduction profile, not an overhead benchmark or a universal sizing rule.
 
@@ -305,13 +306,10 @@ incident.
 - the calm baseline is **not** led by a lock wait;
 - `ash.periods()` returns all 6 rows with no NULL `avg_aas` — which can only
   happen if the rollup chain and its watermarks are intact;
-- at least **two `Lock:*` events rank in the top four** of the whole chart
-  window. That one is purely about the picture: `ash.chart()` ranks its series
-  over the entire window and folds the rest into a single "Other" dot column, so
-  a calm phase heavy enough to outrank both lock waits would render the
-  five-minute incident as anonymous dots. Nothing else here would notice — it is
-  not an error, it is not empty, it is just a bad hero image. Now it fails the
-  seed and names the two knobs to turn.
+- at least **two `Lock:*` events rank in the top five** of the full chart window.
+  The scene uses `n => 5` too. The extra slot gives margin when calm CPU/IO activity changes rank.
+  The chart also preserves each bucket's leading event, but this does not guarantee both lock waits remain named.
+  The gate still rejects captures that lose the secondary lock wait from the top five.
 
 That last one is worth its own note. Deleting `ash.rollup_1m` without also
 setting `last_rollup_1m_ts = null` leaves `ash.rollup_minute()` convinced it has

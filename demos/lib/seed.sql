@@ -30,10 +30,8 @@ comment on schema ash_demo is
 /* ---------------------------------------------------------------------------
  * ash_demo.batch(n, delay)
  *
- * Take `n` real samples through pg_ash's own sampler, committing between each
- * so ash.take_sample() sees a fresh now() (it timestamps from transaction
- * start, not clock_timestamp) and so its transaction-level advisory lock is
- * released between ticks.
+ * Take `n` real samples through pg_ash's own sampler. Commit between ticks
+ * to release its transaction-level advisory lock.
  *
  * The calling session is invisible to its own samples: take_sample() filters
  * `pid <> pg_backend_pid()`. That is what keeps the seeder out of the picture
