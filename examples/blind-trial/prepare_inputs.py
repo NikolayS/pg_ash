@@ -17,7 +17,6 @@ def main():
     parser.add_argument('--repo', type=Path, required=True, help='pg_ash checkout with fetched PR refs')
     parser.add_argument('--out', type=Path, required=True, help='new input directory')
     args = parser.parse_args()
-    args.out.mkdir(parents=True, exist_ok=False)
     def git(*command):
         return subprocess.check_output(['git', '-C', str(args.repo), *command])
     with tempfile.TemporaryDirectory(prefix='pgash-inputs-') as tmp:
@@ -30,6 +29,7 @@ def main():
         contents = target.read_bytes()
     if hashlib.sha256(contents).hexdigest() != SQL_SHA:
         raise RuntimeError('reconstructed SQL differs from the frozen executable')
+    args.out.mkdir(parents=True, exist_ok=False)
     (args.out / 'ash-install.sql').write_bytes(contents)
     for relative in ('README.md', 'docs/REFERENCE.md', 'examples/llm-prompt.md',
                      'examples/llm-investigation.sql'):

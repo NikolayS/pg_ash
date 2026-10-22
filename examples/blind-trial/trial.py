@@ -27,6 +27,8 @@ PREFIX = None
 SOURCE = 'fe3e7b4dc56f5be9977624de7c549165bc180882'
 DOCS = '95e1ecf83ce68ab9423af2568af678b87c8d9e2f'
 STOP = threading.Event()
+DOC_FILES = ('README.md', 'docs/REFERENCE.md', 'examples/llm-prompt.md',
+             'examples/llm-investigation.sql')
 
 
 def now():
@@ -78,16 +80,14 @@ def setup(args):
         raise RuntimeError('setup requires --sql-file, --docs-dir and --prefix')
     if not re.fullmatch(r'pgash_blind_[a-z0-9_]+', args.prefix):
         raise RuntimeError('prefix must match pgash_blind_[a-z0-9_]+')
-    for relative in ('README.md', 'docs/REFERENCE.md', 'examples/llm-prompt.md',
-                     'examples/llm-investigation.sql'):
+    for relative in DOC_FILES:
         if not (args.docs_dir / relative).is_file():
             raise RuntimeError('missing documentation: ' + relative)
     PRIVATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     PUBLIC.mkdir(mode=0o700, parents=True, exist_ok=True)
     (ROOT / 'artifacts').mkdir()
     shutil.copyfile(args.sql_file, ROOT / 'artifacts/ash-install.sql')
-    for relative in ('README.md', 'docs/REFERENCE.md', 'examples/llm-prompt.md',
-                     'examples/llm-investigation.sql'):
+    for relative in DOC_FILES:
         target = PUBLIC / 'docs' / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(args.docs_dir / relative, target)
@@ -126,23 +126,20 @@ def setup(args):
     for case in cases:
         cdir = PRIVATE / case['id']
         cdir.mkdir(exist_ok=True)
-        if (cdir / 'setup.json').exists():
-            continue
         role = 'observer_' + case['id']
         env = os.environ.copy()
         env['POSTGRES_PASSWORD'] = case['passwords']['postgres']
-        if not case.get('container_id'):
-            out = sh(['docker', 'run', '-d', '--name', case['container'], '--label', 'pgash-blind-run=' + manifest['run_id'],
-                      '--memory=192m', '--memory-swap=192m', '--cpus=0.25', '--pids-limit=96', '--shm-size=32m',
-                      '-p', '127.0.0.1::5432', '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_DB=appdb',
-                      '-e', 'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256',
-                      manifest['image_id'], '-c', 'shared_preload_libraries=pg_stat_statements', '-c', 'compute_query_id=on',
-                      '-c', 'shared_buffers=16MB', '-c', 'max_connections=16', '-c', 'work_mem=1MB',
-                      '-c', 'maintenance_work_mem=16MB', '-c', 'log_connections=on', '-c', 'log_timezone=UTC',
-                      '-c', 'timezone=UTC', '-c', 'jit=off'], env=env).strip()
-            case['container_id'] = out
-            dump(PRIVATE / 'manifest.json', manifest)
-        mapping = json.loads(sh(['docker', 'inspect', case['container']]))[0]
+        out = sh(['docker', 'run', '-d', '--name', case['container'], '--label', 'pgash-blind-run=' + manifest['run_id'],
+                  '--memory=192m', '--memory-swap=192m', '--cpus=0.25', '--pids-limit=96', '--shm-size=32m',
+                  '-p', '127.0.0.1::5432', '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_DB=appdb',
+                  '-e', 'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256',
+                  manifest['image_id'], '-c', 'shared_preload_libraries=pg_stat_statements', '-c', 'compute_query_id=on',
+                  '-c', 'shared_buffers=16MB', '-c', 'max_connections=16', '-c', 'work_mem=1MB',
+                  '-c', 'maintenance_work_mem=16MB', '-c', 'log_connections=on', '-c', 'log_timezone=UTC',
+                  '-c', 'timezone=UTC', '-c', 'jit=off'], env=env).strip()
+        case['container_id'] = out
+        dump(PRIVATE / 'manifest.json', manifest)
+        mapping = json.loads(sh(['docker', 'container', 'inspect', case['container_id']]))[0]
         validate_owned(case, mapping, manifest)
         binding = mapping['NetworkSettings']['Ports']['5432/tcp'][0]
         if (binding['HostIp'] != '127.0.0.1'
@@ -263,7 +260,10 @@ def spike(case, seconds, index):
 
     def waiter(conn, query, params):
         try:
-            conn.execute(query, params, prepare=(mechanism == 'relation')).fetchall() if query.startswith('select') else conn.execute(query, params)
+            if query.startswith('select'):
+                conn.execute(query, params, prepare=(mechanism == 'relation')).fetchall()
+            else:
+                conn.execute(query, params)
         except Exception as exc:
             errors.append(str(exc))
 

@@ -238,5 +238,23 @@ class ReaderAuditTests(unittest.TestCase):
                 self.assertIn('missing.sql', record['script_file_errors'])
 
 
+class InputPreparationTests(unittest.TestCase):
+    def test_failed_reconstruction_leaves_output_available_for_retry(self):
+        spec = importlib.util.spec_from_file_location(
+            'prepare_inputs', Path(trial.__file__).with_name('prepare_inputs.py'))
+        inputs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inputs)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'inputs'
+            argv = ['prepare_inputs.py', '--repo', tmp, '--out', str(out)]
+            with mock.patch.object(sys, 'argv', argv), \
+                    mock.patch.object(inputs.subprocess, 'check_output', return_value=b'select 1;'), \
+                    mock.patch.object(inputs.subprocess, 'run'):
+                for attempt in range(2):
+                    with self.assertRaisesRegex(RuntimeError, 'differs from the frozen executable'):
+                        inputs.main()
+                    self.assertFalse(out.exists())
+
+
 if __name__ == '__main__':
     unittest.main()
