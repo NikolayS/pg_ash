@@ -119,6 +119,7 @@ begin
     '_pg_cron_available()',
     '_pgss_query_text(query_id bigint, maxlen integer)',
     '_pgss_query_text(query_id bigint, maxlen integer, database_oid oid)',
+    '_pgss_query_text_sql()',
     '_pgss_schema()',
     '_pick_source(since timestamp with time zone)',
     '_pick_source_agg(since timestamp with time zone, until timestamp with time zone)',
@@ -174,6 +175,7 @@ begin
     '_pg_cron_available()',
     '_pgss_query_text(query_id bigint, maxlen integer)',
     '_pgss_query_text(query_id bigint, maxlen integer, database_oid oid)',
+    '_pgss_query_text_sql()',
     '_pgss_schema()',
     '_pick_source(since timestamp with time zone)',
     '_pick_source_agg(since timestamp with time zone, until timestamp with time zone)',
@@ -225,6 +227,7 @@ begin
     '_pg_cron_available()',
     '_pgss_query_text(query_id bigint, maxlen integer)',
     '_pgss_query_text(query_id bigint, maxlen integer, database_oid oid)',
+    '_pgss_query_text_sql()',
     '_pgss_schema()',
     '_pick_source(since timestamp with time zone)',
     '_pick_source_agg(since timestamp with time zone, until timestamp with time zone)',
@@ -266,10 +269,10 @@ begin
       'ash',
       'USAGE'
     )
-    and v_direct_functions = 48
+    and v_direct_functions = 49
     and v_direct_tables = 12,
     format(
-      '[%s] ash.grant_reader ACLs: expected schema USAGE, 48 direct function EXECUTEs, and 12 direct table SELECTs; got usage=%s functions=%s tables=%s',
+      '[%s] ash.grant_reader ACLs: expected schema USAGE, 49 direct function EXECUTEs, and 12 direct table SELECTs; got usage=%s functions=%s tables=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       pg_catalog.has_schema_privilege(
         'ash_feature_reader',
@@ -560,7 +563,7 @@ begin
     and acl.privilege_type = 'SELECT';
 
   assert pg_catalog.has_schema_privilege('pg_monitor', 'ash', 'USAGE')
-    and v_direct_functions = 48
+    and v_direct_functions = 49
     and v_direct_tables = 12
     and not pg_catalog.has_function_privilege(
       'pg_monitor',
@@ -573,7 +576,7 @@ begin
       'EXECUTE'
     ),
     format(
-      '[%s] default pg_monitor ACLs: expected USAGE/48 reader functions/12 tables/no start() or _admin_funcs(), got usage=%s functions=%s tables=%s start=%s admin_list=%s',
+      '[%s] default pg_monitor ACLs: expected USAGE/49 reader functions/12 tables/no start() or _admin_funcs(), got usage=%s functions=%s tables=%s start=%s admin_list=%s',
       pg_catalog.current_setting('ash.feature_mode'),
       pg_catalog.has_schema_privilege('pg_monitor', 'ash', 'USAGE'),
       v_direct_functions,
