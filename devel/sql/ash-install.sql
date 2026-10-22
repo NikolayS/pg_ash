@@ -6967,10 +6967,20 @@ begin
     query_text := null;
     if dimension = 'query_id' and v_has_pgss
        and v_key_num is not null and v_datid is not null then
-      -- schema-qualified single lookup point (#115); returns null on any
+      -- Catalog-qualified lookup (#115); returns null on any
       -- failure, never text from a shadowing relation. A NULL v_datid means
       -- the key spans ASH databases, so attaching one database's text is unsafe.
-      query_text := ash._pgss_query_text(v_key_num, 100, v_datid);
+      -- Reuse this call's trusted schema. Do not repeat catalog discovery per key.
+      begin
+        execute format(
+          'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
+          'where (queryid = $2 or ($3 is null and queryid is null)) '
+          'and ($3 is null or dbid = $3) '
+          'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+          into query_text using 100, v_key_num, v_datid;
+      exception when others then
+        query_text := null;
+      end;
     end if;
     return next;
   end loop;
@@ -7445,6 +7455,7 @@ declare
   v_end int4;
   v_slots smallint[];
   v_datid oid;
+  v_row_datid oid;
   v_has_pgss boolean := false;
   v_pgss_schema text;
 begin
@@ -7481,7 +7492,7 @@ begin
     end;
   end if;
 
-  return query
+  for sample_time, database_name, active_backends, wait_event, query_id, v_row_datid in
   with decoded as (
     select
       sample_row.sample_ts, sample_row.slot, sample_row.datid,
@@ -7528,12 +7539,28 @@ begin
     resolved.active_count,
     resolved.wait_event,
     resolved.qid,
-    case when v_has_pgss then ash._pgss_query_text(resolved.qid, 80, resolved.datid)
-         else null end
+    resolved.datid
   from resolved
   left join pg_database as db on db.oid = resolved.datid
   order by resolved.sample_ts desc, resolved.wait_event
-  limit greatest(n, 0);
+  limit greatest(n, 0)
+  loop
+    query_text := null;
+    if v_has_pgss and query_id is not null then
+      -- The schema came from the extension catalog before this output loop.
+      begin
+        execute format(
+          'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
+          'where (queryid = $2 or ($3 is null and queryid is null)) '
+          'and ($3 is null or dbid = $3) '
+          'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+          into query_text using 80, query_id, v_row_datid;
+      exception when others then
+        query_text := null;
+      end;
+    end if;
+    return next;
+  end loop;
 end;
 $$;
 
