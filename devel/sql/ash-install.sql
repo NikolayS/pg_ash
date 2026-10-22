@@ -5810,6 +5810,10 @@ begin
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.aas: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
   -- Floor before rounding, then align again after the int4 horizon clamp.
@@ -5917,6 +5921,10 @@ begin
    * Round UP to the nearest grain multiple so the effective bucket is never
    * finer than the caller requested.
    */
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.aas: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6053,6 +6061,10 @@ begin
     if v_requested_bucket_secs < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
+    if ceil(v_requested_bucket_secs) > 2147483647 then
+      raise exception 'ash.timeline: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
+    end if;
     v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
   end if;
 
@@ -6123,6 +6135,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.timeline: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6672,7 +6688,7 @@ begin
       'ash.top: since must be less than or equal to until';
   end if;
 
-  if dimension not in (
+  if dimension is null or dimension not in (
        'wait_event_type', 'wait_event', 'query_id', 'database'
      ) then
     raise exception
@@ -6685,6 +6701,10 @@ begin
   v_requested_bucket_secs := extract(epoch from bucket);
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
+  end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.top: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
   end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
@@ -6776,6 +6796,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.top: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -8180,6 +8204,10 @@ begin
     if extract(epoch from bucket) < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
+    if ceil(extract(epoch from bucket)) > 2147483647 then
+      raise exception 'ash.chart: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
+    end if;
     v_bucket_secs := ceil(extract(epoch from bucket))::int4;
   end if;
 
@@ -8197,6 +8225,10 @@ begin
   end if;
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.chart: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
