@@ -5955,7 +5955,7 @@ begin
   ),
   bucket_aas as (
     select bstart,
-           (cnt * v_si / (least(bstart + v_bucket_secs, v_end_ts)
+           (cnt * v_si / (least(bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(bstart, v_start_ts))) as aas
     from per_bucket
   )
@@ -6201,7 +6201,7 @@ begin
     v_source,
     coalesce(agg.n, 0)::bigint,
     case when agg.n > 0 then
-      round(agg.cnt * v_si / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+      round(agg.cnt * v_si / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                             - greatest(buckets.bstart, v_start_ts)), 2)
     end,
     case when agg.n > 0 and v_extrema_supported then
@@ -6917,13 +6917,13 @@ begin
                  / (v_end_ts - v_start_ts)::numeric, 2) as avg_aas,
            case when v_extrema_supported then
              round(max(key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))), 2)
            end as peak_aas,
            case when v_extrema_supported then
              round(percentile_cont(0.99) within group (
                      order by key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))
                    )::numeric, 2)
            end as p99_aas
@@ -8216,7 +8216,7 @@ begin
            sum(grain_by_row.cnt) * v_si
            / (least(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs
-                  + v_bucket_secs, v_end_ts)
+                  + v_bucket_secs::bigint, v_end_ts)
               - greatest(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs,
                 v_start_ts)) as tot
@@ -8259,11 +8259,11 @@ begin
     per_bucket as (
       select buckets.bstart,
              round(coalesce(sum(bucket_events.cnt), 0) * v_si
-                   / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                   / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                       - greatest(buckets.bstart, v_start_ts)), 2) as total,
              coalesce(jsonb_object_agg(bucket_events.ev,
                round(bucket_events.cnt * v_si
-                     / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                     / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                         - greatest(buckets.bstart, v_start_ts)), 2))
                filter (where bucket_events.ev is not null),
                '{}'::jsonb) as events
