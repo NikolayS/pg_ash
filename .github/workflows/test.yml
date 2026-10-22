@@ -3807,6 +3807,8 @@ jobs:
             --file=devel/tests/raw_slot_selection.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/helper_execution.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/reader_invariants.sql
 
       - name: "Test 2.0: report totals and formatting edges"
         env:

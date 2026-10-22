@@ -5026,7 +5026,10 @@ as $$
    * All escapes padded to 19 chars: \033[38;2;RRR;GGG;BBBm
    * Uniform length prevents pspg right-border misalignment.
    */
-  select case when not ash._color_on(color) then '' else
+  -- A resolved true value needs no session lookup.
+  select case when not (
+    case when color then true else ash._color_on(color) end
+  ) then '' else
     case
       when event like 'CPU%' then E'\033[38;2;080;250;123m'         -- green
       when event like 'IdleTx%' then E'\033[38;2;241;250;140m'      -- light yellow
@@ -5079,15 +5082,19 @@ as $$
    * All color escapes are now exactly 19 chars (zero-padded RGB).
    * reset is always 4 chars. Total invisible = 23 when color on, 0 when off.
    */
-  select ash._wait_color(event, color)
+  with settings as materialized (
+    select ash._color_on(color) as enabled
+  )
+  select case when not settings.enabled then '' else ash._wait_color(event, true) end
     || rpad(
          repeat('█', greatest(1, (
            pct / nullif(max_pct, 0) * least(greatest(width, 1), 500)
          )::int)),
          least(greatest(width, 1), 500)
        )
-    || ash._reset(color)
-    || lpad(pct || '%', 8);
+    || case when settings.enabled then E'\033[0m' else '' end
+    || lpad(pct || '%', 8)
+  from settings;
 $$;
 
 --------------------------------------------------------------------------------
@@ -5332,8 +5339,9 @@ begin
        and exists (
          select from ash.sample as sample_row
          where sample_row.slot = any((select ash._active_slots())::smallint[])
-           and sample_row.sample_ts >= ash.ts_from_timestamptz(since)
-           and sample_row.sample_ts < ash.ts_from_timestamptz(v_complete_until)
+           -- Scalar InitPlans also keep bounds constant during sequential scans.
+           and sample_row.sample_ts >= (select ash.ts_from_timestamptz(since))
+           and sample_row.sample_ts < (select ash.ts_from_timestamptz(v_complete_until))
            and (v_watermark is null or sample_row.sample_ts >= v_watermark)
            and not exists (
              select from ash.rollup_1m as minute_row
@@ -6947,8 +6955,9 @@ begin
     per_key.key_num,
     per_key.datid,
     v_source,
-    ash.ts_to_timestamptz(v_start_ts),
-    ash.ts_to_timestamptz(v_end_ts),
+    -- Generic plans must convert these bounds once, not once per key.
+    (select ash.ts_to_timestamptz(v_start_ts)),
+    (select ash.ts_to_timestamptz(v_end_ts)),
     v_bucket_secs * interval '1 second',
     per_key.avg_aas,
     per_key.peak_aas,
@@ -7322,10 +7331,11 @@ begin
          then coalesce(window1.query_text, window2.query_text) end,
     v_source1,
     v_source2,
-    ash.ts_to_timestamptz(v_start1),
-    ash.ts_to_timestamptz(v_end1),
-    ash.ts_to_timestamptz(v_start2),
-    ash.ts_to_timestamptz(v_end2),
+    -- Each bound belongs to the whole window, not an output key.
+    (select ash.ts_to_timestamptz(v_start1)),
+    (select ash.ts_to_timestamptz(v_end1)),
+    (select ash.ts_to_timestamptz(v_start2)),
+    (select ash.ts_to_timestamptz(v_end2)),
     v_effective_bucket_secs1 * interval '1 second',
     v_effective_bucket_secs2 * interval '1 second',
     window1.avg_aas, window2.avg_aas,
@@ -8193,11 +8203,12 @@ declare
   v_grain_secs int4;
   v_si numeric;
   v_source text;
-  v_reset text := ash._reset(color);
+  v_color boolean := ash._color_on(color);
+  v_reset text := case when v_color then E'\033[0m' else '' end;
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];
-  v_other_color text := ash._wait_color('Other', color);
+  v_other_color text := case when not v_color then '' else ash._wait_color('Other', true) end;
   v_other_char text := '·';
   v_max numeric;
   v_legend text;
@@ -8338,7 +8349,8 @@ begin
 
   v_event_colors := array[]::text[];
   for v_i in 1 .. array_length(v_top_events, 1) loop
-    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i], color);
+    v_event_colors := v_event_colors || case when not v_color then ''
+      else ash._wait_color(v_top_events[v_i], true) end;
   end loop;
 
   v_legend := '';
