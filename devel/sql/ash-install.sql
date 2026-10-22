@@ -60,13 +60,13 @@ begin
 end $$;
 
 /*
- * Preserve function EXECUTE grants across the drop/recreate below (#107).
+ * Preserve function EXECUTE grants across required drop/recreate below (#107).
  * DROP FUNCTION destroys ACLs that CREATE OR REPLACE would keep, so a
  * monitoring role configured via ash.grant_reader() (or a manual GRANT)
  * would silently lose access on every upgrade or installer re-apply.
  * Snapshot every explicit non-owner EXECUTE grant on ash.* functions into
  * a temp table now; the matching block at the very end of this script
- * re-applies them to the recreated functions and drops the snapshot. The
+ * re-applies them after routine definitions and drops the snapshot. The
  * argument signature is captured alongside the name so the restore can put
  * the grant back on the exact same overload. Required new dependencies are
  * handled explicitly by the restore below.
@@ -8665,7 +8665,9 @@ begin
     where proc.pronamespace = 'ash'::regnamespace
       and proc.proname in (
         'uninstall', 'rebuild_partitions', 'start', 'set_debug_logging',
-        'rollup_minute', 'grant_reader', 'revoke_reader'
+        'rollup_minute', 'grant_reader', 'revoke_reader',
+        '_register_wait', '_merge_wait_counts', '_merge_query_counts',
+        '_truncate_pairs'
       )
   loop
     execute format('revoke execute on function %s from %I cascade',
@@ -9021,9 +9023,9 @@ end $$;
  *   * Admin functions (ash._admin_funcs()) are never restored. They are
  *     locked to the owner by the hardening block above and are never handed
  *     out by ash.grant_reader(); re-applying a stray manual grant on one
- *     would silently undo that hardening on every install. Excluding them
- *     here preserves the pre-#107 behaviour where DROP FUNCTION scrubbed
- *     such grants.
+ *     would silently undo that hardening on every install. The hardening
+ *     block scrubs grants on historically dropped admins before restoring
+ *     schema-owner access. This restore must not reintroduce those grants.
  *   * Each grant is restored to the exact same signature when it still
  *     exists, so a role that held only one overload of a function is not
  *     widened to its siblings. Only when the snapshotted signature is gone
