@@ -1,8 +1,8 @@
 /*
- * pg_ash: upgrade from 1.5 or any earlier 2.0 prerelease to 2.0 rc 1
+ * pg_ash: upgrade from 1.5 or any earlier 2.0 prerelease to 2.0 rc 2
  *
  * 2.0 is a breaking release: the reader API is redesigned (issue #113,
- * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 rc 1
+ * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 rc 2
  * installer, which:
  *   * snapshots existing reader-role EXECUTE grants, then drops every removed
  *     v1.x reader and draft aas_* function (all overloads / _at twins), the
@@ -11,6 +11,7 @@
  *     p_from -> since, p_to -> until, p_limit -> n; CREATE OR REPLACE cannot
  *     rename input parameters) via the top-of-installer drop block, so
  *     the resulting schema equals a fresh 2.0 install (CI asserts this),
+ *   * preserves unchanged routine identities and their dependent objects,
  *   * creates the 2.0 reader surface (periods, aas, timeline, top, compare,
  *     samples, report, chart, summary) with catalog comments and grants,
  *   * re-applies the snapshotted reader grants to the surviving/recreated
@@ -18,18 +19,18 @@
  *     full pre-upgrade reader bundle — so a configured reader role can use
  *     the whole 2.0 surface (new readers AND their new internal helpers)
  *     without manual intervention; roles holding only partial manual grants
- *     are restored by exact signature and never widened,
+ *     retain their signatures and required reader-helper dependencies only,
  *   * grants the default reader bundle to pg_monitor (best-effort, new in
  *     2.0 — see the block at the end of the installer; opt out afterwards
  *     with `select ash.revoke_reader('pg_monitor')`), and
- *   * stamps ash.config.version = '2.0-rc1' (and the column default), and
+ *   * stamps ash.config.version = '2.0-rc2' (and the column default), and
  *   * normalizes ash.config's physical column order to match a fresh 2.0
  *     install while preserving its singleton row and catalog properties.
  *
  * The release candidate installer owns the API, lifecycle and storage changes.
  * Normalization includes sample_unlogged while retaining operator choices.
  * This cumulative migration and its relative installer include are promoted
- * together for the 2.0 rc 1 release candidate.
+ * together for the 2.0 rc 2 release candidate.
  * Re-apply-safe: the installer is idempotent (CREATE OR REPLACE / IF NOT
  * EXISTS plus the deterministic drop block), and the config normalization
  * exits without replacing the table once the canonical order is present.

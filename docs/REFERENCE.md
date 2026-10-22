@@ -7,7 +7,7 @@ Start with an [agent-led incident investigation](../README.md#investigate-an-inc
 - [Admin API](#admin-api) and [scheduling](#scheduling)
 - [Retention](#retention-and-storage) and [privileges](#privileges)
 - [Requirements](#requirements) and [known limits](#known-limits)
-- [Upgrade from an existing installation](#upgrade-to-20-rc-1)
+- [Upgrade from an existing installation](#upgrade-to-20-rc-2)
 
 ## Reader API
 
@@ -216,7 +216,7 @@ explain these semantics to an LLM.
 | `ash.revoke_reader(role)` | Revoke the monitoring-reader bundle |
 | `ash.uninstall('yes')` | Drop pg_ash and unschedule jobs |
 
-The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
+RC2 requires `start()`, `stop()`, `rebuild_partitions()`
 and `uninstall()` to run as the `ash` schema owner, including when another
 superuser administers the installation. Use `SET ROLE` to the owner first.
 A failed lifecycle call rolls back its configuration, job and DDL changes.
@@ -392,9 +392,9 @@ Also schedule maintenance, with the connection routed to the primary:
 
 The published beta accepts wider minute/hour intervals, but its historical
 AAS is weighted by the current configured interval. Keep the interval fixed
-while retaining that history. The development candidate's cadence safeguards
-are tracked in [#137](https://github.com/NikolayS/pg_ash/issues/137); use the
-candidate's catalog documentation when testing unreleased changes.
+while retaining that history.
+RC2 rejects cadence changes while any history tier contains rows.
+Its safeguards are described in [#137](https://github.com/NikolayS/pg_ash/issues/137).
 
 pg_cron can add a `cron.job_run_details` row per invocation and has no automatic
 retention for this table. Monitor its growth, configure cleanup, or disable
@@ -417,7 +417,8 @@ Raw samples use a PGQ-style ring of partitions. Defaults:
 - `rollup_1m` retention is 30 days
 - `rollup_1h` retention is 5 years
 
-The [pending cleanup correction](https://github.com/NikolayS/pg_ash/pull/277) retains expired minutes needed by hourly aggregation.
+`ash.rollup_cleanup()` retains expired minutes needed by hourly aggregation.
+See the [cleanup correction](https://github.com/NikolayS/pg_ash/pull/277).
 Those rows remain until hourly aggregation completes or their destination hour expires.
 With default retention, a stopped hourly job can retain that backlog for up to five years.
 Monitor `last_rollup_1h_ts` and rollup row counts in `ash.status()`.
@@ -529,11 +530,12 @@ not grant `pg_read_all_stats`. Monitoring roles that need `query_text` from
 `pg_stat_statements` usually need membership in `pg_monitor` or
 `pg_read_all_stats` too.
 
-The [pending database-attribution correction](https://github.com/NikolayS/pg_ash/pull/282) derives the source database from ASH rows when it is unique. Unsafe attribution returns NULL.
-With that correction, a `database` filter resolves cross-database ambiguity.
+Query-text attribution derives the source database from ASH rows when it is unique.
+Unsafe attribution returns NULL. A `database` filter resolves cross-database ambiguity.
+See the [database-attribution correction](https://github.com/NikolayS/pg_ash/pull/282).
 Reading another role's SQL still requires the appropriate statistics privileges.
 
-SQL-text lookup finds the `pg_stat_statements` schema on each call.
+SQL-text lookup discovers the real `pg_stat_statements` schema once per reader call.
 Installing or relocating the extension does not require a helper call.
 
 Readers also need `usage` on the schema that contains `pg_stat_statements`.
@@ -670,7 +672,9 @@ Postgres.
   pg_ash's advisory locks. See
   [SECURITY.md](../SECURITY.md#advisory-lock-squat-dos).
 
-## Upgrade to 2.0 rc 1
+<a id="upgrade-to-20-rc-1"></a>
+
+## Upgrade to 2.0 rc 2
 
 Test upgrades on a disposable instance first.
 Keep a verified backup before upgrading.
@@ -682,7 +686,7 @@ The [archived RC1 rehearsal](https://github.com/NikolayS/pg_ash/blob/v2.0-rc1/do
 2.0 is a breaking reader-API release. Upgrade scripts are cumulative; run the
 missing scripts in order. From 1.5 or an earlier 2.0 prerelease, including
 `2.0-beta1`, run only `sql/migrations/ash-1.5-to-2.0.sql`. The same migration
-is safe to reapply to `2.0-rc1`.
+is safe to reapply to `2.0-rc2`.
 
 ```sql
 \i sql/migrations/ash-1.0-to-1.1.sql
@@ -693,7 +697,7 @@ is safe to reapply to `2.0-rc1`.
 \i sql/migrations/ash-1.5-to-2.0.sql
 
 select * from ash.status() where metric = 'version';
--- version | 2.0-rc1
+-- version | 2.0-rc2
 ```
 
 The old root-level upgrade paths, such as `sql/ash-1.5-to-2.0.sql`, are kept as
@@ -701,13 +705,12 @@ compatibility wrappers. New docs and scripts should use `sql/migrations/`.
 
 ### Dependent views and functions
 
-The development installer preserves unchanged function identities and their
-dependent views and SQL functions. This fix reaches the public migration when
-`devel/sql/ash-install.sql` is promoted. The frozen beta1 and rc1 installers
-still drop unchanged readers and can reject these dependencies.
+The RC2 installer and public migration preserve unchanged function identities
+and their dependent views and SQL functions. Earlier beta1 and RC1 payloads
+lacked this preservation; use the RC2 checkout for the upgrade.
 
 Some historical signatures must change. Beta1's `ash.aas()`, `ash.top()`, and
-`ash.compare()` gain result columns. The candidate also adds `datid` to the
+`ash.compare()` gain result columns. RC2 also adds `datid` to the
 internal `ash._grain_by()` result. Older 1.x and alpha readers have additional
 signature changes. Dependencies on incompatible signatures still block the
 upgrade. The transaction rolls back; the existing objects and data remain.
@@ -717,7 +720,7 @@ Drop only those user objects, in dependency order, without `cascade`.
 Run the upgrade again. Adapt the saved definitions to the new result columns.
 Recreate the objects and restore their grants. Test their queries before
 resuming consumers. Unchanged beta1 readers, such as `timeline()` and
-`samples()`, do not need this procedure with the development installer.
+`samples()`, do not need this procedure with the RC2 installer.
 
 The old 1.x reader functions are gone in 2.0:
 
