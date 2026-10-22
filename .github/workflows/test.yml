@@ -3804,6 +3804,8 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/pgss_helper_scope.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/pgss_query_template.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/raw_slot_selection.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/helper_execution.sql
@@ -9471,6 +9473,13 @@ jobs:
               'ordinary helper EXECUTE must not gain a grant option';
             assert has_function_privilege('lp_query_grant', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE WITH GRANT OPTION'),
               'delegable legacy helper must retain a delegable dependency';
+            assert has_function_privilege('lp_query', 'ash._pgss_query_text_sql()', 'EXECUTE')
+              and not has_function_privilege('lp_query', 'ash._pgss_query_text_sql()', 'EXECUTE WITH GRANT OPTION')
+              and has_function_privilege('lp_query_grant', 'ash._pgss_query_text_sql()', 'EXECUTE WITH GRANT OPTION'),
+              'partial pgss helper grants must retain the constant-template dependency';
+            assert not has_function_privilege('lp_overload', 'ash._pgss_query_text_sql()', 'EXECUTE')
+              and not has_function_privilege('public', 'ash._pgss_query_text_sql()', 'EXECUTE'),
+              'the new dependency must not widen unrelated or PUBLIC access';
             assert not has_function_privilege('lp_overload', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
               and not has_function_privilege('public', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
               and not has_table_privilege('lp_query', 'ash.sample', 'SELECT')

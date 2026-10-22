@@ -16,6 +16,8 @@ declare
   v_plan json;
   v_before bigint;
   v_after bigint;
+  v_template_before bigint;
+  v_template_after bigint;
   v_rows integer;
   v_text_rows integer;
   v_slot smallint := ash.current_slot();
@@ -44,10 +46,17 @@ begin
           else 'select * from ash.top(''query_id'', $1, $2, n => 1000)' end;
         select coalesce(sum(calls), 0) into v_before
         from pg_stat_xact_user_functions where funcid = 'ash._pgss_schema()'::regprocedure;
+        select coalesce(sum(calls), 0) into v_template_before
+        from pg_stat_xact_user_functions where funcid = 'ash._pgss_query_text_sql()'::regprocedure;
         execute 'explain (analyze, format json) ' || v_sql
           into v_plan using v_from, v_from + interval '1 minute';
         select coalesce(sum(calls), 0) into v_after
         from pg_stat_xact_user_functions where funcid = 'ash._pgss_schema()'::regprocedure;
+        select coalesce(sum(calls), 0) into v_template_after
+        from pg_stat_xact_user_functions where funcid = 'ash._pgss_query_text_sql()'::regprocedure;
+        assert v_template_after - v_template_before <= 1,
+          format('%s %s rows=%s: expected at most one template construction, got %s',
+            v_reader, v_mode, v_size, v_template_after - v_template_before);
         assert v_after - v_before = 1,
           format('%s %s rows=%s: expected one schema lookup, got %s',
             v_reader, v_mode, v_size, v_after - v_before);
@@ -58,8 +67,9 @@ begin
           into v_rows, v_text_rows using v_from, v_from + interval '1 minute';
         assert v_rows = case when v_reader = 'samples' then v_size else v_size / 4 end
           and v_text_rows = 0, 'unknown query IDs must survive with null query text';
-        raise notice 'PASS: % % rows=% schema_calls=% plan_rows=%',
+        raise notice 'PASS: % % rows=% schema_calls=% template_calls=% plan_rows=%',
           v_reader, v_mode, v_size, v_after - v_before,
+          v_template_after - v_template_before,
           v_plan->0->'Plan'->>'Actual Rows';
       end loop;
     end loop;

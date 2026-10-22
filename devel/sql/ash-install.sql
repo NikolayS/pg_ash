@@ -6622,6 +6622,26 @@ end;
 $$;
 
 /*
+ * Shared query-text rules. This immutable helper returns only a constant SQL
+ * template; it accepts no schema and executes no lookup. Callers quote their
+ * catalog-derived schema with format() and bind maxlen, query ID, and database
+ * OID with USING. Readers can safely receive EXECUTE on this constant helper.
+ */
+create or replace function ash._pgss_query_text_sql()
+returns text
+language sql
+immutable
+parallel safe
+set search_path = pg_catalog, ash
+as $$
+  -- Hidden IDs can collide across databases. Only visible matching IDs supply text.
+  select 'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
+         'where (queryid = $2 or ($3 is null and queryid is null)) '
+         'and ($3 is null or dbid = $3) '
+         'having $3 is not null or count(distinct dbid) = 1';
+$$;
+
+/*
  * The single vertical drill: AAS broken down by one dimension, every row
  * carrying avg/peak/p99 plus its share (pct) of the window total. Filters
  * compose with the dimension. Every explicit query_id filter needs exact raw
@@ -6684,6 +6704,7 @@ declare
   v_raw_start timestamptz;
   v_has_pgss boolean := false;
   v_pgss_schema text;
+  v_pgss_query_sql text;
   v_key_num bigint;
   v_datid oid;
 begin
@@ -6822,6 +6843,7 @@ begin
     begin
       execute format('select 1 from %I.pg_stat_statements limit 1',
                      v_pgss_schema);
+      v_pgss_query_sql := format(ash._pgss_query_text_sql(), v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
@@ -6981,11 +7003,7 @@ begin
       -- the key spans ASH databases, so attaching one database's text is unsafe.
       -- Reuse this call's trusted schema. Do not repeat catalog discovery per key.
       begin
-        execute format(
-          'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
-          'where (queryid = $2 or ($3 is null and queryid is null)) '
-          'and ($3 is null or dbid = $3) '
-          'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+        execute v_pgss_query_sql
           into query_text using 100, v_key_num, v_datid;
       exception when others then
         query_text := null;
@@ -7396,13 +7414,7 @@ begin
     return null;
   end if;
   begin
-    -- Other users' hidden IDs can collide in another database. Count those
-    -- databases too, but select text only from visible matching IDs.
-    execute format(
-      'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
-      'where (queryid = $2 or ($3 is null and queryid is null)) '
-      'and ($3 is null or dbid = $3) '
-      'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+    execute format(ash._pgss_query_text_sql(), v_pgss_schema)
       into v_text using maxlen, query_id, database_oid;
   exception when others then
     v_text := null;
@@ -7468,6 +7480,7 @@ declare
   v_row_datid oid;
   v_has_pgss boolean := false;
   v_pgss_schema text;
+  v_pgss_query_sql text;
 begin
   -- Raw sample listing has no rollup equivalent.
   perform ash._require_raw_ring('ash.samples()');
@@ -7496,6 +7509,7 @@ begin
     begin
       execute format('select 1 from %I.pg_stat_statements limit 1',
                      v_pgss_schema);
+      v_pgss_query_sql := format(ash._pgss_query_text_sql(), v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
@@ -7559,11 +7573,7 @@ begin
     if v_has_pgss and query_id is not null then
       -- The schema came from the extension catalog before this output loop.
       begin
-        execute format(
-          'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
-          'where (queryid = $2 or ($3 is null and queryid is null)) '
-          'and ($3 is null or dbid = $3) '
-          'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+        execute v_pgss_query_sql
           into query_text using 80, query_id, v_row_datid;
       exception when others then
         query_text := null;
@@ -9217,6 +9227,19 @@ begin
                    v_rec.proname, v_rec.args, v_rec.grantee,
                    case when v_rec.grantable then ' with grant option'
                         else '' end);
+  end loop;
+
+  -- Partial reader grants also need the new constant-only dependency.
+  for v_rec in
+    select func_acl.grantee, bool_or(func_acl.grantable) as grantable
+    from pg_temp._ash_install_func_acl as func_acl
+    join pg_catalog.pg_roles as role_row on role_row.rolname = func_acl.grantee
+    where func_acl.proname in ('top', '_samples', '_pgss_query_text')
+    group by func_acl.grantee
+  loop
+    execute format('grant execute on function ash._pgss_query_text_sql() to %I%s',
+      v_rec.grantee,
+      case when v_rec.grantable then ' with grant option' else '' end);
   end loop;
 
   select string_agg(
