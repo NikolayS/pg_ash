@@ -505,6 +505,9 @@ query attribution; do not assume that all other users remain represented as
 unattributed load.
 
 The installer grants reader access to `pg_monitor` by default when possible.
+To opt out, run `select ash.revoke_reader('pg_monitor');`.
+Repeat this opt-out after each upgrade or installer re-apply, which restores the default grant.
+
 For another monitoring role:
 
 ```sql
@@ -517,11 +520,22 @@ not grant `pg_read_all_stats`. Monitoring roles that need `query_text` from
 `pg_stat_statements` usually need membership in `pg_monitor` or
 `pg_read_all_stats` too.
 
-If `pg_stat_statements` is installed after pg_ash, or moved to another schema:
+SQL-text lookup finds the `pg_stat_statements` schema on each call.
+Installing or relocating the extension does not require a helper call.
+
+Readers also need `usage` on the schema that contains `pg_stat_statements`.
+An administrator must grant this privilege when the extension uses a restricted schema.
+Without schema access, query text can remain NULL despite statistics-role membership.
+
+## Chart presentation
+
+Enable ANSI colors for one chart with `color => true`, or for the session:
 
 ```sql
-select ash._apply_pgss_search_path();
+set ash.color = on;
 ```
+
+The chart uses distinct glyphs as well as colors. The legend identifies each series without requiring color perception.
 
 ## Catalog docs
 
