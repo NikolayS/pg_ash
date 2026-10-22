@@ -22,6 +22,20 @@ reader surface has been replaced by the AAS-oriented 2.0 API:
 | `event_queries(e)` | `top('query_id', wait_event => e)` |
 | `samples_by_database` | `top('database')` |
 
+## Pending changes after 2.0 rc 1
+
+These changes target the development candidate, not the published RC1 payload.
+
+- Cleanup keeps minute rows that pending hourly aggregation still needs. (#277)
+- Comparison deltas use effective windows and coverage. Incomplete windows return NULL deltas instead of misleading changes. (#280)
+- Sampling timestamps use the wall clock after acquiring the sampler lock, not the transaction start time. (#281)
+- Query text follows the source database identity, including missing statistics entries and restricted-role visibility. Ambiguous attribution returns NULL. (#282)
+- The README starts with incident investigation. The reference, agent tasks, and lock lab provide detailed follow-up workflows. (#284)
+- The release-chain helper accepts a byte-identical final-release baseline. Changed development SQL still requires a connected migration. (#289)
+- Reapplying the installer preserves unchanged reader routines and their dependent objects. Changed return types still fail atomically when dependencies block replacement. (#290)
+- Oversized reader buckets get reader-specific validation errors, including overflow during grain alignment. `top(NULL)` now rejects the invalid dimension. (#177, #293)
+- Historical-upgrade tests use the actual alpha installers. Their help command no longer connects to a database. (#296)
+
 ## 2.0 highlights
 
 - **AAS-first readers.** `periods`, `aas`, `timeline`, `top`, `compare`,
@@ -37,7 +51,7 @@ reader surface has been replaced by the AAS-oriented 2.0 API:
   warns that this can re-grant operator-narrowed table privileges.
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
-  `select ash.revoke_reader('pg_monitor');`.
+  `select ash.revoke_reader('pg_monitor');`. Repeat this opt-out after each upgrade or installer re-apply.
 - **Postgres 19 prerelease testing.** CI covers Postgres 14–18 and 19 RC1.
   This release candidate uses the official `postgres:19rc1` image.
   Prerelease testing does not establish Postgres 19 GA support.
