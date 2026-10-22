@@ -1220,8 +1220,8 @@ begin
     return 0;
   end if;
 
-  -- Get sample timestamp (seconds since epoch, from now()).
-  v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
+  -- Read the clock after the lock; the transaction may predate a completed minute.
+  v_sample_ts := extract(epoch from clock_timestamp() - ash.epoch())::int4;
   v_current_slot := ash.current_slot();
 
   /*
@@ -4371,10 +4371,9 @@ begin
 
   /*
    * Drain in-flight samplers before choosing the "complete minute" boundary.
-   * take_sample() gets sample_ts from transaction-start now(), then may block
-   * before INSERT. Without this drain, rollup_minute() can advance the
-   * watermark while a sampler later commits an old-minute row, permanently
-   * excluding it from rollups (#81).
+   * take_sample() reads the clock after acquiring its transaction-level lock.
+   * It can still delay INSERT or commit across a minute boundary. This drain
+   * keeps the watermark behind such uncommitted samples (#81).
    */
   if not pg_try_advisory_lock(
        hashtext('pg_ash')::int4,
