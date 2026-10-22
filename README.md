@@ -121,6 +121,26 @@ select * from ash.status() where metric = 'version';
 The old root-level upgrade paths, such as `sql/ash-1.5-to-2.0.sql`, are kept as
 compatibility wrappers. New docs and scripts should use `sql/migrations/`.
 
+### Dependent views and functions
+
+The development installer preserves unchanged function identities and their
+dependent views and SQL functions. This fix reaches the public migration when
+`devel/sql/ash-install.sql` is promoted. The frozen beta1 and rc1 installers
+still drop unchanged readers and can reject these dependencies.
+
+Some historical signatures must change. Beta1's `ash.aas()`, `ash.top()`, and
+`ash.compare()` gain result columns. The candidate also adds `datid` to the
+internal `ash._grain_by()` result. Older 1.x and alpha readers have additional
+signature changes. Dependencies on incompatible signatures still block the
+upgrade. The transaction rolls back; the existing objects and data remain.
+
+For a blocked upgrade, save the dependent objects' definitions and grants.
+Drop only those user objects, in dependency order, without `cascade`.
+Run the upgrade again. Adapt the saved definitions to the new result columns.
+Recreate the objects and restore their grants. Test their queries before
+resuming consumers. Unchanged beta1 readers, such as `timeline()` and
+`samples()`, do not need this procedure with the development installer.
+
 The old 1.x reader functions are gone in 2.0:
 
 | 1.x | 2.0 |

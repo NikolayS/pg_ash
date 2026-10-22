@@ -95,15 +95,85 @@ def main() -> None:
         def snapshot() -> str:
             return run(["--file", str(ROOT / "devel/tests/schema_snapshot.sql")])
 
+        def routines() -> dict[str, tuple[str, str]]:
+            rows = run(["--command", "select oid, oid::regprocedure, "
+                        "pg_get_function_result(oid) from pg_proc "
+                        "where pronamespace = 'ash'::regnamespace "
+                        "and prokind = 'f'"]).splitlines()
+            return {signature: (oid, result)
+                    for oid, signature, result in (row.split("|", 2) for row in rows)}
+
+        def dependencies() -> dict[str, tuple[str, str]]:
+            before = routines()
+            # These signatures have unchanged results in beta1 and rc1.
+            run(["--command", """
+                create view public.ash_dependency_time as
+                  select ash.ts_to_timestamptz(60) as ts;
+                create view public.ash_dependency_timeline as
+                  select * from ash.timeline('2026-01-01 00:00Z',
+                                             '2026-01-01 00:01Z');
+                create view public.ash_dependency_periods as
+                  select * from ash.periods('2026-01-01 00:01Z');
+                create function public.ash_dependency_atomic()
+                returns timestamptz language sql
+                begin atomic
+                  select ash.ts_to_timestamptz(60);
+                end;
+            """])
+            top = next(sig for sig in before if sig.startswith("ash.top("))
+            if before[top][1] == expected_routines[top][1]:
+                run(["--command", "create view public.ash_dependency_top as "
+                     "select * from ash.top('wait_event')"])
+            return before
+
+        def check_dependencies(before: dict[str, tuple[str, str]]) -> None:
+            after = routines()
+            for sig, (oid, result) in before.items():
+                # Changed return rows require DROP RESTRICT, not replacement.
+                if sig in expected_routines and result == expected_routines[sig][1]:
+                    assert after[sig][0] == oid, f"unchanged routine replaced: {sig}"
+            assert run(["--command", "select ts = '2026-01-01 00:01Z'::timestamptz "
+                        "and public.ash_dependency_atomic() = ts "
+                        "from public.ash_dependency_time"]).strip() == "t"
+            assert run(["--command", "select count(*) = 1 and "
+                        "bool_and(data_points = 0 and avg_aas is null) "
+                        "from public.ash_dependency_timeline"]).strip() == "t"
+
+            assert run(["--command", "select count(*) from public.ash_dependency_periods"]).strip() == "6"
+            if run(["--command", "select to_regclass('public.ash_dependency_top') is not null"]).strip() == "t":
+                assert run(["--command", "select count(*) from public.ash_dependency_top"]).strip() == "0"
+
+        def incompatible_dependency(tag: str) -> None:
+            call = ("ash.top('wait_event')" if tag == "v2.0-beta1" else
+                    "ash._grain_by(0, 60, 'raw', 'wait_event')")
+            run(["--command", "create view public.ash_incompatible as select * from " + call])
+            before_schema, before_routines = snapshot(), routines()
+            before_version = run(["--command", "select version from ash.config"])
+            try:
+                install(wrapper)
+            except RuntimeError as error:
+                assert "cannot drop function" in str(error), str(error)
+                assert "view ash_incompatible depends" in str(error), str(error)
+            else:
+                raise AssertionError(f"{tag}: incompatible dependency did not block upgrade")
+            assert snapshot() == before_schema, f"{tag}: failed upgrade changed schema/ACLs"
+            assert routines() == before_routines, f"{tag}: failed upgrade replaced routines"
+            assert run(["--command", "select version from ash.config"]) == before_version
+            run(["--command", "select * from public.ash_incompatible; "
+                 "drop view public.ash_incompatible"])
+
         try:
             reset()
             install(promoted / "sql/ash-install.sql")
             expected_schema = snapshot()
+            expected_routines = routines()
+            before = dependencies()
             expected_version = run(["--command",
                 "select version from ash.config where singleton"]).strip()
             # A public migration must also safely accept a fresh candidate.
             install(canonical)
             install(wrapper)
+            check_dependencies(before)
             assert snapshot() == expected_schema, "fresh candidate wrapper changed schema"
             print("fresh promoted install/canonical/wrapper reapply PASS", flush=True)
 
@@ -125,6 +195,10 @@ def main() -> None:
                 if source_install is None:
                     raise RuntimeError(f"{tag}: no recognized tagged SQL installer")
                 install(source_install, cwd=archived)
+                before = None
+                if tag in ("v2.0-beta1", "v2.0-rc1"):
+                    before = dependencies()
+                    incompatible_dependency(tag)
                 run(["--command", "update ash.config set sample_interval = interval '5 seconds', "
                      "include_bg_workers = true where singleton"])
                 # Preserve the actual tagged origin before applying finalized
@@ -146,6 +220,8 @@ def main() -> None:
                 install(wrapper)
                 assert run(["--command", "select 'ash.config'::regclass::oid"]) == oid, tag
                 assert snapshot() == expected_schema, f"{tag}: reapply changed schema"
+                if before is not None:
+                    check_dependencies(before)
                 # Reapply must preserve the operator's opt-in and physical ring.
                 run(["--command", "select ash.set_sample_persistence('unlogged')"])
                 install(wrapper)

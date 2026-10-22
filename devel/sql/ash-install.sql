@@ -146,9 +146,9 @@ begin
 end $$;
 
 /*
- * Drop ALL overloads of functions whose signatures changed across versions.
- * Using a DO block because DROP FUNCTION requires exact arg types and we
- * can't predict which stale overloads exist from prior installs.
+ * Drop removed readers and incompatible historical signatures only (#290).
+ * CREATE OR REPLACE preserves unchanged OIDs and their user dependencies.
+ * Incompatible signatures still use DROP RESTRICT: never remove user objects.
  */
 do $$
 declare
@@ -185,77 +185,61 @@ begin
     from pg_proc as proc
     join pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
-      and proc.proname in (
-        'top_waits', 'top_waits_at',
-        'histogram', 'histogram_at',
-        'timeline_chart', 'timeline_chart_at',
-        'query_waits', 'query_waits_at',
-        'top_by_type', 'top_by_type_at',
-        'waits_by_type', 'waits_by_type_at',
-        'event_queries', 'event_queries_at',
-        'top_queries_with_text',
-        '_validate_data',
-        'uninstall',
-        'debug_logging',
-        'rebuild_partitions',
-        /*
-         * 2.0 reader rework (issue #113): drop every removed v1.x reader,
-         * every draft aas_* function (all overloads / _at twins), and the
-         * earlier 2.0 draft names that were renamed to the final surface
-         * (aas_by -> top, aas_series -> timeline, aas_compare -> compare,
-         * aas_periods -> periods, health_report -> report), plus the
-         * changed-signature name `samples`, so re-applying this installer
-         * over any prior install yields exactly the 2.0 surface (periods,
-         * aas, timeline, top, compare, samples, report, chart, summary).
-         * `aas` is a stable name but its signature changed, so it is
-         * dropped too to clear any old overload.
-         */
-        'top_queries', 'top_queries_at',
-        'wait_timeline', 'wait_timeline_at',
-        'activity_summary',
-        'samples', 'samples_at',
-        'samples_by_database', 'samples_by_database_at',
-        'minute_waits', 'minute_waits_at',
-        'hourly_queries', 'hourly_queries_at',
-        'daily_peak_backends', 'daily_peak_backends_at',
-        '_to_sample_ts', '_pick_rollup_source',
-        'aas', 'aas_at',
-        'aas_periods',
-        /*
-         * signature/return-type changes during the 2.0 development cycle:
-         * periods() renamed minutes_with_data -> buckets_with_data and
-         * gained a bucket column; top() gained order_by. Drop stale
-         * overloads so re-apply over an earlier 2.0 draft converges on the
-         * final surface.
-         */
-        'periods', 'top',
-        /*
-         * 2.0 parameter de-prefixing (see the note above the loop): every
-         * remaining param-bearing function whose parameter names changed.
-         */
-        'ts_from_timestamptz', 'ts_to_timestamptz', '_register_wait',
-        'decode_sample', 'decode_sample_at',
-        'start', 'set_debug_logging',
-        '_active_slots_for', '_active_slots_for_at',
-        '_merge_wait_counts', '_merge_query_counts', '_truncate_pairs',
-        'rollup_minute',
-        '_color_on', '_wait_color', '_reset', '_bar',
-        '_pick_source', '_pick_source_agg', '_exact_query_uses_coarser',
-        '_raise_tie_retention',
-        '_minute_counts_valid', '_rollup_1h_has_flat',
-        '_grain_counts', '_grain_by',
-        'timeline', 'compare', '_pgss_query_text',
-        '_hr_top_events', '_hr_top_queryids',
-        'report', 'chart', 'summary',
-        'grant_reader', 'revoke_reader',
-        'aas_series', 'aas_by', 'aas_compare', 'health_report',
-        'aas_timeline', 'aas_timeline_at',
-        'aas_wait_types', 'aas_wait_types_at',
-        'aas_wait_events', 'aas_wait_events_at',
-        'aas_queryids', 'aas_queryids_at',
-        'aas_summary', 'aas_summary_at',
-        'aas_waits', 'aas_waits_at',
-        'aas_queries', 'aas_queries_at'
+      and (
+        -- Removed 1.x readers and renamed 2.0 draft functions.
+        proc.proname in (
+          'top_waits', 'top_waits_at',
+          'histogram', 'histogram_at', 'timeline_chart',
+          'timeline_chart_at', 'query_waits', 'query_waits_at',
+          'top_by_type', 'top_by_type_at', 'waits_by_type',
+          'waits_by_type_at', 'event_queries', 'event_queries_at',
+          'top_queries_with_text', '_validate_data', 'debug_logging',
+          'top_queries', 'top_queries_at', 'wait_timeline',
+          'wait_timeline_at', 'activity_summary', 'samples_at',
+          'samples_by_database', 'samples_by_database_at', 'minute_waits',
+          'minute_waits_at', 'hourly_queries', 'hourly_queries_at',
+          'daily_peak_backends', 'daily_peak_backends_at', '_to_sample_ts',
+          '_pick_rollup_source', 'aas_at', 'aas_periods',
+          'aas_series', 'aas_by', 'aas_compare',
+          'health_report', 'aas_timeline', 'aas_timeline_at',
+          'aas_wait_types', 'aas_wait_types_at', 'aas_wait_events',
+          'aas_wait_events_at', 'aas_queryids', 'aas_queryids_at',
+          'aas_summary', 'aas_summary_at', 'aas_waits',
+          'aas_waits_at', 'aas_queries', 'aas_queries_at'
+        )
+        or (
+          -- CREATE OR REPLACE cannot rename historical input parameters.
+          proc.proargnames[1] like 'p\_%'
+          and proc.proname in (
+            '_active_slots_for', '_active_slots_for_at', '_bar',
+            '_color_on', '_exact_query_uses_coarser', '_grain_by',
+            '_grain_counts', '_hr_top_events', '_hr_top_queryids',
+            '_merge_query_counts', '_merge_wait_counts', '_minute_counts_valid',
+            '_pgss_query_text', '_pick_source', '_pick_source_agg',
+            '_raise_tie_retention', '_register_wait', '_reset',
+            '_rollup_1h_has_flat', '_truncate_pairs', '_wait_color',
+            'aas', 'chart', 'compare',
+            'decode_sample', 'decode_sample_at', 'grant_reader',
+            'periods', 'rebuild_partitions', 'report',
+            'revoke_reader', 'rollup_minute', 'samples',
+            'set_debug_logging', 'start', 'summary',
+            'timeline', 'top', 'ts_from_timestamptz',
+            'ts_to_timestamptz', 'uninstall'
+          )
+        )
+        -- Draft top() lacked order_by; 1.x readers had different inputs.
+        or (proc.proname = 'top' and proc.pronargs <> 10)
+        or (proc.proname in ('aas', 'samples') and proc.pronargs <> 7)
+        -- These TABLE results gained columns without changing input types.
+        or (proc.proname in ('aas', 'top')
+            and not ('effective_bucket' = any(proc.proargnames)))
+        or (proc.proname = 'compare'
+            and not ('effective_bucket_1' = any(proc.proargnames)))
+        or (proc.proname = 'periods'
+            and not ('buckets_with_data' = any(proc.proargnames)
+                     and 'bucket' = any(proc.proargnames)))
+        or (proc.proname = '_grain_by'
+            and not ('datid' = any(proc.proargnames)))
       )
   loop
     execute format('drop function if exists %s', func_row.sig);
@@ -4852,7 +4836,6 @@ comment on procedure ash.run_rollup_cleanup() is
 
 drop function if exists ash.aas_summary(interval);
 drop function if exists ash.aas_summary_at(timestamptz, timestamptz);
-drop function if exists ash.periods(timestamptz);
 drop function if exists ash.aas_waits(interval, text, int);
 drop function if exists ash.aas_waits_at(timestamptz, timestamptz, text, int);
 drop function if exists ash.aas_queries(interval, int);
@@ -9049,6 +9032,22 @@ declare
   v_admin_funcs constant text[] := ash._admin_funcs();
   v_reader_roles text;
 begin
+  -- Replacing these unchanged admins now preserves ACLs too. Remove the
+  -- same non-owner grants that the former DROP FUNCTION used to discard.
+  for v_rec in
+    select distinct func_acl.grantee, proc.oid::regprocedure as sig
+    from pg_temp._ash_install_func_acl as func_acl
+    join pg_proc as proc on proc.proname = func_acl.proname
+    where proc.pronamespace = 'ash'::regnamespace
+      and proc.proname in (
+        'uninstall', 'rebuild_partitions', 'start', 'set_debug_logging',
+        'rollup_minute', 'grant_reader', 'revoke_reader'
+      )
+  loop
+    execute format('revoke execute on function %s from %I cascade',
+                   v_rec.sig, v_rec.grantee);
+  end loop;
+
   for v_rec in
     select distinct func_acl.grantee, func_acl.grantable, proc.proname,
            pg_catalog.pg_get_function_identity_arguments(proc.oid) as args
