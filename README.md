@@ -25,9 +25,8 @@ Three sessions waiting throughout ten seconds contribute 30 backend-seconds.
 Across a 60-second window, that is 0.5 AAS.
 AAS measures sampled activity, not CPU utilization or query latency.
 
-pg_ash uses SQL and PL/pgSQL, without a C extension or a restart for pg_ash itself.
 It can run on managed Postgres, including RDS, Cloud SQL, AlloyDB, Supabase, and Neon.
-Installation still requires schema permissions. Optional extensions and cross-role statistics have separate [privilege requirements](docs/REFERENCE.md#privileges).
+Optional extensions and cross-role statistics have separate [privilege requirements](docs/REFERENCE.md#privileges).
 
 ## Ask an agent, watch, or operate
 
