@@ -6,7 +6,6 @@ declare
   oversized text;
   command text;
   message text;
-  failures text[] := array[]::text[];
 begin
   foreach reader in array array['aas', 'timeline', 'top', 'chart'] loop
     foreach oversized in array array['69 years', '100000 years', '2147483647.1 seconds',
@@ -20,8 +19,6 @@ begin
       exception when invalid_parameter_value then
         get stacked diagnostics message = message_text;
         assert message like 'ash.' || reader || ': bucket%', message;
-      when others then
-        failures := array_append(failures, command || ': ' || sqlstate || ' ' || sqlerrm);
       end;
     end loop;
   end loop;
@@ -30,11 +27,8 @@ begin
     raise exception 'accepted NULL dimension';
   exception when raise_exception then
     get stacked diagnostics message = message_text;
-    if message not like 'ash.top: unknown dimension%' then
-      failures := array_append(failures, message);
-    end if;
+    assert message like 'ash.top: unknown dimension%', message;
   end;
-  assert cardinality(failures) = 0, array_to_string(failures, E'\n');
   foreach reader in array array['aas', 'timeline', 'top', 'chart'] loop
     execute format('select * from ash.%I(%sbucket => interval ''2147483640 seconds'')',
       reader, case when reader = 'top' then '''wait_event'', ' else '' end);
