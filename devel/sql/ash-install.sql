@@ -5807,6 +5807,10 @@ begin
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.aas: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
   -- Floor before rounding, then align again after the int4 horizon clamp.
@@ -6049,6 +6053,10 @@ begin
     v_requested_bucket_secs := extract(epoch from bucket);
     if v_requested_bucket_secs < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
+    end if;
+    if ceil(v_requested_bucket_secs) > 2147483647 then
+      raise exception 'ash.timeline: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
     end if;
     v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
   end if;
@@ -6661,7 +6669,7 @@ begin
       'ash.top: since must be less than or equal to until';
   end if;
 
-  if dimension not in (
+  if dimension is null or dimension not in (
        'wait_event_type', 'wait_event', 'query_id', 'database'
      ) then
     raise exception
@@ -6674,6 +6682,10 @@ begin
   v_requested_bucket_secs := extract(epoch from bucket);
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
+  end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.top: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
   end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
@@ -8096,6 +8108,10 @@ begin
   else
     if extract(epoch from bucket) < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
+    end if;
+    if ceil(extract(epoch from bucket)) > 2147483647 then
+      raise exception 'ash.chart: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
     end if;
     v_bucket_secs := ceil(extract(epoch from bucket))::int4;
   end if;
