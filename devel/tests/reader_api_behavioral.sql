@@ -329,6 +329,16 @@ begin
   j := ash.report(v_from, v_to);
   assert j is not null, 'report returned null on covered window';
 
+  -- cluster_name is optional report metadata, inherited from the server.
+  if nullif(current_setting('cluster_name', true), '') is not null then
+    expected_keys := array_append(expected_keys, 'cluster_name');
+    assert j->>'cluster_name' = current_setting('cluster_name'),
+      'report cluster_name must match server setting';
+  else
+    assert not (j ? 'cluster_name'),
+      'report must omit empty cluster_name';
+  end if;
+
   -- exact top-level key set.
   assert (select array_agg(k order by k) from jsonb_object_keys(j) k)
          = (select array_agg(k order by k) from unnest(expected_keys) k),

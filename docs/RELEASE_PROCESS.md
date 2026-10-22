@@ -61,20 +61,52 @@ addition that buries its actual change. Landing the copy on its own, where the
 whole diff is provably a copy, keeps every later PR's diff equal to its real
 delta.
 
-A reviewer can verify a claimed copy in one command:
+From the proposed release checkout, a reviewer can verify a claimed copy:
 
 ```bash
-git diff origin/main:sql/ash-install.sql <branch>:devel/sql/ash-install.sql
+git diff HEAD:sql/ash-install.sql HEAD:devel/sql/ash-install.sql
 ```
 
-Empty output means byte-identical. `shasum -a 256` on both paths is equivalent
-and easier to quote in a PR description.
+Empty output means byte-identical in that commit. Compare both sides from
+the same candidate: `origin/main` can still contain the preceding beta payload.
+`shasum -a 256 sql/ash-install.sql devel/sql/ash-install.sql` in a clean
+candidate checkout is equivalent and easier to quote in a PR description.
+
+This check proves that both installer copies match in the same commit.
+It does not prove that they match the accepted source.
+Compare the promoted installer with the exact development commit that passed
+review and the full gate:
+
+```bash
+# Set reviewed_sha to the full accepted development commit SHA, not a moving ref.
+git diff "${reviewed_sha}:devel/sql/ash-install.sql" HEAD:sql/ash-install.sql
+```
+
+Only the reviewed release-identity header and version stamps should differ.
+Review any executable difference. Test it before acceptance.
+Record the full reviewed and candidate SHAs with both comparisons.
+Do not substitute `origin/main` for the accepted development SHA.
+The reviewed feature branch may still await merge, and branch tips can move.
 
 All post-release SQL changes must be made in `devel/sql/`, not in released files
 under `sql/`. After a prerelease of the current line, its released cumulative
 migration remains the public entry point and the next candidate installer is
-staged under `devel/sql/`; that migration may change again only in a later
-release-stamp PR.
+staged under `devel/sql/`; the released file under `sql/migrations/` may change again only in a later
+release-stamp PR. Its executable behavior can be refreshed through a staged
+copy as described below.
+
+When that current-line cumulative migration needs executable changes before
+another prerelease, stage a same-named copy in `devel/sql/` alongside its
+installer. Its relative include targets `ash-install.sql` in that directory.
+Discovery permits this replacement only for the current prerelease's exact
+source/target edge and a matching development installer release line; older
+or finalized edges cannot be overridden. Full, pinned and reapply development
+paths execute the staged transaction instead of first publishing the old
+released wrapper's intermediate schema. `promoted_upgrade_paths.py` separately
+rehearses the canonical and root public entrypoints in a temporary promoted
+layout. During the stamp, promote the tested migration, change its include to
+`../ash-install.sql`, remove the staged migration, and retain the byte-identical
+development installer baseline.
 
 CI must not hardcode concrete version chains. It uses
 `devel/scripts/ash_sql_chain.py` to discover released installers, released
@@ -94,9 +126,17 @@ migrations connect the requested starting version to the released head. It
 then verifies that both installers remain on that prerelease's `X.Y` line and
 appends the candidate to the full-upgrade, pinned public-wrapper, and re-apply
 chains as a re-apply-safe overlay. A lone installer for another release line is
-rejected before any SQL is emitted. Once the shipped payload is final, a
-connected development migration is mandatory even when the candidate has not
-yet received its next release identity. This makes the beta-to-final path
+rejected before any SQL is emitted.
+
+After a final release, the helper accepts a lone development installer only
+when it is byte-identical to `sql/ash-install.sql`. It validates both installers'
+version stamps and the released migration graph before accepting this baseline.
+It appends this baseline once to full, pinned public-wrapper, and re-apply chains.
+Any changed bytes require a connected development migration, including comments
+or line endings. This requirement applies even before the candidate receives
+its next release identity.
+
+The prerelease overlay makes the beta-to-final path
 exercise the same candidate as a fresh install without allowing the overlay to
 hide a missing migration or inventing a prerelease-specific migration filename.
 The helper also requires the promoted released installer to name the head of
@@ -140,10 +180,10 @@ promote the development SQL into released core SQL:
    (empty output). The next cycle then begins with the baseline already
    present, so no feature PR carries an ~8000-line copy alongside its own
    change.
-   A no-op overlay is safe for CI: `ash_sql_chain.py` still discovers it and
-   appends it to the full, re-apply and pinned upgrade paths, and applying an
-   installer identical to the released one is exactly the idempotent re-apply
-   those paths already assert.
+   This baseline works after prerelease and final stamps. After a final stamp,
+   `ash_sql_chain.py` requires byte identity before it appends the baseline.
+   Full, re-apply, and pinned upgrade paths include it once.
+   CI checks installer re-application through these paths.
 7. Leave CI on discovery-based helpers; remove only obsolete `devel/sql/`
    references if the helper no longer emits them after promotion.
 8. From the exact candidate commit, dispatch `test.yml` with the intended tag
@@ -151,12 +191,12 @@ promote the development SQL into released core SQL:
    gate, must pass before tagging; the tag push runs the same identity check
    again.
 
-After the tag, keep an empty `devel/sql/` area as the next development-cycle
-landing zone. The first SQL-changing PR after a final release adds the next
-`devel/sql/ash-install.sql` and cumulative
-`devel/sql/ash-X.Y-to-X.Z.sql` files there before touching released `sql/`
-files. After a prerelease, stage the next installer there while retaining the
-current line's cumulative migration path for the next stamp.
+After the tag, retain the byte-identical `devel/sql/ash-install.sql` baseline
+created in the stamp PR. The first SQL-changing PR after a final release also
+adds the next connected cumulative `devel/sql/ash-X.Y-to-X.Z.sql` migration.
+After a prerelease, edit that development installer and stage any current-line
+migration refresh there; retain the released entrypoint until the next stamp.
+Never edit the tagged payload under its existing identity.
 
 ### Prerelease to final
 

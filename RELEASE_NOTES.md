@@ -1,15 +1,15 @@
-# pg_ash 2.0 beta 1 release notes
+# pg_ash 2.0 rc 1 release notes
 
-2.0 beta 1 promotes the rewritten reader API from `devel/sql/` into the normal
-release SQL path. Fresh installs use `\i sql/ash-install.sql`; upgrades from
-1.5 use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any missing 1.x
-migrations. Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for
-compatibility.
+This release candidate stamps the tested 2.0 installer as `2.0-rc1`. Fresh
+installs use `\i sql/ash-install.sql`; upgrades from 1.5 or an earlier 2.0
+prerelease use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any
+missing 1.x migrations. The same migration is safe to reapply to `2.0-rc1`.
+Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for compatibility.
 
-This is a breaking reader-API release. Sampling, storage, rollups, scheduler
-functions, and lifecycle/admin function signatures are unchanged; parameter
-names were de-prefixed. The 1.x reader surface has been replaced by the
-AAS-oriented 2.0 API:
+The 2.0 line introduces a breaking reader API and removes parameter-name
+prefixes. RC1 also changes cadence safeguards, storage options, scheduler
+procedures, and lifecycle ownership behavior as described below. The 1.x
+reader surface has been replaced by the AAS-oriented 2.0 API:
 
 | 1.x | 2.0 |
 |---|---|
@@ -22,6 +22,23 @@ AAS-oriented 2.0 API:
 | `event_queries(e)` | `top('query_id', wait_event => e)` |
 | `samples_by_database` | `top('database')` |
 
+## Pending changes after 2.0 rc 1
+
+These changes target the development candidate, not the published RC1 payload.
+
+- Cleanup keeps minute rows that pending hourly aggregation still needs. (#277)
+- Comparison deltas use effective windows and coverage. Incomplete windows return NULL deltas instead of misleading changes. (#280)
+- Sampling timestamps use the wall clock after acquiring the sampler lock, not the transaction start time. (#281)
+- Query text follows the source database identity, including missing statistics entries and restricted-role visibility. Ambiguous attribution returns NULL. (#282)
+- Reapplying the installer preserves unchanged reader routines and their dependent objects. Changed return types still fail atomically when dependencies block replacement. (#290)
+- Oversized reader buckets get reader-specific validation errors, including overflow during grain alignment. `top(NULL)` now rejects the invalid dimension. (#177, #293)
+
+### Documentation and release tooling
+
+- The README starts with incident investigation. The reference, agent tasks, and lock lab provide detailed follow-up workflows. (#284)
+- The release-chain helper accepts a byte-identical final-release baseline. Changed development SQL still requires a connected migration. (#289)
+- Historical-upgrade tests use the actual alpha installers. Their help command no longer connects to a database. (#296)
+
 ## 2.0 highlights
 
 - **AAS-first readers.** `periods`, `aas`, `timeline`, `top`, `compare`,
@@ -30,19 +47,91 @@ AAS-oriented 2.0 API:
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
   may add keys, but existing keys are not renamed or removed.
-- **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the finalized 2.0
+- **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the 2.0 release-candidate
   installer, removes stale 1.x and earlier draft reader functions, and restores
   eligible explicit reader-function grants. Roles that held the full
   reader-function bundle receive the full current reader bundle; the installer
   warns that this can re-grant operator-narrowed table privileges.
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
-  `select ash.revoke_reader('pg_monitor');`.
-- **Postgres 19 beta support.** CI now covers Postgres 14 through 19, using the
-  official `postgres:19beta1` image until the GA `postgres:19` image exists.
+  `select ash.revoke_reader('pg_monitor');`. Repeat this opt-out after each upgrade or installer re-apply.
+- **Postgres 19 prerelease testing.** CI covers Postgres 14–18 and 19 RC1.
+  This release candidate uses the official `postgres:19rc1` image.
+  Prerelease testing does not establish Postgres 19 GA support.
 - **Docs refreshed.** README examples now use the 2.0 named-argument API.
 
-## Fixes since 2.0 beta 1
+## Changes since 2.0 beta 1
+
+- **Filtered raw readers avoid repeated slot selection.** Each helper selects retained slots once per call, rather than once per scanned row. (#269)
+  [Dedicated-fixture measurements](https://github.com/NikolayS/pg_ash/pull/267#issuecomment-6282719259) show 23x faster custom plans and 12x faster generic plans.
+  These results do not establish general production throughput.
+
+- **Aggregate boundaries use UTC minute floors.** Readers floor fractional endpoints before timestamp conversion.
+  Reports use the same UTC boundaries for retained raw-query attribution, including second-resolution session offsets. (#267)
+
+- A schema owner with `pg_monitor` can start libpq-backed pg_cron jobs without
+  write access to `cron.job`. Without that permission, the administrator manages
+  connection defaults. Reactivation through `alter_job` preserves sampler and
+  rotation connection settings. Without `alter_job`, the fallback recreates
+  inactive sampler and rotation jobs with the same permitted socket adjustment
+  as new jobs.
+  Minute scheduling supports pg_cron versions with named jobs but no optional
+  `alter_job` API. (#260)
+
+- Lifecycle operations now require the exact `ash` schema owner, including
+  when invoked by another superuser; use `SET ROLE` to the owner. Failed
+  start/stop/rebuild/uninstall calls roll back jobs, config and DDL together.
+  `stop()` returns real job IDs only for actual removals. A successful rebuild
+  leaves sampling disabled. (#203)
+- Explicit start reactivates local jobs while preserving custom commands and
+  migrating recognized commands to `CALL`. Non-superuser owners can repeat
+  start without `cron.alter_job` privileges; an inactive job may receive a new
+  ID when recreated. Cross-database managed-name collisions and visible
+  foreign-owner same-database jobs fail before changes. (#250)
+
+- **Partial aggregate sources disclose omitted raw observations.** When the
+  best available minute rollup is stale and lacks newer completed raw grains
+  in the requested window, aggregate readers emit a `01000` NOTICE prefixed
+  `pg_ash partial source:` with catch-up/narrow-window guidance. Returned
+  values and source labels are unchanged and describe selected rollup rows;
+  clients must surface/preserve the advisory diagnostic. This does not add
+  source composition or machine-readable completeness metadata; #122 stays open.
+
+- **Cadence changes can no longer reweight retained history.** New sampling
+  intervals must be 1–60 whole seconds; `ash.start()` without an interval
+  resumes the configured cadence. Explicit interval changes and direct config
+  updates are refused while raw or either rollup tier retains history, with
+  no automatic deletion. Commit a successful change promptly: its locks block
+  history writers until transaction end. Unsupported legacy cadence/config/data survive
+  upgrade, but sampling skips and AAS weighting raises until the operator
+  explicitly archives/resets history and selects a supported cadence. This
+  contains issue #137; it does not infer or repair older mixed-cadence data.
+
+- **Raw sample WAL can be reduced with an opt-in unlogged ring.**
+  `ash.set_sample_persistence('unlogged')` converts only raw `sample_N`
+  partitions and is preserved by rotation, partition rebuilds, and installer
+  re-apply; the default remains logged and rollups always stay logged. A crash
+  or immediate shutdown truncates unlogged raw history, promoted replicas
+  start with an empty raw ring, and standbys cannot read it. (issue #224)
+- **Primary-only operation is explicit on physical standbys.** Scheduled
+  sampling, rotation, and rollup routines now emit an actionable notice and
+  return a neutral value without writing when the server is in recovery.
+  Administrative entrypoints and the installer fail with SQLSTATE `25006`,
+  reader functions remain available, and `ash.status()` reports the node's
+  recovery state while explaining replicated `sampling_enabled`. (issue #222)
+- **Maintenance routines now have a `CALL` surface.** Admins and schedulers
+  can invoke `run_take_sample`, `run_rotate`, `run_rollup_minute`,
+  `run_rollup_hour`, and `run_rollup_cleanup` as procedures. This prevents
+  statement-kind routers from treating a side-effecting `SELECT` as a read
+  and sending it to a read-only replica. pg_cron jobs use the procedure forms;
+  installer re-apply migrates the known legacy commands — including the
+  uppercase `SELECT` forms scheduled by 1.0 and 1.1 — while preserving custom
+  commands, cadence, job IDs, and active state. `ash.start()` honours the same
+  contract: it re-syncs only command text pg_ash itself scheduled, and leaves
+  a customised command alone with a notice naming the recommended form. The procedures are admin-only
+  and excluded from `ash.grant_reader()`. (issue #221)
+
+### Fixes
 
 - **Reader windows and diagnostics are now explicit.** Reader functions reject
   inverted windows and anchor an `until`-only call to the preceding hour.
@@ -93,18 +182,16 @@ AAS-oriented 2.0 API:
 
 ## Known limitations
 
-- **Historical cadence and idle coverage are not persisted.** AAS readers
-  weight stored appearances with the current `ash.config.sample_interval`, so
-  changing it rescales earlier raw and rollup history. Successful idle sampler
-  ticks write no row; consequently `data_points`, `buckets_with_data`, and
-  report `minutes_with_data` are derived from stored activity and do not verify
-  successful sampling; they cannot distinguish sampled zero load from a
-  sampler outage. At sampling intervals greater than one minute, the full tick
-  weight is assigned to one minute, so one-minute peaks and report
-  worst-minute values can exceed observed concurrency. Keep cadence fixed and
-  monitor scheduler health independently. `ash.timeline()` now calls these
-  buckets “no stored observation,” but that catalog correction does not add
-  heartbeat storage. (issues #137 and #175)
+- **Historical cadence and idle coverage are not persisted.** The cadence
+  guard prevents future changes from reweighting retained history, but cannot
+  repair mixed-cadence data from older installations or verify external
+  scheduler timing. Coarse subminute cadence can still overstate minute extrema
+  through bucket placement (for example, two 59-second observations in one
+  minute); this containment does not replace persisted weighted time. Successful idle sampler ticks write no row;
+  `data_points`, `buckets_with_data`, and report `minutes_with_data` describe
+  stored activity, not successful sampler heartbeats. Idle periods and
+  scheduler outages remain indistinguishable; monitor scheduler health
+  independently. (issues #137 and #175)
 
 Known security limitation: advisory-lock squat DoS remains possible for roles
 that can intentionally hold pg_ash advisory locks. See

@@ -1,0 +1,274 @@
+{"at": "2026-10-21T22:11:15.413169+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:16.409754+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:17.409486+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:18.409735+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:19.409342+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:20.409726+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:21.409269+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:22.409329+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:23.409450+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:24.409305+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:25.409345+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:26.409836+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:27.409259+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:28.409312+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:29.409343+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:30.409388+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:31.409373+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:32.409357+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:33.409355+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:34.409310+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:35.409341+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:36.409270+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:37.409349+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:38.409576+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:39.409362+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:40.409586+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:41.409407+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:42.409380+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:43.409393+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:44.409497+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:45.409363+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:46.409405+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:47.409506+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:48.409304+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:49.409334+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:50.409167+00:00", "sessions": []}
+{"at": "2026-10-21T22:11:51.413625+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:51.413468+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:51.413485+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:51.413486+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:52.410492+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:52.410346+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:52.410357+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:52.410359+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:53.410350+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:53.410182+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:53.410193+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:53.410195+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:54.410151+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:54.409997+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:54.410008+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:54.410010+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:55.410107+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:55.409957+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:55.409967+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:55.409969+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:56.410509+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:56.410157+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:56.410167+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:56.410170+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:57.409925+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:57.409730+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:57.409742+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:57.409744+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:58.409817+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:58.409667+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:58.409677+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:58.409679+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:11:59.409836+00:00", "sessions": [{"observed_at": "2026-10-21 22:11:59.409689+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:59.409700+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:11:59.409702+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:00.409986+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:00.409807+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:00.409818+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:00.409819+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:01.409916+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:01.409734+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:01.409743+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:01.409745+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:02.409809+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:02.409646+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:02.409655+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:02.409657+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:03.409732+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:03.409567+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:03.409576+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:03.409578+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:04.410229+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:04.409662+00:00", "pid": 86, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.423971+00:00", "query_start": "2026-10-21 22:11:50.423971+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:04.409674+00:00", "pid": 87, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:11:50.424090+00:00", "query_start": "2026-10-21 22:11:50.424090+00:00", "blocking_pids": [88]}, {"observed_at": "2026-10-21 22:12:04.409676+00:00", "pid": 88, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:11:50.423292+00:00", "query_start": "2026-10-21 22:11:50.423500+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:05.408941+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:06.409041+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:07.409008+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:08.409006+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:09.409071+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:10.408946+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:11.409076+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:12.408925+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:13.409309+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:14.409179+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:15.409003+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:16.408986+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:17.409012+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:18.409035+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:19.409046+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:20.409027+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:21.409046+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:22.409025+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:23.409036+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:24.409007+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:25.409912+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:25.409766+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:25.409775+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:25.409777+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:26.410749+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:26.410596+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:26.410606+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:26.410607+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:27.409818+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:27.409662+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:27.409672+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:27.409674+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:28.409922+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:28.409757+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:28.409766+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:28.409768+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:29.409863+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:29.409693+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:29.409704+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:29.409705+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:30.410046+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:30.409878+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:30.409889+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:30.409891+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:31.409837+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:31.409680+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:31.409690+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:31.409692+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:32.409880+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:32.409716+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:32.409727+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:32.409729+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:33.409726+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:33.409551+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:33.409566+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:33.409568+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:34.409746+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:34.409552+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:34.409568+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:34.409571+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:35.409838+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:35.409640+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:35.409650+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:35.409652+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:36.409888+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:36.409712+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:36.409721+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:36.409723+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:37.411990+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:37.411785+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:37.411797+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:37.411799+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:38.409977+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:38.409753+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:38.409763+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:38.409765+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:39.409936+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:39.409779+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:39.409789+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:39.409791+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:40.409912+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:40.409715+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:40.409724+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:40.409725+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:41.409939+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:41.409766+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:41.409775+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:41.409777+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:42.409880+00:00", "sessions": [{"observed_at": "2026-10-21 22:12:42.409722+00:00", "pid": 91, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445159+00:00", "query_start": "2026-10-21 22:12:24.445159+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:42.409733+00:00", "pid": 92, "state": "active", "wait_event_type": "Lock", "wait_event": "relation", "query_id": -9127212586606946335, "query": "select payload from records where id = $1", "xact_start": "2026-10-21 22:12:24.445271+00:00", "query_start": "2026-10-21 22:12:24.445271+00:00", "blocking_pids": [93]}, {"observed_at": "2026-10-21 22:12:42.409734+00:00", "pid": 93, "state": "idle in transaction", "wait_event_type": "Client", "wait_event": "ClientRead", "query_id": -238073253591604315, "query": "lock table records in access exclusive mode", "xact_start": "2026-10-21 22:12:24.444461+00:00", "query_start": "2026-10-21 22:12:24.444724+00:00", "blocking_pids": []}]}
+{"at": "2026-10-21T22:12:43.409005+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:44.408978+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:45.414325+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:46.408954+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:47.408959+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:48.409117+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:49.409050+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:50.408991+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:51.409255+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:52.409050+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:53.409103+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:54.409073+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:55.409014+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:56.409019+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:57.408993+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:58.408956+00:00", "sessions": []}
+{"at": "2026-10-21T22:12:59.408949+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:00.409075+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:01.409067+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:02.409023+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:03.408981+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:04.409010+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:05.409028+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:06.411154+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:07.408990+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:08.409072+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:09.409046+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:10.409023+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:11.409021+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:12.409028+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:13.408962+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:14.408972+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:15.409028+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:16.409235+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:17.408995+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:18.409058+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:19.409274+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:20.409194+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:21.408994+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:22.409123+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:23.409034+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:24.409020+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:25.409059+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:26.409058+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:27.409056+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:28.409010+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:29.409038+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:30.409058+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:31.409046+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:32.416630+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:33.409053+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:34.408986+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:35.409019+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:36.409005+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:37.409059+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:38.409099+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:39.409093+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:40.409057+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:41.409037+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:42.409168+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:43.409125+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:44.409147+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:45.409126+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:46.409002+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:47.409090+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:48.409124+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:49.409169+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:50.408954+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:51.409221+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:52.409110+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:53.409387+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:54.409271+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:55.409088+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:56.409068+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:57.409044+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:58.409038+00:00", "sessions": []}
+{"at": "2026-10-21T22:13:59.409049+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:00.433439+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:01.409054+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:02.408987+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:03.409066+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:04.409032+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:05.409020+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:06.409055+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:07.409263+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:08.409107+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:09.409062+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:10.409049+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:11.409052+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:12.409256+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:13.409066+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:14.408973+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:15.409101+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:16.408994+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:17.409040+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:18.409023+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:19.409061+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:20.409005+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:21.409114+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:22.409089+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:23.409041+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:24.409084+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:25.409071+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:26.409048+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:27.409483+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:28.409274+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:29.409110+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:30.409065+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:31.409023+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:32.409055+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:33.409003+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:34.408931+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:35.409117+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:36.408935+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:37.408973+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:38.408993+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:39.408982+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:40.408917+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:41.409056+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:42.408958+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:43.408999+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:44.409034+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:45.409168+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:46.409061+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:47.409054+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:48.409416+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:49.408939+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:50.409008+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:51.409296+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:52.409109+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:53.409137+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:54.408941+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:55.408974+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:56.409170+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:57.409019+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:58.409223+00:00", "sessions": []}
+{"at": "2026-10-21T22:14:59.408935+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:00.409014+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:01.409021+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:02.409050+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:03.409185+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:04.409233+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:05.409013+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:06.409243+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:07.409029+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:08.409119+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:09.409020+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:10.409112+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:11.409044+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:12.408845+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:13.409088+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:14.408963+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:15.410408+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:16.409041+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:17.408893+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:18.408959+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:19.408964+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:20.408969+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:21.408964+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:22.408919+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:23.409051+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:24.408985+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:25.408963+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:26.409011+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:27.408995+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:28.408965+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:29.408981+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:30.409084+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:31.408911+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:32.408936+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:33.408954+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:34.408937+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:35.408948+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:36.409188+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:37.409063+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:38.409160+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:39.409082+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:40.409084+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:41.409128+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:42.409072+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:43.408986+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:44.408974+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:45.409108+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:46.408975+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:47.409152+00:00", "sessions": []}
+{"at": "2026-10-21T22:15:48.409178+00:00", "sessions": []}

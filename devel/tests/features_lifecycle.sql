@@ -163,8 +163,7 @@ begin
 
   update ash.config
   set
-    sampling_enabled = true,
-    sample_interval = interval '1 second'
+    sampling_enabled = true
   where singleton;
 
   select ash.take_sample()
@@ -243,6 +242,9 @@ rollback;
 /* -------------------------------------------------------------------------
  * ash.start() / ash.stop(): exact cron and external-scheduler behavior.
  * ------------------------------------------------------------------------- */
+begin;
+-- Cadence-reschedule scenarios own an empty history, restored by rollback.
+truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
 do $feature_start_stop$
 declare
   v_expected_cron boolean :=
@@ -291,35 +293,35 @@ begin
       'ash_sampler',
       pg_catalog.jsonb_build_array(
         '2 seconds',
-        'set statement_timeout = ''500ms''; select ash.take_sample()',
+        'set statement_timeout = ''500ms''; call ash.run_take_sample()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rotation',
       pg_catalog.jsonb_build_array(
         '0 0 * * *',
-        'select ash.rotate()',
+        'call ash.run_rotate()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rollup_1m',
       pg_catalog.jsonb_build_array(
         '* * * * *',
-        'select ash.rollup_minute()',
+        'call ash.run_rollup_minute()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rollup_1h',
       pg_catalog.jsonb_build_array(
         '1 * * * *',
-        'select ash.rollup_hour()',
+        'call ash.run_rollup_hour()',
         pg_catalog.current_database(),
         true
       ),
       'ash_rollup_gc',
       pg_catalog.jsonb_build_array(
         '0 3 * * *',
-        'select ash.rollup_cleanup()',
+        'call ash.run_rollup_cleanup()',
         pg_catalog.current_database(),
         true
       )
@@ -395,15 +397,15 @@ begin
     assert v_start_rows = '{
         "sampler": [
           null,
-          "interval set to 00:00:02 — schedule externally (pg_cron not available)"
+          "interval set to 00:00:02 — schedule externally with CALL ash.run_take_sample() (pg_cron not available in this database)"
         ],
         "rotation": [
           null,
-          "rotation_period is 1 day — schedule ash.rotate() externally"
+          "rotation_period is 1 day — schedule CALL ash.run_rotate() externally"
         ],
         "rollup": [
           null,
-          "schedule ash.rollup_minute() every minute, ash.rollup_hour() at minute 1 every hour, ash.rollup_cleanup() daily"
+          "schedule CALL ash.run_rollup_minute() every minute, CALL ash.run_rollup_hour() at minute 1 every hour, CALL ash.run_rollup_cleanup() daily"
         ]
       }'::jsonb
       and (
@@ -430,7 +432,7 @@ begin
     assert v_stop_rows = '[[
         "info",
         null,
-        "pg_cron not installed — remember to stop your external scheduler (cron, systemd timer, loop script, etc.)"
+        "pg_cron is not available in this database — stop your external scheduler (cron, systemd timer, loop script, etc.)"
       ]]'::jsonb
       and not (
         select sampling_enabled
@@ -445,6 +447,7 @@ begin
   end if;
 end
 $feature_start_stop$;
+rollback;
 
 /* -------------------------------------------------------------------------
  * ash.rotate(): exact slot advance and lockstep partition/query-map truncate.
@@ -1046,7 +1049,7 @@ declare
 begin
   if v_expected_cron then
     perform *
-    from ash.start(interval '5 seconds');
+    from ash.start();
     assert (
       select pg_catalog.count(*)
       from cron.job

@@ -1,0 +1,80 @@
+{
+  "case_id": "n6rq9wm3",
+  "actual_models": [
+    "gpt-6.1-sol"
+  ],
+  "runtime_transcript_filename": "rollout-2026-10-21T22-15-48-01a16088-edc8-7442-ae7c-e7fe169925ae.jsonl",
+  "runtime_transcript_sha256": "99e47f41a61e03f53bc1987c48039882cab9324c08597b44a3fdb4c78d2a99db",
+  "started_at": "2026-10-21T22:15:48.976Z",
+  "completed_at": "2026-10-21T22:17:01.591Z",
+  "elapsed_seconds": 72.615,
+  "orchestration_calls": 9,
+  "nested_exec_command_calls": 13,
+  "nested_apply_patch_calls": 0,
+  "documentation_lookup_operations_including_listing": 5,
+  "documentation_content_lookups": 4,
+  "documentation_operations": [
+    "ls /tmp/pgash-blind-trial-20261021/investigators/docs",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/README.md",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/examples/llm-prompt.md",
+    "rg -n 'ash.status|ash.aas|ash.samples|ash.timeline|ash.top|query_id|Reader API' /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md",
+    "sed -n '20,175p' /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md"
+  ],
+  "sql_wrapper_calls": 6,
+  "wrapper_rows_excluded_outside_runtime": 1,
+  "sql_select_with_submitted": 19,
+  "sql_select_with_attempted": 19,
+  "sql_select_with_successful": 18,
+  "all_sql_statements_submitted_including_transaction_control": 31,
+  "sql_error_count": 1,
+  "failures": [
+    {
+      "wrapper_call": 4,
+      "returncode": 1,
+      "stderr": "ERROR:  bucket must be at least 1 minute, got 00:00:01\nCONTEXT:  PL/pgSQL function timeline(timestamp with time zone,timestamp with time zone,interval,text,text,bigint,name) line 43 at RAISE\n",
+      "unexecuted_selects_after_error": 0
+    }
+  ],
+  "agent_retries": 0,
+  "sql_wrapper_elapsed_seconds_total": 1.734,
+  "launch_frozen_hashes_match": {
+    "/tmp/pgash-blind-trial-20261021/investigators/n6rq9wm3/psql": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/n6rq9wm3/answer-sealed.json": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/n6rq9wm3/investigator-prompt.txt": true
+  },
+  "answer_certified": true,
+  "observed_mechanism": "Lock:relation",
+  "sample_export_summary": [
+    {
+      "event": "Client:ClientRead",
+      "query_id": -238073253591604315,
+      "query_text": "lock table records in access exclusive mode",
+      "decoded_rows": 32,
+      "distinct_ticks": 32,
+      "first": "2026-10-21 22:11:51+00:00",
+      "last": "2026-10-21 22:12:42+00:00"
+    },
+    {
+      "event": "Lock:relation",
+      "query_id": -9127212586606946335,
+      "query_text": "select payload from records where id = $1",
+      "decoded_rows": 64,
+      "distinct_ticks": 32,
+      "first": "2026-10-21 22:11:51+00:00",
+      "last": "2026-10-21 22:12:42+00:00"
+    }
+  ],
+  "scores": {
+    "window": 2,
+    "mechanism": 2,
+    "query": 2,
+    "evidence": 2,
+    "next_check": 2
+  },
+  "score_total": 10,
+  "classification": "solved",
+  "confident_causal_or_blocker_fabrication": false,
+  "boundary_audit": "All tool inputs inspected: only frozen docs, supplied SQL wrapper, and own artifacts. No wrapper-source/setup/controller/answer/other-case/GitHub reads, no delegation.",
+  "sanitization_changed_tool_archive": false,
+  "report_sha256": "83553c1e337d3d68274b63523da64720fbe520936166c61ad18679024860169b"
+}

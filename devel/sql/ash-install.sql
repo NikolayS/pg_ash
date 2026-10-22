@@ -1,6 +1,6 @@
 /*
  * pg_ash: Active Session History for Postgres
- * Version: 2.0 beta 1
+ * Version: 2.0 rc 1
  * Fresh install: \i sql/ash-install.sql
  * Upgrade from 1.0: \i sql/migrations/ash-1.0-to-1.1.sql, then \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.1: \i sql/migrations/ash-1.1-to-1.2.sql, then \i sql/migrations/ash-1.2-to-1.3.sql, then \i sql/migrations/ash-1.3-to-1.4.sql, then \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
@@ -9,28 +9,67 @@
  * Upgrade from 1.4: \i sql/migrations/ash-1.4-to-1.5.sql, then \i sql/migrations/ash-1.5-to-2.0.sql
  * Upgrade from 1.5: \i sql/migrations/ash-1.5-to-2.0.sql
  *
- * Transaction behavior: this entrypoint disables ON_ERROR_ROLLBACK, enables
- * ON_ERROR_STOP, and owns its transaction. ON_ERROR_ROLLBACK would reduce
- * statement failures to savepoint rollbacks and permit a partial install to
- * be committed. When invoked with \i inside an existing transaction, the
- * final COMMIT also commits the caller's outer work.
+ * Transaction behavior: when invoked directly, this entrypoint disables
+ * ON_ERROR_ROLLBACK, enables ON_ERROR_STOP, and owns its transaction.
+ * ON_ERROR_ROLLBACK would reduce statement failures to savepoint rollbacks
+ * and permit a partial install to be committed. When invoked directly with
+ * \i inside an existing transaction, the final COMMIT also commits the
+ * caller's outer work.
+ *
+ * The current cumulative migration sets an internal transaction-local token
+ * to its transaction ID so it can include this installer inside the
+ * migration's wider transaction. The installer accepts include mode only
+ * when that token matches the current assigned transaction ID; an ambient
+ * setting (for example, one supplied through PGOPTIONS) cannot suppress the
+ * installer's transaction boundaries. The decision is cached in a psql
+ * variable through the footer so later SQL cannot change transaction
+ * ownership mid-install. This keeps the 2.0 stamp and the migration's physical
+ * convergence work atomic.
  */
 
 \set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP on
+select case
+  when nullif(
+    pg_catalog.current_setting(
+      'pg_ash.install_in_migration_transaction',
+      true
+    ),
+    ''
+  ) = pg_catalog.pg_current_xact_id_if_assigned()::text then 'true'
+  else 'false'
+end as pg_ash_install_in_migration_transaction
+\gset
+\if :pg_ash_install_in_migration_transaction
+\else
 begin;
+\endif
+
+do $$
+begin
+  /*
+   * ash._in_recovery() is not defined this early in the installer, so use
+   * the catalog predicate directly before any installation writes.
+   */
+  if pg_catalog.pg_is_in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot install pg_ash on a standby: pg_ash installs on the '
+        'primary and reaches replicas through streaming replication';
+  end if;
+end $$;
 
 /*
- * Preserve function EXECUTE grants across the drop/recreate below (#107).
+ * Preserve function EXECUTE grants across required drop/recreate below (#107).
  * DROP FUNCTION destroys ACLs that CREATE OR REPLACE would keep, so a
  * monitoring role configured via ash.grant_reader() (or a manual GRANT)
  * would silently lose access on every upgrade or installer re-apply.
  * Snapshot every explicit non-owner EXECUTE grant on ash.* functions into
  * a temp table now; the matching block at the very end of this script
- * re-applies them to the recreated functions and drops the snapshot. The
+ * re-applies them after routine definitions and drops the snapshot. The
  * argument signature is captured alongside the name so the restore can put
- * the grant back on the exact same overload and never widen a role that
- * held only one overload of a function.
+ * the grant back on the exact same overload. Required new dependencies are
+ * handled explicitly by the restore below.
  * PUBLIC (grantee oid 0, which has no pg_roles row) is intentionally
  * excluded: the hardening block below re-applies the REVOKE-from-PUBLIC
  * posture on every install.
@@ -107,9 +146,9 @@ begin
 end $$;
 
 /*
- * Drop ALL overloads of functions whose signatures changed across versions.
- * Using a DO block because DROP FUNCTION requires exact arg types and we
- * can't predict which stale overloads exist from prior installs.
+ * Drop removed readers and incompatible historical signatures only (#290).
+ * CREATE OR REPLACE preserves unchanged OIDs and their user dependencies.
+ * Incompatible signatures still use DROP RESTRICT: never remove user objects.
  */
 do $$
 declare
@@ -146,77 +185,61 @@ begin
     from pg_proc as proc
     join pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
-      and proc.proname in (
-        'top_waits', 'top_waits_at',
-        'histogram', 'histogram_at',
-        'timeline_chart', 'timeline_chart_at',
-        'query_waits', 'query_waits_at',
-        'top_by_type', 'top_by_type_at',
-        'waits_by_type', 'waits_by_type_at',
-        'event_queries', 'event_queries_at',
-        'top_queries_with_text',
-        '_validate_data',
-        'uninstall',
-        'debug_logging',
-        'rebuild_partitions',
-        /*
-         * 2.0 reader rework (issue #113): drop every removed v1.x reader,
-         * every draft aas_* function (all overloads / _at twins), and the
-         * earlier 2.0 draft names that were renamed to the final surface
-         * (aas_by -> top, aas_series -> timeline, aas_compare -> compare,
-         * aas_periods -> periods, health_report -> report), plus the
-         * changed-signature name `samples`, so re-applying this installer
-         * over any prior install yields exactly the 2.0 surface (periods,
-         * aas, timeline, top, compare, samples, report, chart, summary).
-         * `aas` is a stable name but its signature changed, so it is
-         * dropped too to clear any old overload.
-         */
-        'top_queries', 'top_queries_at',
-        'wait_timeline', 'wait_timeline_at',
-        'activity_summary',
-        'samples', 'samples_at',
-        'samples_by_database', 'samples_by_database_at',
-        'minute_waits', 'minute_waits_at',
-        'hourly_queries', 'hourly_queries_at',
-        'daily_peak_backends', 'daily_peak_backends_at',
-        '_to_sample_ts', '_pick_rollup_source',
-        'aas', 'aas_at',
-        'aas_periods',
-        /*
-         * signature/return-type changes during the 2.0 development cycle:
-         * periods() renamed minutes_with_data -> buckets_with_data and
-         * gained a bucket column; top() gained order_by. Drop stale
-         * overloads so re-apply over an earlier 2.0 draft converges on the
-         * final surface.
-         */
-        'periods', 'top',
-        /*
-         * 2.0 parameter de-prefixing (see the note above the loop): every
-         * remaining param-bearing function whose parameter names changed.
-         */
-        'ts_from_timestamptz', 'ts_to_timestamptz', '_register_wait',
-        'decode_sample', 'decode_sample_at',
-        'start', 'set_debug_logging',
-        '_active_slots_for', '_active_slots_for_at',
-        '_merge_wait_counts', '_merge_query_counts', '_truncate_pairs',
-        'rollup_minute',
-        '_color_on', '_wait_color', '_reset', '_bar',
-        '_pick_source', '_pick_source_agg', '_exact_query_uses_coarser',
-        '_raise_tie_retention',
-        '_minute_counts_valid', '_rollup_1h_has_flat',
-        '_grain_counts', '_grain_by',
-        'timeline', 'compare', '_pgss_query_text',
-        '_hr_top_events', '_hr_top_queryids',
-        'report', 'chart', 'summary',
-        'grant_reader', 'revoke_reader',
-        'aas_series', 'aas_by', 'aas_compare', 'health_report',
-        'aas_timeline', 'aas_timeline_at',
-        'aas_wait_types', 'aas_wait_types_at',
-        'aas_wait_events', 'aas_wait_events_at',
-        'aas_queryids', 'aas_queryids_at',
-        'aas_summary', 'aas_summary_at',
-        'aas_waits', 'aas_waits_at',
-        'aas_queries', 'aas_queries_at'
+      and (
+        -- Removed 1.x readers and renamed 2.0 draft functions.
+        proc.proname in (
+          'top_waits', 'top_waits_at',
+          'histogram', 'histogram_at', 'timeline_chart',
+          'timeline_chart_at', 'query_waits', 'query_waits_at',
+          'top_by_type', 'top_by_type_at', 'waits_by_type',
+          'waits_by_type_at', 'event_queries', 'event_queries_at',
+          'top_queries_with_text', '_validate_data', 'debug_logging',
+          'top_queries', 'top_queries_at', 'wait_timeline',
+          'wait_timeline_at', 'activity_summary', 'samples_at',
+          'samples_by_database', 'samples_by_database_at', 'minute_waits',
+          'minute_waits_at', 'hourly_queries', 'hourly_queries_at',
+          'daily_peak_backends', 'daily_peak_backends_at', '_to_sample_ts',
+          '_pick_rollup_source', 'aas_at', 'aas_periods',
+          'aas_series', 'aas_by', 'aas_compare',
+          'health_report', 'aas_timeline', 'aas_timeline_at',
+          'aas_wait_types', 'aas_wait_types_at', 'aas_wait_events',
+          'aas_wait_events_at', 'aas_queryids', 'aas_queryids_at',
+          'aas_summary', 'aas_summary_at', 'aas_waits',
+          'aas_waits_at', 'aas_queries', 'aas_queries_at'
+        )
+        or (
+          -- CREATE OR REPLACE cannot rename historical input parameters.
+          proc.proargnames[1] like 'p\_%'
+          and proc.proname in (
+            '_active_slots_for', '_active_slots_for_at', '_bar',
+            '_color_on', '_exact_query_uses_coarser', '_grain_by',
+            '_grain_counts', '_hr_top_events', '_hr_top_queryids',
+            '_merge_query_counts', '_merge_wait_counts', '_minute_counts_valid',
+            '_pgss_query_text', '_pick_source', '_pick_source_agg',
+            '_raise_tie_retention', '_register_wait', '_reset',
+            '_rollup_1h_has_flat', '_truncate_pairs', '_wait_color',
+            'aas', 'chart', 'compare',
+            'decode_sample', 'decode_sample_at', 'grant_reader',
+            'periods', 'rebuild_partitions', 'report',
+            'revoke_reader', 'rollup_minute', 'samples',
+            'set_debug_logging', 'start', 'summary',
+            'timeline', 'top', 'ts_from_timestamptz',
+            'ts_to_timestamptz', 'uninstall'
+          )
+        )
+        -- Draft top() lacked order_by; 1.x readers had different inputs.
+        or (proc.proname = 'top' and proc.pronargs <> 10)
+        or (proc.proname in ('aas', 'samples') and proc.pronargs <> 7)
+        -- These TABLE results gained columns without changing input types.
+        or (proc.proname in ('aas', 'top')
+            and not ('effective_bucket' = any(proc.proargnames)))
+        or (proc.proname = 'compare'
+            and not ('effective_bucket_1' = any(proc.proargnames)))
+        or (proc.proname = 'periods'
+            and not ('buckets_with_data' = any(proc.proargnames)
+                     and 'bucket' = any(proc.proargnames)))
+        or (proc.proname = '_grain_by'
+            and not ('datid' = any(proc.proargnames)))
       )
   loop
     execute format('drop function if exists %s', func_row.sig);
@@ -279,7 +302,7 @@ create table if not exists ash.config (
   include_bg_workers         bool not null default false,
   debug_logging              bool not null default false,
   encoding_version           smallint not null default 1,
-  version                    text not null default '2.0-beta1',
+  version                    text not null default '2.0-rc1',
   rotated_at                 timestamptz not null default clock_timestamp(),
   installed_at               timestamptz not null default clock_timestamp(),
   rollup_1m_retention_days   smallint not null default 30
@@ -294,14 +317,20 @@ create table if not exists ash.config (
   -- M-BUG-6 / H-SEC-3: _register_wait dictionary-cap hit counter.
   register_wait_cap_hits     bigint not null default 0,
   -- Consecutive rotate() failure returns; reset by a successful rotation.
-  consecutive_rotate_failures bigint not null default 0
+  consecutive_rotate_failures bigint not null default 0,
+  /*
+   * Keep raw samples logged by default: a crash truncates unlogged tables,
+   * destroying exactly the ASH history an incident post-mortem needs.
+   * Operators must opt in knowingly with set_sample_persistence().
+   */
+  sample_unlogged            bool not null default false
 );
 
 -- Insert initial row if not exists.
 insert into ash.config (singleton) values (true) on conflict do nothing;
 
 comment on column ash.config.sample_interval is
-$$Current nominal sampler interval, not a historical record. In 2.0, sample and rollup rows do not persist the interval in force when collected, so AAS readers weight all retained appearances with this current value; changing it rescales history. Intervals greater than one minute can assign the full tick weight to one minute and overstate minute extrema. Successful idle ticks also write no sample row, so activity-row availability cannot distinguish idle sampling from an outage (issues #137 and #175).$$;
+$$Nominal sampler cadence: 1 to 60 whole seconds. Changing it is refused while any raw, minute-rollup, or hour-rollup history remains, because stored appearances have no per-row cadence. ash.start() without an interval resumes this value. The guard does not repair older mixed-cadence history; legacy values outside the supported range are preserved on upgrade but sampling and AAS readers refuse them. Successful idle ticks write no sample row, so activity-row availability cannot distinguish idle sampling from an outage (issues #137 and #175).$$;
 
 /*
  * Migration: add v1.4 columns if upgrading from pre-1.4. Must run before any
@@ -331,7 +360,12 @@ alter table ash.config
    */
   add column if not exists register_wait_cap_hits bigint not null default 0,
   add column if not exists consecutive_rotate_failures bigint not null
-    default 0;
+    default 0,
+  /*
+   * Logged remains the upgrade default. ADD COLUMN IF NOT EXISTS preserves
+   * an operator's existing opt-in when this installer is re-applied.
+   */
+  add column if not exists sample_unlogged bool not null default false;
 
 /*
  * Keep the day-granularity error reusable and actionable. The explicit call
@@ -492,8 +526,8 @@ $$Internal trigger enforcing rotation and retention geometry whenever its ash.co
  * fresh 2.0 install and an upgrade chain landing on 2.0 (the CI
  * schema-equivalence check).
  */
-update ash.config set version = '2.0-beta1' where singleton;
-alter table ash.config alter column version set default '2.0-beta1';
+update ash.config set version = '2.0-rc1' where singleton;
+alter table ash.config alter column version set default '2.0-rc1';
 
 /*
  * Wait event dictionary.
@@ -694,17 +728,85 @@ create table if not exists ash.sample (
   slot         smallint not null default ash.current_slot()
 ) partition by list (slot);
 
+/*
+ * Reconcile existing raw-ring partitions with the configured persistence.
+ * CREATE TABLE IF NOT EXISTS never changes an existing table, so both the
+ * installer and rebuild_partitions() call this after their creation loops.
+ * Catalog enumeration guarantees that only ash.sample's numeric children
+ * are touched; the partitioned parent and logged rollups are never altered.
+ */
+create or replace function ash._apply_sample_persistence()
+returns int
+language plpgsql
+set search_path = pg_catalog, ash
+/*
+ * ALTER TABLE ... SET LOGGED/UNLOGGED takes ACCESS EXCLUSIVE and rewrites the
+ * partition. On a live installation the sampler inserts every second and
+ * readers scan the ring, so a blocked ALTER would queue behind them and then
+ * block everything arriving behind itself — converting a routine setting
+ * change into a stall of the whole ring. Fail fast instead. Reconciliation is
+ * idempotent and per-partition, so a timed-out conversion leaves a
+ * partially-converted ring that the next call finishes.
+ */
+set lock_timeout = '5s'
+as $$
+declare
+  v_converted int := 0;
+  v_mode text;
+  v_rec record;
+  v_sample_unlogged bool;
+  v_target "char";
+begin
+  v_sample_unlogged := coalesce((
+    select sample_unlogged from ash.config where singleton
+  ), false);
+  v_target := case when v_sample_unlogged then 'u' else 'p' end;
+  v_mode := case when v_sample_unlogged then 'unlogged' else 'logged' end;
+
+  for v_rec in
+    select rel.relname
+    from pg_inherits as inh
+    join pg_class as rel on rel.oid = inh.inhrelid
+    join pg_namespace as nsp on nsp.oid = rel.relnamespace
+    where inh.inhparent = 'ash.sample'::regclass
+      and nsp.nspname = 'ash'
+      and rel.relname ~ '^sample_[0-9]+$'
+      and rel.relpersistence <> v_target
+    order by rel.relname
+  loop
+    execute format('alter table ash.%I set %s', v_rec.relname, v_mode);
+    v_converted := v_converted + 1;
+  end loop;
+
+  return v_converted;
+end;
+$$;
+
+comment on function ash._apply_sample_persistence() is
+$$Internal admin helper: reconciles only the numeric ash.sample_N partitions with ash.config.sample_unlogged and returns the number converted. Existing partitions are altered only when pg_class.relpersistence differs, so a matching ring is a no-op. Never alters the partitioned ash.sample parent or the always-logged rollup tables. Runs with lock_timeout = 5s: the ALTER takes ACCESS EXCLUSIVE and rewrites the partition, so it fails fast rather than stalling the sampler; reconciliation is idempotent so the next call finishes a timed-out conversion.$$;
+
 -- Create partitions and indexes dynamically based on num_partitions.
 do $$
 declare
   v_n int;
+  v_sample_unlogged bool;
 begin
   select num_partitions into v_n from ash.config where singleton;
+  /*
+   * COALESCE keeps the first installer pass safe if the singleton row does
+   * not exist yet; logged is the conservative bootstrap default.
+   */
+  v_sample_unlogged := coalesce((
+    select sample_unlogged from ash.config where singleton
+  ), false);
 
   for i in 0 .. v_n - 1 loop
     execute format(
-      'create table if not exists ash.sample_%s '
-      'partition of ash.sample for values in (%s)', i, i
+      'create %stable if not exists ash.sample_%s '
+      'partition of ash.sample for values in (%s)',
+      case when v_sample_unlogged then 'unlogged ' else '' end,
+      i,
+      i
     );
 
     -- (sample_ts) for time-range reader queries
@@ -719,6 +821,8 @@ begin
       'on ash.sample_%s (datid, sample_ts)', i, i
     );
   end loop;
+
+  perform ash._apply_sample_persistence();
 end $$;
 
 /*
@@ -934,6 +1038,100 @@ $$;
 -- STEP 2: Sampler and decoder
 --------------------------------------------------------------------------------
 
+create or replace function ash._in_recovery()
+returns bool
+language sql
+stable
+parallel safe
+set search_path = pg_catalog
+as $$
+  select pg_catalog.pg_is_in_recovery()
+$$;
+
+comment on function ash._in_recovery() is
+  'Reports whether this server is in recovery (a physical standby).';
+
+/*
+ * Can this backend read the raw sample ring at all?
+ *
+ * PostgreSQL refuses to read an UNLOGGED relation during recovery
+ * ("cannot access temporary or unlogged relations during recovery",
+ * SQLSTATE 55000). So on a standby, an installation that opted into an
+ * unlogged ring has raw samples that are physically unreadable here — while
+ * the always-logged rollups remain perfectly readable.
+ *
+ * Readers consult this before probing the ring, so that a standby degrades
+ * to rollup-backed answers instead of erroring out. Without it, opting into
+ * unlogged on the primary silently breaks every reader on every replica,
+ * including ash.status() — the one place an operator looks to find out why.
+ */
+create or replace function ash._raw_ring_readable()
+returns bool
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  /*
+   * Derived from pg_class, not from ash.config.sample_unlogged. The config
+   * flag is the operator's intent; relpersistence is the physical truth, and
+   * the two can drift — which is exactly the drift _apply_sample_persistence()
+   * exists to repair. Trusting the flag would make this guard return "readable"
+   * against partitions that are still unlogged, putting the 55000 straight
+   * back. Same cost, cannot drift.
+   */
+  select not (
+    ash._in_recovery()
+    and exists (
+      select
+      from pg_catalog.pg_inherits as inh
+      join pg_catalog.pg_class as rel on rel.oid = inh.inhrelid
+      where inh.inhparent = 'ash.sample'::pg_catalog.regclass
+        and rel.relpersistence = 'u'
+    )
+  )
+$$;
+
+comment on function ash._raw_ring_readable() is
+  'False when this backend cannot read ash.sample: an unlogged ring on a server in recovery. Readers fall back to the always-logged rollups instead of raising SQLSTATE 55000.';
+
+/*
+ * Some reads cannot be answered from the rollups at all — raw sample decoding
+ * and any exact per-query drill need the ring itself. On a standby with an
+ * unlogged ring those cannot work, and the honest thing is to say so in
+ * pg_ash's own words. Without this the caller gets either a bare
+ * "cannot access temporary or unlogged relations during recovery", which names
+ * neither pg_ash nor the setting, or — worse — a retention error claiming the
+ * data does not exist and the drill is unrecoverable, when it exists and is
+ * perfectly recoverable on the primary.
+ */
+create or replace function ash._require_raw_ring(what text)
+returns void
+language plpgsql
+stable
+set search_path = pg_catalog, ash
+as $$
+begin
+  if ash._raw_ring_readable() then
+    return;
+  end if;
+
+  raise exception using
+    errcode = '55000',
+    message = format(
+      '%s needs the raw sample ring, which is UNLOGGED on this installation '
+      'and therefore unreadable while this server is in recovery',
+      what
+    ),
+    hint = 'Run it on the primary. The rollup-backed readers (aas, timeline, '
+      'top, periods, report, chart, summary without query_id) work here. To '
+      'make the raw ring readable on standbys, run '
+      'ash.set_sample_persistence(''logged'') on the primary.';
+end;
+$$;
+
+comment on function ash._require_raw_ring(text) is
+  'Raises a pg_ash-authored SQLSTATE 55000 naming the cause and the remedy when a read needs the raw ring but the ring is unlogged and this server is in recovery. Used by readers that cannot fall back to the rollups.';
+
 -- Core sampler function (no hstore dependency)
 create or replace function ash.take_sample()
 returns int
@@ -945,6 +1143,7 @@ declare
   v_include_bg bool;
   v_debug_logging bool;
   v_sampling_enabled bool;
+  v_sample_seconds numeric;
   v_rec record;
   v_datid_rec record;
   v_data integer[];
@@ -955,9 +1154,17 @@ declare
   v_missed_count bigint;
   v_seen_waits text[] := '{}';
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.take_sample: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   -- Get config (single read for all settings).
-  select sampling_enabled, include_bg_workers, debug_logging
-  into v_sampling_enabled, v_include_bg, v_debug_logging
+  select sampling_enabled, include_bg_workers, debug_logging,
+    extract(epoch from sample_interval)
+  into v_sampling_enabled, v_include_bg, v_debug_logging, v_sample_seconds
   from ash.config where singleton;
 
   if not v_sampling_enabled then
@@ -965,6 +1172,15 @@ begin
     set skipped_samples = skipped_samples + 1
     where singleton;
 
+    return 0;
+  end if;
+
+  if v_sample_seconds is null or v_sample_seconds < 1 or v_sample_seconds > 60
+     or v_sample_seconds <> trunc(v_sample_seconds) then
+    update ash.config set skipped_samples = skipped_samples + 1 where singleton;
+    raise warning
+      'ash.take_sample: unsupported legacy sample_interval; sampling skipped. '
+      'Archive retained history and choose 1 to 60 whole seconds.';
     return 0;
   end if;
 
@@ -988,8 +1204,8 @@ begin
     return 0;
   end if;
 
-  -- Get sample timestamp (seconds since epoch, from now()).
-  v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
+  -- Read the clock after the lock; the transaction may predate a completed minute.
+  v_sample_ts := extract(epoch from clock_timestamp() - ash.epoch())::int4;
   v_current_slot := ash.current_slot();
 
   /*
@@ -1398,6 +1614,11 @@ $$;
  * avoiding the "search-all-partitions" branch that can return stale ids
  * after rotation).
  */
+/*
+ * plpgsql rather than sql so the raw-ring guard can short-circuit before the
+ * query runs. decode_sample_at() delegates here, so guarding this overload
+ * covers both.
+ */
 create or replace function ash.decode_sample(sample_ts int4)
 returns table (
   datid      oid,
@@ -1405,10 +1626,15 @@ returns table (
   query_id   int8,
   count      int
 )
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
+begin
+  perform ash._require_raw_ring('ash.decode_sample()');
+
+  return query
+
   select sample_row.datid, decoded.wait_event, decoded.query_id, decoded.count
   from ash.sample as sample_row
   cross join lateral
@@ -1418,7 +1644,8 @@ as $$
    * to the sample_row.sample_ts column (columns take precedence), not the
    * parameter
    */
-  where sample_row.sample_ts = decode_sample.sample_ts
+  where sample_row.sample_ts = decode_sample.sample_ts;
+end;
 $$;
 
 /*
@@ -1478,6 +1705,7 @@ set search_path = pg_catalog, ash
 set lock_timeout = '250ms'
 as $$
 begin
+
   update ash.config
   set consecutive_rotate_failures = consecutive_rotate_failures + 1
   where singleton;
@@ -1515,6 +1743,14 @@ declare
   v_endangered_rows bigint;
   v_unrolled_groups bigint;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rotate: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 'skipped: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+  end if;
+
   /*
    * Advisory lock prevents concurrent rotation from pg_cron overlap.
    * Xact-level: auto-releases on commit/rollback — no leak risk with pg_cron
@@ -1690,9 +1926,8 @@ $$;
 /*
  * Rebuild partitions: destructive admin function to change partition count.
  * All raw sample data is lost. Rollup tables survive.
- * WARNING: failure after acquiring lock leaves sampling_enabled = false.
- * Manual recovery:
- *   update ash.config set sampling_enabled = true; select ash.start();
+ * Failures roll back config, jobs, privileges and DDL together. A successful
+ * rebuild leaves sampling disabled; verify the rebuilt ring then call start().
  */
 create or replace function ash.rebuild_partitions(
   num_partitions int,
@@ -1708,7 +1943,33 @@ declare
   v_rec record;
   v_rotation_period interval;
   v_rollup_1m_retention_days int;
+  v_sample_unlogged bool;
+  v_schema_owner text;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.rebuild_partitions must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
+  end if;
+
   /*
    * Destructive: drops all raw sample partitions. Require explicit
    * confirmation BEFORE touching any state (sampling_enabled, pg_cron jobs,
@@ -1731,6 +1992,13 @@ begin
   from ash.config as config_row
   where config_row.singleton;
   v_new_n := coalesce(rebuild_partitions.num_partitions, v_old_n);
+  /*
+   * COALESCE also keeps this creation path safe if the singleton row is
+   * unexpectedly absent; logged is the conservative bootstrap default.
+   */
+  v_sample_unlogged := coalesce((
+    select sample_unlogged from ash.config where singleton
+  ), false);
 
   if v_new_n < 3 or v_new_n > 32 then
     raise exception 'num_partitions must be between 3 and 32, got: %', v_new_n;
@@ -1903,9 +2171,19 @@ begin
 
   -- Step 7: create new partitions.
   for i in 0 .. v_new_n - 1 loop
+    /*
+     * No `if not exists` here, unlike the installer's loop: step 6 dropped
+     * every partition, so a name that still exists is a leftover NON-partition
+     * table. Skipping it silently would leave the slot unattached to
+     * ash.sample and surface much later as "no partition of relation sample
+     * found for row" during take_sample(). Fail here instead.
+     */
     execute format(
-      'create table ash.sample_%s '
-      'partition of ash.sample for values in (%s)', i, i
+      'create %stable ash.sample_%s '
+      'partition of ash.sample for values in (%s)',
+      case when v_sample_unlogged then 'unlogged ' else '' end,
+      i,
+      i
     );
 
     execute format(
@@ -1924,6 +2202,12 @@ begin
       i, i
     );
   end loop;
+
+  /*
+   * IF NOT EXISTS does not change an existing table's persistence. Reconcile
+   * every numeric child after creation so rebuilds cannot drift from config.
+   */
+  perform ash._apply_sample_persistence();
 
   -- Step 8: rebuild the query_map_all view.
   perform ash._rebuild_query_map_view();
@@ -1961,6 +2245,83 @@ $$;
 --------------------------------------------------------------------------------
 
 -- Check if pg_cron extension is available
+/*
+ * Single source of truth for pg_cron job command text: every spelling pg_ash
+ * has ever scheduled, and the canonical form each should become.
+ *
+ * Two places need this and must never disagree — ash.start()'s
+ * already-exists branches and the installer re-apply migration. Encoding it
+ * twice is how they drift, and the drift is user-visible: one path preserving
+ * an operator's customised command while the other silently overwrites it.
+ *
+ * Anything NOT listed here is, by definition, operator-customised and must be
+ * left alone.
+ */
+create or replace function ash._job_command_map()
+returns table (
+  jobname           text,
+  legacy_command    text,
+  canonical_command text
+)
+language sql
+immutable
+parallel safe
+set search_path = pg_catalog
+as $$
+  values
+    -- v1.0/v1.1 scheduled these in uppercase; only the sampler was ever
+    -- normalized by a released migration (ash-1.1-to-1.2.sql).
+    ('ash_sampler', 'SELECT ash.take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_sampler',
+     'set statement_timeout = ''500ms''; select ash.take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_sampler',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()',
+     'set statement_timeout = ''500ms''; call ash.run_take_sample()'),
+    ('ash_rotation', 'SELECT ash.rotate()', 'call ash.run_rotate()'),
+    ('ash_rotation', 'select ash.rotate()', 'call ash.run_rotate()'),
+    ('ash_rotation', 'call ash.run_rotate()', 'call ash.run_rotate()'),
+    ('ash_rollup_1m', 'select ash.rollup_minute()',
+     'call ash.run_rollup_minute()'),
+    ('ash_rollup_1m', 'call ash.run_rollup_minute()',
+     'call ash.run_rollup_minute()'),
+    ('ash_rollup_1h', 'select ash.rollup_hour()', 'call ash.run_rollup_hour()'),
+    ('ash_rollup_1h', 'call ash.run_rollup_hour()',
+     'call ash.run_rollup_hour()'),
+    ('ash_rollup_gc', 'select ash.rollup_cleanup()',
+     'call ash.run_rollup_cleanup()'),
+    ('ash_rollup_gc', 'call ash.run_rollup_cleanup()',
+     'call ash.run_rollup_cleanup()')
+$$;
+
+comment on function ash._job_command_map() is
+  'Every pg_cron command string pg_ash has ever scheduled, mapped to its canonical current form. A stored command absent from this map is operator-customised and must never be rewritten. Shared by ash.start() and the installer re-apply migration so the two cannot drift.';
+
+/*
+ * The canonical command for a job whose stored text pg_ash recognises, or
+ * NULL when the operator has customised it (leave it alone) or the job name
+ * is not one of ours.
+ */
+create or replace function ash._canonical_job_command(
+  jobname text,
+  stored_command text
+)
+returns text
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select command_map.canonical_command
+  from ash._job_command_map() as command_map
+  where command_map.jobname = _canonical_job_command.jobname
+    and command_map.legacy_command = _canonical_job_command.stored_command
+  limit 1
+$$;
+
+comment on function ash._canonical_job_command(text, text) is
+  'Returns the canonical pg_cron command for a recognised pg_ash job command, or NULL when the stored text is operator-customised and must be preserved.';
+
 create or replace function ash._pg_cron_available()
 returns boolean
 language sql
@@ -1972,8 +2333,23 @@ as $$
   )
 $$;
 
--- Start sampling: create pg_cron jobs
-create or replace function ash.start(every interval default '1 second')
+/* Omitted start() intervals resume the existing installation, including after stop(). */
+create or replace function ash._configured_sample_interval()
+returns interval
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select sample_interval from ash.config where singleton
+$$;
+
+comment on function ash._configured_sample_interval() is
+  'Internal default for ash.start(): preserve the configured cadence; fresh installations default to one second.';
+
+-- Start sampling: create pg_cron jobs.
+create or replace function ash.start(
+  every interval default ash._configured_sample_interval()
+)
 returns table (job_type text, job_id bigint, status text)
 language plpgsql
 set search_path = pg_catalog, ash
@@ -1984,13 +2360,99 @@ declare
   v_cron_version text;
   v_seconds_exact numeric;
   v_seconds int;
-  v_hours int;
   v_schedule text;
   v_skip_nodename_update boolean := false;
+  v_can_alter_job boolean := false;
+  v_job_was_inactive boolean := false;
   v_debug_logging boolean := false;
   v_pg_cron_available boolean;
   v_cron_database text;
+  v_stored_command text;
+  v_canonical_command text;
+  v_unscheduled boolean;
+  v_schema_owner text;
+  v_cross_database_jobs text;
+  v_foreign_jobs text;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.start must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
+  end if;
+
+  if ash._pg_cron_available() then
+    select string_agg(format('%I (jobid %s, database %I)',
+      jobname, jobid, database), ', ' order by jobname, jobid)
+    into v_cross_database_jobs
+    from cron.job
+    where username = current_user
+      and database <> current_database()
+      and jobname = any(array['ash_sampler', 'ash_rotation', 'ash_rollup_1m',
+                             'ash_rollup_1h', 'ash_rollup_gc']);
+    if v_cross_database_jobs is not null then
+      raise exception using
+        errcode = 'object_not_in_prerequisite_state',
+        message = format(
+          'ash.start: managed job name(s) already target another database: '
+          '%s. Rename or unschedule them deliberately before retrying; '
+          'pg_cron job names are unique per role across databases.',
+          v_cross_database_jobs
+        );
+    end if;
+  end if;
+
+
+  if ash._pg_cron_available() then
+  select string_agg(
+    format(
+      '%I (jobid %s, owner %I)',
+      cron_job.jobname,
+      cron_job.jobid,
+      cron_job.username
+    ),
+    ', ' order by cron_job.jobname, cron_job.username, cron_job.jobid
+  )
+  into v_foreign_jobs
+  from cron.job as cron_job
+  where cron_job.jobname = any(array[
+    'ash_sampler',
+    'ash_rotation',
+    'ash_rollup_1m',
+    'ash_rollup_1h',
+    'ash_rollup_gc'
+  ])
+    and cron_job.database = current_database()
+    and cron_job.username <> v_schema_owner;
+  if v_foreign_jobs is not null then
+    raise exception using
+      errcode = 'object_not_in_prerequisite_state',
+      message = format(
+        'ash.start: managed pg_cron job(s) owned by another role still '
+        'target this database: %s. Unschedule them as their owning role(s) '
+        'before retrying.',
+        v_foreign_jobs
+      );
+  end if;
+  end if;
+
   /*
    * Read debug_logging flag so we can trace the pg_cron detection /
    * scheduling path when ash.start() appears to no-op. Treat an error here as
@@ -2037,57 +2499,23 @@ begin
   end if;
 
   /* Check the upper bound before the int cast so huge intervals stay errors. */
-  if v_seconds_exact > 82800 then
+  if v_seconds_exact > 60 then
     job_type := 'error';
     job_id := null;
     status := format(
-      'interval exceeds maximum 23 hours (82800s), got %s. '
-      'Use days or shorter interval.', every);
+      'interval exceeds maximum 60 seconds; use 1 to 60 whole seconds, got %s',
+      every);
     return next;
     return;
   end if;
 
   v_seconds := v_seconds_exact::int;
 
-  /*
-   * H-BUG-1: validate interval shape BEFORE branching on pg_cron
-   * availability. Previously, the no-pg_cron branch returned early (below),
-   * skipping the seconds/minutes/hours checks. Same input must produce the
-   * same accept/reject outcome regardless of whether pg_cron is installed.
-   *
-   * Build schedule string here (also used later when pg_cron is available):
-   * seconds format for <60s, cron format for 60s+.
-   */
-  if v_seconds <= 59 then
+  -- At 60 seconds the calendar schedule has no uneven boundary gap.
+  if v_seconds < 60 then
     v_schedule := v_seconds || ' seconds';
-  elsif v_seconds < 3600 then
-    -- Convert to cron: every N minutes.
-    if v_seconds % 60 <> 0 then
-      job_type := 'error';
-      job_id := null;
-      status := format(
-        'interval must be exact minutes (60s, 120s, etc.), got %s', every);
-      return next;
-      return;
-    end if;
-    v_schedule := '*/' || (v_seconds / 60) || ' * * * *';
   else
-    -- Convert to cron: every N hours (limit to 23 hours max for step syntax).
-    if v_seconds % 3600 <> 0 then
-      job_type := 'error';
-      job_id := null;
-      status := format(
-        'interval must be exact hours (3600s, 7200s, etc., up to 23h), '
-        'got %s', every);
-      return next;
-      return;
-    end if;
-    v_hours := v_seconds / 3600;
-    if v_hours = 1 then
-      v_schedule := '0 * * * *';  -- every hour at minute 0
-    else
-      v_schedule := '0 */' || v_hours || ' * * *';  -- every N hours at minute 0
-    end if;
+    v_schedule := '*/1 * * * *';
   end if;
 
   /*
@@ -2136,27 +2564,28 @@ begin
     job_type := 'sampler';
     job_id := null;
     status := format(
-      'interval set to %s — schedule externally (pg_cron not available)',
+      'interval set to %s — schedule externally with CALL ash.run_take_sample() '
+      '(pg_cron not available in this database)',
       every);
     return next;
 
     job_type := 'rotation';
     job_id := null;
     status := format(
-      'rotation_period is %s — schedule ash.rotate() externally',
+      'rotation_period is %s — schedule CALL ash.run_rotate() externally',
       (select rotation_period from ash.config where singleton));
     return next;
 
     job_type := 'rollup';
     job_id := null;
     status :=
-      'schedule ash.rollup_minute() every minute, ash.rollup_hour() '
-      'at minute 1 every hour, ash.rollup_cleanup() daily';
+      'schedule CALL ash.run_rollup_minute() every minute, CALL ash.run_rollup_hour() '
+      'at minute 1 every hour, CALL ash.run_rollup_cleanup() daily';
     return next;
 
     raise notice
-      'pg_cron is not available in this database. To sample, call '
-      'ash.take_sample() from an external scheduler:';
+      'pg_cron is not available in this database. To sample, execute '
+      'CALL ash.run_take_sample() from an external scheduler:';
     v_cron_database :=
       nullif(current_setting('cron.database_name', true), '');
     if v_cron_database is null then
@@ -2177,18 +2606,19 @@ begin
     end if;
     raise notice
       '  system cron:    * * * * * psql -qAtX -c '
-      '"select ash.take_sample()" (for per-second, use a loop)';
-    raise notice '  psql:           SELECT ash.take_sample() \watch 1';
+      '"call ash.run_take_sample()" (for per-second, use a loop)';
+    raise notice '  psql:           CALL ash.run_take_sample() \watch %', v_seconds;
     raise notice
-      '  any language:   execute "SELECT ash.take_sample()" in a loop '
-      'with sleep';
+      '  any language:   execute "CALL ash.run_take_sample()" in a loop '
+      'at exactly % second intervals; a different cadence makes AAS inaccurate',
+      v_seconds;
     raise notice
-      'Also schedule ash.rotate() at the rotation_period interval '
-      '(default: daily).';
+      'Also schedule CALL ash.run_rotate() at the rotation_period '
+      'interval (default: daily).';
     raise notice
-      'Schedule rollup: ash.rollup_minute() every minute, '
-      'ash.rollup_hour() at minute 1 every hour, '
-      'ash.rollup_cleanup() daily.';
+      'Schedule rollup: CALL ash.run_rollup_minute() every minute, '
+      'CALL ash.run_rollup_hour() at minute 1 every hour, '
+      'CALL ash.run_rollup_cleanup() daily.';
 
     return;
   end if;
@@ -2234,18 +2664,53 @@ begin
   end if;
 
   /*
-   * Detect whether we need to UPDATE cron.job.nodename after scheduling.
-   * Skip when cron.use_background_workers = on (nodename irrelevant)
-   * or cron.host is already '' or a socket path (cron.schedule() inherits it).
+   * Validate the cadence change before creating/replacing any scheduler jobs.
+   * The config trigger serializes against the sampler and all retained tiers.
+   * Any later scheduling failure still rolls this update back atomically.
+   */
+  update ash.config
+  set sample_interval = every
+  where singleton;
+
+  /*
+   * pg_cron 1.3 has named scheduling but no alter_job. Probe its optional
+   * signature as an OID so an absent function yields NULL, not an error.
+   */
+  v_can_alter_job := coalesce(pg_catalog.has_function_privilege(
+    pg_catalog.to_regprocedure(
+      'cron.alter_job(bigint,text,text,text,text,boolean)'
+    ), 'EXECUTE'
+  ), false);
+
+  /*
+   * Only adjust connection fields when the configured libpq transport needs
+   * it. Background workers and existing socket defaults need no UPDATE.
    */
   begin
     v_skip_nodename_update :=
       coalesce(current_setting('cron.use_background_workers', true), '') = 'on'
       or coalesce(current_setting('cron.host', true), 'localhost') = ''
       or coalesce(current_setting('cron.host', true), 'localhost') like '/%';
-  exception when others then
-    v_skip_nodename_update := false;
+  exception when insufficient_privilege then
+    v_skip_nodename_update := true;
+    raise notice
+      'ash.start: keeping pg_cron connection defaults; this role cannot '
+      'inspect cron host settings. The pg_cron administrator must configure '
+      'working connection defaults for scheduled jobs.';
   end;
+
+  /*
+   * Settings visibility (including pg_monitor) does not imply job writes.
+   * Column-only UPDATE grants are sufficient for this one adjustment.
+   */
+  if not v_skip_nodename_update
+     and not pg_catalog.has_column_privilege('cron.job', 'nodename', 'UPDATE') then
+    v_skip_nodename_update := true;
+    raise notice
+      'ash.start: keeping pg_cron connection defaults; this role cannot '
+      'update cron.job.nodename. The pg_cron administrator must configure '
+      'working connection defaults for scheduled jobs.';
+  end if;
 
   /*
    * (schedule string v_schedule already built above, before the pg_cron
@@ -2253,9 +2718,18 @@ begin
    */
 
   -- Check for existing sampler job (idempotent).
+  /*
+   * cron.job is cluster-wide, so an unfiltered jobname lookup finds another
+   * database's sampler. The rotation lookup below has always filtered; this
+   * one did not, and now that the branch re-syncs `command` as well as
+   * `schedule` an unfiltered match would rewrite a different database's job
+   * while this database still ends up with no sampler at all.
+   */
   select jobid into v_sampler_job
   from cron.job
-  where jobname = 'ash_sampler';
+  where jobname = 'ash_sampler'
+    and username = current_user
+    and database = current_database();
 
   if v_sampler_job is not null then
     /*
@@ -2263,19 +2737,111 @@ begin
      * Previously ash.start(new_interval) updated ash.config.sample_interval
      * (further below) but never touched cron.job.schedule, so pg_cron kept
      * firing at the old cadence — a silent behavioral divergence between
-     * configured and actual sampling rate.
+     * configured and actual sampling rate. Re-sync the command for the same
+     * reason: otherwise an upgraded installation keeps the legacy SELECT
+     * writer until an operator recreates the job.
      */
-    perform cron.alter_job(job_id := v_sampler_job, schedule := v_schedule);
+    /*
+     * Re-sync the command ONLY when the stored text is one pg_ash itself has
+     * scheduled. Rewriting unconditionally would destroy an operator's
+     * customised command — e.g. a longer statement_timeout — and would
+     * contradict the installer migration below, which deliberately preserves
+     * custom text. start() is re-entrant by design and runbooks call it, so
+     * "customise after the last start()" is not a contract anyone can hold.
+     */
+    select cron_job.command into v_stored_command
+    from cron.job as cron_job
+    where cron_job.jobid = v_sampler_job;
+    v_canonical_command :=
+      ash._canonical_job_command('ash_sampler', v_stored_command);
+
+    if v_canonical_command is null then
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_sampler_job, schedule := v_schedule, active := true
+        );
+      else
+        -- pg_cron grants named schedule/unschedule to ordinary job owners,
+        -- but reserves alter_job. Upsert active jobs; replace only an inactive
+        -- job so explicit start can reactivate it without privileged grants.
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_sampler_job
+        );
+        if v_job_was_inactive then
+          begin
+            select cron.unschedule(v_sampler_job) into v_unscheduled;
+            if v_unscheduled is distinct from true then
+              raise exception 'cron.unschedule returned false for jobid %',
+                v_sampler_job;
+            end if;
+          exception when others then
+            raise exception using errcode = sqlstate,
+              message = format('ash.start: could not replace %s (jobid %s): %s',
+                'ash_sampler', v_sampler_job, sqlerrm);
+          end;
+        end if;
+        select cron.schedule('ash_sampler', v_schedule,
+          coalesce(v_canonical_command, v_stored_command)) into v_sampler_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_sampler_job;
+        end if;
+      end if;
+      raise notice
+        'ash.start: ash_sampler has a customised command; preserving it. '
+        'pg_ash writes through CALL now — if that command still uses '
+        '"select ash.take_sample()" a read-routing proxy may send it to a '
+        'replica. Recommended: %',
+        'set statement_timeout = ''500ms''; call ash.run_take_sample()';
+      status := format(
+        'already exists — schedule updated to %s; custom command preserved',
+        v_schedule);
+    else
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_sampler_job,
+          schedule := v_schedule,
+          command := v_canonical_command,
+          active := true
+        );
+      else
+        -- pg_cron grants named schedule/unschedule to ordinary job owners,
+        -- but reserves alter_job. Upsert active jobs; replace only an inactive
+        -- job so explicit start can reactivate it without privileged grants.
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_sampler_job
+        );
+        if v_job_was_inactive then
+          begin
+            select cron.unschedule(v_sampler_job) into v_unscheduled;
+            if v_unscheduled is distinct from true then
+              raise exception 'cron.unschedule returned false for jobid %',
+                v_sampler_job;
+            end if;
+          exception when others then
+            raise exception using errcode = sqlstate,
+              message = format('ash.start: could not replace %s (jobid %s): %s',
+                'ash_sampler', v_sampler_job, sqlerrm);
+          end;
+        end if;
+        select cron.schedule('ash_sampler', v_schedule,
+          coalesce(v_canonical_command, v_stored_command)) into v_sampler_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_sampler_job;
+        end if;
+      end if;
+      status := format(
+        'already exists — schedule updated to %s; command re-synced',
+        v_schedule);
+    end if;
     job_type := 'sampler';
     job_id := v_sampler_job;
-    status := format('already exists — schedule updated to %s', v_schedule);
     return next;
   else
     -- Create sampler job.
     select cron.schedule(
       'ash_sampler',
       v_schedule,
-      'set statement_timeout = ''500ms''; select ash.take_sample()'
+      'set statement_timeout = ''500ms''; call ash.run_take_sample()'
     ) into v_sampler_job;
 
     /*
@@ -2313,21 +2879,101 @@ begin
     /*
      * The supported rotation contract is day-granular. Repair any manually
      * drifted or legacy sub-day cron expression on every idempotent start.
+     * As with H-BUG-2 above, also re-sync the command so an existing job does
+     * not silently keep the legacy SELECT writer after an installer upgrade.
      */
-    perform cron.alter_job(
-      job_id := v_rotation_job,
-      schedule := '0 0 * * *'
-    );
+    -- Same contract as the sampler branch: never overwrite custom text.
+    select cron_job.command into v_stored_command
+    from cron.job as cron_job
+    where cron_job.jobid = v_rotation_job;
+    v_canonical_command :=
+      ash._canonical_job_command('ash_rotation', v_stored_command);
+
+    if v_canonical_command is null then
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_rotation_job,
+          schedule := '0 0 * * *',
+          active := true
+        );
+      else
+        -- pg_cron grants named schedule/unschedule to ordinary job owners,
+        -- but reserves alter_job. Upsert active jobs; replace only an inactive
+        -- job so explicit start can reactivate it without privileged grants.
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_rotation_job
+        );
+        if v_job_was_inactive then
+          begin
+            select cron.unschedule(v_rotation_job) into v_unscheduled;
+            if v_unscheduled is distinct from true then
+              raise exception 'cron.unschedule returned false for jobid %',
+                v_rotation_job;
+            end if;
+          exception when others then
+            raise exception using errcode = sqlstate,
+              message = format('ash.start: could not replace %s (jobid %s): %s',
+                'ash_rotation', v_rotation_job, sqlerrm);
+          end;
+        end if;
+        select cron.schedule('ash_rotation', '0 0 * * *',
+          coalesce(v_canonical_command, v_stored_command)) into v_rotation_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_rotation_job;
+        end if;
+      end if;
+      raise notice
+        'ash.start: ash_rotation has a customised command; preserving it. '
+        'Recommended: %', 'call ash.run_rotate()';
+      status :=
+        'already exists — schedule reset to 0 0 * * *; '
+        'custom command preserved';
+    else
+      if v_can_alter_job then
+        perform cron.alter_job(
+          job_id := v_rotation_job,
+          schedule := '0 0 * * *',
+          command := v_canonical_command,
+          active := true
+        );
+      else
+        -- pg_cron grants named schedule/unschedule to ordinary job owners,
+        -- but reserves alter_job. Upsert active jobs; replace only an inactive
+        -- job so explicit start can reactivate it without privileged grants.
+        v_job_was_inactive := not (
+          select active from cron.job where jobid = v_rotation_job
+        );
+        if v_job_was_inactive then
+          begin
+            select cron.unschedule(v_rotation_job) into v_unscheduled;
+            if v_unscheduled is distinct from true then
+              raise exception 'cron.unschedule returned false for jobid %',
+                v_rotation_job;
+            end if;
+          exception when others then
+            raise exception using errcode = sqlstate,
+              message = format('ash.start: could not replace %s (jobid %s): %s',
+                'ash_rotation', v_rotation_job, sqlerrm);
+          end;
+        end if;
+        select cron.schedule('ash_rotation', '0 0 * * *',
+          coalesce(v_canonical_command, v_stored_command)) into v_rotation_job;
+        if v_job_was_inactive and not v_skip_nodename_update then
+          update cron.job set nodename = '' where jobid = v_rotation_job;
+        end if;
+      end if;
+      status :=
+        'already exists — schedule reset to 0 0 * * *; command re-synced';
+    end if;
     job_type := 'rotation';
     job_id := v_rotation_job;
-    status := 'already exists — schedule reset to 0 0 * * *';
     return next;
   else
     -- Create rotation job (daily at midnight UTC).
     select cron.schedule(
       'ash_rotation',
       '0 0 * * *',
-      'select ash.rotate()'
+      'call ash.run_rotate()'
     ) into v_rotation_job;
 
     if not v_skip_nodename_update then
@@ -2342,16 +2988,53 @@ begin
 
   -- Schedule rollup cron jobs (idempotent: unschedule first).
   -- rollup_minute: every minute.
-  begin
-    perform cron.unschedule('ash_rollup_1m');
-  exception when others then
-    null;
-  end;
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_1m'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_1m', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_1m has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_minute()';
+  else
+    v_canonical_command := 'call ash.run_rollup_minute()';
+  end if;
+
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rollup_1m'
+    and username = current_user
+    and database = current_database();
+  if v_rotation_job is not null then
+    begin
+      select cron.unschedule(v_rotation_job) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception 'cron.unschedule returned false for existing jobid %',
+          v_rotation_job;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.start: could not replace pg_cron job "%s" (jobid %s): %s',
+          'ash_rollup_1m', v_rotation_job, sqlerrm
+        );
+    end;
+  end if;
 
   select cron.schedule(
     'ash_rollup_1m',
     '* * * * *',
-    'select ash.rollup_minute()'
+    v_canonical_command
   ) into v_rotation_job; -- reuse variable for job id
 
   if not v_skip_nodename_update then
@@ -2365,16 +3048,53 @@ begin
 
   -- rollup_hour: every hour at minute 1; its blocking shared lock sequences it
   -- after any in-flight minute rollup before it checks the minute watermark.
-  begin
-    perform cron.unschedule('ash_rollup_1h');
-  exception when others then
-    null;
-  end;
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_1h'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_1h', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_1h has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_hour()';
+  else
+    v_canonical_command := 'call ash.run_rollup_hour()';
+  end if;
+
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rollup_1h'
+    and username = current_user
+    and database = current_database();
+  if v_rotation_job is not null then
+    begin
+      select cron.unschedule(v_rotation_job) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception 'cron.unschedule returned false for existing jobid %',
+          v_rotation_job;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.start: could not replace pg_cron job "%s" (jobid %s): %s',
+          'ash_rollup_1h', v_rotation_job, sqlerrm
+        );
+    end;
+  end if;
 
   select cron.schedule(
     'ash_rollup_1h',
     '1 * * * *',
-    'select ash.rollup_hour()'
+    v_canonical_command
   ) into v_rotation_job;
 
   if not v_skip_nodename_update then
@@ -2387,16 +3107,53 @@ begin
   return next;
 
   -- rollup_cleanup: daily at 03:00 UTC
-  begin
-    perform cron.unschedule('ash_rollup_gc');
-  exception when others then
-    null;
-  end;
+  /*
+   * Preserve a customised command here too. These three are recreated with
+   * unschedule+schedule rather than alter_job, which would otherwise silently
+   * replace an operator's text — the same contract the sampler and rotation
+   * branches above now honour.
+   */
+  select cron_job.command into v_stored_command
+  from cron.job as cron_job
+  where cron_job.jobname = 'ash_rollup_gc'
+    and cron_job.username = current_user
+    and cron_job.database = current_database();
+  if v_stored_command is not null
+     and ash._canonical_job_command('ash_rollup_gc', v_stored_command) is null then
+    v_canonical_command := v_stored_command;
+    raise notice
+      'ash.start: ash_rollup_gc has a customised command; preserving it. '
+      'Recommended: %', 'call ash.run_rollup_cleanup()';
+  else
+    v_canonical_command := 'call ash.run_rollup_cleanup()';
+  end if;
+
+  select jobid into v_rotation_job
+  from cron.job
+  where jobname = 'ash_rollup_gc'
+    and username = current_user
+    and database = current_database();
+  if v_rotation_job is not null then
+    begin
+      select cron.unschedule(v_rotation_job) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception 'cron.unschedule returned false for existing jobid %',
+          v_rotation_job;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.start: could not replace pg_cron job "%s" (jobid %s): %s',
+          'ash_rollup_gc', v_rotation_job, sqlerrm
+        );
+    end;
+  end if;
 
   select cron.schedule(
     'ash_rollup_gc',
     '0 3 * * *',
-    'select ash.rollup_cleanup()'
+    v_canonical_command
   ) into v_rotation_job;
 
   if not v_skip_nodename_update then
@@ -2428,7 +3185,7 @@ begin
         '(~12 MiB/day).';
       raise notice
         'to disable: alter system set cron.log_run = off; '
-        'select pg_reload_conf();';
+        'then restart Postgres (cron.log_run is restart-only).';
       raise notice
         'or schedule periodic cleanup: delete from cron.job_run_details '
         'where end_time < now() - interval ''1 day'';';
@@ -2448,8 +3205,58 @@ language plpgsql
 set search_path = pg_catalog, ash
 as $$
 declare
-  v_job_id bigint;
+  v_job record;
+  v_unscheduled boolean;
+  v_schema_owner text;
+  v_cross_database_jobs text;
+  v_foreign_jobs text;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.stop must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
+  end if;
+
+  if ash._pg_cron_available() then
+    select string_agg(format('%I (jobid %s, database %I)',
+      jobname, jobid, database), ', ' order by jobname, jobid)
+    into v_cross_database_jobs
+    from cron.job
+    where username = current_user
+      and database <> current_database()
+      and jobname = any(array['ash_sampler', 'ash_rotation', 'ash_rollup_1m',
+                             'ash_rollup_1h', 'ash_rollup_gc']);
+    if v_cross_database_jobs is not null then
+      raise exception using
+        errcode = 'object_not_in_prerequisite_state',
+        message = format(
+          'ash.stop: managed job name(s) already target another database: '
+          '%s. Rename or unschedule them deliberately before retrying; '
+          'pg_cron job names are unique per role across databases.',
+          v_cross_database_jobs
+        );
+    end if;
+  end if;
+
+
   -- Mark sampling as disabled.
   update ash.config set sampling_enabled = false where singleton;
 
@@ -2458,68 +3265,105 @@ begin
     job_type := 'info';
     job_id := null;
     status :=
-      'pg_cron not installed — remember to stop your external scheduler '
+      'pg_cron is not available in this database — stop your external scheduler '
       '(cron, systemd timer, loop script, etc.)';
     return next;
     return;
   end if;
 
-  -- Remove sampler job.
-  select jobid into v_job_id
-  from cron.job
-  where jobname = 'ash_sampler';
-
-  if v_job_id is not null then
-    perform cron.unschedule('ash_sampler');
-    job_type := 'sampler';
-    job_id := v_job_id;
-    status := 'removed';
-    return next;
+  /*
+   * A superuser schema owner can see jobs created by another role through an
+   * older ash.start() or a manual scheduler call. Refuse to declare this
+   * installation stopped while any such same-database managed-name row
+   * survives. Non-superuser owners cannot see another role's cron.job rows,
+   * so ash.start() is owner-bound above to prevent creating that state.
+   */
+  select string_agg(
+    format(
+      '%I (jobid %s, owner %I)',
+      cron_job.jobname,
+      cron_job.jobid,
+      cron_job.username
+    ),
+    ', ' order by cron_job.jobname, cron_job.username, cron_job.jobid
+  )
+  into v_foreign_jobs
+  from cron.job as cron_job
+  where cron_job.jobname = any(array[
+    'ash_sampler',
+    'ash_rotation',
+    'ash_rollup_1m',
+    'ash_rollup_1h',
+    'ash_rollup_gc'
+  ])
+    and cron_job.database = current_database()
+    and cron_job.username <> v_schema_owner;
+  if v_foreign_jobs is not null then
+    raise exception using
+      errcode = 'object_not_in_prerequisite_state',
+      message = format(
+        'ash.stop: managed pg_cron job(s) owned by another role still '
+        'target this database: %s. Unschedule them as their owning role(s) '
+        'before retrying.',
+        v_foreign_jobs
+      );
   end if;
 
-  -- Remove rotation job
-  select jobid into v_job_id
-  from cron.job
-  where jobname = 'ash_rotation';
+  /*
+   * Resolve absence before calling cron.unschedule(): pg_cron raises the same
+   * generic error for an absent name that it uses for other lookup failures,
+   * so an exception handler cannot safely distinguish idempotency from a real
+   * failure. Scope every lookup to pg_cron's named-job uniqueness domain (the
+   * current role), remove the exact jobid, and report a row only after a real
+   * deletion.
+   */
+  for v_job in
+    select
+      managed.job_type,
+      managed.job_name,
+      cron_job.jobid
+    from (
+      values
+        (1, 'sampler'::text, 'ash_sampler'::text),
+        (2, 'rotation'::text, 'ash_rotation'::text),
+        (3, 'rollup_1m'::text, 'ash_rollup_1m'::text),
+        (4, 'rollup_1h'::text, 'ash_rollup_1h'::text),
+        (5, 'rollup_gc'::text, 'ash_rollup_gc'::text)
+    ) as managed(ordinal, job_type, job_name)
+    left join cron.job as cron_job
+      on cron_job.jobname = managed.job_name
+     and cron_job.username = current_user
+     and cron_job.database = current_database()
+    order by managed.ordinal
+  loop
+    if v_job.jobid is null then
+      continue;
+    end if;
 
-  if v_job_id is not null then
-    perform cron.unschedule('ash_rotation');
-    job_type := 'rotation';
-    job_id := v_job_id;
+    begin
+      select cron.unschedule(v_job.jobid) into v_unscheduled;
+      if v_unscheduled is distinct from true then
+        raise exception
+          'cron.unschedule returned false for existing jobid %',
+          v_job.jobid;
+      end if;
+    exception when others then
+      raise exception using
+        errcode = sqlstate,
+        message = format(
+          'ash.stop: could not unschedule pg_cron job "%s" '
+          '(jobid %s): %s',
+          v_job.job_name,
+          v_job.jobid,
+          sqlerrm
+        );
+    end;
+
+    job_type := v_job.job_type;
+    job_id := v_job.jobid;
     status := 'removed';
     return next;
-  end if;
-
-  -- Remove rollup jobs (idempotent — tolerate missing jobs).
-  begin
-    perform cron.unschedule('ash_rollup_1m');
-    job_type := 'rollup_1m';
-    job_id := null;
-    status := 'removed';
-    return next;
-  exception when others then
-    null;
-  end;
-
-  begin
-    perform cron.unschedule('ash_rollup_1h');
-    job_type := 'rollup_1h';
-    job_id := null;
-    status := 'removed';
-    return next;
-  exception when others then
-    null;
-  end;
-
-  begin
-    perform cron.unschedule('ash_rollup_gc');
-    job_type := 'rollup_gc';
-    job_id := null;
-    status := 'removed';
-    return next;
-  exception when others then
-    null;
-  end;
+  end loop;
 
   return;
 end;
@@ -2547,6 +3391,17 @@ as $$
 declare
   v_current bool;
 begin
+  /*
+   * NULL only reports the replicated setting and remains safe on a standby;
+   * non-NULL arguments change state and must be run on the primary.
+   */
+  if enabled is not null and ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
   select debug_logging into v_current from ash.config where singleton;
 
   if enabled is null then
@@ -2563,6 +3418,56 @@ begin
 end;
 $$;
 
+/*
+ * Change raw-ring persistence without ever altering the partitioned parent
+ * or the logged rollup tables. Validation precedes the config update so an
+ * invalid mode cannot change the operator's current setting.
+ */
+create or replace function ash.set_sample_persistence(mode text)
+returns text
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_converted int;
+  v_mode text := lower(btrim(set_sample_persistence.mode));
+  v_summary text;
+begin
+  if v_mode is null or v_mode not in ('logged', 'unlogged') then
+    raise exception using
+      errcode = '22023',
+      message = format(
+        'ash.set_sample_persistence: mode must be logged or unlogged; got %L',
+        set_sample_persistence.mode
+      );
+  end if;
+
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  update ash.config
+  set sample_unlogged = (v_mode = 'unlogged')
+  where singleton
+    and sample_unlogged is distinct from (v_mode = 'unlogged');
+
+  v_converted := ash._apply_sample_persistence();
+  v_summary := format(
+    'sample persistence: %s; %s partitions converted. Converting populated '
+    'partitions rewrites them; in unlogged mode the raw sample ring will be '
+    'empty after a crash or immediate shutdown.',
+    v_mode,
+    v_converted
+  );
+
+  raise notice '%', v_summary;
+  return v_summary;
+end;
+$$;
+
 -- Uninstall: stop jobs and drop schema.
 create or replace function ash.uninstall(confirm text default null)
 returns text
@@ -2572,7 +3477,32 @@ as $$
 declare
   v_rec record;
   v_jobs_removed int := 0;
+  v_schema_owner text;
 begin
+  if ash._in_recovery() then
+    raise exception using
+      errcode = '25006',
+      message = 'cannot administer pg_ash on a standby: server is in '
+        'recovery; pg_ash must be administered on the primary';
+  end if;
+
+  select owner_role.rolname
+  into v_schema_owner
+  from pg_catalog.pg_namespace as nsp
+  join pg_catalog.pg_roles as owner_role on owner_role.oid = nsp.nspowner
+  where nsp.nspname = 'ash';
+  if current_user <> v_schema_owner then
+    raise exception using
+      errcode = 'insufficient_privilege',
+      message = format(
+        'ash.uninstall must be called as ash schema owner %I; '
+        'current role is %I. Use SET ROLE %I and retry.',
+        v_schema_owner,
+        current_user,
+        v_schema_owner
+      );
+  end if;
+
   if confirm is distinct from 'yes' then
     raise exception 'to uninstall pg_ash, call: select ash.uninstall(''yes'')';
   end if;
@@ -2831,19 +3761,42 @@ declare
   v_rollup_1m_newest int4;
   v_rollup_1h_oldest int4;
   v_rollup_1h_newest int4;
+  v_in_recovery bool := ash._in_recovery();
 begin
+  if v_in_recovery then
+    raise notice
+      'ash.status: server is in recovery (standby); no sampling or rollup '
+      'happens here, and sampling_enabled reflects the primary''s '
+      'configuration rather than local activity';
+  end if;
+
   -- Get config
   select * into v_config from ash.config where singleton;
 
   -- Last sample timestamp
-  select max(sample_ts) into v_last_sample_ts from ash.sample;
+  /*
+   * status() must keep working on a standby with an unlogged ring — it is
+   * the documented place to look when pg_ash misbehaves, and node role is
+   * one of the rows it reports.
+   */
+  if ash._raw_ring_readable() then
+    select max(sample_ts) into v_last_sample_ts from ash.sample;
+  else
+    v_last_sample_ts := null;
+  end if;
 
-  -- Samples in current partition
-  select count(*) into v_samples_current
-  from ash.sample where slot = v_config.current_slot;
+  -- Samples in current partition / total (both unreadable on an
+  -- unlogged ring during recovery; report them as unknown, not as zero,
+  -- so nobody mistakes "cannot read" for "no samples").
+  if ash._raw_ring_readable() then
+    select count(*) into v_samples_current
+    from ash.sample where slot = v_config.current_slot;
 
-  -- Total samples
-  select count(*) into v_samples_total from ash.sample;
+    select count(*) into v_samples_total from ash.sample;
+  else
+    v_samples_current := null;
+    v_samples_total := null;
+  end if;
 
   -- Dictionary sizes
   select count(*) into v_wait_events from ash.wait_event_map;
@@ -2864,14 +3817,23 @@ begin
   end;
 
   metric := 'version'; value := coalesce(v_config.version, '1.0'); return next;
+  metric := 'in_recovery'; value := v_in_recovery::text; return next;
   metric := 'color';
   value := case when ash._color_on() then 'on' else 'off' end;
   return next;
   metric := 'num_partitions'; value := v_config.num_partitions::text; return next;
+  metric := 'sample_unlogged'; value := v_config.sample_unlogged::text; return next;
   metric := 'sampling_enabled'; value := v_config.sampling_enabled::text; return next;
   metric := 'skipped_samples'; value := v_config.skipped_samples::text; return next;
   metric := 'current_slot'; value := v_config.current_slot::text; return next;
   metric := 'sample_interval'; value := v_config.sample_interval::text; return next;
+  metric := 'sample_interval_supported';
+  value := (
+    extract(epoch from v_config.sample_interval) between 1 and 60
+    and extract(epoch from v_config.sample_interval)
+      = trunc(extract(epoch from v_config.sample_interval))
+  )::text;
+  return next;
   metric := 'rotation_period'; value := v_config.rotation_period::text; return next;
   metric := 'rotation_period_contract';
   value := 'day-granular; minimum 1 day';
@@ -2898,7 +3860,22 @@ begin
   value := v_config.consecutive_rotate_failures::text;
   return next;
 
-  if v_last_sample_ts is not null then
+  /*
+   * Never say "no samples" when the truthful answer is "cannot read them from
+   * here". On a standby with an unlogged ring the samples exist on the
+   * primary; reporting absence would make a healthy sampler look dead, which
+   * is the exact misreading these guards exist to prevent. Keep the row SHAPE
+   * stable too — time_since_last_sample must not silently disappear — so
+   * scrapers see a changed value rather than a missing metric.
+   */
+  if not ash._raw_ring_readable() then
+    metric := 'last_sample_ts';
+    value := 'unknown (unlogged ring, in recovery)';
+    return next;
+    metric := 'time_since_last_sample';
+    value := 'unknown (unlogged ring, in recovery)';
+    return next;
+  elsif v_last_sample_ts is not null then
     metric := 'last_sample_ts';
     value := ash.ts_to_timestamptz(v_last_sample_ts)::text;
     return next;
@@ -2907,10 +3884,15 @@ begin
     return next;
   else
     metric := 'last_sample_ts'; value := 'no samples'; return next;
+    metric := 'time_since_last_sample'; value := 'no samples'; return next;
   end if;
 
-  metric := 'samples_in_current_slot'; value := v_samples_current::text; return next;
-  metric := 'samples_total'; value := v_samples_total::text; return next;
+  metric := 'samples_in_current_slot';
+  value := coalesce(v_samples_current::text, 'unknown (unlogged ring, in recovery)');
+  return next;
+  metric := 'samples_total';
+  value := coalesce(v_samples_total::text, 'unknown (unlogged ring, in recovery)');
+  return next;
   metric := 'wait_event_map_count'; value := v_wait_events::text; return next;
   /*
    * M-BUG-6 / H-SEC-3: denominator tracks the 32 000 cap enforced in
@@ -2974,7 +3956,11 @@ begin
    * windows before querying. NULL when the source holds no data yet.
    */
   metric := 'raw_retention_start';
-  value := coalesce(ash._raw_retention_start()::text, 'no samples'); return next;
+  value := case
+    when not ash._raw_ring_readable() then 'unknown (unlogged ring, in recovery)'
+    else coalesce(ash._raw_retention_start()::text, 'no samples')
+  end;
+  return next;
   metric := 'rollup_1m_retention_start';
   value := coalesce(ash._rollup_1m_retention_start()::text, 'no rollups'); return next;
   metric := 'rollup_1h_retention_start';
@@ -3016,10 +4002,22 @@ begin
       loop
         return next;
       end loop;
+      -- Schema/table grants do not reveal the owner's jobs through cron RLS.
+      if pg_catalog.row_security_active('cron.job'::regclass)
+         and current_user <> pg_catalog.pg_get_userbyid(
+           (select nspowner from pg_catalog.pg_namespace where nspname = 'ash')
+         ) then
+        metric := 'cron_jobs';
+        value := '<cron.job visibility is limited by row-level security; '
+          'missing rows do not mean jobs are stopped. '
+          'Ask the pg_ash owner to inspect scheduling.>';
+        return next;
+      end if;
     exception when insufficient_privilege then
       metric := 'cron_jobs';
       value := format(
-        '<no cron.job access; grant USAGE ON SCHEMA cron TO %I>',
+        '<no cron.job access; ask an administrator for USAGE ON SCHEMA cron '
+        'and SELECT ON cron.job for %I; row-level security may still hide jobs>',
         current_user
       );
       return next;
@@ -3344,6 +4342,13 @@ declare
   v_has_later_data bool;
   v_sampler_lock_acquired bool := false;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_minute: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   /*
    * Acquire rollup lock (xact-level). Rollup operations serialize with each
    * other, and rebuild_partitions's drain poll waits on this objid.
@@ -3363,10 +4368,9 @@ begin
 
   /*
    * Drain in-flight samplers before choosing the "complete minute" boundary.
-   * take_sample() gets sample_ts from transaction-start now(), then may block
-   * before INSERT. Without this drain, rollup_minute() can advance the
-   * watermark while a sampler later commits an old-minute row, permanently
-   * excluding it from rollups (#81).
+   * take_sample() reads the clock after acquiring its transaction-level lock.
+   * It can still delay INSERT or commit across a minute boundary. This drain
+   * keeps the watermark behind such uncommitted samples (#81).
    */
   if not pg_try_advisory_lock(
        hashtext('pg_ash')::int4,
@@ -3591,6 +4595,13 @@ declare
   v_batch_limit int := 24;
   v_total int := 0;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_hour: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 0;
+  end if;
+
   /*
    * Wait for the shared rollup lock instead of skipping. The hourly pg_cron
    * job runs at minute 1, when the every-minute worker also fires; a try-lock
@@ -3706,7 +4717,16 @@ declare
   v_1h_retention int;
   v_cutoff_1m int4;
   v_cutoff_1h int4;
+  v_last_1h_ts int4;
 begin
+  if ash._in_recovery() then
+    raise notice
+      'ash.rollup_cleanup: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+    return 'skipped: server is in recovery (standby); '
+      'pg_ash writes only on a primary';
+  end if;
+
   /*
    * Acquire rollup lock (xact-level). Shares the kind with rollup_minute
    * and rollup_hour so cleanup can't delete rows that an in-flight rollup
@@ -3719,8 +4739,8 @@ begin
     return 'cleanup: skipped — another rollup operation in progress';
   end if;
 
-  select rollup_1m_retention_days, rollup_1h_retention_days
-  into v_1m_retention, v_1h_retention
+  select rollup_1m_retention_days, rollup_1h_retention_days, last_rollup_1h_ts
+  into v_1m_retention, v_1h_retention, v_last_1h_ts
   from ash.config where singleton;
 
   v_cutoff_1m := ash.ts_from_timestamptz(
@@ -3730,7 +4750,10 @@ begin
     now() - (v_1h_retention || ' days')::interval
   );
 
-  delete from ash.rollup_1m where ts < v_cutoff_1m;
+  -- Keep pending hourly input after downtime. An expired hour needs no input.
+  delete from ash.rollup_1m
+  where ts < v_cutoff_1m
+    and (ts < v_last_1h_ts or (ts / 3600) * 3600 < v_cutoff_1h);
   get diagnostics v_1m_deleted = row_count;
 
   delete from ash.rollup_1h where ts < v_cutoff_1h;
@@ -3741,32 +4764,216 @@ begin
 end;
 $$;
 
+/*
+ * CALL-able maintenance procedures.
+ *
+ * Load balancers and query proxies may route by statement kind, treating a
+ * SELECT of a writer function as a read and sending it to a read-only replica.
+ * CALL is unambiguously a write, and procedures are the semantically correct
+ * construct for routines invoked for their side effects.
+ *
+ * Transaction control is deliberately deferred to issue #228. These routines
+ * rely on transaction-scoped advisory locks, which a COMMIT would release.
+ */
+create or replace procedure ash.run_take_sample()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result int;
+begin
+  select ash.take_sample() into v_result;
+  raise notice 'ash.run_take_sample: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_take_sample() is
+  'CALL-able form of ash.take_sample(); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rotate()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result text;
+begin
+  select ash.rotate() into v_result;
+  raise notice 'ash.run_rotate: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rotate() is
+  'CALL-able form of ash.rotate(); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rollup_minute(batch_limit int default 60)
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result int;
+begin
+  select ash.rollup_minute(batch_limit) into v_result;
+  raise notice 'ash.run_rollup_minute: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rollup_minute(int) is
+  'CALL-able form of ash.rollup_minute(int); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rollup_hour()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result int;
+begin
+  select ash.rollup_hour() into v_result;
+  raise notice 'ash.run_rollup_hour: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rollup_hour() is
+  'CALL-able form of ash.rollup_hour(); exists so query routers cannot mistake a writer for a read.';
+
+create or replace procedure ash.run_rollup_cleanup()
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_result text;
+begin
+  select ash.rollup_cleanup() into v_result;
+  raise notice 'ash.run_rollup_cleanup: %', v_result;
+end;
+$$;
+
+comment on procedure ash.run_rollup_cleanup() is
+  'CALL-able form of ash.rollup_cleanup(); exists so query routers cannot mistake a writer for a read.';
+
 drop function if exists ash.aas_summary(interval);
 drop function if exists ash.aas_summary_at(timestamptz, timestamptz);
-drop function if exists ash.periods(timestamptz);
 drop function if exists ash.aas_waits(interval, text, int);
 drop function if exists ash.aas_waits_at(timestamptz, timestamptz, text, int);
 drop function if exists ash.aas_queries(interval, int);
 drop function if exists ash.aas_queries_at(timestamptz, timestamptz, int);
 
 /*
- * Configured sample interval in seconds (>= a tiny floor to avoid
- * div-by-zero). Each rollup count is one sample appearance =
- * sample_interval_secs of backend time, so
- * AAS = sum(count) * sample_interval_secs / wall_clock_seconds.
+ * Until samples and rollups persist weighted backend time, one retained
+ * history must use one cadence. Protect direct config writes as well as
+ * start(), and do not silently delete or reinterpret an older installation.
  */
+create or replace function ash._validate_sample_interval_update()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, ash
+as $$
+declare
+  v_seconds numeric := extract(epoch from new.sample_interval);
+begin
+  if v_seconds is null or v_seconds < 1 or v_seconds > 60
+     or v_seconds <> trunc(v_seconds) then
+    raise exception using
+      errcode = '23514',
+      message = 'pg_ash: sample_interval must be 1 to 60 whole seconds';
+  end if;
+
+  if tg_op = 'UPDATE' then
+    if new.sample_interval = old.sample_interval then
+      return new;
+    end if;
+  elsif exists (select from ash.config where singleton) then
+    -- Installer re-apply uses INSERT ... ON CONFLICT DO NOTHING.
+    return new;
+  end if;
+
+  /* A retained row committed after a repeatable snapshot could be invisible. */
+  if current_setting('transaction_isolation') <> 'read committed' then
+    raise exception using
+      errcode = '55000',
+      message = 'pg_ash: change sample_interval in a READ COMMITTED transaction',
+      hint = 'Commit the current transaction and retry at READ COMMITTED.';
+  end if;
+
+  /*
+   * The config row is already locked by UPDATE. Never wait for an active
+   * sampler or history writer that could in turn need that row. Table locks
+   * also cover direct INSERTs and remain held until transaction end, so a
+   * history-empty check cannot race with a concurrent writer.
+   */
+  if not pg_try_advisory_xact_lock(
+    hashtext('pg_ash')::int4,
+    hashtext('pg_ash_sampler')::int4
+  ) then
+    raise exception using
+      errcode = '55P03',
+      message = 'pg_ash: sampler is active; retry the sample_interval change';
+  end if;
+  lock table ash.sample, ash.rollup_1m, ash.rollup_1h in share mode nowait;
+
+  if exists (select from ash.sample)
+     or exists (select from ash.rollup_1m)
+     or exists (select from ash.rollup_1h) then
+    raise exception using
+      errcode = '55000',
+      message = 'pg_ash: cannot change sample_interval while retained history exists',
+      hint = 'Keep the current cadence. To start a new cadence, explicitly archive '
+        'and remove all raw, minute-rollup, and hour-rollup history first; '
+        'pg_ash never removes history automatically for a cadence change.';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists config_validate_sample_interval on ash.config;
+create trigger config_validate_sample_interval
+before insert or update of sample_interval on ash.config
+for each row execute function ash._validate_sample_interval_update();
+
+comment on function ash._validate_sample_interval_update() is
+  'Internal trigger: require 1 to 60 whole seconds, and refuse cadence changes while any retained history exists. Changes require READ COMMITTED and nonblocking sampler/history locks.';
+
+/* Preserve legacy config verbatim; an upgrade cannot infer its past cadence. */
+do $$
+declare
+  v_seconds numeric;
+begin
+  select extract(epoch from sample_interval) into v_seconds
+  from ash.config where singleton;
+  if v_seconds < 1 or v_seconds > 60 or v_seconds <> trunc(v_seconds) then
+    raise warning
+      'pg_ash: preserved unsupported legacy sample_interval (% seconds). '
+      'Sampling and AAS readers are disabled for this cadence. '
+      'Archive existing history, explicitly remove all three history tiers, '
+      'and choose 1 to 60 whole seconds. Existing mixed-cadence history '
+      'cannot be repaired automatically.', v_seconds;
+  end if;
+end;
+$$;
+
+/* Each retained appearance has the one cadence protected by the trigger. */
 create or replace function ash._sample_interval_secs()
 returns numeric
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
-  select greatest(
-           coalesce(extract(epoch from sample_interval)::numeric, 1),
-           0.001
-         )
-  from ash.config
-  where singleton
+declare
+  v_seconds numeric;
+begin
+  select extract(epoch from sample_interval) into v_seconds
+  from ash.config where singleton;
+  if v_seconds is null or v_seconds < 1 or v_seconds > 60
+     or v_seconds <> trunc(v_seconds) then
+    raise exception using
+      errcode = '55000',
+      message = 'pg_ash: unsupported legacy sample_interval; AAS weighting is unavailable',
+      hint = 'The supported cadence is 1 to 60 whole seconds. Archive and '
+        'explicitly remove retained raw/minute/hour history before changing '
+        'cadence. Older history has no cadence metadata and is not repaired '
+        'by an installer upgrade.';
+  end if;
+  return v_seconds;
+end;
 $$;
 
 --------------------------------------------------------------------------------
@@ -3819,7 +5026,10 @@ as $$
    * All escapes padded to 19 chars: \033[38;2;RRR;GGG;BBBm
    * Uniform length prevents pspg right-border misalignment.
    */
-  select case when not ash._color_on(color) then '' else
+  -- A resolved true value needs no session lookup.
+  select case when not (
+    case when color then true else ash._color_on(color) end
+  ) then '' else
     case
       when event like 'CPU%' then E'\033[38;2;080;250;123m'         -- green
       when event like 'IdleTx%' then E'\033[38;2;241;250;140m'      -- light yellow
@@ -3872,15 +5082,19 @@ as $$
    * All color escapes are now exactly 19 chars (zero-padded RGB).
    * reset is always 4 chars. Total invisible = 23 when color on, 0 when off.
    */
-  select ash._wait_color(event, color)
+  with settings as materialized (
+    select ash._color_on(color) as enabled
+  )
+  select case when not settings.enabled then '' else ash._wait_color(event, true) end
     || rpad(
          repeat('█', greatest(1, (
            pct / nullif(max_pct, 0) * least(greatest(width, 1), 500)
          )::int)),
          least(greatest(width, 1), 500)
        )
-    || ash._reset(color)
-    || lpad(pct || '%', 8);
+    || case when settings.enabled then E'\033[0m' else '' end
+    || lpad(pct || '%', 8)
+  from settings;
 $$;
 
 --------------------------------------------------------------------------------
@@ -3905,15 +5119,33 @@ $$;
  * a delayed rotation. It therefore does not jump to the first post-install or
  * post-outage sample. Null when raw holds no data.
  */
+/*
+ * Deliberately plpgsql, not sql. A `case when readable then (select … from
+ * ash.sample) end` does NOT work: the uncorrelated sub-select is planned as
+ * an InitPlan and evaluated at executor startup regardless of the CASE, so
+ * it still opens the relation and still raises 55000 on a standby with an
+ * unlogged ring. An IF in plpgsql genuinely does not execute the query.
+ */
 create or replace function ash._raw_oldest_sample()
 returns timestamptz
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
-  select ash.ts_to_timestamptz(min(sample_ts))
-  from ash.sample
-  where slot = any(ash._active_slots())
+declare
+  v_oldest timestamptz;
+begin
+  if not ash._raw_ring_readable() then
+    return null;
+  end if;
+
+  select ash.ts_to_timestamptz(min(sample_row.sample_ts))
+  into v_oldest
+  from ash.sample as sample_row
+  where sample_row.slot = any((select ash._active_slots())::smallint[]);
+
+  return v_oldest;
+end;
 $$;
 
 create or replace function ash._raw_retention_start()
@@ -3922,7 +5154,7 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  with raw_coverage as (
+  with raw_coverage as materialized (
     select ash._raw_oldest_sample() as oldest_sample
   )
   select case
@@ -4016,7 +5248,7 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  with raw_coverage as (
+  with raw_coverage as materialized (
     select ash._raw_oldest_sample() as oldest_sample
   )
   select case
@@ -4048,7 +5280,8 @@ $$;
  * When raw covers the window start, a rollup that is disabled, cannot cover it,
  * or lags the requested end falls back through _pick_source. Completeness for a
  * stalled rollup when the window starts before physical raw coverage remains
- * tracked by #122. Exact-query drills and samples bypass this and force raw.
+ * tracked by #122. Such results retain their selected source and values, but
+ * emit SQLSTATE 01000 NOTICE when recent completed raw activity is omitted. Exact-query drills and samples bypass this and force raw.
  * The source column stays honest — it names whatever was actually read.
  */
 create or replace function ash._pick_source_agg(
@@ -4056,11 +5289,16 @@ create or replace function ash._pick_source_agg(
   until timestamptz
 )
 returns text
-language sql
+language plpgsql
 stable
 set search_path = pg_catalog, ash
 as $$
-  with fallback as (
+declare
+  v_source text;
+  v_watermark int4;
+  v_complete_until timestamptz := least(until, date_trunc('minute', now()));
+begin
+  with fallback as materialized (
     select ash._pick_source(since) as source
   )
   select case
@@ -4083,8 +5321,54 @@ as $$
               )
          ) then 'rollup_1m'
     else fallback.source
-  end
-  from fallback
+  end into v_source
+  from fallback;
+
+  /*
+   * Preserve the best-partial-source contract, but disclose proven omission:
+   * the selected minute rollup is stale and newer completed-minute raw
+   * activity actually exists inside this window. Missing rows alone do not
+   * prove a sampler outage, so do not infer incompleteness from sparse data.
+   * An unlogged standby cannot inspect the raw ring and must not probe it.
+   */
+  if v_source = 'rollup_1m' and since is not null and until is not null
+     and ash._raw_ring_readable() then
+    select last_rollup_1m_ts into v_watermark from ash.config where singleton;
+    if (v_watermark is null
+        or v_watermark < ash.ts_from_timestamptz(v_complete_until))
+       and exists (
+         select from ash.sample as sample_row
+         where sample_row.slot = any((select ash._active_slots())::smallint[])
+           -- Scalar InitPlans also keep bounds constant during sequential scans.
+           and sample_row.sample_ts >= (select ash.ts_from_timestamptz(since))
+           and sample_row.sample_ts < (select ash.ts_from_timestamptz(v_complete_until))
+           and (v_watermark is null or sample_row.sample_ts >= v_watermark)
+           and not exists (
+             select from ash.rollup_1m as minute_row
+             where minute_row.ts = (sample_row.sample_ts / 60) * 60
+               and minute_row.datid = sample_row.datid
+           )
+       ) then
+      raise notice using
+        errcode = '01000',
+        message = format(
+          'pg_ash partial source: rollup_1m watermark %s is behind the '
+          'requested complete-minute end %s; newer raw observations are omitted '
+          'from this result. Values describe only selected rollup rows.',
+          coalesce(ash.ts_to_timestamptz(v_watermark)::text, 'unknown'),
+          v_complete_until
+        ),
+        hint = format(
+          'Wait for minute rollup catch-up or ask an administrator to run '
+          'CALL ash.run_rollup_minute(). To inspect recent raw activity, '
+          'narrow since to %s or later. Clients must surface this NOTICE; '
+          'the returned source label is not a completeness guarantee.',
+          ash._raw_oldest_sample()
+        );
+    end if;
+  end if;
+  return v_source;
+end;
 $$;
 
 /*
@@ -4276,6 +5560,7 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_datid oid;
+  v_slots smallint[];
 begin
   if database is not null then
     select db.oid into v_datid from pg_database as db
@@ -4286,13 +5571,13 @@ begin
   end if;
 
   if source = 'raw' then
+    v_slots := ash._active_slots_for_at(
+      ash.ts_to_timestamptz(start_ts), ash.ts_to_timestamptz(end_ts));
     return query
     with mins as (
       select distinct (sample_row.sample_ts / 60) * 60 as mts
       from ash.sample as sample_row
-      where sample_row.slot = any(ash._active_slots_for_at(
-                       ash.ts_to_timestamptz(start_ts),
-                       ash.ts_to_timestamptz(end_ts)))
+      where sample_row.slot = any(v_slots)
         and sample_row.sample_ts >= start_ts
         and sample_row.sample_ts < end_ts
         and (v_datid is null or sample_row.datid = v_datid)
@@ -4308,9 +5593,7 @@ begin
       cross join lateral generate_series(
         0, greatest(sample_row.data[data_idx + 1] - 1, -1)
       ) as backend(n)
-      where sample_row.slot = any(ash._active_slots_for_at(
-                       ash.ts_to_timestamptz(start_ts),
-                       ash.ts_to_timestamptz(end_ts)))
+      where sample_row.slot = any(v_slots)
         and sample_row.sample_ts >= start_ts
         and sample_row.sample_ts < end_ts
         and sample_row.data[data_idx] < 0
@@ -4531,10 +5814,15 @@ begin
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.aas: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
-  v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
+  -- Floor before rounding, then align again after the int4 horizon clamp.
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   /*
    * overflow-safe empty/degenerate-window guard (#63): never let
    * v_start_ts + 60 wrap past INT4_MAX near the 2094 epoch horizon.
@@ -4549,6 +5837,14 @@ begin
   v_exact_query := query_id is not null;
 
   if v_exact_query then
+    /*
+     * An exact per-query drill can only be answered from the ring, so this
+     * bypasses _pick_source entirely. Say so honestly before reading, rather
+     * than letting the read fail with a bare 55000 — or, worse, reach the
+     * tie-retention path and claim the samples do not exist and the drill is
+     * unrecoverable, when both are false on the primary.
+     */
+    perform ash._require_raw_ring('exact query attribution');
     v_source := 'raw';
     /*
      * Preserve the existing tie guard. For the broader query_id-only case,
@@ -4629,6 +5925,10 @@ begin
    * Round UP to the nearest grain multiple so the effective bucket is never
    * finer than the caller requested.
    */
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.aas: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -4662,7 +5962,7 @@ begin
   ),
   bucket_aas as (
     select bstart,
-           (cnt * v_si / (least(bstart + v_bucket_secs, v_end_ts)
+           (cnt * v_si / (least(bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(bstart, v_start_ts))) as aas
     from per_bucket
   )
@@ -4746,8 +6046,8 @@ begin
       'ash.timeline: since must be less than or equal to until';
   end if;
 
-  v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
@@ -4765,6 +6065,10 @@ begin
     if v_requested_bucket_secs < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
+    if ceil(v_requested_bucket_secs) > 2147483647 then
+      raise exception 'ash.timeline: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
+    end if;
     v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
   end if;
 
@@ -4774,6 +6078,14 @@ begin
            and (wait_event_type is not null or wait_event is not null);
   v_exact_query := query_id is not null;
   if v_exact_query then
+    /*
+     * An exact per-query drill can only be answered from the ring, so this
+     * bypasses _pick_source entirely. Say so honestly before reading, rather
+     * than letting the read fail with a bare 55000 — or, worse, reach the
+     * tie-retention path and claim the samples do not exist and the drill is
+     * unrecoverable, when both are false on the primary.
+     */
+    perform ash._require_raw_ring('exact query attribution');
     v_source := 'raw';
     v_coarser_query_history := ash._exact_query_uses_coarser(
       v_start_ts,
@@ -4827,6 +6139,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.timeline: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -4892,7 +6208,7 @@ begin
     v_source,
     coalesce(agg.n, 0)::bigint,
     case when agg.n > 0 then
-      round(agg.cnt * v_si / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+      round(agg.cnt * v_si / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                             - greatest(buckets.bstart, v_start_ts)), 2)
     end,
     case when agg.n > 0 and v_extrema_supported then
@@ -4989,7 +6305,8 @@ returns table (
   ts int4,
   key text,
   key_num bigint,
-  cnt numeric
+  cnt numeric,
+  datid oid
 )
 language plpgsql
 stable
@@ -4998,6 +6315,7 @@ set search_path = pg_catalog, ash
 as $$
 declare
   v_datid oid;
+  v_slots smallint[];
   v_tbl text;
   v_disp constant text :=
     '(case when event_map.event = event_map.type then event_map.event '
@@ -5017,6 +6335,8 @@ begin
   end if;
 
   if source = 'raw' then
+    v_slots := ash._active_slots_for_at(
+      ash.ts_to_timestamptz(start_ts), ash.ts_to_timestamptz(end_ts));
     return query
     with expanded as (
       select (sample_row.sample_ts / 60) * 60 as mts,
@@ -5029,9 +6349,7 @@ begin
       cross join lateral generate_series(
         0, greatest(sample_row.data[data_idx + 1] - 1, -1)
       ) as backend(n)
-      where sample_row.slot = any(ash._active_slots_for_at(
-                       ash.ts_to_timestamptz(start_ts),
-                       ash.ts_to_timestamptz(end_ts)))
+      where sample_row.slot = any(v_slots)
         and sample_row.sample_ts >= start_ts
         and sample_row.sample_ts < end_ts
         and sample_row.data[data_idx] < 0
@@ -5079,9 +6397,10 @@ begin
                     '<oid:' || decoded.datid || '>')
            end,
            case when dimension = 'query_id' then decoded.qid else null end,
-           count(*)::numeric
+           count(*)::numeric,
+           case when dimension = 'query_id' then decoded.datid end
     from decoded
-    group by 1, 2, 3;
+    group by 1, 2, 3, 5;
     return;
   end if;
 
@@ -5148,7 +6467,8 @@ begin
       grains.mts,
       grains.database_key,
       null::bigint,
-      sum(grains.cnt)::numeric
+      sum(grains.cnt)::numeric,
+      null::oid
     from grains
     where grains.mts >= start_ts
       and grains.mts < end_ts
@@ -5165,7 +6485,8 @@ begin
     return query execute format($q$
       select rollup.ts,
              %s as key, null::bigint as key_num,
-             sum(rollup.wait_counts[pos + 1])::numeric as cnt
+             sum(rollup.wait_counts[pos + 1])::numeric as cnt,
+             null::oid
       from %s as rollup
       cross join generate_subscripts(rollup.wait_counts, 1) as pos
       join ash.wait_event_map as event_map
@@ -5200,7 +6521,8 @@ begin
         rollup.ts,
         keyed.query_id::text as key,
         keyed.query_id::bigint as key_num,
-        sum(keyed.cnt)::numeric as cnt
+        sum(keyed.cnt)::numeric as cnt,
+        rollup.datid
       from %s as rollup
       cross join lateral (
         select coalesce(
@@ -5251,7 +6573,7 @@ begin
             and ($4 is null or keyed.query_id = $4)
           )
         )
-      group by rollup.ts, keyed.query_id
+      group by rollup.ts, keyed.query_id, rollup.datid
     $q$, v_tbl)
     using start_ts, end_ts, v_datid, query_id;
 
@@ -5265,7 +6587,8 @@ begin
                (select coalesce(sum(rollup.query_counts[pos + 1]), 0)
                 from generate_subscripts(rollup.query_counts, 1) as pos
                 where pos %% 2 = 1
-                  and rollup.query_counts[pos] = $4)::numeric as cnt
+                  and rollup.query_counts[pos] = $4)::numeric as cnt,
+               null::oid
         from %s as rollup
         left join pg_database as db on db.oid = rollup.datid
         where rollup.ts >= $1 and rollup.ts < $2
@@ -5285,7 +6608,8 @@ begin
                 where pos %% 2 = 1
                   and ($4 is null or event_map.type = $4)
                   and ($5 is null or %s = $5
-                       or event_map.event = $5))::numeric as cnt
+                       or event_map.event = $5))::numeric as cnt,
+               null::oid
         from %s as rollup
         left join pg_database as db on db.oid = rollup.datid
         where rollup.ts >= $1 and rollup.ts < $2
@@ -5295,6 +6619,26 @@ begin
     end if;
   end if;
 end;
+$$;
+
+/*
+ * Shared query-text rules. This immutable helper returns only a constant SQL
+ * template; it accepts no schema and executes no lookup. Callers quote their
+ * catalog-derived schema with format() and bind maxlen, query ID, and database
+ * OID with USING. Readers can safely receive EXECUTE on this constant helper.
+ */
+create or replace function ash._pgss_query_text_sql()
+returns text
+language sql
+immutable
+parallel safe
+set search_path = pg_catalog, ash
+as $$
+  -- Hidden IDs can collide across databases. Only visible matching IDs supply text.
+  select 'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
+         'where (queryid = $2 or ($3 is null and queryid is null)) '
+         'and ($3 is null or dbid = $3) '
+         'having $3 is not null or count(distinct dbid) = 1';
 $$;
 
 /*
@@ -5360,14 +6704,16 @@ declare
   v_raw_start timestamptz;
   v_has_pgss boolean := false;
   v_pgss_schema text;
+  v_pgss_query_sql text;
   v_key_num bigint;
+  v_datid oid;
 begin
   if v_from > v_to then
     raise exception
       'ash.top: since must be less than or equal to until';
   end if;
 
-  if dimension not in (
+  if dimension is null or dimension not in (
        'wait_event_type', 'wait_event', 'query_id', 'database'
      ) then
     raise exception
@@ -5381,10 +6727,14 @@ begin
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.top: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
-  v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
@@ -5407,6 +6757,14 @@ begin
                    );
 
   if v_exact_query then
+    /*
+     * An exact per-query drill can only be answered from the ring, so this
+     * bypasses _pick_source entirely. Say so honestly before reading, rather
+     * than letting the read fail with a bare 55000 — or, worse, reach the
+     * tie-retention path and claim the samples do not exist and the drill is
+     * unrecoverable, when both are false on the primary.
+     */
+    perform ash._require_raw_ring('exact query attribution');
     v_source := 'raw';
     v_coarser_query_history := ash._exact_query_uses_coarser(
       v_start_ts,
@@ -5463,6 +6821,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.top: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -5481,6 +6843,7 @@ begin
     begin
       execute format('select 1 from %I.pg_stat_statements limit 1',
                      v_pgss_schema);
+      v_pgss_query_sql := format(ash._pgss_query_text_sql(), v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
@@ -5490,6 +6853,7 @@ begin
   for
     key,
     v_key_num,
+    v_datid,
     source,
     period_start,
     period_end,
@@ -5511,7 +6875,8 @@ begin
       grain_by_row.ts,
       grain_by_row.key,
       grain_by_row.key_num,
-      grain_by_row.cnt
+      grain_by_row.cnt,
+      grain_by_row.datid
     from ash._grain_by(v_start_ts, v_end_ts, v_read_source, dimension,
            wait_event_type, wait_event, query_id, database) as grain_by_row
   ),
@@ -5520,16 +6885,18 @@ begin
       (source_keyed.ts / v_grain_secs) * v_grain_secs as gstart,
       source_keyed.key,
       max(source_keyed.key_num) as key_num,
-      sum(source_keyed.cnt) as cnt
+      sum(source_keyed.cnt) as cnt,
+      source_keyed.datid
     from source_keyed
-    group by 1, source_keyed.key
+    group by 1, source_keyed.key, source_keyed.datid
   ),
   keyed as (
     select
       (keyed_grains.gstart / v_bucket_secs) * v_bucket_secs as bstart,
       keyed_grains.key,
       keyed_grains.key_num,
-      keyed_grains.cnt
+      keyed_grains.cnt,
+      keyed_grains.datid
     from keyed_grains
   ),
   /*
@@ -5552,7 +6919,8 @@ begin
     from coverage_grains
   ),
   keys as (
-    select keyed.key, max(keyed.key_num) as key_num, sum(keyed.cnt) as total
+    select keyed.key, max(keyed.key_num) as key_num, sum(keyed.cnt) as total,
+           case when count(distinct keyed.datid) = 1 then min(keyed.datid) end as datid
     from keyed
     group by keyed.key
     having sum(keyed.cnt) > 0
@@ -5577,7 +6945,7 @@ begin
     from keyed group by keyed.key, keyed.bstart
   ),
   key_bucket as (
-    select top_keys.key, top_keys.key_num, top_keys.total, covered.bstart,
+    select top_keys.key, top_keys.key_num, top_keys.total, top_keys.datid, covered.bstart,
            coalesce(key_bucket_data.bcnt, 0) as bcnt
     from top_keys
     cross join covered
@@ -5586,30 +6954,32 @@ begin
       and key_bucket_data.bstart = covered.bstart
   ),
   per_key as (
-    select key_bucket.key, key_bucket.key_num, key_bucket.total,
+    select key_bucket.key, key_bucket.key_num, key_bucket.total, key_bucket.datid,
            round(key_bucket.total * v_si
                  / (v_end_ts - v_start_ts)::numeric, 2) as avg_aas,
            case when v_extrema_supported then
              round(max(key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))), 2)
            end as peak_aas,
            case when v_extrema_supported then
              round(percentile_cont(0.99) within group (
                      order by key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))
                    )::numeric, 2)
            end as p99_aas
     from key_bucket
-    group by key_bucket.key, key_bucket.key_num, key_bucket.total
+    group by key_bucket.key, key_bucket.key_num, key_bucket.total, key_bucket.datid
   )
   select
     per_key.key,
     per_key.key_num,
+    per_key.datid,
     v_source,
-    ash.ts_to_timestamptz(v_start_ts),
-    ash.ts_to_timestamptz(v_end_ts),
+    -- Generic plans must convert these bounds once, not once per key.
+    (select ash.ts_to_timestamptz(v_start_ts)),
+    (select ash.ts_to_timestamptz(v_end_ts)),
     v_bucket_secs * interval '1 second',
     per_key.avg_aas,
     per_key.peak_aas,
@@ -5626,10 +6996,18 @@ begin
   limit greatest(n, 0)
   loop
     query_text := null;
-    if dimension = 'query_id' and v_has_pgss and v_key_num is not null then
-      -- schema-qualified single lookup point (#115); returns null on any
-      -- failure, never text from a shadowing relation.
-      query_text := ash._pgss_query_text(v_key_num, 100);
+    if dimension = 'query_id' and v_has_pgss
+       and v_key_num is not null and v_datid is not null then
+      -- Catalog-qualified lookup (#115); returns null on any
+      -- failure, never text from a shadowing relation. A NULL v_datid means
+      -- the key spans ASH databases, so attaching one database's text is unsafe.
+      -- Reuse this call's trusted schema. Do not repeat catalog discovery per key.
+      begin
+        execute v_pgss_query_sql
+          into query_text using 100, v_key_num, v_datid;
+      exception when others then
+        query_text := null;
+      end;
     end if;
     return next;
   end loop;
@@ -5706,6 +7084,7 @@ declare
   v_grain2 int4;
   v_source1 text;
   v_source2 text;
+  v_datid oid;
   v_exact_query boolean;
   v_extrema_mismatch boolean;
 begin
@@ -5730,10 +7109,9 @@ begin
   end if;
 
   /*
-   * Per-window coverage probe (rollup-backed, cheap). buckets_with_data = 0
-   * means the window holds no data at all — its side must read NULL, and the
-   * caller is warned: comparing against an uncovered window says nothing
-   * about a regression.
+   * Scalar coverage probe and shared input validation. Dimensional reads
+   * recheck coverage below, after planning their own bounds and read grain.
+   * An uncovered window must not produce a delta against a fake zero.
    */
   select * into v_aas1 from ash.aas(v_from1, v_to1,
     wait_event_type, wait_event, query_id, database, bucket);
@@ -5741,21 +7119,6 @@ begin
     wait_event_type, wait_event, query_id, database, bucket);
   v_cov1 := v_aas1.buckets_with_data > 0;
   v_cov2 := v_aas2.buckets_with_data > 0;
-  if not v_cov1 then
-    raise notice
-      'ash.compare: window 1 (% to %) has no data coverage — its columns '
-      'and avg_delta are NULL, not zero. Check retention with ash.status() '
-      'before reading a delta as a change.',
-      v_aas1.period_start, v_aas1.period_end;
-  end if;
-  if not v_cov2 then
-    raise notice
-      'ash.compare: window 2 (% to %) has no data coverage — its columns '
-      'and avg_delta are NULL, not zero. Check retention with ash.status() '
-      'before reading a delta as a change.',
-      v_aas2.period_start, v_aas2.period_end;
-  end if;
-
   /*
    * The displayed bucket can be the same even when one side consists of one
    * retained hour average and the other consists of minute observations.
@@ -5782,6 +7145,161 @@ begin
          ) then 3600
     else 60
   end;
+
+  if dimension is not null then
+    /*
+     * Plan the dimensional windows independently. This cannot reuse aas()'s
+     * effective grain: an unfiltered scalar rollup_1h read can use minute_counts
+     * while a wait/query breakdown over that same physical source is hourly.
+     */
+    v_requested_bucket_secs := extract(epoch from bucket);
+    v_start1 := (ash.ts_from_timestamptz(date_trunc('minute', v_from1, 'UTC')) / 60) * 60;
+    v_end1 := (ash.ts_from_timestamptz(date_trunc('minute', v_to1, 'UTC')) / 60) * 60;
+    if v_end1 <= v_start1 then
+      v_end1 := least(v_start1::bigint + 60, 2147483647)::int4;
+    end if;
+    v_start2 := (ash.ts_from_timestamptz(date_trunc('minute', v_from2, 'UTC')) / 60) * 60;
+    v_end2 := (ash.ts_from_timestamptz(date_trunc('minute', v_to2, 'UTC')) / 60) * 60;
+    if v_end2 <= v_start2 then
+      v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
+    end if;
+
+    v_exact_query := query_id is not null
+                     or (
+                       dimension = 'query_id'
+                       and (
+                         wait_event_type is not null
+                         or wait_event is not null
+                       )
+                     );
+
+    if v_exact_query then
+      perform ash._require_raw_ring('exact query attribution');
+      v_source1 := 'raw';
+      v_source2 := 'raw';
+    else
+      v_source1 := ash._pick_source_agg(
+        ash.ts_to_timestamptz(v_start1),
+        ash.ts_to_timestamptz(v_end1)
+      );
+      v_source2 := ash._pick_source_agg(
+        ash.ts_to_timestamptz(v_start2),
+        ash.ts_to_timestamptz(v_end2)
+      );
+    end if;
+    v_grain1 := case when v_source1 = 'rollup_1h' then 3600 else 60 end;
+    v_grain2 := case when v_source2 = 'rollup_1h' then 3600 else 60 end;
+
+    if v_source1 = 'rollup_1h'
+       and dimension = 'database'
+       and wait_event_type is null
+       and wait_event is null
+       and query_id is null then
+      if ash._rollup_1h_has_flat(v_start1, v_end1, database) then
+        v_source1 := 'rollup_1h_flat';
+      else
+        v_grain1 := 60;
+      end if;
+    end if;
+    if v_source2 = 'rollup_1h'
+       and dimension = 'database'
+       and wait_event_type is null
+       and wait_event is null
+       and query_id is null then
+      if ash._rollup_1h_has_flat(v_start2, v_end2, database) then
+        v_source2 := 'rollup_1h_flat';
+      else
+        v_grain2 := 60;
+      end if;
+    end if;
+
+    if v_grain1 = 3600 then
+      v_start1 := ((v_start1::bigint / 3600) * 3600)::int4;
+      v_end1 := least(
+        ((v_end1::bigint + 3599) / 3600) * 3600,
+        2147483647
+      )::int4;
+    end if;
+    if v_grain2 = 3600 then
+      v_start2 := ((v_start2::bigint / 3600) * 3600)::int4;
+      v_end2 := least(
+        ((v_end2::bigint + 3599) / 3600) * 3600,
+        2147483647
+      )::int4;
+    end if;
+    v_effective_bucket_secs1 := (
+      (
+        greatest(ceil(v_requested_bucket_secs)::int4, v_grain1)::bigint
+        + v_grain1 - 1
+      )
+      / v_grain1 * v_grain1
+    )::int4;
+    v_effective_bucket_secs2 := (
+      (
+        greatest(ceil(v_requested_bucket_secs)::int4, v_grain2)::bigint
+        + v_grain2 - 1
+      )
+      / v_grain2 * v_grain2
+    )::int4;
+    v_extrema_mismatch :=
+      v_grain1 <> v_grain2
+      or v_effective_bucket_secs1 <> v_effective_bucket_secs2;
+
+    -- Minute rollup plans share aas() coverage, including sparse database detail.
+    -- Raw and hourly plans need only source-row existence, not decoded counts.
+    select db.oid into v_datid from pg_database as db where db.datname = database;
+    select case
+      when v_source1 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start1), ash.ts_to_timestamptz(v_end1)))::smallint[])
+          and s.sample_ts >= v_start1 and s.sample_ts < v_end1
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain1 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start1 and h.ts < v_end1
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov1
+    end into v_cov1;
+    select case
+      when v_source2 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start2), ash.ts_to_timestamptz(v_end2)))::smallint[])
+          and s.sample_ts >= v_start2 and s.sample_ts < v_end2
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain2 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start2 and h.ts < v_end2
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov2
+    end into v_cov2;
+  end if;
+
+  if not v_cov1 then
+    raise notice
+      'ash.compare: window 1 (% to %) has no data coverage — its columns '
+      'and avg_delta are NULL, not zero. Check retention with ash.status() '
+      'before reading a delta as a change.',
+      case when dimension is null then v_aas1.period_start
+           else ash.ts_to_timestamptz(v_start1) end,
+      case when dimension is null then v_aas1.period_end
+           else ash.ts_to_timestamptz(v_end1) end;
+  end if;
+  if not v_cov2 then
+    raise notice
+      'ash.compare: window 2 (% to %) has no data coverage — its columns '
+      'and avg_delta are NULL, not zero. Check retention with ash.status() '
+      'before reading a delta as a change.',
+      case when dimension is null then v_aas2.period_start
+           else ash.ts_to_timestamptz(v_start2) end,
+      case when dimension is null then v_aas2.period_end
+           else ash.ts_to_timestamptz(v_end2) end;
+  end if;
 
   if dimension is null then
     v_extrema_mismatch :=
@@ -5814,103 +7332,6 @@ begin
     return;
   end if;
 
-  /*
-   * Plan the dimensional windows independently. This cannot reuse aas()'s
-   * effective grain: an unfiltered scalar rollup_1h read can use minute_counts
-   * while a wait/query breakdown over that same physical source is hourly.
-   */
-  v_requested_bucket_secs := extract(epoch from bucket);
-  v_start1 := (ash.ts_from_timestamptz(v_from1) / 60) * 60;
-  v_end1 := (ash.ts_from_timestamptz(v_to1) / 60) * 60;
-  if v_end1 <= v_start1 then
-    v_end1 := least(v_start1::bigint + 60, 2147483647)::int4;
-  end if;
-  v_start2 := (ash.ts_from_timestamptz(v_from2) / 60) * 60;
-  v_end2 := (ash.ts_from_timestamptz(v_to2) / 60) * 60;
-  if v_end2 <= v_start2 then
-    v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
-  end if;
-
-  v_exact_query := query_id is not null
-                   or (
-                     dimension = 'query_id'
-                     and (
-                       wait_event_type is not null
-                       or wait_event is not null
-                     )
-                   );
-
-  if v_exact_query then
-    v_source1 := 'raw';
-    v_source2 := 'raw';
-  else
-    v_source1 := ash._pick_source_agg(
-      ash.ts_to_timestamptz(v_start1),
-      ash.ts_to_timestamptz(v_end1)
-    );
-    v_source2 := ash._pick_source_agg(
-      ash.ts_to_timestamptz(v_start2),
-      ash.ts_to_timestamptz(v_end2)
-    );
-  end if;
-  v_grain1 := case when v_source1 = 'rollup_1h' then 3600 else 60 end;
-  v_grain2 := case when v_source2 = 'rollup_1h' then 3600 else 60 end;
-
-  if v_source1 = 'rollup_1h'
-     and dimension = 'database'
-     and wait_event_type is null
-     and wait_event is null
-     and query_id is null then
-    if ash._rollup_1h_has_flat(v_start1, v_end1, database) then
-      v_source1 := 'rollup_1h_flat';
-    else
-      v_grain1 := 60;
-    end if;
-  end if;
-  if v_source2 = 'rollup_1h'
-     and dimension = 'database'
-     and wait_event_type is null
-     and wait_event is null
-     and query_id is null then
-    if ash._rollup_1h_has_flat(v_start2, v_end2, database) then
-      v_source2 := 'rollup_1h_flat';
-    else
-      v_grain2 := 60;
-    end if;
-  end if;
-
-  if v_grain1 = 3600 then
-    v_start1 := ((v_start1::bigint / 3600) * 3600)::int4;
-    v_end1 := least(
-      ((v_end1::bigint + 3599) / 3600) * 3600,
-      2147483647
-    )::int4;
-  end if;
-  if v_grain2 = 3600 then
-    v_start2 := ((v_start2::bigint / 3600) * 3600)::int4;
-    v_end2 := least(
-      ((v_end2::bigint + 3599) / 3600) * 3600,
-      2147483647
-    )::int4;
-  end if;
-  v_effective_bucket_secs1 := (
-    (
-      greatest(ceil(v_requested_bucket_secs)::int4, v_grain1)::bigint
-      + v_grain1 - 1
-    )
-    / v_grain1 * v_grain1
-  )::int4;
-  v_effective_bucket_secs2 := (
-    (
-      greatest(ceil(v_requested_bucket_secs)::int4, v_grain2)::bigint
-      + v_grain2 - 1
-    )
-    / v_grain2 * v_grain2
-  )::int4;
-  v_extrema_mismatch :=
-    v_grain1 <> v_grain2
-    or v_effective_bucket_secs1 <> v_effective_bucket_secs2;
-
   return query
   with window1 as (
     select * from ash.top(dimension, v_from1, v_to1,
@@ -5922,13 +7343,17 @@ begin
   )
   select
     coalesce(window1.key, window2.key),
-    coalesce(window1.query_text, window2.query_text),
+    case when database is not null
+           or window1.key is null or window2.key is null
+           or window1.query_text = window2.query_text
+         then coalesce(window1.query_text, window2.query_text) end,
     v_source1,
     v_source2,
-    ash.ts_to_timestamptz(v_start1),
-    ash.ts_to_timestamptz(v_end1),
-    ash.ts_to_timestamptz(v_start2),
-    ash.ts_to_timestamptz(v_end2),
+    -- Each bound belongs to the whole window, not an output key.
+    (select ash.ts_to_timestamptz(v_start1)),
+    (select ash.ts_to_timestamptz(v_end1)),
+    (select ash.ts_to_timestamptz(v_start2)),
+    (select ash.ts_to_timestamptz(v_end2)),
     v_effective_bucket_secs1 * interval '1 second',
     v_effective_bucket_secs2 * interval '1 second',
     window1.avg_aas, window2.avg_aas,
@@ -5968,11 +7393,13 @@ $$;
  * caller lacks USAGE on, so an unqualified reference could fall through to a
  * planted public.pg_stat_statements and leak attacker-controlled query_text.
  * Returns null when unavailable (including permission-denied on the real
- * pgss schema) — degraded, never spoofed.
+ * pgss schema) — degraded, never spoofed. Query IDs are database-local.
+ * Unscoped lookups return NULL when matching or hidden IDs span databases.
  */
 create or replace function ash._pgss_query_text(
   query_id bigint,
-  maxlen int default 80
+  maxlen int,
+  database_oid oid
 )
 returns text
 language plpgsql
@@ -5987,15 +7414,26 @@ begin
     return null;
   end if;
   begin
-    execute format(
-      'select left(query, $1) from %I.pg_stat_statements '
-      'where queryid = $2 limit 1', v_pgss_schema)
-      into v_text using maxlen, query_id;
+    execute format(ash._pgss_query_text_sql(), v_pgss_schema)
+      into v_text using maxlen, query_id, database_oid;
   exception when others then
     v_text := null;
   end;
   return v_text;
 end;
+$$;
+
+-- Preserve existing calls. Without a database, only an unambiguous lookup is safe.
+create or replace function ash._pgss_query_text(
+  query_id bigint,
+  maxlen int default 80
+)
+returns text
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select ash._pgss_query_text($1, $2, null::oid);
 $$;
 
 /*
@@ -6039,9 +7477,14 @@ declare
   v_end int4;
   v_slots smallint[];
   v_datid oid;
+  v_row_datid oid;
   v_has_pgss boolean := false;
   v_pgss_schema text;
+  v_pgss_query_sql text;
 begin
+  -- Raw sample listing has no rollup equivalent.
+  perform ash._require_raw_ring('ash.samples()');
+
   if v_from > v_to then
     raise exception
       'ash.samples: since must be less than or equal to until';
@@ -6066,13 +7509,14 @@ begin
     begin
       execute format('select 1 from %I.pg_stat_statements limit 1',
                      v_pgss_schema);
+      v_pgss_query_sql := format(ash._pgss_query_text_sql(), v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
     end;
   end if;
 
-  return query
+  for sample_time, database_name, active_backends, wait_event, query_id, v_row_datid in
   with decoded as (
     select
       sample_row.sample_ts, sample_row.slot, sample_row.datid,
@@ -6119,12 +7563,24 @@ begin
     resolved.active_count,
     resolved.wait_event,
     resolved.qid,
-    case when v_has_pgss then ash._pgss_query_text(resolved.qid, 80)
-         else null end
+    resolved.datid
   from resolved
   left join pg_database as db on db.oid = resolved.datid
   order by resolved.sample_ts desc, resolved.wait_event
-  limit greatest(n, 0);
+  limit greatest(n, 0)
+  loop
+    query_text := null;
+    if v_has_pgss and query_id is not null then
+      -- The schema came from the extension catalog before this output loop.
+      begin
+        execute v_pgss_query_sql
+          into query_text using 80, query_id, v_row_datid;
+      exception when others then
+        query_text := null;
+      end;
+    end if;
+    return next;
+  end loop;
 end;
 $$;
 
@@ -6222,11 +7678,11 @@ as $$
     cross join lateral generate_series(
       0, greatest(sample_row.data[data_idx + 1] - 1, -1)
     ) as backend(n)
-    where sample_row.slot = any(ash._active_slots_for_at(
+    where sample_row.slot = any((select ash._active_slots_for_at(
              ash.ts_to_timestamptz(
                (select min(m) from unnest(minutes) as m)),
              ash.ts_to_timestamptz(
-               (select max(m) + 60 from unnest(minutes) as m))))
+               (select max(m) + 60 from unnest(minutes) as m))))::smallint[])
       /*
        * Sargable range bound so the (sample_ts) index prunes to the extreme
        * minutes instead of seq-scanning the whole active partition (#perf:
@@ -6342,8 +7798,8 @@ begin
    * ts_from_timestamptz() rounds fractional seconds while casting; converting
    * first could therefore move a :59.5+ endpoint into the next minute.
    */
-  v_start_ts := ash.ts_from_timestamptz(date_trunc('minute', v_from));
-  v_end_ts := ash.ts_from_timestamptz(date_trunc('minute', v_to));
+  v_start_ts := ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC'));
+  v_end_ts := ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC'));
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
@@ -6374,7 +7830,7 @@ begin
        and exists (
          select
          from ash.sample as sample_row
-         where sample_row.slot = any(ash._active_slots())
+         where sample_row.slot = any((select ash._active_slots())::smallint[])
            and sample_row.sample_ts >= v_start_ts
            and sample_row.sample_ts < v_end_ts
        ) then
@@ -6391,7 +7847,7 @@ begin
     if v_available_source is not null then
       raise notice
         'ash.report: no rollup_1m coverage for [%, %); % has coverage, '
-        'but report reads rollup_1m only and returns NULL',
+        'but report base metrics require rollup_1m and return NULL',
         ash.ts_to_timestamptz(v_start_ts),
         ash.ts_to_timestamptz(v_end_ts),
         v_available_source;
@@ -6412,16 +7868,17 @@ begin
    * (greatest/least in ts_from_timestamptz ignore NULLs, so a missing raw
    * oldest sample must be short-circuited here, not passed through.)
    */
+  with raw_coverage as materialized (
+    select ash._raw_oldest_sample() as oldest_sample
+  )
   select case
     when raw_coverage.oldest_sample is null then null
     else ash.ts_from_timestamptz(
-      date_trunc('minute', raw_coverage.oldest_sample)
+      date_trunc('minute', raw_coverage.oldest_sample, 'UTC')
     )
   end
   into v_raw_min
-  from (
-    select ash._raw_oldest_sample() as oldest_sample
-  ) as raw_coverage;
+  from raw_coverage;
 
   -- Per-class metrics over the zero-filled per-minute AAS series.
   for v_class in
@@ -6756,11 +8213,12 @@ declare
   v_grain_secs int4;
   v_si numeric;
   v_source text;
-  v_reset text := ash._reset(color);
+  v_color boolean := ash._color_on(color);
+  v_reset text := case when v_color then E'\033[0m' else '' end;
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];
-  v_other_color text := ash._wait_color('Other', color);
+  v_other_color text := case when not v_color then '' else ash._wait_color('Other', true) end;
   v_other_char text := '·';
   v_max numeric;
   v_legend text;
@@ -6778,8 +8236,8 @@ begin
   end if;
 
   width := least(greatest(width, 1), 500);
-  v_start_ts := (ash.ts_from_timestamptz(v_from) / 60) * 60;
-  v_end_ts := (ash.ts_from_timestamptz(v_to) / 60) * 60;
+  v_start_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_from, 'UTC')) / 60) * 60;
+  v_end_ts := (ash.ts_from_timestamptz(date_trunc('minute', v_to, 'UTC')) / 60) * 60;
   -- overflow-safe empty/degenerate-window guard (#63).
   if v_end_ts <= v_start_ts then
     v_end_ts := least(v_start_ts::bigint + 60, 2147483647)::int4;
@@ -6791,6 +8249,10 @@ begin
   else
     if extract(epoch from bucket) < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
+    end if;
+    if ceil(extract(epoch from bucket)) > 2147483647 then
+      raise exception 'ash.chart: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
     end if;
     v_bucket_secs := ceil(extract(epoch from bucket))::int4;
   end if;
@@ -6809,6 +8271,10 @@ begin
   end if;
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.chart: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6879,7 +8345,7 @@ begin
            sum(grain_by_row.cnt) * v_si
            / (least(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs
-                  + v_bucket_secs, v_end_ts)
+                  + v_bucket_secs::bigint, v_end_ts)
               - greatest(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs,
                 v_start_ts)) as tot
@@ -6893,7 +8359,8 @@ begin
 
   v_event_colors := array[]::text[];
   for v_i in 1 .. array_length(v_top_events, 1) loop
-    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i], color);
+    v_event_colors := v_event_colors || case when not v_color then ''
+      else ash._wait_color(v_top_events[v_i], true) end;
   end loop;
 
   v_legend := '';
@@ -6922,11 +8389,11 @@ begin
     per_bucket as (
       select buckets.bstart,
              round(coalesce(sum(bucket_events.cnt), 0) * v_si
-                   / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                   / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                       - greatest(buckets.bstart, v_start_ts)), 2) as total,
              coalesce(jsonb_object_agg(bucket_events.ev,
                round(bucket_events.cnt * v_si
-                     / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                     / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                         - greatest(buckets.bstart, v_start_ts)), 2))
                filter (where bucket_events.ev is not null),
                '{}'::jsonb) as events
@@ -7110,7 +8577,7 @@ comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigin
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is null. Reads ash.sample directly (raw retention only).$$;
 
 comment on function ash.report(timestamptz, timestamptz, int, int) is
-$$Machine-readable load report as one jsonb (US-8) for [since, until) (no bounds: last 1 day; until-only: preceding 1 hour). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution; raw_retention_start is the logical planning/loss boundary, not the physical query-attribution cutoff. vcpus (echoed, never used) and cluster_name are pass-throughs. Reads ash.rollup_1m only. If it has no coverage for the window, returns null even when raw or rollup_1h has coverage, emits a NOTICE naming that source, and never raises for missing coverage. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
+$$Returns one machine-readable jsonb load report (US-8) for effective minute-aligned [from, to) bounds. With no bounds, it reads the last 1 day. With only until, it reads the preceding 1 hour. Inverted requested bounds raise an error. Otherwise, the function floors both endpoints to UTC minute boundaries. Equal or ordered same-minute bounds expand to one minute. The integer timestamp horizon caps that interval. coverage.from/to expose the effective interval. Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution; raw_retention_start is the logical planning/loss boundary, not the physical query-attribution cutoff. vcpus (echoed, never used) and cluster_name are pass-throughs. Base metrics and top events read ash.rollup_1m; top query IDs additionally read raw samples for eligible extreme minutes. If it has no coverage for the window, returns null even when raw or rollup_1h has coverage, emits a NOTICE naming that source, and never raises for missing coverage. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
 
 comment on function ash.chart(timestamptz, timestamptz, interval, int, int, boolean) is
 $$Human render helper: stacked ASCII per-bucket AAS chart over [since, until) (default last 1 hour). Series/legend = the window-wide top n wait events PLUS any event that is top-1 in at least one bucket, plus Other. bucket => null auto-selects grain by span. On rollup_1h the chart snaps partial bounds/buckets outward and emits a NOTICE naming source and effective plan; it never silently falls through to unavailable rollup_1m data. Presentation-only (bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with color => true or "set ash.color = on".$$;
@@ -7123,23 +8590,23 @@ $$Human render helper: key/value AAS overview for one window [since, until) (def
  * the whole surface (readers vs operations) before any \df spelunking.
  */
 comment on schema ash is
-$$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader entry points (start with ash.periods()): periods, aas, timeline, top, compare, samples, report, chart, summary, status — readers report load in AAS (Average Active Sessions), and their function comments state how provenance is exposed. Operations/admin (owner-only, not granted by grant_reader): start, stop, take_sample, rotate, rollup_minute, rollup_hour, rollup_cleanup, rebuild_partitions, set_debug_logging, uninstall, grant_reader, revoke_reader. Each function documents itself: select obj_description('ash.<name>(<argtypes>)'::regprocedure).$$;
+$$pg_ash: Active Session History for Postgres (pure SQL, no extension). Reader entry points (start with ash.periods()): periods, aas, timeline, top, compare, samples, report, chart, summary, status — readers report load in AAS (Average Active Sessions), and their function comments state how provenance is exposed. Operations/admin (owner-only, not granted by grant_reader): start, stop, take_sample, rotate, rollup_minute, rollup_hour, rollup_cleanup, rebuild_partitions, set_sample_persistence, set_debug_logging, uninstall, grant_reader, revoke_reader. Each function documents itself: select obj_description('ash.<name>(<argtypes>)'::regprocedure).$$;
 
 /*
  * Operational / admin surface: obj_description for every entry point, so the
  * reader-vs-ops split is legible from \df+ alone.
  */
 comment on function ash.status() is
-$$Installation health snapshot (readable by monitoring roles): sampling state and interval, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
+$$Installation health snapshot (readable by monitoring roles): sampling state and interval, raw sample persistence, the day-granular rotation_period contract (whole days, minimum 1 day), pg_cron job status, partition slots and sizes, rollup progress/lag, retention starts (raw_retention_start is a reusable minute-aligned planning/loss boundary; rollup_1m_retention_start and rollup_1h_retention_start are physical starts), error counters (consecutive_rotate_failures, insert_errors, register_wait_cap_hits, missed/skipped samples), and version. Returns (metric, value) rows. Start here when pg_ash misbehaves; readers are documented on the schema: obj_description('ash'::regnamespace).$$;
 
 comment on function ash.start(interval) is
-$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., default 1 second; accepts 1–59 whole seconds, whole minutes, or whole hours up to 23h) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally. Idempotent. Inverse: ash.stop(). Check with ash.status().$$;
+$$Admin: start sampling — schedules take_sample() at the given interval (every => ..., omitted interval resumes ash.config.sample_interval; fresh default 1 second; accepts 1–60 whole seconds) plus rollup_minute()/rollup_hour()/rollup_cleanup() and a daily rotation check via pg_cron when available. rotation_period accepts whole days only (minimum 1 day); early daily checks skip until it is due. Without pg_cron, start enables sampling and prints the jobs to schedule externally at exactly the configured interval. Cadence changes with retained raw or rollup history raise SQLSTATE 55000; concurrent sampler/history writers raise 55P03. Invalid interval shapes return an error row. Never clears history automatically. Idempotent. Inverse: ash.stop(). Check with ash.status(). Must run as the ash schema owner (SET ROLE when needed). Explicit start reactivates local jobs, migrates recognized commands to CALL, and preserves custom commands. Same-owner managed names targeting another database are rejected before changes. Scheduling failures roll back every job/config change.$$;
 
 comment on function ash.stop() is
-$$Admin: stop sampling — unschedules the pg_cron jobs created by ash.start() (or disables sampling when pg_cron is absent). Collected data is kept and remains readable. Inverse: ash.start().$$;
+$$Admin: stop sampling — atomically unschedules the pg_cron jobs created by ash.start() and disables sampling (or only disables sampling when pg_cron is absent). Must be called as the ash schema owner; visible managed jobs owned by another role and targeting this database make the call fail closed. Same-owner managed names targeting another database are rejected before changes. Returns one removed row with its real job ID for each job actually unscheduled; absent jobs are idempotent. If any existing job cannot be unscheduled, the error propagates and rolls back every job/config change from the call; ordinary unschedule errors are wrapped to name the job. Collected data is kept and remains readable. Inverse: ash.start().$$;
 
 comment on function ash.take_sample() is
-$$Admin/internal: take one wait-event sample of pg_stat_activity into the current slot (the every-second worker that ash.start() schedules). Returns the number of active backends captured. Call manually only for testing; continuous sampling belongs to ash.start().$$;
+$$Admin/internal: take one wait-event sample of pg_stat_activity into the current slot (the every-second worker that ash.start() schedules). Returns the number of per-database sample rows that it inserts, not the number of captured backends. Zero can mean that the call stored no sample. A handled cancellation returns -1 and records a missed sample. Normally, ash.start() schedules this function. Without pg_cron, enable sampling with ash.start(). Then use an external scheduler at exactly the configured sample_interval.$$;
 
 comment on function ash.rotate() is
 $$Admin: rotate to the next partition slot, rolling up and truncating the oldest (checked daily by ash.start()). Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. The pre-truncation guard requires minute rollups only while they remain inside rollup_1m_retention_days. Failed attempts increment consecutive_rotate_failures in ash.status(); successful rotation resets it. Safe to call manually to force a due rotation.$$;
@@ -7151,16 +8618,19 @@ comment on function ash.rollup_hour() is
 $$Admin: fold completed hours of ash.rollup_1m into ash.rollup_1h. minute_counts preserves available per-minute totals and must sum to the hourly wait total; missing stored rows remain NULL slots because idle and uncovered minutes are indistinguishable (#137). Returns hours processed.$$;
 
 comment on function ash.rollup_cleanup() is
-$$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Rotation deliberately does not require minute rollups that this cleanup is entitled to delete. Returns a summary of rows deleted.$$;
+$$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Pending hourly input can exceed minute retention until aggregated or its destination hour expires under hourly retention. Rotation deliberately does not require minute rollups that this cleanup is entitled to delete. Returns a summary of rows deleted.$$;
 
 comment on function ash.rebuild_partitions(int, text) is
-$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. Requires confirm => 'yes'. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild.$$;
+$$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. Requires confirm => 'yes' and must be called as the ash schema owner. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild. Any job-stop or rebuild failure raises and rolls back jobs, config, raw data, and DDL; success deliberately leaves sampling disabled until ash.start() is called.$$;
+
+comment on function ash.set_sample_persistence(text) is
+$$Admin: set raw ash.sample_N partitions to logged or unlogged persistence (mode is case-insensitive and surrounding whitespace is ignored); other values raise SQLSTATE 22023 without changing config, and calls on a standby raise 25006. Updates ash.config.sample_unlogged so installer re-apply and ash.rebuild_partitions() create and reconcile every raw slot consistently. Matching partitions are untouched; converting populated partitions rewrites them. The partitioned ash.sample parent and ash.rollup_1m/ash.rollup_1h always remain logged. Unlogged mode reduces raw-sample WAL, but a crash or immediate shutdown truncates every raw partition, a promoted replica starts with an empty raw ring, and unlogged tables cannot be read on a standby; use only after accepting that post-mortem trade-off. A clean restart preserves unlogged data. pg_dump includes unlogged contents unless --no-unlogged-table-data is used. Returns and raises a NOTICE with the selected mode and exact conversion count.$$;
 
 comment on function ash.set_debug_logging(bool) is
 $$Admin: toggle debug logging for the sampler and rollup jobs (null argument reports the current setting). Returns the resulting state.$$;
 
 comment on function ash.uninstall(text) is
-$$Admin, DESTRUCTIVE: remove pg_ash entirely — unschedules jobs and drops schema ash with all collected data. Requires confirm => 'yes'.$$;
+$$Admin, DESTRUCTIVE: remove pg_ash entirely — unschedules jobs and drops schema ash with all collected data. Requires confirm => 'yes' and must be called as the ash schema owner. Success counts only jobs actually removed. If an existing pg_cron job cannot be unscheduled, or a visible managed job owned by another role targets this database, raises and leaves the schema, data, config, and all jobs unchanged.$$;
 
 /*
  * Helper: detect the schema that holds the pg_stat_statements view.
@@ -7185,9 +8655,9 @@ comment on function ash._pgss_schema() is
   'Returns the schema name of the installed pg_stat_statements extension, or NULL if not installed. Used to keep reader functions portable across managed services and custom install schemas.';
 
 /*
- * Helper: re-apply search_path on the pgss reader functions using the
- * currently detected pgss schema. Run this after installing / moving
- * pg_stat_statements if it lives outside `public`. Safe to re-run.
+ * Defense in depth: refresh pgss reader search_path using the detected schema.
+ * SQL-text lookup is schema-qualified per call (#115), so this helper is not
+ * required after pgss installation or relocation. Safe to re-run.
  */
 create or replace function ash._apply_pgss_search_path()
 returns text
@@ -7257,14 +8727,14 @@ end;
 $$;
 
 comment on function ash._apply_pgss_search_path() is
-  'Re-applies search_path on pgss reader functions using the currently detected pg_stat_statements schema. Run after installing pg_stat_statements if it lives outside the public schema.';
+  'Refreshes reader search_path as defense in depth. SQL-text lookup resolves the pg_stat_statements schema on each call and does not require this helper after extension installation or relocation.';
 
 -- Apply now so installs that have pgss in a non-public schema work out of the
 -- box. No-op (keeps default) when pgss is absent or lives in public.
 select ash._apply_pgss_search_path();
 
 /*
- * Canonical "admin" function set: callers that must NOT be granted to
+ * Canonical "admin" routine set: callers that must NOT be granted to
  * monitoring roles. Single source of truth for the REVOKE-from-PUBLIC /
  * GRANT-to-owner hardening block below and for grant_reader/revoke_reader
  * (which exclude these names from the reader EXECUTE bundle). Adding a new
@@ -7279,12 +8749,24 @@ set search_path = pg_catalog
 as $$
   select array[
     'start', 'stop', 'uninstall', 'rotate', 'take_sample',
-    'set_debug_logging', 'rebuild_partitions', 'rollup_minute',
-    'rollup_hour', 'rollup_cleanup', '_drop_all_partitions',
+    'set_debug_logging', 'set_sample_persistence', 'rebuild_partitions',
+    'rollup_minute', 'rollup_hour', 'rollup_cleanup',
+    '_drop_all_partitions',
+    /* Procedure forms of the maintenance/admin routines. */
+    'run_take_sample', 'run_rotate', 'run_rollup_minute',
+    'run_rollup_hour', 'run_rollup_cleanup',
+    /*
+     * Scheduling internals: only ash.start() and the installer re-apply
+     * migration consult these. No reader needs them, so keep them out of the
+     * reader bundle rather than widening it for helpers.
+     */
+    '_job_command_map', '_canonical_job_command',
     '_rebuild_query_map_view', '_merge_wait_counts', '_merge_query_counts',
     '_truncate_pairs', '_int4_array_cat_agg', '_int8_array_cat_agg',
-    '_register_wait', '_validate_rotation_period', '_record_rotate_failure',
+    '_register_wait', '_apply_sample_persistence',
+    '_validate_rotation_period', '_record_rotate_failure',
     '_validate_rotation_config', '_validate_config_update',
+    '_configured_sample_interval', '_validate_sample_interval_update',
     /*
      * The privilege helpers and their canonical exclusion-list helper are
      * administrative. Granting grant_reader/revoke_reader to a monitoring
@@ -7305,7 +8787,7 @@ as $$
 $$;
 
 comment on function ash._admin_funcs() is
-  'Canonical list of ash.* admin function names (must not be granted to monitoring roles). Single source of truth used by the REVOKE/GRANT hardening block and by grant_reader/revoke_reader.';
+  'Canonical list of ash.* admin routine names (functions and procedures that must not be granted to monitoring roles). Single source of truth used by the REVOKE/GRANT hardening block and by grant_reader/revoke_reader.';
 
 do $$
 declare
@@ -7315,11 +8797,30 @@ declare
   v_admin_funcs constant text[] := ash._admin_funcs();
   v_rec record;
 begin
+  -- Scrub historical admin grants before restoring schema-owner access.
+  -- The schema owner can differ from the function owner; cascade still
+  -- removes prior grant options and delegated grants, as DROP used to.
+  for v_rec in
+    select distinct func_acl.grantee, proc.oid::regprocedure as sig
+    from pg_temp._ash_install_func_acl as func_acl
+    join pg_proc as proc on proc.proname = func_acl.proname
+    where proc.pronamespace = 'ash'::regnamespace
+      and proc.proname in (
+        'uninstall', 'rebuild_partitions', 'start', 'set_debug_logging',
+        'rollup_minute', 'grant_reader', 'revoke_reader',
+        '_register_wait', '_merge_wait_counts', '_merge_query_counts',
+        '_truncate_pairs'
+      )
+  loop
+    execute format('revoke execute on function %s from %I cascade',
+                   v_rec.sig, v_rec.grantee);
+  end loop;
+
   /*
-   * Admin functions: revoke from PUBLIC and grant only to the schema owner.
+   * Admin routines: revoke from PUBLIC and grant only to the schema owner.
    * Resolve signatures dynamically via pg_proc so any future overload or
-   * default-argument change is picked up automatically. prokind in ('f','a')
-   * covers regular functions and aggregates (_int{4,8}_array_cat_agg).
+   * default-argument change is picked up automatically. The prokind filter
+   * covers functions, aggregates (_int{4,8}_array_cat_agg), and procedures.
    * Entries in _admin_funcs() that are not yet created at this point in
    * install order (e.g. grant_reader/revoke_reader, defined below) are
    * skipped here and locked down by their own DO block once created.
@@ -7330,12 +8831,12 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
-      and proc.prokind in ('f', 'a')
+      and proc.prokind in ('f', 'a', 'p')
       and proc.proname::text = any(v_admin_funcs)
   loop
-    execute format('revoke all on function ash.%I(%s) from public',
+    execute format('revoke all on routine ash.%I(%s) from public',
                    v_rec.proname, v_rec.args);
-    execute format('grant execute on function ash.%I(%s) to %I',
+    execute format('grant execute on routine ash.%I(%s) to %I',
                    v_rec.proname, v_rec.args, v_owner);
   end loop;
 
@@ -7346,10 +8847,11 @@ begin
    */
 
   /*
-   * Reader/helper functions: revoke EXECUTE from PUBLIC for every non-trigger
-   * function in ash.*. Signatures are resolved dynamically via pg_proc so
-   * default arguments and future overloads do not cause drift. Admin
-   * functions above are re-revoked here (harmless: REVOKE is idempotent).
+   * Reader/helper functions and maintenance procedures: revoke EXECUTE from
+   * PUBLIC for every non-trigger routine in ash.*. Signatures are resolved
+   * dynamically via pg_proc so default arguments and future overloads do not
+   * cause drift. Admin routines above are re-revoked here (harmless: REVOKE is
+   * idempotent).
    */
   for v_rec in
     select proc.proname,
@@ -7357,9 +8859,9 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
-      and proc.prokind = 'f'
+      and proc.prokind in ('f', 'p')
   loop
-    execute format('revoke execute on function ash.%I(%s) from public',
+    execute format('revoke execute on routine ash.%I(%s) from public',
                    v_rec.proname, v_rec.args);
   end loop;
 
@@ -7419,11 +8921,13 @@ end $$;
  * Granted set:
  *   - USAGE on schema ash
  *   - EXECUTE on every ash.* function EXCEPT the admin set (start, stop,
- *     uninstall, rotate, take_sample, set_debug_logging, rebuild_partitions,
+ *     uninstall, rotate, take_sample, set_debug_logging,
+ *     set_sample_persistence, rebuild_partitions,
  *     rollup_minute, rollup_hour, rollup_cleanup, _drop_all_partitions,
  *     _rebuild_query_map_view, _merge_wait_counts, _merge_query_counts,
  *     _truncate_pairs, _int4_array_cat_agg, _int8_array_cat_agg,
- *     _register_wait, _validate_rotation_period, _record_rotate_failure,
+ *     _register_wait, _apply_sample_persistence,
+ *     _validate_rotation_period, _record_rotate_failure,
  *     _validate_rotation_config, _validate_config_update, _admin_funcs).
  *     Defining "reader" by exclusion (rather than enumeration) keeps the
  *     helpers correct as new readers and reader-internal helpers are added.
@@ -7482,6 +8986,7 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
+      /* Maintenance procedures are admin-only; exclude them from readers. */
       and proc.prokind = 'f'
       and proc.proname::text <> all (v_admin_funcs)
   loop
@@ -7596,6 +9101,7 @@ begin
     from pg_catalog.pg_proc as proc
     join pg_catalog.pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
+      /* Maintenance procedures are admin-only; exclude them from readers. */
       and proc.prokind = 'f'
       and proc.proname::text <> all (v_admin_funcs)
   loop
@@ -7659,19 +9165,21 @@ end $$;
  *   * Admin functions (ash._admin_funcs()) are never restored. They are
  *     locked to the owner by the hardening block above and are never handed
  *     out by ash.grant_reader(); re-applying a stray manual grant on one
- *     would silently undo that hardening on every install. Excluding them
- *     here preserves the pre-#107 behaviour where DROP FUNCTION scrubbed
- *     such grants.
+ *     would silently undo that hardening on every install. The hardening
+ *     block scrubs grants on historically dropped admins before restoring
+ *     schema-owner access. This restore must not reintroduce those grants.
  *   * Each grant is restored to the exact same signature when it still
  *     exists, so a role that held only one overload of a function is not
  *     widened to its siblings. Only when the snapshotted signature is gone
  *     (a genuine cross-version signature change — the case this restore
  *     exists to cover) does it fall back to every current overload of the
  *     name.
+ *   * The legacy query-text wrapper also needs its database-aware dependency.
+ *     Its grantees retain that EXECUTE privilege with the same grant option.
  * This mirrors what CREATE OR REPLACE would have preserved: function names
  * that no longer exist (removed/renamed) are skipped, roles dropped
- * mid-script are skipped, and a role with only partial FUNCTION grants is
- * not widened. Roles that held the FULL pre-upgrade reader-function bundle
+ * mid-script are skipped, and a role with only partial FUNCTION grants gets
+ * no unrelated privileges. Roles with the FULL pre-upgrade reader-function bundle
  * (detected in the snapshot block at the top of this script) are additionally
  * re-run through ash.grant_reader() afterwards, so they can also execute
  * helpers introduced by this version — otherwise the readers they kept would
@@ -7698,6 +9206,10 @@ begin
       and (
         -- the snapshotted overload still exists: restore exactly it
         pg_catalog.pg_get_function_identity_arguments(proc.oid) = func_acl.args
+        or (
+          proc.oid = 'ash._pgss_query_text(bigint,integer,oid)'::regprocedure
+          and func_acl.args = 'query_id bigint, maxlen integer'
+        )
         -- the snapshotted overload is gone (signature changed): fall back
         -- to restoring every current overload of the name
         or not exists (
@@ -7715,6 +9227,19 @@ begin
                    v_rec.proname, v_rec.args, v_rec.grantee,
                    case when v_rec.grantable then ' with grant option'
                         else '' end);
+  end loop;
+
+  -- Partial reader grants also need the new constant-only dependency.
+  for v_rec in
+    select func_acl.grantee, bool_or(func_acl.grantable) as grantable
+    from pg_temp._ash_install_func_acl as func_acl
+    join pg_catalog.pg_roles as role_row on role_row.rolname = func_acl.grantee
+    where func_acl.proname in ('top', '_samples', '_pgss_query_text')
+    group by func_acl.grantee
+  loop
+    execute format('grant execute on function ash._pgss_query_text_sql() to %I%s',
+      v_rec.grantee,
+      case when v_rec.grantable then ' with grant option' else '' end);
   end loop;
 
   select string_agg(
@@ -7844,6 +9369,60 @@ begin
 end $$;
 
 /*
+ * Installer re-apply migration for legacy pg_ash job commands. Replacing
+ * ash.start() does not change command text already stored in cron.job, so a
+ * running installation would otherwise keep SELECT-based writers forever.
+ *
+ * Match both the pg_ash job name and its exact known legacy command. This
+ * deliberately preserves every operator-customized command, even for a job
+ * with a standard pg_ash name. Named cron.schedule() updates the caller's job
+ * in place without requiring cron.alter_job(), which pg_cron revokes from
+ * PUBLIC. Reusing the stored schedule preserves cadence, jobid, and active
+ * state while changing only the command text.
+ */
+do $$
+declare
+  v_job record;
+begin
+  if ash._pg_cron_available() then
+    for v_job in
+      select
+        cron_job.jobname,
+        cron_job.schedule,
+        command_map.canonical_command as new_command
+      from cron.job as cron_job
+      inner join ash._job_command_map() as command_map
+        on command_map.jobname = cron_job.jobname
+        and command_map.legacy_command = cron_job.command
+        and command_map.legacy_command
+            is distinct from command_map.canonical_command
+      where cron_job.database = current_database()
+        and cron_job.username = current_user
+    loop
+      /*
+       * A cron.schedule() failure here must not abort the installer. This
+       * block now matches essentially every upgrading installation, and
+       * pg_cron revokes some of its API from PUBLIC, so a restricted
+       * installing role could otherwise turn a routine re-apply into a failed
+       * upgrade. Same defence the pg_monitor grant block above uses.
+       */
+      begin
+        perform cron.schedule(
+          v_job.jobname,
+          v_job.schedule,
+          v_job.new_command
+        );
+      exception when others then
+        raise warning
+          'pg_ash: could not migrate the legacy pg_cron command for job % '
+          '(%: %); it still uses the SELECT form and should be re-created',
+          v_job.jobname, sqlstate, sqlerrm;
+      end;
+    end loop;
+  end if;
+end $$;
+
+/*
  * Enforce the day-granular rotation contract last. A legacy install may
  * already contain a sub-day value that older versions accepted. The
  * actionable error must still stop that unsupported configuration. Because
@@ -7875,4 +9454,8 @@ begin
   end if;
 end $$;
 
+\if :pg_ash_install_in_migration_transaction
+\else
 commit;
+\endif
+\unset pg_ash_install_in_migration_transaction

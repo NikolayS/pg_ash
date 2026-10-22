@@ -1,13 +1,13 @@
 # pg_cron-capable PostgreSQL image for the release gate.
 #
 # Keep the image tag separate from PostgreSQL's numeric major. In particular,
-# postgres:19beta2 exports PG_MAJOR=19, which is the value required by the
+# postgres:19rc1 exports PG_MAJOR=19, which is the value required by the
 # postgresql-19-cron package name.
 ARG POSTGRES_TAG=18
 FROM postgres:${POSTGRES_TAG}
 
-# pg_cron versions differ by PostgreSQL major and follow the pinned base
-# image's PGDG repository snapshot.
+# pg_cron versions differ by PostgreSQL major and come from the current PGDG
+# repository; prerelease base images must match their extension ABI.
 # hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-cron" \

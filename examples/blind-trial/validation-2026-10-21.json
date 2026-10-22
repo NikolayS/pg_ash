@@ -1,0 +1,158 @@
+{
+  "purpose": "Fresh functional harness validation; not a blind-agent trial or replacement of initial results",
+  "status": "PASS",
+  "verified_at": "2026-10-21T22:35:23.752675+00:00",
+  "prefix": "pgash_blind_validation_20261021",
+  "source": {
+    "executed_controller_sha256": "c64d293a72d529eca0c3ad3072137dbd5406bca12e41b922ccd6cc2a33f67fff",
+    "final_controller_sha256": "b333674b91a66672c1d1d259d973118c5391af540246271555e3530941a77b67",
+    "limitation": "Full five-fixture replay used the pre-hardening controller. Final setup ID-persistence and cleanup hardening were tested separately; workload, connection, sampler, phase, certification and run function ASTs are identical.",
+    "identical_function_asts": [
+      "connect",
+      "scheduler",
+      "spike",
+      "calm",
+      "certify",
+      "run"
+    ],
+    "final_cleanup_executed_successfully": true,
+    "sql_sha256": "94b3d80b6864999922bd9d70794dac4073e8e10e5d11f918d2a0947adf6b6444",
+    "sql_composition_revision": "fe3e7b4dc56f5be9977624de7c549165bc180882",
+    "docs_revision": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f"
+  },
+  "runtime": {
+    "python": "3.12.3",
+    "psycopg": "3.3.3",
+    "postgres": "18.6 (Debian 18.6-1.pgdg13+2)",
+    "image_id": "sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280",
+    "limits": {
+      "memory": "192m",
+      "cpus": "0.25",
+      "shared_buffers": "16MB",
+      "max_connections": 16
+    }
+  },
+  "checks": {
+    "controller_exit_code": 0,
+    "certified_cases": 5,
+    "reader_samples_and_readonly": 5,
+    "reader_script_content_audit": 5,
+    "actual_acl_denials": 25,
+    "hba_all_scram": true,
+    "pgpass_mode_0600": true,
+    "offline_safety_tests_passed": 11,
+    "syntax_check": "PASS",
+    "help_check": "PASS",
+    "public_commit_input_reconstruction": "PASS",
+    "cleanup_removed_owned_containers": 5,
+    "cleanup_retry_with_absent_ids": "PASS",
+    "remaining_validation_containers": 0
+  },
+  "cases": [
+    {
+      "case_id": "swe7j6wu",
+      "mechanism": "sleep",
+      "certified": true,
+      "certified_at": "2026-10-21T22:22:00.325084+00:00",
+      "matching_ash_independent_counts": [
+        [
+          28,
+          30
+        ],
+        [
+          34,
+          36
+        ]
+      ],
+      "query_attribution_available": true,
+      "sampler_errors_or_skips": 0,
+      "service_sessions_remaining": 0,
+      "rollup_rows": 2,
+      "certificate_sha256": "dc38fd7c5f0413ce717ee30333b73182a5c55f5b0adace9918d71dd48c44ae47"
+    },
+    {
+      "case_id": "abja9n39",
+      "mechanism": "transactionid",
+      "certified": true,
+      "certified_at": "2026-10-21T22:25:00.431146+00:00",
+      "matching_ash_independent_counts": [
+        [
+          28,
+          28
+        ],
+        [
+          36,
+          36
+        ]
+      ],
+      "query_attribution_available": true,
+      "sampler_errors_or_skips": 0,
+      "service_sessions_remaining": 0,
+      "rollup_rows": 2,
+      "certificate_sha256": "65dcf8a725636cdd20bd51a8520979b38c2867d6b1bd9762fee9dec70868ddb6"
+    },
+    {
+      "case_id": "3epj57xn",
+      "mechanism": "idletx",
+      "certified": true,
+      "certified_at": "2026-10-21T22:28:00.309791+00:00",
+      "matching_ash_independent_counts": [
+        [
+          28,
+          28
+        ],
+        [
+          36,
+          36
+        ]
+      ],
+      "query_attribution_available": true,
+      "sampler_errors_or_skips": 0,
+      "service_sessions_remaining": 0,
+      "rollup_rows": 2,
+      "certificate_sha256": "bb9568823f7da7cd2d0b7d52618c95d5c2811638d515e2d1f6edbdf5230c3aef"
+    },
+    {
+      "case_id": "s49m2cnh",
+      "mechanism": "cpu",
+      "certified": true,
+      "certified_at": "2026-10-21T22:31:00.205235+00:00",
+      "matching_ash_independent_counts": [
+        [
+          14,
+          13
+        ],
+        [
+          17,
+          17
+        ]
+      ],
+      "query_attribution_available": true,
+      "sampler_errors_or_skips": 0,
+      "service_sessions_remaining": 0,
+      "rollup_rows": 2,
+      "certificate_sha256": "c301a9a24ceea768943942f37aa298123cf548e575d56d15393352d57ba3aa60"
+    },
+    {
+      "case_id": "ssfjwgh2",
+      "mechanism": "relation",
+      "certified": true,
+      "certified_at": "2026-10-21T22:34:00.442787+00:00",
+      "matching_ash_independent_counts": [
+        [
+          28,
+          28
+        ],
+        [
+          36,
+          36
+        ]
+      ],
+      "query_attribution_available": true,
+      "sampler_errors_or_skips": 0,
+      "service_sessions_remaining": 0,
+      "rollup_rows": 2,
+      "certificate_sha256": "742d15388ac06ee5dfa43291171b805b8ee8777daf004de33f4499e91ae46bc1"
+    }
+  ]
+}

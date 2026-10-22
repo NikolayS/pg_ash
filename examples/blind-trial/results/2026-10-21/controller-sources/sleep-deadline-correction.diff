@@ -1,0 +1,11 @@
+--- harness-v1-invalid-sleep-deadline.py
++++ harness-v2-valid-generation-cpu-validator-defect.py
+@@ -271,7 +271,7 @@
+             for conn in conns:
+                 conn.execute('rollback')
+         for thread in threads:
+-            thread.join(timeout=5)
++            thread.join(timeout=seconds + 5)
+             if thread.is_alive():
+                 raise RuntimeError('workload did not exit')
+         if errors:

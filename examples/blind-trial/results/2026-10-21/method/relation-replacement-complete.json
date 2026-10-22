@@ -1,0 +1,25 @@
+{
+  "at": "2026-10-21T22:14:39.259903+00:00",
+  "status": "certified and handed to parent",
+  "owner": "/root/adjudicate_demo_reviews",
+  "scope": "only fourth replacement",
+  "replacement_id": "n6rq9wm3",
+  "additional_attribution_checks": [
+    {
+      "index": 1,
+      "distinct_sample_seconds": 14,
+      "all_matching_query_ids_and_text_present": true
+    },
+    {
+      "index": 2,
+      "distinct_sample_seconds": 18,
+      "all_matching_query_ids_and_text_present": true
+    }
+  ],
+  "handoff_sha256": "297e1ff958e0eef6d7d6115371b06a4d1c57a58045f1f36fcb14cd0c7eea8625",
+  "issue_method_comment": "https://github.com/NikolayS/pg_ash/issues/285#issuecomment-6327723731",
+  "old_attempt": "ssfjwgh2-invalid-attempt1",
+  "old_container_state": "stopped and retained",
+  "cleanup": "deferred; parent owns final cleanup",
+  "active_sampler_pid": 2145828
+}

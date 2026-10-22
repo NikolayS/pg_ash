@@ -1,16 +1,58 @@
-# pg_ash demo harness
+# pg_ash demos
 
-Every image in `README.md` and `docs/`, plus the animated reel, regenerated from
-**real** pg_ash query output against a **real** PostgreSQL, with one command:
+## Watch
+
+[Watch the incident investigation](../README.md#watch-an-incident-investigation).
+The reel is a scripted SQL replay, not an autonomous agent recording.
+For tool-using agent tasks, start with the [agentic examples](../examples/README.md).
+The reel starts after the incident ends.
+It follows four questions:
+
+1. When did load rise?
+2. What were sessions waiting for?
+3. Which statements experienced that wait?
+4. What changed from the baseline?
+
+Each scene uses actual pg_ash reader output.
+The timeline is compressed by restamping real observations; it is not a real-time recording of the incident.
+Backend counts and reader results are not edited.
+See [collection method](#collection-method-and-timing) below.
+
+## Try
+
+[Give an agent the before/after lock lab](../examples/README.md#beforeafter-lock-lab).
+It uses real elapsed time and requires no renderer.
+The lab changes transaction scope, then compares the sampled lock waits.
+It is a functional demonstration, not an overhead benchmark.
+
+## Reproduce the assets
+
+Run from the repository root on a disposable Postgres instance:
 
 ```sh
+make -C demos doctor
 make -C demos all
+make -C demos down
 ```
 
-No Docker required. No browser required. No hand-cropping, and nothing that only
-works on one laptop.
+`doctor` lists missing dependencies before collection starts.
+The default backend uses your local libpq connection settings.
+For an isolated Docker backend, use:
 
----
+```sh
+ASH_BACKEND=docker make -C demos all
+ASH_BACKEND=docker make -C demos down
+```
+
+Start with the default workload.
+Use the [empty-baseline profile](#workload-timing-and-an-empty-baseline) only when short reads produce empty minutes.
+Hardware and transport still affect the result.
+Do not run the workload against production.
+The backend rejects unsafe database names and preserves resources it does not own.
+
+All stills and the reel share one frozen window.
+The scene list is [scenes/scenes.tsv](scenes/scenes.tsv).
+Collection settings and history availability remain available as stills; they do not delay the incident story.
 
 ## What it produces
 
@@ -19,16 +61,14 @@ works on one laptop.
 | `assets/<scene>.svg` | `make stills` | the primary still. Vector, byte-deterministic, crisp at any zoom |
 | `assets/<scene>.png` | `make stills` | `ASH_SCALE`× raster of the same SVG (default 2×) |
 | `assets/ash_demo.gif` | `make demo` | the reel |
-| `assets/ash_demo.mp4` | `make demo` | same render, ~40% smaller; what docs sites want |
+| `assets/ash_demo.mp4` | `make demo` | same render, with pause, seek, and full-screen player controls |
 
 The scene list is data, not code: `scenes/scenes.tsv`. Adding a documentation
 image means adding one line to that file.
 
 ---
 
-## Honesty boundary
-
-Read this before you look at a single number.
+## Collection method and timing
 
 > The harness shapes **which** real samples exist and **when** they are
 > considered to have been taken. Every number in every asset is pg_ash
@@ -36,20 +76,21 @@ Read this before you look at a single number.
 > `pg_stat_activity` over real pgbench backends. No reader output is edited.
 
 Concretely, the seeder runs a real workload, samples it with pg_ash's real
-sampler, and then rewrites `ash.sample.sample_ts` so that one real second of
-load is filed as one virtual minute of history. It never invents a row, never
+sampler, and then rewrites `ash.sample.sample_ts` to distribute each short
+batch of observations across one virtual minute of history. It never invents a row, never
 edits a backend count, and never touches the packed wait/query array. That is
 the whole of the liberty taken, and it lives in one `UPDATE` in
 `lib/seed.sql` (`ash_demo.restamp`).
 
-**Time compression: 1 real second = 1 virtual minute.** 28 minutes of history
-arrives in about 20 seconds. The exact ratio in force for a given run is
-recorded in `out/window.env` as `ASH_COMPRESSION`.
+**Compressed mode uses virtual-minute weighting, not a fixed clock ratio.**
+Elapsed time depends on sample execution and workload duration as well as the
+configured pauses. `out/window.env` records a descriptive `ASH_COMPRESSION`
+label; it is not a measured compression ratio.
 
-`ASH_REAL_TIME=1` turns compression off entirely: the seeder then samples at the
-declared interval in real wall-clock time and skips the restamp. It takes about
-28 minutes and the assets are indistinguishable, which is the point — the switch
-exists so that claim can be checked rather than believed.
+`ASH_REAL_TIME=1` skips restamping and uses the declared sampling interval as
+the real pause between calls, plus their execution time. The default run takes
+roughly 28 minutes. Its observed counts, waits, and rendered shape can differ
+from compressed mode; the workload is stochastic.
 
 The seeder also keeps only samples for its own database. pg_ash samples the
 whole cluster by design; on a developer machine that would quietly fold every
@@ -61,14 +102,13 @@ reproducible.
 ## pg_cron is not required — and this demo deliberately does not use it
 
 The harness drives `ash.take_sample()` itself, from an ordinary session. That is
-the **external scheduler** path, and it is the default here for two reasons:
+the **external scheduler** path. The harness uses it so reproduction does not
+depend on pg_cron being installed, configured, or permitted in the chosen
+database. Managed services may support pg_cron; availability depends on the
+provider, Postgres version, and configuration. Check those requirements when
+choosing the scheduler for your deployment.
 
-1. It is what pg_ash users on RDS, Cloud SQL, Supabase, AlloyDB and Neon
-   actually run, because those platforms do not give you pg_cron.
-2. It is the only path that works on an arbitrary CI runner.
-
-So the degraded no-cron mode is not a compromise in this harness — it is the
-mainline. `ash.status()` in the `status` scene says so on screen: the demo shows
+`ash.status()` in the `status` scene says so on screen: the demo shows
 `pg_cron_available` as `no (use external scheduler)`, because that is the truth
 of how it was collected.
 
@@ -91,9 +131,41 @@ make -C demos down       # remove only a database/container this run created
 
 `make help` prints the same list plus every knob.
 
-Measured wall-clock on an M-series MacBook against a local PostgreSQL 18.3:
-`seed` 22 s, `stills` 23 s, `demo` 155 s (75 s of that is the recording itself,
-which runs in real time by construction), `all` about 3 minutes, `check` 1 s.
+The reel holds each result long enough to read it.
+Actual capture time depends on query execution, typing, and rendering.
+The run log records elapsed times.
+
+### Workload timing and an empty baseline
+
+The defaults are starting points for shaping a real workload. Over TCP to a
+VM or container, short read queries can spend most sampling instants idle,
+even after the readiness probe has seen an active backend. A zero-sample
+minute fails the seed rather than fabricating activity. Check `ash.status()`
+for enabled sampling, a supported interval, and skipped/missed/error counters.
+If collection is healthy, increase the real range-query work per request.
+Use this profile only to address empty baseline minutes.
+It passed capture and shape checks from macOS to Docker Postgres 18.4:
+
+```bash
+ASH_BACKEND=docker \
+ASH_READ_SPAN_CALM=50000 ASH_READ_SPAN_TAIL=50000 \
+make -C demos all
+```
+
+These knobs increase real query work, not stored backend counts or reader output.
+They can also increase calm AAS and push a lock event below the chart cutoff.
+This profile is not a general fix for ranking failures.
+All shape assertions remain required.
+The default 1,500-row calm query produced only 1 stored observation
+in a 20-tick probe on that setup, versus 15 with 50,000 rows. This is a demo
+reproduction profile, not an overhead benchmark or a universal sizing rule.
+
+The default `ASH_SPM=12` requests 12 ticks per **virtual** minute and sets the
+stored sampling weight to `60 / 12 = 5` seconds. Compressed mode pauses only
+0.04 real seconds between ticks before restamping the observations; the
+5-second weight is not its wall-clock collection cadence. `ASH_REAL_TIME=1`
+uses 5-second pauses and skips restamping. The LLM walkthrough under
+`examples/` separately uses real one-second sampling without compression.
 
 ### Prerequisites, honestly
 
@@ -166,7 +238,7 @@ Whether that is still valid is decided by the *data*, not by a clock:
 against what is in the table right now, so a reseed, a stray sampler or a
 dropped database all fail it with exit 3.
 
-`make render` skips the 75-second tmux recording and redoes everything from
+`make render` skips the tmux recording and redoes everything from
 `agg` onwards against the cast already in `out/`. That is the loop for anything
 to do with the theme, the window chrome, the palette or the size budget.
 
@@ -234,13 +306,10 @@ incident.
 - the calm baseline is **not** led by a lock wait;
 - `ash.periods()` returns all 6 rows with no NULL `avg_aas` — which can only
   happen if the rollup chain and its watermarks are intact;
-- at least **two `Lock:*` events rank in the top four** of the whole chart
-  window. That one is purely about the picture: `ash.chart()` ranks its series
-  over the entire window and folds the rest into a single "Other" dot column, so
-  a calm phase heavy enough to outrank both lock waits would render the
-  five-minute incident as anonymous dots. Nothing else here would notice — it is
-  not an error, it is not empty, it is just a bad hero image. Now it fails the
-  seed and names the two knobs to turn.
+- at least **two `Lock:*` events rank in the top five** of the full chart window.
+  The scene uses `n => 5` too. The extra slot gives margin when calm CPU/IO activity changes rank.
+  The chart also preserves each bucket's leading event, but this does not guarantee both lock waits remain named.
+  The gate still rejects captures that lose the secondary lock wait from the top five.
 
 That last one is worth its own note. Deleting `ash.rollup_1m` without also
 setting `last_rollup_1m_ts = null` leaves `ash.rollup_minute()` convinced it has
@@ -260,7 +329,7 @@ ASH_UNTIL='2026-07-26 23:00:00-07'
 ASH_STORM_SINCE='2026-07-26 22:44:00-07'
 ASH_STORM_UNTIL='2026-07-26 22:49:00-07'
 ASH_STORM_EVENT='Lock:transactionid'
-ASH_COMPRESSION='1 real second = 1 virtual minute'
+ASH_COMPRESSION='virtual-minute weighting; elapsed time varies'
 ...
 ```
 

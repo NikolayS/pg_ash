@@ -1,0 +1,154 @@
+[
+  {
+    "metric": "version",
+    "value": "2.0-rc1"
+  },
+  {
+    "metric": "in_recovery",
+    "value": "false"
+  },
+  {
+    "metric": "color",
+    "value": "off"
+  },
+  {
+    "metric": "num_partitions",
+    "value": "3"
+  },
+  {
+    "metric": "sample_unlogged",
+    "value": "false"
+  },
+  {
+    "metric": "sampling_enabled",
+    "value": "true"
+  },
+  {
+    "metric": "skipped_samples",
+    "value": "0"
+  },
+  {
+    "metric": "current_slot",
+    "value": "0"
+  },
+  {
+    "metric": "sample_interval",
+    "value": "00:00:01"
+  },
+  {
+    "metric": "sample_interval_supported",
+    "value": "true"
+  },
+  {
+    "metric": "rotation_period",
+    "value": "1 day"
+  },
+  {
+    "metric": "rotation_period_contract",
+    "value": "day-granular; minimum 1 day"
+  },
+  {
+    "metric": "raw_retention",
+    "value": "1 day + current partial"
+  },
+  {
+    "metric": "include_bg_workers",
+    "value": "false"
+  },
+  {
+    "metric": "debug_logging",
+    "value": "false"
+  },
+  {
+    "metric": "missed_samples",
+    "value": "0"
+  },
+  {
+    "metric": "insert_errors",
+    "value": "0"
+  },
+  {
+    "metric": "installed_at",
+    "value": "2026-10-21 21:52:31.126159+00"
+  },
+  {
+    "metric": "rotated_at",
+    "value": "2026-10-21 21:52:31.126159+00"
+  },
+  {
+    "metric": "time_since_rotation",
+    "value": "00:02:40.579485"
+  },
+  {
+    "metric": "consecutive_rotate_failures",
+    "value": "0"
+  },
+  {
+    "metric": "last_sample_ts",
+    "value": "2026-10-21 21:54:10+00"
+  },
+  {
+    "metric": "time_since_last_sample",
+    "value": "00:01:01.705644"
+  },
+  {
+    "metric": "samples_in_current_slot",
+    "value": "5"
+  },
+  {
+    "metric": "samples_total",
+    "value": "5"
+  },
+  {
+    "metric": "wait_event_map_count",
+    "value": "1"
+  },
+  {
+    "metric": "wait_event_map_utilization",
+    "value": "0.00%"
+  },
+  {
+    "metric": "register_wait_cap_hits",
+    "value": "0"
+  },
+  {
+    "metric": "query_map_count",
+    "value": "1"
+  },
+  {
+    "metric": "rollup_1m_rows",
+    "value": "0"
+  },
+  {
+    "metric": "rollup_1m_retention",
+    "value": "30 days"
+  },
+  {
+    "metric": "rollup_1h_rows",
+    "value": "0"
+  },
+  {
+    "metric": "rollup_1h_retention",
+    "value": "1825 days"
+  },
+  {
+    "metric": "raw_retention_start",
+    "value": "2026-10-20 21:52:00+00"
+  },
+  {
+    "metric": "rollup_1m_retention_start",
+    "value": "no rollups"
+  },
+  {
+    "metric": "rollup_1h_retention_start",
+    "value": "no rollups"
+  },
+  {
+    "metric": "epoch_seconds_remaining",
+    "value": "2122089535"
+  },
+  {
+    "metric": "pg_cron_available",
+    "value": "no (use external scheduler)"
+  }
+]

@@ -1,0 +1,209 @@
+\set ON_ERROR_STOP on
+begin read only;
+BEGIN
+set local statement_timeout = '30s';
+SET
+select * from ash.status();
+           metric            |             value             
+-----------------------------+-------------------------------
+ version                     | 2.0-rc1
+ in_recovery                 | false
+ color                       | off
+ num_partitions              | 3
+ sample_unlogged             | false
+ sampling_enabled            | true
+ skipped_samples             | 0
+ current_slot                | 0
+ sample_interval             | 00:00:01
+ sample_interval_supported   | true
+ rotation_period             | 1 day
+ rotation_period_contract    | day-granular; minimum 1 day
+ raw_retention               | 1 day + current partial
+ include_bg_workers          | false
+ debug_logging               | false
+ missed_samples              | 0
+ insert_errors               | 0
+ installed_at                | 2026-10-21 22:11:14.542024+00
+ rotated_at                  | 2026-10-21 22:11:14.542024+00
+ time_since_rotation         | 00:05:07.501753
+ consecutive_rotate_failures | 0
+ last_sample_ts              | 2026-10-21 22:12:42+00
+ time_since_last_sample      | 00:03:40.043777
+ samples_in_current_slot     | 32
+ samples_total               | 32
+ wait_event_map_count        | 2
+ wait_event_map_utilization  | 0.01%
+ register_wait_cap_hits      | 0
+ query_map_count             | 2
+ rollup_1m_rows              | 2
+ rollup_1m_oldest            | 2026-10-21 22:11:00+00
+ rollup_1m_newest            | 2026-10-21 22:12:00+00
+ rollup_1m_retention         | 30 days
+ rollup_1h_rows              | 0
+ rollup_1h_retention         | 1825 days
+ last_rollup_1m_ts           | 2026-10-21 22:15:00+00
+ raw_retention_start         | 2026-10-20 22:11:00+00
+ rollup_1m_retention_start   | 2026-10-21 22:11:00+00
+ rollup_1h_retention_start   | no rollups
+ epoch_seconds_remaining     | 2122088265
+ pg_cron_available           | no (use external scheduler)
+(41 rows)
+
+select * from ash.aas(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00');
+      period_start      |       period_end       | source | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+--------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 22:11:00+00 | 2026-10-21 22:13:00+00 | raw    | 00:01:00         |                2 |                 2 |    0.80 |     1.15 |    1.14 |           96.00
+(1 row)
+
+select * from ash.timeline(since=>'2026-10-21 22:09:00+00',until=>'2026-10-21 22:15:00+00',bucket=>'1 minute');
+      bucket_start      |  source   | data_points | avg_aas | peak_aas | p99_aas 
+------------------------+-----------+-------------+---------+----------+---------
+ 2026-10-21 22:09:00+00 | rollup_1m |           0 |         |          |        
+ 2026-10-21 22:10:00+00 | rollup_1m |           0 |         |          |        
+ 2026-10-21 22:11:00+00 | rollup_1m |           1 |    0.45 |     0.45 |    0.45
+ 2026-10-21 22:12:00+00 | rollup_1m |           1 |    1.15 |     1.15 |    1.15
+ 2026-10-21 22:13:00+00 | rollup_1m |           0 |         |          |        
+ 2026-10-21 22:14:00+00 | rollup_1m |           0 |         |          |        
+(6 rows)
+
+select * from ash.top('wait_event',since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',order_by=>'peak');
+        key        | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct  
+-------------------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+-------
+ Lock:relation     |            | raw    | 2026-10-21 22:11:00+00 | 2026-10-21 22:13:00+00 | 00:01:00         |    0.53 |     0.77 |    0.76 |           64.00 | 66.67
+ Client:ClientRead |            | raw    | 2026-10-21 22:11:00+00 | 2026-10-21 22:13:00+00 | 00:01:00         |    0.27 |     0.38 |    0.38 |           32.00 | 33.33
+(2 rows)
+
+select * from ash.top('query_id',since=>'2026-10-21 22:12:00+00',until=>'2026-10-21 22:13:00+00',wait_event=>'Lock:relation',order_by=>'peak');
+         key          |                query_text                 | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+----------------------+-------------------------------------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ -9127212586606946335 | select payload from records where id = $1 | raw    | 2026-10-21 22:12:00+00 | 2026-10-21 22:13:00+00 | 00:01:00         |    0.77 |     0.77 |    0.77 |           46.00 | 100.00
+(1 row)
+
+select * from ash.top('wait_event',since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',query_id=>-9127212586606946335);
+      key      | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+---------------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ Lock:relation |            | raw    | 2026-10-21 22:11:00+00 | 2026-10-21 22:13:00+00 | 00:01:00         |    0.53 |     0.77 |    0.76 |           64.00 | 100.00
+(1 row)
+
+select * from ash.samples(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',n=>100);
+      sample_time       | database_name | active_backends |    wait_event     |       query_id       |                 query_text                  
+------------------------+---------------+-----------------+-------------------+----------------------+---------------------------------------------
+ 2026-10-21 22:12:42+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:42+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:42+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:41+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:41+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:41+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:40+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:40+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:40+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:39+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:39+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:39+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:38+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:38+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:38+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:37+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:37+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:37+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:36+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:36+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:36+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:35+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:35+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:35+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:34+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:34+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:34+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:33+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:33+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:33+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:32+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:32+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:32+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:31+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:31+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:31+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:30+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:30+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:30+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:29+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:29+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:29+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:28+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:28+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:28+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:27+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:27+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:27+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:26+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:26+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:26+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:25+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:25+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:25+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:04+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:04+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:04+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:03+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:03+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:03+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:02+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:02+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:02+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:01+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:01+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:01+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:00+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:12:00+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:12:00+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:59+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:59+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:59+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:58+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:58+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:58+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:57+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:57+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:57+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:56+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:56+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:56+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:55+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:55+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:55+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:54+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:54+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:54+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:53+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:53+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:53+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:52+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:52+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:52+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:51+00 | appdb         |               3 | Client:ClientRead |  -238073253591604315 | lock table records in access exclusive mode
+ 2026-10-21 22:11:51+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:11:51+00 | appdb         |               3 | Lock:relation     | -9127212586606946335 | select payload from records where id = $1
+(96 rows)
+
+with ticks as (
+ select sample_time, count(*) as observations
+ from ash.samples(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',n=>100)
+ group by sample_time
+), gaps as (
+ select *, sample_time - lag(sample_time) over (order by sample_time) as gap from ticks
+)
+select min(sample_time) as first_sample, max(sample_time) as last_sample, count(*) as ticks, min(observations) as min_observations, max(observations) as max_observations, max(gap) as largest_gap from gaps;
+      first_sample      |      last_sample       | ticks | min_observations | max_observations | largest_gap 
+------------------------+------------------------+-------+------------------+------------------+-------------
+ 2026-10-21 22:11:51+00 | 2026-10-21 22:12:42+00 |    32 |                3 |                3 | 00:00:21
+(1 row)
+
+select * from ash.aas(since=>'2026-10-21 22:09:00+00',until=>'2026-10-21 22:11:00+00');
+      period_start      |       period_end       |  source   | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+-----------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 22:09:00+00 | 2026-10-21 22:11:00+00 | rollup_1m | 00:01:00         |                2 |                 0 |    0.00 |        0 |       0 |            0.00
+(1 row)
+
+commit;
+COMMIT

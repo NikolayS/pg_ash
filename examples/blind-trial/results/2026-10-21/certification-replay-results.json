@@ -1,0 +1,234 @@
+[
+  {
+    "case": "3epj57xn",
+    "frozen_window_counts_reproduced": true,
+    "observed_windows": [
+      {
+        "window": {
+          "index": 1,
+          "start": "2026-10-21T21:59:19.648946+00:00",
+          "end": "2026-10-21T21:59:33.664587+00:00"
+        },
+        "ash_matching_rows": 28,
+        "independent_matching_observations": 28,
+        "query_ids": [
+          -9127212586606946335
+        ],
+        "valid": true
+      },
+      {
+        "window": {
+          "index": 2,
+          "start": "2026-10-21T21:59:53.665163+00:00",
+          "end": "2026-10-21T22:00:11.680007+00:00"
+        },
+        "ash_matching_rows": 36,
+        "independent_matching_observations": 36,
+        "query_ids": [
+          -9127212586606946335
+        ],
+        "valid": true
+      }
+    ],
+    "sampler_errors_before_certification": 0
+  },
+  {
+    "case": "abja9n39",
+    "frozen_window_counts_reproduced": true,
+    "observed_windows": [
+      {
+        "window": {
+          "index": 1,
+          "start": "2026-10-21T21:57:17.266517+00:00",
+          "end": "2026-10-21T21:57:31.290489+00:00"
+        },
+        "ash_matching_rows": 28,
+        "independent_matching_observations": 28,
+        "query_ids": [
+          -1016721775295826782
+        ],
+        "valid": true
+      },
+      {
+        "window": {
+          "index": 2,
+          "start": "2026-10-21T21:57:51.290829+00:00",
+          "end": "2026-10-21T21:58:09.311261+00:00"
+        },
+        "ash_matching_rows": 36,
+        "independent_matching_observations": 36,
+        "query_ids": [
+          -1016721775295826782
+        ],
+        "valid": true
+      }
+    ],
+    "sampler_errors_before_certification": 0
+  },
+  {
+    "case": "n6rq9wm3",
+    "frozen_window_counts_reproduced": true,
+    "observed_windows": [
+      {
+        "window": {
+          "index": 1,
+          "start": "2026-10-21T22:11:50.401896+00:00",
+          "end": "2026-10-21T22:12:04.425244+00:00"
+        },
+        "ash_matching_rows": 28,
+        "independent_matching_observations": 28,
+        "query_ids": [
+          -9127212586606946335
+        ],
+        "valid": true
+      },
+      {
+        "window": {
+          "index": 2,
+          "start": "2026-10-21T22:12:24.425759+00:00",
+          "end": "2026-10-21T22:12:42.446143+00:00"
+        },
+        "ash_matching_rows": 36,
+        "independent_matching_observations": 36,
+        "query_ids": [
+          -9127212586606946335
+        ],
+        "valid": true
+      }
+    ],
+    "sampler_errors_before_certification": 0
+  },
+  {
+    "case": "s49m2cnh",
+    "frozen_window_counts_reproduced": true,
+    "observed_windows": [
+      {
+        "window": {
+          "index": 1,
+          "start": "2026-10-21T22:01:21.852289+00:00",
+          "end": "2026-10-21T22:01:36.588135+00:00"
+        },
+        "ash_matching_rows": 13,
+        "independent_matching_observations": 14,
+        "query_ids": [
+          2642533687498376244
+        ],
+        "valid": true
+      },
+      {
+        "window": {
+          "index": 2,
+          "start": "2026-10-21T22:01:56.588689+00:00",
+          "end": "2026-10-21T22:02:15.082508+00:00"
+        },
+        "ash_matching_rows": 17,
+        "independent_matching_observations": 18,
+        "query_ids": [
+          2642533687498376244
+        ],
+        "valid": true
+      }
+    ],
+    "sampler_errors_before_certification": 0
+  },
+  {
+    "case": "swe7j6wu",
+    "frozen_window_counts_reproduced": true,
+    "observed_windows": [
+      {
+        "window": {
+          "index": 1,
+          "start": "2026-10-21T22:07:44.514452+00:00",
+          "end": "2026-10-21T22:07:58.536009+00:00"
+        },
+        "ash_matching_rows": 27,
+        "independent_matching_observations": 29,
+        "query_ids": [
+          -7209068558248614225
+        ],
+        "valid": true
+      },
+      {
+        "window": {
+          "index": 2,
+          "start": "2026-10-21T22:08:18.536371+00:00",
+          "end": "2026-10-21T22:08:36.565679+00:00"
+        },
+        "ash_matching_rows": 34,
+        "independent_matching_observations": 36,
+        "query_ids": [
+          -7209068558248614225
+        ],
+        "valid": true
+      }
+    ],
+    "sampler_errors_before_certification": 0
+  },
+  {
+    "case": "original-relation-rejected",
+    "frozen_window_counts_reproduced": true,
+    "observed_windows": [
+      {
+        "window": {
+          "index": 1,
+          "start": "2026-10-21T22:04:32.094109+00:00",
+          "end": "2026-10-21T22:04:46.115388+00:00"
+        },
+        "ash_matching_rows": 28,
+        "independent_matching_observations": 28,
+        "query_ids": [],
+        "valid": false
+      },
+      {
+        "window": {
+          "index": 2,
+          "start": "2026-10-21T22:05:06.115944+00:00",
+          "end": "2026-10-21T22:05:24.136407+00:00"
+        },
+        "ash_matching_rows": 36,
+        "independent_matching_observations": 36,
+        "query_ids": [],
+        "valid": false
+      }
+    ]
+  },
+  {
+    "case": "cpu-original-validator-false-negative",
+    "original_counts_reproduced": true,
+    "observed_windows": [
+      {
+        "window": {
+          "index": 1,
+          "start": "2026-10-21T22:01:21.852289+00:00",
+          "end": "2026-10-21T22:01:36.588135+00:00"
+        },
+        "ash_matching_rows": 13,
+        "independent_matching_observations": 0,
+        "query_ids": [
+          2642533687498376244
+        ],
+        "valid": false
+      },
+      {
+        "window": {
+          "index": 2,
+          "start": "2026-10-21T22:01:56.588689+00:00",
+          "end": "2026-10-21T22:02:15.082508+00:00"
+        },
+        "ash_matching_rows": 17,
+        "independent_matching_observations": 0,
+        "query_ids": [
+          2642533687498376244
+        ],
+        "valid": false
+      }
+    ]
+  },
+  {
+    "case": "original-sleep-rejected",
+    "failure_log_present": true,
+    "completed_spike_records": 0,
+    "retained_decoded_sample_rows": 10,
+    "note": "The controller raised before completing/certifying its first spike; this is not a fabricated failed certificate."
+  }
+]

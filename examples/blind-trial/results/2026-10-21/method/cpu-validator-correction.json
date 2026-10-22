@@ -1,0 +1,7 @@
+{
+  "at": "2026-10-21T22:04:28.142703+00:00",
+  "definition": "pg_ash CPU* means active backend and no reported wait; independent pg_stat_activity exposes state=active and NULL wait_event_type/wait_event, not a literalCPU* string.",
+  "change": "Normalize only that exact active+twoNULL condition to CPU* for independent matching; no thresholds or data changed.",
+  "original_invalid_validator_result": "s49m2cnh/invalid-validator-result.json",
+  "validation_required": "Parent Astra review before CPU case investigator handoff; repeated adapter errors disclosed."
+}

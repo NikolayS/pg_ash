@@ -1,8 +1,8 @@
 /*
- * pg_ash: upgrade from 1.5 to 2.0 beta 1
+ * pg_ash: upgrade from 1.5 or any earlier 2.0 prerelease to 2.0 rc 1
  *
  * 2.0 is a breaking release: the reader API is redesigned (issue #113,
- * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 beta 1
+ * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 rc 1
  * installer, which:
  *   * snapshots existing reader-role EXECUTE grants, then drops every removed
  *     v1.x reader and draft aas_* function (all overloads / _at twins), the
@@ -22,22 +22,40 @@
  *   * grants the default reader bundle to pg_monitor (best-effort, new in
  *     2.0 — see the block at the end of the installer; opt out afterwards
  *     with `select ash.revoke_reader('pg_monitor')`), and
- *   * stamps ash.config.version = '2.0-beta1' (and the column default), and
+ *   * stamps ash.config.version = '2.0-rc1' (and the column default), and
  *   * normalizes ash.config's physical column order to match a fresh 2.0
  *     install while preserving its singleton row and catalog properties.
  *
- * Sampling and storage are unchanged. Other admin/lifecycle behavior and
- * rollup scheduling remain compatible; rollup_minute()/rollup_hour() correct
- * only their return values to count time grains instead of per-database rows.
+ * The release candidate installer owns the API, lifecycle and storage changes.
+ * Normalization includes sample_unlogged while retaining operator choices.
+ * This cumulative migration and its relative installer include are promoted
+ * together for the 2.0 rc 1 release candidate.
  * Re-apply-safe: the installer is idempotent (CREATE OR REPLACE / IF NOT
  * EXISTS plus the deterministic drop block), and the config normalization
  * exits without replacing the table once the canonical order is present.
+ *
+ * One migration-owned transaction covers both phases. The installer normally
+ * owns and commits its transaction; the transaction-local token below binds
+ * include mode to this transaction ID so the installer participates in the
+ * wider transaction instead. A finite preflight cannot prove that
+ * normalization will finish: the explicit catalog checks reject known
+ * unsupported table shapes, but a permitted dependent view can still make
+ * DROP RESTRICT fail, and event triggers, concurrent DDL, permissions,
+ * cancellation, or resource/commit failures can arise later. Keeping every
+ * statement in one transaction guarantees that any such failure rolls back
+ * the 2.0 version stamp together with all installer and normalization changes.
  */
 
+\set ON_ERROR_ROLLBACK off
 \set ON_ERROR_STOP on
+begin;
+select pg_catalog.set_config(
+  'pg_ash.install_in_migration_transaction',
+  pg_catalog.pg_current_xact_id()::text,
+  true
+);
 \ir ../ash-install.sql
 
-begin;
 set local search_path = pg_catalog, pg_temp;
 set local default_tablespace = '';
 
@@ -82,7 +100,8 @@ declare
     'last_rollup_1h_ts',
     'insert_errors',
     'register_wait_cap_hits',
-    'consecutive_rotate_failures'
+    'consecutive_rotate_failures',
+    'sample_unlogged'
   ]::text[];
   v_canonical_types constant text[] := array[
     'boolean',
@@ -106,7 +125,8 @@ declare
     'integer',
     'bigint',
     'bigint',
-    'bigint'
+    'bigint',
+    'boolean'
   ]::text[];
   v_canonical_not_null constant bool[] := array[
     true,
@@ -128,6 +148,7 @@ declare
     true,
     false,
     false,
+    true,
     true,
     true,
     true
@@ -332,7 +353,7 @@ begin
     where
       trigger_row.tgrelid = v_relation_oid
       and not trigger_row.tgisinternal
-  ) <> 1
+  ) <> 2
      or not exists (
        select
        from pg_catalog.pg_trigger as trigger_row
@@ -342,6 +363,15 @@ begin
          and trigger_row.tgname = 'config_validate_rotation'
          and trigger_row.tgfoid =
            'ash._validate_config_update()'::regprocedure
+         and trigger_row.tgenabled = 'O'
+     )
+     or not exists (
+       select from pg_catalog.pg_trigger as trigger_row
+       where trigger_row.tgrelid = v_relation_oid
+         and not trigger_row.tgisinternal
+         and trigger_row.tgname = 'config_validate_sample_interval'
+         and trigger_row.tgfoid =
+           'ash._validate_sample_interval_update()'::regprocedure
          and trigger_row.tgenabled = 'O'
      ) then
     raise exception
@@ -569,7 +599,8 @@ begin
     last_rollup_1h_ts          int4,
     insert_errors                bigint,
     register_wait_cap_hits       bigint,
-    consecutive_rotate_failures bigint
+    consecutive_rotate_failures bigint,
+    sample_unlogged bool
   ) using heap;
 
   insert into ash.config (
@@ -594,7 +625,8 @@ begin
     last_rollup_1h_ts,
     insert_errors,
     register_wait_cap_hits,
-    consecutive_rotate_failures
+    consecutive_rotate_failures,
+    sample_unlogged
   )
   select
     singleton,
@@ -618,7 +650,8 @@ begin
     last_rollup_1h_ts,
     insert_errors,
     register_wait_cap_hits,
-    consecutive_rotate_failures
+    consecutive_rotate_failures,
+    sample_unlogged
   from ash.config_ordinal_legacy;
 
   drop table ash.config_ordinal_legacy restrict;
@@ -631,6 +664,10 @@ begin
   on ash.config
   for each row
   execute function ash._validate_config_update();
+
+  create trigger config_validate_sample_interval
+  before insert or update of sample_interval on ash.config
+  for each row execute function ash._validate_sample_interval_update();
 
   v_owner_name := pg_catalog.pg_get_userbyid(v_owner_oid);
   execute format(

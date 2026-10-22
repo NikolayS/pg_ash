@@ -1,0 +1,7 @@
+{
+  "at": "2026-10-21T22:01:59.640381+00:00",
+  "reason": "Pre-handoff controller worker join deadline error; first incomplete fixture invalidated. Parent interrupted; do not delete resources without cleanup instruction.",
+  "recovery": "Retained original invalid first-case container STOPPED with complete actual evidence; created fresh replacement container for same opaque case. All5validcases use separate containers, plus1stoppedinvalid fixture retained. No database DROP, no ASH row edits or timestamp restamps.",
+  "workload_order": "Four untouched cases serially, then replacement case last.",
+  "unused_reset_script": "reset-invalid-case-NOT-EXECUTED.txt, superseded, must never execute."
+}

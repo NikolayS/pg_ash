@@ -325,6 +325,7 @@ while IFS=$'\t' read -r name hold reel title markers sql caption <&3; do
   expanded=$sql
   expanded=${expanded//\$STORM_SINCE/\'$ASH_STORM_SINCE\'}
   expanded=${expanded//\$STORM_UNTIL/\'$ASH_STORM_UNTIL\'}
+  expanded=${expanded//\$STORM_EVENT/\'$ASH_STORM_EVENT\'}
   expanded=${expanded//\$BASE_SINCE/\'$ASH_BASE_SINCE\'}
   expanded=${expanded//\$BASE_UNTIL/\'$ASH_BASE_UNTIL\'}
   expanded=${expanded//\$SINCE/\'$ASH_SINCE\'}
