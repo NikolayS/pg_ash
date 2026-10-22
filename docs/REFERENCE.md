@@ -520,6 +520,9 @@ not grant `pg_read_all_stats`. Monitoring roles that need `query_text` from
 `pg_stat_statements` usually need membership in `pg_monitor` or
 `pg_read_all_stats` too.
 
+Hidden `pg_stat_statements` entries in other databases can make unscoped query text NULL, even when the visible query ID is unique.
+A `database` filter disambiguates the source. Reading another role's SQL still requires the appropriate statistics privileges.
+
 SQL-text lookup finds the `pg_stat_statements` schema on each call.
 Installing or relocating the extension does not require a helper call.
 
@@ -535,7 +538,8 @@ Enable ANSI colors for one chart with `color => true`, or for the session:
 set ash.color = on;
 ```
 
-The chart uses distinct glyphs as well as colors. The legend identifies each series without requiring color perception.
+The chart uses glyphs as well as colors, but glyphs repeat when there are more than four series.
+Use the legend and typed `ash.top()` results when color or repeated glyphs make a series hard to distinguish.
 
 ## Catalog docs
 
