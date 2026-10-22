@@ -5135,7 +5135,7 @@ begin
   select ash.ts_to_timestamptz(min(sample_row.sample_ts))
   into v_oldest
   from ash.sample as sample_row
-  where sample_row.slot = any(ash._active_slots());
+  where sample_row.slot = any((select ash._active_slots())::smallint[]);
 
   return v_oldest;
 end;
@@ -5147,7 +5147,7 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  with raw_coverage as (
+  with raw_coverage as materialized (
     select ash._raw_oldest_sample() as oldest_sample
   )
   select case
@@ -5241,7 +5241,7 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  with raw_coverage as (
+  with raw_coverage as materialized (
     select ash._raw_oldest_sample() as oldest_sample
   )
   select case
@@ -5291,7 +5291,7 @@ declare
   v_watermark int4;
   v_complete_until timestamptz := least(until, date_trunc('minute', now()));
 begin
-  with fallback as (
+  with fallback as materialized (
     select ash._pick_source(since) as source
   )
   select case
@@ -5331,7 +5331,7 @@ begin
         or v_watermark < ash.ts_from_timestamptz(v_complete_until))
        and exists (
          select from ash.sample as sample_row
-         where sample_row.slot = any(ash._active_slots())
+         where sample_row.slot = any((select ash._active_slots())::smallint[])
            and sample_row.sample_ts >= ash.ts_from_timestamptz(since)
            and sample_row.sample_ts < ash.ts_from_timestamptz(v_complete_until)
            and (v_watermark is null or sample_row.sample_ts >= v_watermark)
@@ -7631,11 +7631,11 @@ as $$
     cross join lateral generate_series(
       0, greatest(sample_row.data[data_idx + 1] - 1, -1)
     ) as backend(n)
-    where sample_row.slot = any(ash._active_slots_for_at(
+    where sample_row.slot = any((select ash._active_slots_for_at(
              ash.ts_to_timestamptz(
                (select min(m) from unnest(minutes) as m)),
              ash.ts_to_timestamptz(
-               (select max(m) + 60 from unnest(minutes) as m))))
+               (select max(m) + 60 from unnest(minutes) as m))))::smallint[])
       /*
        * Sargable range bound so the (sample_ts) index prunes to the extreme
        * minutes instead of seq-scanning the whole active partition (#perf:
@@ -7783,7 +7783,7 @@ begin
        and exists (
          select
          from ash.sample as sample_row
-         where sample_row.slot = any(ash._active_slots())
+         where sample_row.slot = any((select ash._active_slots())::smallint[])
            and sample_row.sample_ts >= v_start_ts
            and sample_row.sample_ts < v_end_ts
        ) then
@@ -7821,6 +7821,9 @@ begin
    * (greatest/least in ts_from_timestamptz ignore NULLs, so a missing raw
    * oldest sample must be short-circuited here, not passed through.)
    */
+  with raw_coverage as materialized (
+    select ash._raw_oldest_sample() as oldest_sample
+  )
   select case
     when raw_coverage.oldest_sample is null then null
     else ash.ts_from_timestamptz(
@@ -7828,9 +7831,7 @@ begin
     )
   end
   into v_raw_min
-  from (
-    select ash._raw_oldest_sample() as oldest_sample
-  ) as raw_coverage;
+  from raw_coverage;
 
   -- Per-class metrics over the zero-filled per-minute AAS series.
   for v_class in

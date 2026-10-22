@@ -3802,7 +3802,11 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/query_text_database.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/pgss_helper_scope.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/raw_slot_selection.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/helper_execution.sql
 
       - name: "Test 2.0: report totals and formatting edges"
         env:
