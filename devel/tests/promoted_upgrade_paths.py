@@ -6,6 +6,7 @@ server with CREATEDB privileges; database names are unique to this process.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import sys
@@ -41,7 +42,24 @@ def tagged_origins(target_line: str) -> list[str]:
 
 
 
+def tagged_installer(archived: Path, tag: str) -> Path:
+    version = chain.PAYLOAD_VERSION_RE.fullmatch(tag[1:])
+    source_line = version.group("release_line")
+    if version.group("stage") == "alpha":
+        candidate = archived / "devel/sql/ash-install.sql"
+        if candidate.is_file():
+            return candidate
+    candidates = [archived / "sql" / name for name in (
+        "ash-install.sql", f"ash--{source_line}.sql", f"ash-{source_line}.sql"
+    )]
+    source_install = next((path for path in candidates if path.exists()), None)
+    if source_install is None:
+        raise RuntimeError(f"{tag}: no recognized tagged SQL installer")
+    return source_install
+
+
 def main() -> None:
+    argparse.ArgumentParser(description=__doc__).parse_args()
     with tempfile.TemporaryDirectory(prefix="ash-promoted-") as directory:
         temp = Path(directory)
         promoted = temp / "candidate"
@@ -113,17 +131,12 @@ def main() -> None:
                 archived.mkdir()
                 archive_file = temp / (tag + ".tar")
                 subprocess.run(["git", "archive", "--format=tar",
-                                "--output", str(archive_file), tag, "sql"],
+                                "--output", str(archive_file), tag],
                                cwd=ROOT, check=True)
                 subprocess.run(["tar", "-xf", str(archive_file), "-C", str(archived)],
                                check=True)
                 source_line = chain.PAYLOAD_VERSION_RE.fullmatch(tag[1:]).group("release_line")
-                candidates = [archived / "sql" / name for name in (
-                    "ash-install.sql", f"ash--{source_line}.sql", f"ash-{source_line}.sql"
-                )]
-                source_install = next((path for path in candidates if path.exists()), None)
-                if source_install is None:
-                    raise RuntimeError(f"{tag}: no recognized tagged SQL installer")
+                source_install = tagged_installer(archived, tag)
                 install(source_install, cwd=archived)
                 run(["--command", "update ash.config set sample_interval = interval '5 seconds', "
                      "include_bg_workers = true where singleton"])
