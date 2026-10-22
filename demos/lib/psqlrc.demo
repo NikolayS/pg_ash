@@ -75,4 +75,4 @@ set ash.color = on;
 -- Continuation of a quoted string / comment: same nonce family, still detected.
 \set PROMPT3 '%[%`printf "\033]2;ashcont-$$\007"`%]   '
 
-\unset QUIET
+-- Keep QUIET enabled so the connection banner cannot wrap into the recording.
