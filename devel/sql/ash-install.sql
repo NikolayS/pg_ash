@@ -8592,9 +8592,9 @@ comment on function ash._pgss_schema() is
   'Returns the schema name of the installed pg_stat_statements extension, or NULL if not installed. Used to keep reader functions portable across managed services and custom install schemas.';
 
 /*
- * Helper: re-apply search_path on the pgss reader functions using the
- * currently detected pgss schema. Run this after installing / moving
- * pg_stat_statements if it lives outside `public`. Safe to re-run.
+ * Defense in depth: refresh pgss reader search_path using the detected schema.
+ * SQL-text lookup is schema-qualified per call (#115), so this helper is not
+ * required after pgss installation or relocation. Safe to re-run.
  */
 create or replace function ash._apply_pgss_search_path()
 returns text
@@ -8664,7 +8664,7 @@ end;
 $$;
 
 comment on function ash._apply_pgss_search_path() is
-  'Re-applies search_path on pgss reader functions using the currently detected pg_stat_statements schema. Run after installing pg_stat_statements if it lives outside the public schema.';
+  'Refreshes reader search_path as defense in depth. SQL-text lookup resolves the pg_stat_statements schema on each call and does not require this helper after extension installation or relocation.';
 
 -- Apply now so installs that have pgss in a non-public schema work out of the
 -- box. No-op (keeps default) when pgss is absent or lives in public.

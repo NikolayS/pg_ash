@@ -25,6 +25,9 @@ Three sessions waiting throughout ten seconds contribute 30 backend-seconds.
 Across a 60-second window, that is 0.5 AAS.
 AAS measures sampled activity, not CPU utilization or query latency.
 
+pg_ash can run on managed Postgres, including RDS, Cloud SQL, AlloyDB, Supabase, and Neon.
+Optional extensions and cross-role statistics have separate [privilege requirements](docs/REFERENCE.md#privileges).
+
 ## Ask an agent, watch, or operate
 
 | Goal | Start here |
@@ -154,6 +157,9 @@ Install in the database that will store the history:
 ```bash
 psql -X -v ON_ERROR_STOP=1 -d mydb -f sql/ash-install.sql
 ```
+
+In an interactive psql session, install with `\i sql/ash-install.sql` from the repository root.
+Run it outside an open transaction. The installer owns its transaction, and its final `commit` also commits your pending work.
 
 Enable collection:
 
