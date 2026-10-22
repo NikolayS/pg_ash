@@ -110,8 +110,9 @@ begin
    * restore, which grants the complete current closure. Detection uses the
    * snapshotted explicit aclitems, not has_function_privilege(), so
    * superusers and role-membership shortcuts never qualify; roles holding
-   * only partial manual FUNCTION grants keep the exact-signature restore
-   * path and are not widened. Table ACLs are not snapshotted: a role with
+   * only partial manual FUNCTION grants retain their exact signatures plus
+   * required helper dependencies, not the full reader bundle.
+   * Table ACLs are not snapshotted: a role with
    * the full function bundle is classified as a reader even if an operator
    * narrowed its table access, so the full-bundle restore below re-grants
    * that access and emits a WARNING. ash._admin_funcs() may not exist yet

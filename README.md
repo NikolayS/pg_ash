@@ -145,9 +145,17 @@ For the latest stable release, check out `v1.5` instead.
 Use the instructions and SQL from the same checkout.
 Postgres 14 or newer is required.
 
-Use the RC2 release-stamp checkout for the commands below.
-Before the stamp merges, use its PR head, not the older release-branch payload.
-These instructions do not require an RC2 tag to exist.
+Fetch the RC2 stamp revision from its pull-request ref:
+
+```bash
+git clone https://github.com/NikolayS/pg_ash.git
+cd pg_ash
+git fetch origin refs/pull/306/head
+git switch --detach FETCH_HEAD
+```
+
+This checkout works without an RC2 tag.
+Use the SQL and instructions from this same checkout.
 
 Install in the database that will store the history:
 
