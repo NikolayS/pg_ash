@@ -7011,6 +7011,7 @@ declare
   v_grain2 int4;
   v_source1 text;
   v_source2 text;
+  v_datid oid;
   v_exact_query boolean;
   v_extrema_mismatch boolean;
 begin
@@ -7035,10 +7036,9 @@ begin
   end if;
 
   /*
-   * Per-window coverage probe (rollup-backed, cheap). buckets_with_data = 0
-   * means the window holds no data at all — its side must read NULL, and the
-   * caller is warned: comparing against an uncovered window says nothing
-   * about a regression.
+   * Scalar coverage probe and shared input validation. Dimensional reads
+   * recheck coverage below, after planning their own bounds and read grain.
+   * An uncovered window must not produce a delta against a fake zero.
    */
   select * into v_aas1 from ash.aas(v_from1, v_to1,
     wait_event_type, wait_event, query_id, database, bucket);
@@ -7046,21 +7046,6 @@ begin
     wait_event_type, wait_event, query_id, database, bucket);
   v_cov1 := v_aas1.buckets_with_data > 0;
   v_cov2 := v_aas2.buckets_with_data > 0;
-  if not v_cov1 then
-    raise notice
-      'ash.compare: window 1 (% to %) has no data coverage — its columns '
-      'and avg_delta are NULL, not zero. Check retention with ash.status() '
-      'before reading a delta as a change.',
-      v_aas1.period_start, v_aas1.period_end;
-  end if;
-  if not v_cov2 then
-    raise notice
-      'ash.compare: window 2 (% to %) has no data coverage — its columns '
-      'and avg_delta are NULL, not zero. Check retention with ash.status() '
-      'before reading a delta as a change.',
-      v_aas2.period_start, v_aas2.period_end;
-  end if;
-
   /*
    * The displayed bucket can be the same even when one side consists of one
    * retained hour average and the other consists of minute observations.
@@ -7087,6 +7072,161 @@ begin
          ) then 3600
     else 60
   end;
+
+  if dimension is not null then
+    /*
+     * Plan the dimensional windows independently. This cannot reuse aas()'s
+     * effective grain: an unfiltered scalar rollup_1h read can use minute_counts
+     * while a wait/query breakdown over that same physical source is hourly.
+     */
+    v_requested_bucket_secs := extract(epoch from bucket);
+    v_start1 := (ash.ts_from_timestamptz(date_trunc('minute', v_from1, 'UTC')) / 60) * 60;
+    v_end1 := (ash.ts_from_timestamptz(date_trunc('minute', v_to1, 'UTC')) / 60) * 60;
+    if v_end1 <= v_start1 then
+      v_end1 := least(v_start1::bigint + 60, 2147483647)::int4;
+    end if;
+    v_start2 := (ash.ts_from_timestamptz(date_trunc('minute', v_from2, 'UTC')) / 60) * 60;
+    v_end2 := (ash.ts_from_timestamptz(date_trunc('minute', v_to2, 'UTC')) / 60) * 60;
+    if v_end2 <= v_start2 then
+      v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
+    end if;
+
+    v_exact_query := query_id is not null
+                     or (
+                       dimension = 'query_id'
+                       and (
+                         wait_event_type is not null
+                         or wait_event is not null
+                       )
+                     );
+
+    if v_exact_query then
+      perform ash._require_raw_ring('exact query attribution');
+      v_source1 := 'raw';
+      v_source2 := 'raw';
+    else
+      v_source1 := ash._pick_source_agg(
+        ash.ts_to_timestamptz(v_start1),
+        ash.ts_to_timestamptz(v_end1)
+      );
+      v_source2 := ash._pick_source_agg(
+        ash.ts_to_timestamptz(v_start2),
+        ash.ts_to_timestamptz(v_end2)
+      );
+    end if;
+    v_grain1 := case when v_source1 = 'rollup_1h' then 3600 else 60 end;
+    v_grain2 := case when v_source2 = 'rollup_1h' then 3600 else 60 end;
+
+    if v_source1 = 'rollup_1h'
+       and dimension = 'database'
+       and wait_event_type is null
+       and wait_event is null
+       and query_id is null then
+      if ash._rollup_1h_has_flat(v_start1, v_end1, database) then
+        v_source1 := 'rollup_1h_flat';
+      else
+        v_grain1 := 60;
+      end if;
+    end if;
+    if v_source2 = 'rollup_1h'
+       and dimension = 'database'
+       and wait_event_type is null
+       and wait_event is null
+       and query_id is null then
+      if ash._rollup_1h_has_flat(v_start2, v_end2, database) then
+        v_source2 := 'rollup_1h_flat';
+      else
+        v_grain2 := 60;
+      end if;
+    end if;
+
+    if v_grain1 = 3600 then
+      v_start1 := ((v_start1::bigint / 3600) * 3600)::int4;
+      v_end1 := least(
+        ((v_end1::bigint + 3599) / 3600) * 3600,
+        2147483647
+      )::int4;
+    end if;
+    if v_grain2 = 3600 then
+      v_start2 := ((v_start2::bigint / 3600) * 3600)::int4;
+      v_end2 := least(
+        ((v_end2::bigint + 3599) / 3600) * 3600,
+        2147483647
+      )::int4;
+    end if;
+    v_effective_bucket_secs1 := (
+      (
+        greatest(ceil(v_requested_bucket_secs)::int4, v_grain1)::bigint
+        + v_grain1 - 1
+      )
+      / v_grain1 * v_grain1
+    )::int4;
+    v_effective_bucket_secs2 := (
+      (
+        greatest(ceil(v_requested_bucket_secs)::int4, v_grain2)::bigint
+        + v_grain2 - 1
+      )
+      / v_grain2 * v_grain2
+    )::int4;
+    v_extrema_mismatch :=
+      v_grain1 <> v_grain2
+      or v_effective_bucket_secs1 <> v_effective_bucket_secs2;
+
+    -- Minute rollup plans share aas() coverage, including sparse database detail.
+    -- Raw and hourly plans need only source-row existence, not decoded counts.
+    select db.oid into v_datid from pg_database as db where db.datname = database;
+    select case
+      when v_source1 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start1), ash.ts_to_timestamptz(v_end1)))::smallint[])
+          and s.sample_ts >= v_start1 and s.sample_ts < v_end1
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain1 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start1 and h.ts < v_end1
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov1
+    end into v_cov1;
+    select case
+      when v_source2 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start2), ash.ts_to_timestamptz(v_end2)))::smallint[])
+          and s.sample_ts >= v_start2 and s.sample_ts < v_end2
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain2 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start2 and h.ts < v_end2
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov2
+    end into v_cov2;
+  end if;
+
+  if not v_cov1 then
+    raise notice
+      'ash.compare: window 1 (% to %) has no data coverage — its columns '
+      'and avg_delta are NULL, not zero. Check retention with ash.status() '
+      'before reading a delta as a change.',
+      case when dimension is null then v_aas1.period_start
+           else ash.ts_to_timestamptz(v_start1) end,
+      case when dimension is null then v_aas1.period_end
+           else ash.ts_to_timestamptz(v_end1) end;
+  end if;
+  if not v_cov2 then
+    raise notice
+      'ash.compare: window 2 (% to %) has no data coverage — its columns '
+      'and avg_delta are NULL, not zero. Check retention with ash.status() '
+      'before reading a delta as a change.',
+      case when dimension is null then v_aas2.period_start
+           else ash.ts_to_timestamptz(v_start2) end,
+      case when dimension is null then v_aas2.period_end
+           else ash.ts_to_timestamptz(v_end2) end;
+  end if;
 
   if dimension is null then
     v_extrema_mismatch :=
@@ -7118,103 +7258,6 @@ begin
       null::numeric, null::numeric;
     return;
   end if;
-
-  /*
-   * Plan the dimensional windows independently. This cannot reuse aas()'s
-   * effective grain: an unfiltered scalar rollup_1h read can use minute_counts
-   * while a wait/query breakdown over that same physical source is hourly.
-   */
-  v_requested_bucket_secs := extract(epoch from bucket);
-  v_start1 := (ash.ts_from_timestamptz(date_trunc('minute', v_from1, 'UTC')) / 60) * 60;
-  v_end1 := (ash.ts_from_timestamptz(date_trunc('minute', v_to1, 'UTC')) / 60) * 60;
-  if v_end1 <= v_start1 then
-    v_end1 := least(v_start1::bigint + 60, 2147483647)::int4;
-  end if;
-  v_start2 := (ash.ts_from_timestamptz(date_trunc('minute', v_from2, 'UTC')) / 60) * 60;
-  v_end2 := (ash.ts_from_timestamptz(date_trunc('minute', v_to2, 'UTC')) / 60) * 60;
-  if v_end2 <= v_start2 then
-    v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
-  end if;
-
-  v_exact_query := query_id is not null
-                   or (
-                     dimension = 'query_id'
-                     and (
-                       wait_event_type is not null
-                       or wait_event is not null
-                     )
-                   );
-
-  if v_exact_query then
-    v_source1 := 'raw';
-    v_source2 := 'raw';
-  else
-    v_source1 := ash._pick_source_agg(
-      ash.ts_to_timestamptz(v_start1),
-      ash.ts_to_timestamptz(v_end1)
-    );
-    v_source2 := ash._pick_source_agg(
-      ash.ts_to_timestamptz(v_start2),
-      ash.ts_to_timestamptz(v_end2)
-    );
-  end if;
-  v_grain1 := case when v_source1 = 'rollup_1h' then 3600 else 60 end;
-  v_grain2 := case when v_source2 = 'rollup_1h' then 3600 else 60 end;
-
-  if v_source1 = 'rollup_1h'
-     and dimension = 'database'
-     and wait_event_type is null
-     and wait_event is null
-     and query_id is null then
-    if ash._rollup_1h_has_flat(v_start1, v_end1, database) then
-      v_source1 := 'rollup_1h_flat';
-    else
-      v_grain1 := 60;
-    end if;
-  end if;
-  if v_source2 = 'rollup_1h'
-     and dimension = 'database'
-     and wait_event_type is null
-     and wait_event is null
-     and query_id is null then
-    if ash._rollup_1h_has_flat(v_start2, v_end2, database) then
-      v_source2 := 'rollup_1h_flat';
-    else
-      v_grain2 := 60;
-    end if;
-  end if;
-
-  if v_grain1 = 3600 then
-    v_start1 := ((v_start1::bigint / 3600) * 3600)::int4;
-    v_end1 := least(
-      ((v_end1::bigint + 3599) / 3600) * 3600,
-      2147483647
-    )::int4;
-  end if;
-  if v_grain2 = 3600 then
-    v_start2 := ((v_start2::bigint / 3600) * 3600)::int4;
-    v_end2 := least(
-      ((v_end2::bigint + 3599) / 3600) * 3600,
-      2147483647
-    )::int4;
-  end if;
-  v_effective_bucket_secs1 := (
-    (
-      greatest(ceil(v_requested_bucket_secs)::int4, v_grain1)::bigint
-      + v_grain1 - 1
-    )
-    / v_grain1 * v_grain1
-  )::int4;
-  v_effective_bucket_secs2 := (
-    (
-      greatest(ceil(v_requested_bucket_secs)::int4, v_grain2)::bigint
-      + v_grain2 - 1
-    )
-    / v_grain2 * v_grain2
-  )::int4;
-  v_extrema_mismatch :=
-    v_grain1 <> v_grain2
-    or v_effective_bucket_secs1 <> v_effective_bucket_secs2;
 
   return query
   with window1 as (
