@@ -5026,7 +5026,10 @@ as $$
    * All escapes padded to 19 chars: \033[38;2;RRR;GGG;BBBm
    * Uniform length prevents pspg right-border misalignment.
    */
-  select case when not ash._color_on(color) then '' else
+  -- A resolved true value needs no session lookup.
+  select case when not (
+    case when color then true else ash._color_on(color) end
+  ) then '' else
     case
       when event like 'CPU%' then E'\033[38;2;080;250;123m'         -- green
       when event like 'IdleTx%' then E'\033[38;2;241;250;140m'      -- light yellow
@@ -5079,15 +5082,19 @@ as $$
    * All color escapes are now exactly 19 chars (zero-padded RGB).
    * reset is always 4 chars. Total invisible = 23 when color on, 0 when off.
    */
-  select ash._wait_color(event, color)
+  with settings as materialized (
+    select ash._color_on(color) as enabled
+  )
+  select case when not settings.enabled then '' else ash._wait_color(event, true) end
     || rpad(
          repeat('█', greatest(1, (
            pct / nullif(max_pct, 0) * least(greatest(width, 1), 500)
          )::int)),
          least(greatest(width, 1), 500)
        )
-    || ash._reset(color)
-    || lpad(pct || '%', 8);
+    || case when settings.enabled then E'\033[0m' else '' end
+    || lpad(pct || '%', 8)
+  from settings;
 $$;
 
 --------------------------------------------------------------------------------
@@ -5135,7 +5142,7 @@ begin
   select ash.ts_to_timestamptz(min(sample_row.sample_ts))
   into v_oldest
   from ash.sample as sample_row
-  where sample_row.slot = any(ash._active_slots());
+  where sample_row.slot = any((select ash._active_slots())::smallint[]);
 
   return v_oldest;
 end;
@@ -5147,7 +5154,7 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  with raw_coverage as (
+  with raw_coverage as materialized (
     select ash._raw_oldest_sample() as oldest_sample
   )
   select case
@@ -5241,7 +5248,7 @@ language sql
 stable
 set search_path = pg_catalog, ash
 as $$
-  with raw_coverage as (
+  with raw_coverage as materialized (
     select ash._raw_oldest_sample() as oldest_sample
   )
   select case
@@ -5291,7 +5298,7 @@ declare
   v_watermark int4;
   v_complete_until timestamptz := least(until, date_trunc('minute', now()));
 begin
-  with fallback as (
+  with fallback as materialized (
     select ash._pick_source(since) as source
   )
   select case
@@ -5331,9 +5338,10 @@ begin
         or v_watermark < ash.ts_from_timestamptz(v_complete_until))
        and exists (
          select from ash.sample as sample_row
-         where sample_row.slot = any(ash._active_slots())
-           and sample_row.sample_ts >= ash.ts_from_timestamptz(since)
-           and sample_row.sample_ts < ash.ts_from_timestamptz(v_complete_until)
+         where sample_row.slot = any((select ash._active_slots())::smallint[])
+           -- Scalar InitPlans also keep bounds constant during sequential scans.
+           and sample_row.sample_ts >= (select ash.ts_from_timestamptz(since))
+           and sample_row.sample_ts < (select ash.ts_from_timestamptz(v_complete_until))
            and (v_watermark is null or sample_row.sample_ts >= v_watermark)
            and not exists (
              select from ash.rollup_1m as minute_row
@@ -6614,6 +6622,26 @@ end;
 $$;
 
 /*
+ * Shared query-text rules. This immutable helper returns only a constant SQL
+ * template; it accepts no schema and executes no lookup. Callers quote their
+ * catalog-derived schema with format() and bind maxlen, query ID, and database
+ * OID with USING. Readers can safely receive EXECUTE on this constant helper.
+ */
+create or replace function ash._pgss_query_text_sql()
+returns text
+language sql
+immutable
+parallel safe
+set search_path = pg_catalog, ash
+as $$
+  -- Hidden IDs can collide across databases. Only visible matching IDs supply text.
+  select 'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
+         'where (queryid = $2 or ($3 is null and queryid is null)) '
+         'and ($3 is null or dbid = $3) '
+         'having $3 is not null or count(distinct dbid) = 1';
+$$;
+
+/*
  * The single vertical drill: AAS broken down by one dimension, every row
  * carrying avg/peak/p99 plus its share (pct) of the window total. Filters
  * compose with the dimension. Every explicit query_id filter needs exact raw
@@ -6676,6 +6704,7 @@ declare
   v_raw_start timestamptz;
   v_has_pgss boolean := false;
   v_pgss_schema text;
+  v_pgss_query_sql text;
   v_key_num bigint;
   v_datid oid;
 begin
@@ -6814,6 +6843,7 @@ begin
     begin
       execute format('select 1 from %I.pg_stat_statements limit 1',
                      v_pgss_schema);
+      v_pgss_query_sql := format(ash._pgss_query_text_sql(), v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
@@ -6947,8 +6977,9 @@ begin
     per_key.key_num,
     per_key.datid,
     v_source,
-    ash.ts_to_timestamptz(v_start_ts),
-    ash.ts_to_timestamptz(v_end_ts),
+    -- Generic plans must convert these bounds once, not once per key.
+    (select ash.ts_to_timestamptz(v_start_ts)),
+    (select ash.ts_to_timestamptz(v_end_ts)),
     v_bucket_secs * interval '1 second',
     per_key.avg_aas,
     per_key.peak_aas,
@@ -6967,10 +6998,16 @@ begin
     query_text := null;
     if dimension = 'query_id' and v_has_pgss
        and v_key_num is not null and v_datid is not null then
-      -- schema-qualified single lookup point (#115); returns null on any
+      -- Catalog-qualified lookup (#115); returns null on any
       -- failure, never text from a shadowing relation. A NULL v_datid means
       -- the key spans ASH databases, so attaching one database's text is unsafe.
-      query_text := ash._pgss_query_text(v_key_num, 100, v_datid);
+      -- Reuse this call's trusted schema. Do not repeat catalog discovery per key.
+      begin
+        execute v_pgss_query_sql
+          into query_text using 100, v_key_num, v_datid;
+      exception when others then
+        query_text := null;
+      end;
     end if;
     return next;
   end loop;
@@ -7312,10 +7349,11 @@ begin
          then coalesce(window1.query_text, window2.query_text) end,
     v_source1,
     v_source2,
-    ash.ts_to_timestamptz(v_start1),
-    ash.ts_to_timestamptz(v_end1),
-    ash.ts_to_timestamptz(v_start2),
-    ash.ts_to_timestamptz(v_end2),
+    -- Each bound belongs to the whole window, not an output key.
+    (select ash.ts_to_timestamptz(v_start1)),
+    (select ash.ts_to_timestamptz(v_end1)),
+    (select ash.ts_to_timestamptz(v_start2)),
+    (select ash.ts_to_timestamptz(v_end2)),
     v_effective_bucket_secs1 * interval '1 second',
     v_effective_bucket_secs2 * interval '1 second',
     window1.avg_aas, window2.avg_aas,
@@ -7376,13 +7414,7 @@ begin
     return null;
   end if;
   begin
-    -- Other users' hidden IDs can collide in another database. Count those
-    -- databases too, but select text only from visible matching IDs.
-    execute format(
-      'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
-      'where (queryid = $2 or ($3 is null and queryid is null)) '
-      'and ($3 is null or dbid = $3) '
-      'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+    execute format(ash._pgss_query_text_sql(), v_pgss_schema)
       into v_text using maxlen, query_id, database_oid;
   exception when others then
     v_text := null;
@@ -7445,8 +7477,10 @@ declare
   v_end int4;
   v_slots smallint[];
   v_datid oid;
+  v_row_datid oid;
   v_has_pgss boolean := false;
   v_pgss_schema text;
+  v_pgss_query_sql text;
 begin
   -- Raw sample listing has no rollup equivalent.
   perform ash._require_raw_ring('ash.samples()');
@@ -7475,13 +7509,14 @@ begin
     begin
       execute format('select 1 from %I.pg_stat_statements limit 1',
                      v_pgss_schema);
+      v_pgss_query_sql := format(ash._pgss_query_text_sql(), v_pgss_schema);
       v_has_pgss := true;
     exception when others then
       v_has_pgss := false;
     end;
   end if;
 
-  return query
+  for sample_time, database_name, active_backends, wait_event, query_id, v_row_datid in
   with decoded as (
     select
       sample_row.sample_ts, sample_row.slot, sample_row.datid,
@@ -7528,12 +7563,24 @@ begin
     resolved.active_count,
     resolved.wait_event,
     resolved.qid,
-    case when v_has_pgss then ash._pgss_query_text(resolved.qid, 80, resolved.datid)
-         else null end
+    resolved.datid
   from resolved
   left join pg_database as db on db.oid = resolved.datid
   order by resolved.sample_ts desc, resolved.wait_event
-  limit greatest(n, 0);
+  limit greatest(n, 0)
+  loop
+    query_text := null;
+    if v_has_pgss and query_id is not null then
+      -- The schema came from the extension catalog before this output loop.
+      begin
+        execute v_pgss_query_sql
+          into query_text using 80, query_id, v_row_datid;
+      exception when others then
+        query_text := null;
+      end;
+    end if;
+    return next;
+  end loop;
 end;
 $$;
 
@@ -7631,11 +7678,11 @@ as $$
     cross join lateral generate_series(
       0, greatest(sample_row.data[data_idx + 1] - 1, -1)
     ) as backend(n)
-    where sample_row.slot = any(ash._active_slots_for_at(
+    where sample_row.slot = any((select ash._active_slots_for_at(
              ash.ts_to_timestamptz(
                (select min(m) from unnest(minutes) as m)),
              ash.ts_to_timestamptz(
-               (select max(m) + 60 from unnest(minutes) as m))))
+               (select max(m) + 60 from unnest(minutes) as m))))::smallint[])
       /*
        * Sargable range bound so the (sample_ts) index prunes to the extreme
        * minutes instead of seq-scanning the whole active partition (#perf:
@@ -7783,7 +7830,7 @@ begin
        and exists (
          select
          from ash.sample as sample_row
-         where sample_row.slot = any(ash._active_slots())
+         where sample_row.slot = any((select ash._active_slots())::smallint[])
            and sample_row.sample_ts >= v_start_ts
            and sample_row.sample_ts < v_end_ts
        ) then
@@ -7821,6 +7868,9 @@ begin
    * (greatest/least in ts_from_timestamptz ignore NULLs, so a missing raw
    * oldest sample must be short-circuited here, not passed through.)
    */
+  with raw_coverage as materialized (
+    select ash._raw_oldest_sample() as oldest_sample
+  )
   select case
     when raw_coverage.oldest_sample is null then null
     else ash.ts_from_timestamptz(
@@ -7828,9 +7878,7 @@ begin
     )
   end
   into v_raw_min
-  from (
-    select ash._raw_oldest_sample() as oldest_sample
-  ) as raw_coverage;
+  from raw_coverage;
 
   -- Per-class metrics over the zero-filled per-minute AAS series.
   for v_class in
@@ -8165,11 +8213,12 @@ declare
   v_grain_secs int4;
   v_si numeric;
   v_source text;
-  v_reset text := ash._reset(color);
+  v_color boolean := ash._color_on(color);
+  v_reset text := case when v_color then E'\033[0m' else '' end;
   v_top_events text[];
   v_event_colors text[];
   v_event_chars text[] := array['█', '▓', '░', '▒'];
-  v_other_color text := ash._wait_color('Other', color);
+  v_other_color text := case when not v_color then '' else ash._wait_color('Other', true) end;
   v_other_char text := '·';
   v_max numeric;
   v_legend text;
@@ -8310,7 +8359,8 @@ begin
 
   v_event_colors := array[]::text[];
   for v_i in 1 .. array_length(v_top_events, 1) loop
-    v_event_colors := v_event_colors || ash._wait_color(v_top_events[v_i], color);
+    v_event_colors := v_event_colors || case when not v_color then ''
+      else ash._wait_color(v_top_events[v_i], true) end;
   end loop;
 
   v_legend := '';
@@ -9177,6 +9227,19 @@ begin
                    v_rec.proname, v_rec.args, v_rec.grantee,
                    case when v_rec.grantable then ' with grant option'
                         else '' end);
+  end loop;
+
+  -- Partial reader grants also need the new constant-only dependency.
+  for v_rec in
+    select func_acl.grantee, bool_or(func_acl.grantable) as grantable
+    from pg_temp._ash_install_func_acl as func_acl
+    join pg_catalog.pg_roles as role_row on role_row.rolname = func_acl.grantee
+    where func_acl.proname in ('top', '_samples', '_pgss_query_text')
+    group by func_acl.grantee
+  loop
+    execute format('grant execute on function ash._pgss_query_text_sql() to %I%s',
+      v_rec.grantee,
+      case when v_rec.grantable then ' with grant option' else '' end);
   end loop;
 
   select string_agg(

@@ -37,6 +37,24 @@ Red/green TDD: write failing tests first, then fix the code to make them pass.
 
 ## Code Review
 
+### Row-invariant SQL work
+
+Do not execute row-invariant helper work once per scanned or expanded row.
+A `stable` declaration does not cache function results. SQL inlining and CTE inlining do not guarantee single evaluation.
+
+- Classify each helper call by its inputs and required evaluation scope before adding or changing a query.
+- Compute row-invariant work once at the appropriate scope. Use a PL/pgSQL variable, an uncorrelated scalar subquery, or a justified materialized CTE.
+- Do not assume these forms guarantee the intended plan. Verify the executed query, including nested SQL and public callers.
+- Keep genuinely row-dependent work correlated. Preserve volatility, privileges, null handling, empty-input behavior, and returned results.
+- Check all equivalent call sites when fixing repeated evaluation. Include filters, joins, projections, lateral queries, and loops.
+- Require real Postgres regression tests for changes to these execution paths. First prove that the old query fails the test.
+- Use `explain (analyze, format json)` to check executed plan properties. Measure helper-call counts where outer plans hide nested execution.
+- Test different fixture sizes and cached plan modes. Assert bounded invariant work and exact results, not elapsed-time thresholds.
+- Run these checks in CI on supported Postgres versions. Avoid full-plan snapshots and requirements for one specific scan strategy.
+- Treat static lint findings as review candidates, not proof of execution frequency. Document justified exceptions with plan and call-count evidence.
+
+A review cannot pass on syntax alone. Repeated row-invariant work requires a fix or an explicit, evidence-backed justification.
+
 All changes go through PRs. Before merging, run a REV review (https://gitlab.com/postgres-ai/rev/) and post the report as a PR comment. REV is designed for GitLab but works on GitHub PRs too.
 
 Never auto-merge PRs. A PR can be merged only after all of these are true:
