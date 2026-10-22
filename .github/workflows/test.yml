@@ -7521,6 +7521,12 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          HAS_CRON=$(psql -h localhost -U postgres -d postgres -tAX -c \
+            "select exists (select from pg_extension where extname='pg_cron')")
+          if [ "$HAS_CRON" != "t" ]; then
+            echo "pg_cron not installed — skipping #299 row visibility test"
+            exit 0
+          fi
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -f devel/tests/status_cron_visibility.sql
 
