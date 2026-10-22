@@ -159,7 +159,7 @@ psql -X -v ON_ERROR_STOP=1 -d mydb -f sql/ash-install.sql
 ```
 
 In an interactive psql session, install with `\i sql/ash-install.sql` from the repository root.
-Run it outside an open transaction: the installer owns its transaction, and its final `commit` would also commit your pending work.
+Run it outside an open transaction. The installer owns its transaction, and its final `commit` also commits your pending work.
 
 Enable collection:
 

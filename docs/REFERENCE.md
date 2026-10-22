@@ -529,7 +529,7 @@ not grant `pg_read_all_stats`. Monitoring roles that need `query_text` from
 `pg_stat_statements` usually need membership in `pg_monitor` or
 `pg_read_all_stats` too.
 
-The [pending database-attribution correction](https://github.com/NikolayS/pg_ash/pull/282) makes readers derive the source database from ASH rows when it is unique and return NULL when attribution is unsafe.
+The [pending database-attribution correction](https://github.com/NikolayS/pg_ash/pull/282) derives the source database from ASH rows when it is unique. Unsafe attribution returns NULL.
 With that correction, a `database` filter resolves cross-database ambiguity.
 Reading another role's SQL still requires the appropriate statistics privileges.
 
