@@ -91,7 +91,7 @@ def setup(args):
         target = PUBLIC / 'docs' / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(args.docs_dir / relative, target)
-    seed = args.seed
+    seed = args.seed if args.seed is not None else secrets.randbits(128)
     rng = random.Random(seed)
     mechanisms = ['transactionid', 'relation', 'cpu', 'sleep', 'idletx']
     rng.shuffle(mechanisms)
@@ -485,7 +485,8 @@ def main():
     parser.add_argument('--docs-revision', default=DOCS)
     parser.add_argument('--image', default='postgres:18', help='locally available PG18 image')
     parser.add_argument('--model', default='gpt-6.1-sol', help='investigator model recorded in manifest')
-    parser.add_argument('--seed', type=int, default=202610210285)
+    parser.add_argument('--seed', type=int,
+                        help='private replay seed; default: fresh random 128-bit seed')
     parser.add_argument('--keep-sampling', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)

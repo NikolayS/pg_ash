@@ -55,6 +55,11 @@ python3 examples/blind-trial/trial.py run \
   --run-dir /tmp/blind-run --keep-sampling
 ```
 
+Setup creates a fresh random 128-bit seed and records it in the private supervisor manifest.
+The seed controls case IDs and mechanism order. Keep it private until all investigations finish.
+Use `--seed <recorded-integer>` only for explicit replay, not for a new blind trial.
+A published replay seed exposes its case mappings. The original archived trial remains unchanged.
+
 Setup records exact container IDs, an independent run label, pinned local image
 ID, input hashes and dedicated credentials. Every reader is granted
 `ash.grant_reader` and `pg_read_all_stats` for query-text visibility. Setup tests
