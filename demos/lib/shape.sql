@@ -180,31 +180,23 @@ begin
   end if;
 
   ------------------------------------------------------------------------
-  -- 7. The FLAGSHIP CHART is legible.
+  -- 7. Both lock waits remain named in the chart.
   --
-  --    ash.chart() ranks its series by total AAS across the whole window and
-  --    draws the top n; everything else collapses into a single "Other" dot
-  --    column. The incident lasts five of twenty-eight minutes, so if the calm
-  --    phases are heavy enough, both Lock waits fall out of the top n and the
-  --    hero image renders the storm as an anonymous row of dots.
-  --
-  --    That is not an error, it is not empty, and no other assertion here
-  --    notices it — it is just a bad picture, which is exactly the class of
-  --    defect this harness exists to make impossible. So: assert that at least
-  --    two Lock:* events survive into the top four of the full window, which is
-  --    what scenes.tsv's `n => 4` draws.
+  --    The chart includes the window-wide top n and each bucket's top event.
+  --    Require both lock waits in the top five, matching scenes.tsv's n => 5.
+  --    The fifth slot gives margin when calm CPU/IO activity changes rank.
+  --    Keep this gate: a secondary lock wait can still fall into "Other".
   ------------------------------------------------------------------------
   select count(*)
   into v_chart_locks
-  from ash.top('wait_event', v_since, v_until, n => 4) as top_row
+  from ash.top('wait_event', v_since, v_until, n => 5) as top_row
   where top_row.key like 'Lock:%';
 
   if v_chart_locks < 2 then
     raise exception
-      'shape: only % Lock:* event(s) rank in the top 4 of the chart window — '
-      'the calm phases are drowning the incident, and ash.chart(n => 4) will '
-      'draw the storm as "Other". Lower ASH_LOAD_BASELINE_CLIENTS / '
-      'ASH_LOAD_READIO_CLIENTS.', v_chart_locks;
+      'shape: only % Lock:* event(s) rank in the top 5 of the chart window — '
+      'both lock waits must remain named in ash.chart(n => 5). '
+      'Lower ASH_LOAD_BASELINE_CLIENTS / ASH_LOAD_READIO_CLIENTS.', v_chart_locks;
   end if;
 
   ------------------------------------------------------------------------
@@ -234,7 +226,7 @@ begin
   raise notice 'shape ok  storm rank-1 wait % (%), guilty query % (% of that wait)',
     v_top_event, v_top_pct || '%', v_query_key, v_query_pct || '%';
   raise notice 'shape ok  calm rank-1 wait %', v_calm_event;
-  raise notice 'shape ok  chart top-4 over the window carries % Lock:* series',
+  raise notice 'shape ok  chart top-5 over the window carries % Lock:* series',
     v_chart_locks;
   for v_rec in
     select period_row.period, period_row.source, period_row.avg_aas,

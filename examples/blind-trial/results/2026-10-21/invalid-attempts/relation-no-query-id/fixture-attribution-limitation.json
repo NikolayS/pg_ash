@@ -1,0 +1,30 @@
+{
+  "at": "2026-10-21T22:07:10.584735+00:00",
+  "status": "Not handed off; private certification rejects absent query IDs. Do not silently relax.",
+  "observations": "Both incident windows have correct Lock:relation ASH and independent activity observations, but query_id=NULL during blocked relation acquisition. Query text exists in independent snapshots/pgss after completion; ASH lacks wait-to-query linkage.",
+  "parent_action": "Astra adjudicate high-level preregistered attribution-when-available rubric vs overly strong private fixture-ID requirement; explicitly predeclare revised unknown-attribution fixture or replace before any investigator. Preserve all old certificates and disclose revision.",
+  "counts": [
+    {
+      "window": {
+        "index": 1,
+        "start": "2026-10-21T22:04:32.094109+00:00",
+        "end": "2026-10-21T22:04:46.115388+00:00"
+      },
+      "ash_matching_rows": 28,
+      "independent_matching_observations": 28,
+      "query_ids": [],
+      "valid": false
+    },
+    {
+      "window": {
+        "index": 2,
+        "start": "2026-10-21T22:05:06.115944+00:00",
+        "end": "2026-10-21T22:05:24.136407+00:00"
+      },
+      "ash_matching_rows": 36,
+      "independent_matching_observations": 36,
+      "query_ids": [],
+      "valid": false
+    }
+  ]
+}

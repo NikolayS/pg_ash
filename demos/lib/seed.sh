@@ -42,22 +42,10 @@ ASH_SEED_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # pgbench shape. Kept as knobs because "make the spike legible" is a tuning
 # problem and tuning through edits to a 200-line script is miserable.
 #
-# The calm phases are deliberately under-provisioned relative to the storm: the
-# shape assertion demands storm peak_aas >= 3x the median calm minute, and a
-# calm baseline that is itself busy eats the whole margin. Measured on this
-# hardware: 4 calm clients -> ~3 AAS, 12 storm clients -> ~15 peak AAS, so the
-# ratio lands near 5x with room for a loaded machine.
-# These numbers are also a PICTURE decision, not just a load decision.
-# ash.chart() ranks its series by total AAS over the whole window, so a heavy
-# calm phase does not merely look busy — it pushes both Lock waits out of the
-# top four and the flagship chart draws the five-minute incident as an anonymous
-# column of "Other" dots. Measured here: baseline at 4 clients gave a 3.7 AAS
-# calm floor and CPU* outranked Lock:transactionid over the 24-minute window.
-# At 2/2 clients the calm floor stays near 1 AAS on both local and Docker
-# Linux hosts, leaving enough full-window weight for Lock:transactionid AND
-# Lock:tuple to survive into the chart's top four. 3/3 passed most runs but
-# failed this exact gate on a hosted PG16 runner when Lock:tuple ranked fifth.
-# lib/shape.sql assertion 7 fails the seed if this balance ever slips again.
+# Keep calm concurrency low so the storm clears the 3x peak-AAS gate.
+# The chart and shape gate use five window-wide series. This gives one extra
+# slot for changing CPU/IO ranks without increasing the workload. Both lock
+# waits must still rank in the top five; lib/shape.sql checks every capture.
 : "${ASH_LOAD_BASELINE_CLIENTS:=2}"
 : "${ASH_LOAD_BASELINE_JOBS:=2}"
 : "${ASH_LOAD_STORM_CLIENTS:=12}"

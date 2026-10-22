@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 devel/scripts/test_release_stamp.py -v
           python3 devel/scripts/test_staged_migration.py -v
+          python3 devel/scripts/test_promoted_upgrade_cli.py -v
 
       # Lives here, not in `test`, on purpose: this suite parses test.yml, and
       # a job inside that workflow's matrix cannot be trusted to report on the
@@ -104,17 +105,17 @@ jobs:
             fi
           done
 
-          if ! grep -Fq "Only \`ash.rebuild_partitions\` and \`ash.uninstall\` require the exact \`'yes'\` confirmation token." README.md; then
-            echo "README.md must limit the exact 'yes' confirmation contract to rebuild_partitions and uninstall." >&2
+          if ! grep -Fq "Only \`ash.rebuild_partitions\` and \`ash.uninstall\` require the exact \`'yes'\` confirmation token." docs/REFERENCE.md; then
+            echo "docs/REFERENCE.md must limit the exact 'yes' confirmation contract to rebuild_partitions and uninstall." >&2
             exit 1
           fi
-          if grep -Fq "All destructive calls require" README.md; then
+          if grep -Fq "All destructive calls require" README.md docs/REFERENCE.md; then
             echo "README.md must not claim every destructive operation takes a confirmation token." >&2
             exit 1
           fi
 
-          grep -q "ash.grant_reader" README.md
-          grep -q "SECURITY.md#advisory-lock-squat-dos" README.md
+          grep -q "ash.grant_reader" docs/REFERENCE.md
+          grep -q "SECURITY.md#advisory-lock-squat-dos" docs/REFERENCE.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" RELEASE_NOTES.md
 
           # Release-stamped operator wording is two-sided: require the corrected
@@ -133,11 +134,11 @@ jobs:
           fi
           grep -Fq \
             'named by `cron.database_name`; it still observes activity from every database.' \
-            README.md
-          grep -Fq 'Base metrics and top events read `ash.rollup_1m`.' README.md
-          grep -Fq 'read raw samples for eligible extreme minutes.' README.md
+            docs/REFERENCE.md
+          grep -Fq 'Base metrics and top events read `ash.rollup_1m`.' docs/REFERENCE.md
+          grep -Fq 'read raw samples for eligible extreme minutes.' docs/REFERENCE.md
           python3 devel/scripts/check_llm_docs.py
-          grep -Fq 'it returns SQL `NULL` and emits a NOTICE' README.md
+          grep -Fq 'it returns SQL `NULL` and emits a NOTICE' docs/REFERENCE.md
           grep -Fq "breaking reader API and removes parameter-name" RELEASE_NOTES.md
           grep -Fq "lifecycle ownership behavior as described below" RELEASE_NOTES.md
           if grep -Fq "lifecycle/admin functions remain compatible" RELEASE_NOTES.md; then
@@ -365,6 +366,12 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: "#177: reader input validation"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/reader_input_validation.sql
+
       - name: "#122: disclose selected partial rollup source"
         env:
           PGHOST: localhost
@@ -388,6 +395,28 @@ jobs:
           PGPASSWORD: postgres
         run: |
           python3 devel/scripts/test_cadence_concurrency.py
+
+      - name: "Cleanup preserves pending hourly input"
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGDATABASE: postgres
+          PGPASSWORD: postgres
+        run: |
+          psql -v ON_ERROR_STOP=1 -f devel/tests/cleanup_pending_hour.sql
+
+      - name: "Sample timestamp and late commits"
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGDATABASE: postgres
+          PGPASSWORD: postgres
+        run: |
+          # This multi-session test commits rollups. Keep them out of later reader fixtures.
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'create database ash_sample_clock_test'
+          trap "psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'drop database ash_sample_clock_test'" EXIT
+          psql -h localhost -U postgres -d ash_sample_clock_test -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
+          PGDATABASE=ash_sample_clock_test python3 devel/scripts/test_sample_clock.py
 
       - name: "#137: preserve unsupported legacy cadence on upgrade"
         env:
@@ -692,7 +721,9 @@ jobs:
             'select * from ash.decode_sample_at(now())' \
             'select * from ash.aas(query_id := 12345)' \
             'select * from ash.timeline(query_id := 12345)' \
-            "select * from ash.top('wait_event', query_id := 12345)"
+            "select * from ash.top('wait_event', query_id := 12345)" \
+            "select * from ash.compare(now() - interval '2 minutes', now() - interval '1 minute', now() - interval '1 minute', now(), dimension => 'query_id', wait_event_type => 'CPU*')" \
+            "select * from ash.compare(now() - interval '2 minutes', now() - interval '1 minute', now() - interval '1 minute', now(), dimension => 'query_id', wait_event => 'CPU*')"
           do
             raw_only_out="$(docker exec "$CONTAINER_ID" psql -U postgres \
               -p 5433 -v ON_ERROR_STOP=1 -tAc "$raw_only" 2>&1 || true)"
@@ -3767,6 +3798,10 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/reader_fractional_bounds.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/compare_effective_coverage.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/query_text_database.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/raw_slot_selection.sql
 
       - name: "Test 2.0: report totals and formatting edges"
@@ -4264,8 +4299,8 @@ jobs:
           alter extension pg_stat_statements set schema ash_pgss_ext;
           select ash._apply_pgss_search_path();
 
-          -- (1) Catalog form: every pgss-probing reader lists the pgss schema
-          -- before public, and the catalog-derived set has not drifted.
+          -- (1) Readers with public in search_path must put the pgss schema first.
+          -- The catalog-derived set must not drift.
           do $$
           declare
             r record;
@@ -4284,7 +4319,7 @@ jobs:
               if r.cfg like 'search_path=%' then
                 v_ext_pos := position('ash_pgss_ext' in r.cfg);
                 v_pub_pos := position('public' in r.cfg);
-                if v_ext_pos = 0 or v_ext_pos > v_pub_pos then
+                if v_pub_pos > 0 and (v_ext_pos = 0 or v_ext_pos > v_pub_pos) then
                   v_bad := v_bad || r.proname || ' ';
                 end if;
               end if;
@@ -5991,13 +6026,13 @@ jobs:
               'precondition expected exactly 1 minute-rollup row';
 
             /*
-             * Model the shipped minute job advancing normally before the
-             * daily cleanup and rotation jobs run.
+             * Model both rollup jobs completing before daily cleanup and rotation.
              */
             update ash.config
             set last_rollup_1m_ts = ash.ts_from_timestamptz(
               date_trunc('minute', now())
-            )
+            ),
+              last_rollup_1h_ts = ash.ts_from_timestamptz(date_trunc('hour', now()))
             where singleton;
             select ash.rollup_cleanup() into v_result_text;
             assert v_result_text =
@@ -7516,6 +7551,20 @@ jobs:
           drop role ash_closure_bare;
           EOF
 
+      - name: "Issue #299: status explains pg_cron row visibility"
+        if: matrix.cron == 'on'
+        env:
+          PGPASSWORD: postgres
+        run: |
+          HAS_CRON=$(psql -h localhost -U postgres -d postgres -tAX -c \
+            "select exists (select from pg_extension where extname='pg_cron')")
+          if [ "$HAS_CRON" != "t" ]; then
+            echo "pg_cron not installed — skipping #299 row visibility test"
+            exit 0
+          fi
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f devel/tests/status_cron_visibility.sql
+
       - name: "Test #61: status() works for non-superuser without cron.job access"
         if: matrix.cron == 'on'
         env:
@@ -7601,7 +7650,7 @@ jobs:
           reset role;
 
           -- Sub-test: GRANT USAGE on schema cron and assert the role now
-          -- sees real cron_job_* rows instead of the cron_jobs fallback.
+          -- sees its own job, with a hint about other jobs hidden by RLS.
           -- pg_cron RLS filters cron.job by `username = current_user`, so
           -- the sentinel ash_sampler job has to be scheduled BY the
           -- reader role (or its username altered) for status() to see it.
@@ -7620,16 +7669,16 @@ jobs:
             v_fallback text;
             v_jobs int;
           begin
-            -- Fallback row must NOT appear when the caller has access.
+            -- Table access does not bypass pg_cron row-level security.
             select value into v_fallback
             from ash.status() where metric = 'cron_jobs';
-            assert v_fallback is null,
-              'expected no cron_jobs fallback row when granted, got: ' || coalesce(v_fallback, '<null>');
+            assert v_fallback like '%row-level security%',
+              'expected RLS visibility hint, got: ' || coalesce(v_fallback, '<null>');
 
             -- Real per-job rows must appear (sentinel ash_sampler scheduled above).
             select count(*) into v_jobs
             from ash.status()
-            where metric like 'cron_job_%';
+            where metric ~ '^cron_job_';
             assert v_jobs > 0,
               'expected at least one cron_job_* row when granted, got 0';
 
@@ -7675,7 +7724,12 @@ jobs:
               (v_recent_ts, 0::oid, 10, 2, '{}'::int4[], '{}'::int8[])
             on conflict (ts, datid) do nothing;
 
-            -- Run cleanup with default 30-day retention
+            -- This fixture models completed hourly aggregation before cleanup.
+            update ash.config
+            set last_rollup_1h_ts = ash.ts_from_timestamptz(date_trunc('hour', now()))
+            where singleton;
+
+            -- Run cleanup with default 30-day retention.
             select ash.rollup_cleanup() into v_result;
             assert v_result like 'cleanup:%', 'cleanup should return message';
 
@@ -9273,18 +9327,59 @@ jobs:
             if not exists (select from pg_roles where rolname = 'lp_reader')   then create role lp_reader   login password 'x'; end if;
             if not exists (select from pg_roles where rolname = 'lp_stray')    then create role lp_stray    login password 'x'; end if;
             if not exists (select from pg_roles where rolname = 'lp_overload') then create role lp_overload login password 'x'; end if;
+            create role lp_query;
+            create role lp_query_grant;
+            create role lp_query_delegate;
+            create role lp_admin_delegate;
+            create role lp_schema_owner;
+            create role lp_owner_delegate;
           end $$;
 
           -- legitimate reader: must SURVIVE re-apply (guards the #107 fix)
           select ash.grant_reader('lp_reader');
+          -- Schema ownership can differ from routine ownership.
+          select ash.grant_reader('lp_schema_owner');
+          alter schema ash owner to lp_schema_owner;
+          grant execute on function ash.start(interval), ash.grant_reader(name),
+            ash.revoke_reader(name), ash.set_debug_logging(bool)
+            to lp_schema_owner with grant option;
+          set role lp_schema_owner;
+          grant execute on function ash.start(interval) to lp_owner_delegate;
+          reset role;
           -- stray manual grant on an admin function in the drop list: must be SCRUBBED
           grant execute on function ash.rebuild_partitions(int, text) to lp_stray;
+          grant execute on function ash._register_wait(text, text, text),
+            ash._merge_wait_counts(integer[]), ash._merge_query_counts(bigint[]),
+            ash._truncate_pairs(bigint[], integer) to lp_stray with grant option;
+          -- take_sample was never in the historical DROP scrub set.
+          grant execute on function ash.take_sample() to lp_stray;
+          -- Replacing an admin must retain its OID but remove delegated grants.
+          create temp table lp_start_oid as
+            select 'ash.start(interval)'::regprocedure::oid as oid;
+          grant usage on schema ash to lp_stray;
+          grant execute on function ash.start(interval) to lp_stray with grant option;
+          set role lp_stray;
+          grant execute on function ash.start(interval),
+            ash._truncate_pairs(bigint[], integer) to lp_admin_delegate;
+          reset role;
           -- single-overload grant: must NOT widen to the sibling overload
           grant execute on function ash.decode_sample(integer[], smallint) to lp_overload;
 
+          -- Partial helper grants must retain only their new required dependency.
+          grant usage on schema ash to lp_query, lp_query_grant, lp_query_delegate;
+          grant execute on function ash._pgss_schema() to lp_query, lp_query_grant, lp_query_delegate;
+          grant execute on function ash._pgss_query_text(bigint, integer) to lp_query;
+          grant execute on function ash._pgss_query_text(bigint, integer) to lp_query_grant with grant option;
+
           do $$ begin
+            assert not has_function_privilege('lp_query', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
+              and not has_function_privilege('lp_query_grant', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE'),
+              'precondition: legacy-only grants must not already include the new dependency';
             assert has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
               'precondition: stray admin grant present before re-apply';
+            assert has_function_privilege('lp_stray', 'ash.start(interval)', 'EXECUTE WITH GRANT OPTION')
+              and has_function_privilege('lp_admin_delegate', 'ash.start(interval)', 'EXECUTE'),
+              'precondition: admin grant option and delegated grant must exist';
             assert has_function_privilege('lp_overload', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
               'precondition: array overload granted';
             assert not has_function_privilege('lp_overload', 'ash.decode_sample(integer)', 'EXECUTE'),
@@ -9293,6 +9388,35 @@ jobs:
 
           -- re-apply the installer: drop/recreate + snapshot/restore + hardening
           \i /tmp/ash_fresh_install.sql
+
+          do $$ begin
+            assert not exists (
+              select from pg_proc as proc
+              where proc.pronamespace = 'ash'::regnamespace
+                and proc.proname in ('start', 'grant_reader', 'revoke_reader',
+                                    'set_debug_logging')
+                and not has_function_privilege('lp_schema_owner', proc.oid, 'EXECUTE')
+            ), 'schema owner lost admin EXECUTE across re-apply';
+            assert not has_function_privilege('lp_schema_owner', 'ash.start(interval)',
+                                             'EXECUTE WITH GRANT OPTION')
+              and not has_function_privilege('lp_owner_delegate', 'ash.start(interval)', 'EXECUTE'),
+              'historical scrub must remove owner grant options and delegated grants';
+          end $$;
+          set role lp_schema_owner;
+          do $$ begin
+            assert ash.set_debug_logging(null) =
+              (select 'debug_logging = ' || debug_logging::text from ash.config where singleton);
+          end $$;
+          reset role;
+
+          -- A NULL query ID still executes the wrapper's SECURITY INVOKER dependency.
+          -- This privilege regression also runs without optional pg_stat_statements.
+          set role lp_query;
+          do $$ begin
+            assert ash._pgss_query_text(null::bigint) is null,
+              'partial grantee must still execute the legacy helper';
+          end $$;
+          reset role;
 
           do $$ begin
             -- (1) #107 still fixed: legitimate reader keeps every reader grant
@@ -9306,6 +9430,22 @@ jobs:
             -- (2) admin-function grant must be scrubbed and NOT restored after hardening
             assert not has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
               'admin EXECUTE grant re-established after hardening (defense-in-depth regression)';
+            assert not has_function_privilege('lp_stray', 'ash.start(interval)', 'EXECUTE')
+              and not has_function_privilege('lp_admin_delegate', 'ash.start(interval)', 'EXECUTE'),
+              'admin grant option and delegated grant must both be removed';
+            assert not exists (
+              select from pg_proc as proc
+              where proc.pronamespace = 'ash'::regnamespace
+                and proc.proname in ('_register_wait', '_merge_wait_counts',
+                                    '_merge_query_counts', '_truncate_pairs')
+                and has_function_privilege('lp_stray', proc.oid, 'EXECUTE')
+            ) and not has_function_privilege('lp_admin_delegate',
+                'ash._truncate_pairs(bigint[],integer)', 'EXECUTE'),
+              'historically dropped admin helpers must lose direct and delegated grants';
+            assert has_function_privilege('lp_stray', 'ash.take_sample()', 'EXECUTE'),
+              'historical scrub must not expand to other admin routines';
+            assert 'ash.start(interval)'::regprocedure::oid = (select oid from lp_start_oid),
+              'unchanged admin OID must survive grant hardening';
             assert not has_function_privilege('lp_reader', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
               'reader must not gain admin function EXECUTE';
             assert not has_function_privilege('lp_reader', 'ash.take_sample()', 'EXECUTE'),
@@ -9321,14 +9461,38 @@ jobs:
             assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'PUBLIC must stay revoked';
 
+            assert not has_function_privilege('lp_query', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE WITH GRANT OPTION'),
+              'ordinary helper EXECUTE must not gain a grant option';
+            assert has_function_privilege('lp_query_grant', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE WITH GRANT OPTION'),
+              'delegable legacy helper must retain a delegable dependency';
+            assert not has_function_privilege('lp_overload', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
+              and not has_function_privilege('public', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
+              and not has_table_privilege('lp_query', 'ash.sample', 'SELECT')
+              and not has_function_privilege('lp_query', 'ash.take_sample()', 'EXECUTE'),
+              'helper dependency restore must not widen unrelated access';
+
             raise notice 'issue #107 follow-up: grant restore stayed least-privilege';
           end $$;
 
-          drop owned by lp_reader, lp_stray, lp_overload;
+          set role lp_query_grant;
+          grant execute on function ash._pgss_query_text(bigint, integer),
+            ash._pgss_query_text(bigint, integer, oid) to lp_query_delegate;
+          reset role;
+          \i /tmp/ash_fresh_install.sql
+          set role lp_query_delegate;
+          do $$ begin
+            assert ash._pgss_query_text(null::bigint, 6) is null,
+              'delegated legacy helper must remain executable after another re-apply';
+          end $$;
+          reset role;
+
+          alter schema ash owner to postgres;
+          drop owned by lp_reader, lp_stray, lp_overload, lp_query, lp_query_grant, lp_query_delegate, lp_admin_delegate, lp_schema_owner, lp_owner_delegate;
           select ash.uninstall('yes');
           drop role lp_reader;
           drop role lp_stray;
           drop role lp_overload;
+          drop role lp_query, lp_query_grant, lp_query_delegate, lp_admin_delegate, lp_schema_owner, lp_owner_delegate;
           EOF
 
       - name: "Migration rollback includes installer and config normalization"
@@ -9602,6 +9766,7 @@ jobs:
             '"call ash.run_take_sample()" (for per-second, use a loop)' \
             'CALL ash.run_take_sample() \watch 1' \
             'execute "CALL ash.run_take_sample()" in a loop' \
+            'To sample, execute CALL ash.run_take_sample()' \
             'Also schedule CALL ash.run_rotate() at the rotation_period' \
             'Schedule rollup: CALL ash.run_rollup_minute() every minute'
           do

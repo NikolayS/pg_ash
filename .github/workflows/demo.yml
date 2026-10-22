@@ -173,7 +173,14 @@ jobs:
           {
             echo "PGHOST=/var/run/postgresql"
             echo "PGUSER=$ci_role"
+            echo "PGDATABASE=postgres"
           } >> "$GITHUB_ENV"
+
+      - name: "#291: chart ranking regression"
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          python3 devel/tests/demo_chart_ranking.py
+          python3 devel/tests/demo_startup.py
 
       - name: Install the tier-3 dependencies
         if: steps.gate.outputs.run == 'yes'

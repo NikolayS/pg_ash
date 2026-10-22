@@ -352,6 +352,7 @@ class CapturedOutputAssertionsTests(unittest.TestCase):
         '\"call ash.run_take_sample()\" (for per-second, use a loop)',
         r"CALL ash.run_take_sample() \watch 1",
         'execute "CALL ash.run_take_sample()" in a loop',
+        "To sample, execute CALL ash.run_take_sample()",
         "Also schedule CALL ash.run_rotate() at the rotation_period",
         "Schedule rollup: CALL ash.run_rollup_minute() every minute",
     ]

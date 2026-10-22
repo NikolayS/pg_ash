@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/tmp/pgash-blind-trial-20261021/harness.py", line 393, in <module>
+    run(args.keep_sampling)
+  File "/tmp/pgash-blind-trial-20261021/harness.py", line 352, in run
+    windows = [spike(case, 14, 1)]
+               ^^^^^^^^^^^^^^^^^^
+  File "/tmp/pgash-blind-trial-20261021/harness.py", line 276, in spike
+    raise RuntimeError('workload did not exit')
+RuntimeError: workload did not exit

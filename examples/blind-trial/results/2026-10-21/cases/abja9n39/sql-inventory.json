@@ -1,0 +1,51 @@
+[
+  {
+    "wrapper_call": 1,
+    "select_statements_submitted": 1,
+    "select_statements_attempted": 1,
+    "all_sql_statements_submitted": 1,
+    "sql": "select * from ash.periods();"
+  },
+  {
+    "wrapper_call": 2,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.status(); select * from ash.aas(since=>'2026-10-21 21:54+00',until=>'2026-10-21 21:59+00'); select * from ash.timeline(since=>'2026-10-21 21:54+00',until=>'2026-10-21 21:59+00'); commit;"
+  },
+  {
+    "wrapper_call": 3,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 2,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.top('wait_event',since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00'); select * from ash.timeline(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',bucket=>'1 second'); select * from ash.samples(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',n=>10); commit;"
+  },
+  {
+    "wrapper_call": 4,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.top('query_id',since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',wait_event=>'Lock:transactionid'); select * from ash.samples(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',n=>12); select * from ash.aas(since=>'2026-10-21 21:55+00',until=>'2026-10-21 21:57+00'); commit;"
+  },
+  {
+    "wrapper_call": 5,
+    "select_statements_submitted": 4,
+    "select_statements_attempted": 4,
+    "all_sql_statements_submitted": 7,
+    "sql": "begin read only; set local statement_timeout='30s'; select wait_event, query_id, min(sample_time) as first_seen, max(sample_time) as last_seen, count(*) as observations, count(distinct sample_time) as ticks from ash.samples(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',n=>1000) group by 1,2 order by observations desc; select * from ash.top('wait_event',since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',query_id=>-1016721775295826782); select * from ash.aas(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00'); select pid,datname,state,wait_event_type,wait_event,pg_blocking_pids(pid) as blockers from pg_stat_activity where datname='appdb'; commit;"
+  },
+  {
+    "wrapper_call": 6,
+    "select_statements_submitted": 1,
+    "select_statements_attempted": 1,
+    "all_sql_statements_submitted": 4,
+    "sql": "begin read only; set local statement_timeout='30s'; with ticks as (select sample_time,count(*) as backends from ash.samples(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',n=>1000) group by 1), gaps as (select *, sample_time-lag(sample_time) over(order by sample_time) as gap from ticks) select * from gaps order by sample_time; commit;"
+  },
+  {
+    "wrapper_call": 7,
+    "select_statements_submitted": 12,
+    "select_statements_attempted": 12,
+    "all_sql_statements_submitted": 15,
+    "sql": "\\set ON_ERROR_STOP on\n\\pset pager off\nbegin read only;\nset local statement_timeout='30s';\nselect * from ash.status();\nselect * from ash.aas(since=>'2026-10-21 21:54+00',until=>'2026-10-21 21:59+00');\nselect * from ash.timeline(since=>'2026-10-21 21:54+00',until=>'2026-10-21 21:59+00');\nselect * from ash.aas(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00');\nselect * from ash.top('wait_event',since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00');\nselect * from ash.top('query_id',since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',wait_event=>'Lock:transactionid');\nselect * from ash.top('wait_event',since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',query_id=>-1016721775295826782);\nselect * from ash.samples(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',n=>12);\nselect wait_event,query_id,min(sample_time) as first_seen,max(sample_time) as last_seen,count(*) as observations,count(distinct sample_time) as ticks from ash.samples(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',n=>1000) group by 1,2;\nwith ticks as (select sample_time,count(*) as backends from ash.samples(since=>'2026-10-21 21:57+00',until=>'2026-10-21 21:59+00',n=>1000) group by 1), gaps as (select *,sample_time-lag(sample_time) over(order by sample_time) as gap from ticks) select * from gaps order by sample_time;\nselect * from ash.aas(since=>'2026-10-21 21:55+00',until=>'2026-10-21 21:57+00');\nselect pid,datname,state,wait_event_type,wait_event,pg_blocking_pids(pid) as blockers from pg_stat_activity where datname='appdb';\ncommit;\n"
+  }
+]

@@ -1,0 +1,10 @@
+[
+  {
+    "attempt": 1,
+    "outcome": "Failed before fixture generation: psycopg cannot execute installer psql metacommands; no rows injected or workload run."
+  },
+  {
+    "attempt": 2,
+    "outcome": "Used psql -f exact installer bytes; resumed owned first container and completed all five setups."
+  }
+]

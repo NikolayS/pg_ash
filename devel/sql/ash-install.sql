@@ -60,16 +60,16 @@ begin
 end $$;
 
 /*
- * Preserve function EXECUTE grants across the drop/recreate below (#107).
+ * Preserve function EXECUTE grants across required drop/recreate below (#107).
  * DROP FUNCTION destroys ACLs that CREATE OR REPLACE would keep, so a
  * monitoring role configured via ash.grant_reader() (or a manual GRANT)
  * would silently lose access on every upgrade or installer re-apply.
  * Snapshot every explicit non-owner EXECUTE grant on ash.* functions into
  * a temp table now; the matching block at the very end of this script
- * re-applies them to the recreated functions and drops the snapshot. The
+ * re-applies them after routine definitions and drops the snapshot. The
  * argument signature is captured alongside the name so the restore can put
- * the grant back on the exact same overload and never widen a role that
- * held only one overload of a function.
+ * the grant back on the exact same overload. Required new dependencies are
+ * handled explicitly by the restore below.
  * PUBLIC (grantee oid 0, which has no pg_roles row) is intentionally
  * excluded: the hardening block below re-applies the REVOKE-from-PUBLIC
  * posture on every install.
@@ -146,9 +146,9 @@ begin
 end $$;
 
 /*
- * Drop ALL overloads of functions whose signatures changed across versions.
- * Using a DO block because DROP FUNCTION requires exact arg types and we
- * can't predict which stale overloads exist from prior installs.
+ * Drop removed readers and incompatible historical signatures only (#290).
+ * CREATE OR REPLACE preserves unchanged OIDs and their user dependencies.
+ * Incompatible signatures still use DROP RESTRICT: never remove user objects.
  */
 do $$
 declare
@@ -185,77 +185,61 @@ begin
     from pg_proc as proc
     join pg_namespace as nsp on proc.pronamespace = nsp.oid
     where nsp.nspname = 'ash'
-      and proc.proname in (
-        'top_waits', 'top_waits_at',
-        'histogram', 'histogram_at',
-        'timeline_chart', 'timeline_chart_at',
-        'query_waits', 'query_waits_at',
-        'top_by_type', 'top_by_type_at',
-        'waits_by_type', 'waits_by_type_at',
-        'event_queries', 'event_queries_at',
-        'top_queries_with_text',
-        '_validate_data',
-        'uninstall',
-        'debug_logging',
-        'rebuild_partitions',
-        /*
-         * 2.0 reader rework (issue #113): drop every removed v1.x reader,
-         * every draft aas_* function (all overloads / _at twins), and the
-         * earlier 2.0 draft names that were renamed to the final surface
-         * (aas_by -> top, aas_series -> timeline, aas_compare -> compare,
-         * aas_periods -> periods, health_report -> report), plus the
-         * changed-signature name `samples`, so re-applying this installer
-         * over any prior install yields exactly the 2.0 surface (periods,
-         * aas, timeline, top, compare, samples, report, chart, summary).
-         * `aas` is a stable name but its signature changed, so it is
-         * dropped too to clear any old overload.
-         */
-        'top_queries', 'top_queries_at',
-        'wait_timeline', 'wait_timeline_at',
-        'activity_summary',
-        'samples', 'samples_at',
-        'samples_by_database', 'samples_by_database_at',
-        'minute_waits', 'minute_waits_at',
-        'hourly_queries', 'hourly_queries_at',
-        'daily_peak_backends', 'daily_peak_backends_at',
-        '_to_sample_ts', '_pick_rollup_source',
-        'aas', 'aas_at',
-        'aas_periods',
-        /*
-         * signature/return-type changes during the 2.0 development cycle:
-         * periods() renamed minutes_with_data -> buckets_with_data and
-         * gained a bucket column; top() gained order_by. Drop stale
-         * overloads so re-apply over an earlier 2.0 draft converges on the
-         * final surface.
-         */
-        'periods', 'top',
-        /*
-         * 2.0 parameter de-prefixing (see the note above the loop): every
-         * remaining param-bearing function whose parameter names changed.
-         */
-        'ts_from_timestamptz', 'ts_to_timestamptz', '_register_wait',
-        'decode_sample', 'decode_sample_at',
-        'start', 'set_debug_logging',
-        '_active_slots_for', '_active_slots_for_at',
-        '_merge_wait_counts', '_merge_query_counts', '_truncate_pairs',
-        'rollup_minute',
-        '_color_on', '_wait_color', '_reset', '_bar',
-        '_pick_source', '_pick_source_agg', '_exact_query_uses_coarser',
-        '_raise_tie_retention',
-        '_minute_counts_valid', '_rollup_1h_has_flat',
-        '_grain_counts', '_grain_by',
-        'timeline', 'compare', '_pgss_query_text',
-        '_hr_top_events', '_hr_top_queryids',
-        'report', 'chart', 'summary',
-        'grant_reader', 'revoke_reader',
-        'aas_series', 'aas_by', 'aas_compare', 'health_report',
-        'aas_timeline', 'aas_timeline_at',
-        'aas_wait_types', 'aas_wait_types_at',
-        'aas_wait_events', 'aas_wait_events_at',
-        'aas_queryids', 'aas_queryids_at',
-        'aas_summary', 'aas_summary_at',
-        'aas_waits', 'aas_waits_at',
-        'aas_queries', 'aas_queries_at'
+      and (
+        -- Removed 1.x readers and renamed 2.0 draft functions.
+        proc.proname in (
+          'top_waits', 'top_waits_at',
+          'histogram', 'histogram_at', 'timeline_chart',
+          'timeline_chart_at', 'query_waits', 'query_waits_at',
+          'top_by_type', 'top_by_type_at', 'waits_by_type',
+          'waits_by_type_at', 'event_queries', 'event_queries_at',
+          'top_queries_with_text', '_validate_data', 'debug_logging',
+          'top_queries', 'top_queries_at', 'wait_timeline',
+          'wait_timeline_at', 'activity_summary', 'samples_at',
+          'samples_by_database', 'samples_by_database_at', 'minute_waits',
+          'minute_waits_at', 'hourly_queries', 'hourly_queries_at',
+          'daily_peak_backends', 'daily_peak_backends_at', '_to_sample_ts',
+          '_pick_rollup_source', 'aas_at', 'aas_periods',
+          'aas_series', 'aas_by', 'aas_compare',
+          'health_report', 'aas_timeline', 'aas_timeline_at',
+          'aas_wait_types', 'aas_wait_types_at', 'aas_wait_events',
+          'aas_wait_events_at', 'aas_queryids', 'aas_queryids_at',
+          'aas_summary', 'aas_summary_at', 'aas_waits',
+          'aas_waits_at', 'aas_queries', 'aas_queries_at'
+        )
+        or (
+          -- CREATE OR REPLACE cannot rename historical input parameters.
+          proc.proargnames[1] like 'p\_%'
+          and proc.proname in (
+            '_active_slots_for', '_active_slots_for_at', '_bar',
+            '_color_on', '_exact_query_uses_coarser', '_grain_by',
+            '_grain_counts', '_hr_top_events', '_hr_top_queryids',
+            '_merge_query_counts', '_merge_wait_counts', '_minute_counts_valid',
+            '_pgss_query_text', '_pick_source', '_pick_source_agg',
+            '_raise_tie_retention', '_register_wait', '_reset',
+            '_rollup_1h_has_flat', '_truncate_pairs', '_wait_color',
+            'aas', 'chart', 'compare',
+            'decode_sample', 'decode_sample_at', 'grant_reader',
+            'periods', 'rebuild_partitions', 'report',
+            'revoke_reader', 'rollup_minute', 'samples',
+            'set_debug_logging', 'start', 'summary',
+            'timeline', 'top', 'ts_from_timestamptz',
+            'ts_to_timestamptz', 'uninstall'
+          )
+        )
+        -- Draft top() lacked order_by; 1.x readers had different inputs.
+        or (proc.proname = 'top' and proc.pronargs <> 10)
+        or (proc.proname in ('aas', 'samples') and proc.pronargs <> 7)
+        -- These TABLE results gained columns without changing input types.
+        or (proc.proname in ('aas', 'top')
+            and not ('effective_bucket' = any(proc.proargnames)))
+        or (proc.proname = 'compare'
+            and not ('effective_bucket_1' = any(proc.proargnames)))
+        or (proc.proname = 'periods'
+            and not ('buckets_with_data' = any(proc.proargnames)
+                     and 'bucket' = any(proc.proargnames)))
+        or (proc.proname = '_grain_by'
+            and not ('datid' = any(proc.proargnames)))
       )
   loop
     execute format('drop function if exists %s', func_row.sig);
@@ -1220,8 +1204,8 @@ begin
     return 0;
   end if;
 
-  -- Get sample timestamp (seconds since epoch, from now()).
-  v_sample_ts := extract(epoch from now() - ash.epoch())::int4;
+  -- Read the clock after the lock; the transaction may predate a completed minute.
+  v_sample_ts := extract(epoch from clock_timestamp() - ash.epoch())::int4;
   v_current_slot := ash.current_slot();
 
   /*
@@ -2580,27 +2564,28 @@ begin
     job_type := 'sampler';
     job_id := null;
     status := format(
-      'interval set to %s — schedule externally (pg_cron not available)',
+      'interval set to %s — schedule externally with CALL ash.run_take_sample() '
+      '(pg_cron not available in this database)',
       every);
     return next;
 
     job_type := 'rotation';
     job_id := null;
     status := format(
-      'rotation_period is %s — schedule ash.rotate() externally',
+      'rotation_period is %s — schedule CALL ash.run_rotate() externally',
       (select rotation_period from ash.config where singleton));
     return next;
 
     job_type := 'rollup';
     job_id := null;
     status :=
-      'schedule ash.rollup_minute() every minute, ash.rollup_hour() '
-      'at minute 1 every hour, ash.rollup_cleanup() daily';
+      'schedule CALL ash.run_rollup_minute() every minute, CALL ash.run_rollup_hour() '
+      'at minute 1 every hour, CALL ash.run_rollup_cleanup() daily';
     return next;
 
     raise notice
-      'pg_cron is not available in this database. To sample, call '
-      'ash.take_sample() from an external scheduler:';
+      'pg_cron is not available in this database. To sample, execute '
+      'CALL ash.run_take_sample() from an external scheduler:';
     v_cron_database :=
       nullif(current_setting('cron.database_name', true), '');
     if v_cron_database is null then
@@ -3280,7 +3265,7 @@ begin
     job_type := 'info';
     job_id := null;
     status :=
-      'pg_cron not installed — remember to stop your external scheduler '
+      'pg_cron is not available in this database — stop your external scheduler '
       '(cron, systemd timer, loop script, etc.)';
     return next;
     return;
@@ -4017,10 +4002,22 @@ begin
       loop
         return next;
       end loop;
+      -- Schema/table grants do not reveal the owner's jobs through cron RLS.
+      if pg_catalog.row_security_active('cron.job'::regclass)
+         and current_user <> pg_catalog.pg_get_userbyid(
+           (select nspowner from pg_catalog.pg_namespace where nspname = 'ash')
+         ) then
+        metric := 'cron_jobs';
+        value := '<cron.job visibility is limited by row-level security; '
+          'missing rows do not mean jobs are stopped. '
+          'Ask the pg_ash owner to inspect scheduling.>';
+        return next;
+      end if;
     exception when insufficient_privilege then
       metric := 'cron_jobs';
       value := format(
-        '<no cron.job access; grant USAGE ON SCHEMA cron TO %I>',
+        '<no cron.job access; ask an administrator for USAGE ON SCHEMA cron '
+        'and SELECT ON cron.job for %I; row-level security may still hide jobs>',
         current_user
       );
       return next;
@@ -4371,10 +4368,9 @@ begin
 
   /*
    * Drain in-flight samplers before choosing the "complete minute" boundary.
-   * take_sample() gets sample_ts from transaction-start now(), then may block
-   * before INSERT. Without this drain, rollup_minute() can advance the
-   * watermark while a sampler later commits an old-minute row, permanently
-   * excluding it from rollups (#81).
+   * take_sample() reads the clock after acquiring its transaction-level lock.
+   * It can still delay INSERT or commit across a minute boundary. This drain
+   * keeps the watermark behind such uncommitted samples (#81).
    */
   if not pg_try_advisory_lock(
        hashtext('pg_ash')::int4,
@@ -4721,6 +4717,7 @@ declare
   v_1h_retention int;
   v_cutoff_1m int4;
   v_cutoff_1h int4;
+  v_last_1h_ts int4;
 begin
   if ash._in_recovery() then
     raise notice
@@ -4742,8 +4739,8 @@ begin
     return 'cleanup: skipped — another rollup operation in progress';
   end if;
 
-  select rollup_1m_retention_days, rollup_1h_retention_days
-  into v_1m_retention, v_1h_retention
+  select rollup_1m_retention_days, rollup_1h_retention_days, last_rollup_1h_ts
+  into v_1m_retention, v_1h_retention, v_last_1h_ts
   from ash.config where singleton;
 
   v_cutoff_1m := ash.ts_from_timestamptz(
@@ -4753,7 +4750,10 @@ begin
     now() - (v_1h_retention || ' days')::interval
   );
 
-  delete from ash.rollup_1m where ts < v_cutoff_1m;
+  -- Keep pending hourly input after downtime. An expired hour needs no input.
+  delete from ash.rollup_1m
+  where ts < v_cutoff_1m
+    and (ts < v_last_1h_ts or (ts / 3600) * 3600 < v_cutoff_1h);
   get diagnostics v_1m_deleted = row_count;
 
   delete from ash.rollup_1h where ts < v_cutoff_1h;
@@ -4852,7 +4852,6 @@ comment on procedure ash.run_rollup_cleanup() is
 
 drop function if exists ash.aas_summary(interval);
 drop function if exists ash.aas_summary_at(timestamptz, timestamptz);
-drop function if exists ash.periods(timestamptz);
 drop function if exists ash.aas_waits(interval, text, int);
 drop function if exists ash.aas_waits_at(timestamptz, timestamptz, text, int);
 drop function if exists ash.aas_queries(interval, int);
@@ -5807,6 +5806,10 @@ begin
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.aas: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
   -- Floor before rounding, then align again after the int4 horizon clamp.
@@ -5914,6 +5917,10 @@ begin
    * Round UP to the nearest grain multiple so the effective bucket is never
    * finer than the caller requested.
    */
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.aas: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -5947,7 +5954,7 @@ begin
   ),
   bucket_aas as (
     select bstart,
-           (cnt * v_si / (least(bstart + v_bucket_secs, v_end_ts)
+           (cnt * v_si / (least(bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(bstart, v_start_ts))) as aas
     from per_bucket
   )
@@ -6050,6 +6057,10 @@ begin
     if v_requested_bucket_secs < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
+    if ceil(v_requested_bucket_secs) > 2147483647 then
+      raise exception 'ash.timeline: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
+    end if;
     v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
   end if;
 
@@ -6120,6 +6131,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.timeline: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6185,7 +6200,7 @@ begin
     v_source,
     coalesce(agg.n, 0)::bigint,
     case when agg.n > 0 then
-      round(agg.cnt * v_si / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+      round(agg.cnt * v_si / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                             - greatest(buckets.bstart, v_start_ts)), 2)
     end,
     case when agg.n > 0 and v_extrema_supported then
@@ -6282,7 +6297,8 @@ returns table (
   ts int4,
   key text,
   key_num bigint,
-  cnt numeric
+  cnt numeric,
+  datid oid
 )
 language plpgsql
 stable
@@ -6373,9 +6389,10 @@ begin
                     '<oid:' || decoded.datid || '>')
            end,
            case when dimension = 'query_id' then decoded.qid else null end,
-           count(*)::numeric
+           count(*)::numeric,
+           case when dimension = 'query_id' then decoded.datid end
     from decoded
-    group by 1, 2, 3;
+    group by 1, 2, 3, 5;
     return;
   end if;
 
@@ -6442,7 +6459,8 @@ begin
       grains.mts,
       grains.database_key,
       null::bigint,
-      sum(grains.cnt)::numeric
+      sum(grains.cnt)::numeric,
+      null::oid
     from grains
     where grains.mts >= start_ts
       and grains.mts < end_ts
@@ -6459,7 +6477,8 @@ begin
     return query execute format($q$
       select rollup.ts,
              %s as key, null::bigint as key_num,
-             sum(rollup.wait_counts[pos + 1])::numeric as cnt
+             sum(rollup.wait_counts[pos + 1])::numeric as cnt,
+             null::oid
       from %s as rollup
       cross join generate_subscripts(rollup.wait_counts, 1) as pos
       join ash.wait_event_map as event_map
@@ -6494,7 +6513,8 @@ begin
         rollup.ts,
         keyed.query_id::text as key,
         keyed.query_id::bigint as key_num,
-        sum(keyed.cnt)::numeric as cnt
+        sum(keyed.cnt)::numeric as cnt,
+        rollup.datid
       from %s as rollup
       cross join lateral (
         select coalesce(
@@ -6545,7 +6565,7 @@ begin
             and ($4 is null or keyed.query_id = $4)
           )
         )
-      group by rollup.ts, keyed.query_id
+      group by rollup.ts, keyed.query_id, rollup.datid
     $q$, v_tbl)
     using start_ts, end_ts, v_datid, query_id;
 
@@ -6559,7 +6579,8 @@ begin
                (select coalesce(sum(rollup.query_counts[pos + 1]), 0)
                 from generate_subscripts(rollup.query_counts, 1) as pos
                 where pos %% 2 = 1
-                  and rollup.query_counts[pos] = $4)::numeric as cnt
+                  and rollup.query_counts[pos] = $4)::numeric as cnt,
+               null::oid
         from %s as rollup
         left join pg_database as db on db.oid = rollup.datid
         where rollup.ts >= $1 and rollup.ts < $2
@@ -6579,7 +6600,8 @@ begin
                 where pos %% 2 = 1
                   and ($4 is null or event_map.type = $4)
                   and ($5 is null or %s = $5
-                       or event_map.event = $5))::numeric as cnt
+                       or event_map.event = $5))::numeric as cnt,
+               null::oid
         from %s as rollup
         left join pg_database as db on db.oid = rollup.datid
         where rollup.ts >= $1 and rollup.ts < $2
@@ -6655,13 +6677,14 @@ declare
   v_has_pgss boolean := false;
   v_pgss_schema text;
   v_key_num bigint;
+  v_datid oid;
 begin
   if v_from > v_to then
     raise exception
       'ash.top: since must be less than or equal to until';
   end if;
 
-  if dimension not in (
+  if dimension is null or dimension not in (
        'wait_event_type', 'wait_event', 'query_id', 'database'
      ) then
     raise exception
@@ -6674,6 +6697,10 @@ begin
   v_requested_bucket_secs := extract(epoch from bucket);
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
+  end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.top: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
   end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
@@ -6765,6 +6792,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.top: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6792,6 +6823,7 @@ begin
   for
     key,
     v_key_num,
+    v_datid,
     source,
     period_start,
     period_end,
@@ -6813,7 +6845,8 @@ begin
       grain_by_row.ts,
       grain_by_row.key,
       grain_by_row.key_num,
-      grain_by_row.cnt
+      grain_by_row.cnt,
+      grain_by_row.datid
     from ash._grain_by(v_start_ts, v_end_ts, v_read_source, dimension,
            wait_event_type, wait_event, query_id, database) as grain_by_row
   ),
@@ -6822,16 +6855,18 @@ begin
       (source_keyed.ts / v_grain_secs) * v_grain_secs as gstart,
       source_keyed.key,
       max(source_keyed.key_num) as key_num,
-      sum(source_keyed.cnt) as cnt
+      sum(source_keyed.cnt) as cnt,
+      source_keyed.datid
     from source_keyed
-    group by 1, source_keyed.key
+    group by 1, source_keyed.key, source_keyed.datid
   ),
   keyed as (
     select
       (keyed_grains.gstart / v_bucket_secs) * v_bucket_secs as bstart,
       keyed_grains.key,
       keyed_grains.key_num,
-      keyed_grains.cnt
+      keyed_grains.cnt,
+      keyed_grains.datid
     from keyed_grains
   ),
   /*
@@ -6854,7 +6889,8 @@ begin
     from coverage_grains
   ),
   keys as (
-    select keyed.key, max(keyed.key_num) as key_num, sum(keyed.cnt) as total
+    select keyed.key, max(keyed.key_num) as key_num, sum(keyed.cnt) as total,
+           case when count(distinct keyed.datid) = 1 then min(keyed.datid) end as datid
     from keyed
     group by keyed.key
     having sum(keyed.cnt) > 0
@@ -6879,7 +6915,7 @@ begin
     from keyed group by keyed.key, keyed.bstart
   ),
   key_bucket as (
-    select top_keys.key, top_keys.key_num, top_keys.total, covered.bstart,
+    select top_keys.key, top_keys.key_num, top_keys.total, top_keys.datid, covered.bstart,
            coalesce(key_bucket_data.bcnt, 0) as bcnt
     from top_keys
     cross join covered
@@ -6888,27 +6924,28 @@ begin
       and key_bucket_data.bstart = covered.bstart
   ),
   per_key as (
-    select key_bucket.key, key_bucket.key_num, key_bucket.total,
+    select key_bucket.key, key_bucket.key_num, key_bucket.total, key_bucket.datid,
            round(key_bucket.total * v_si
                  / (v_end_ts - v_start_ts)::numeric, 2) as avg_aas,
            case when v_extrema_supported then
              round(max(key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))), 2)
            end as peak_aas,
            case when v_extrema_supported then
              round(percentile_cont(0.99) within group (
                      order by key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))
                    )::numeric, 2)
            end as p99_aas
     from key_bucket
-    group by key_bucket.key, key_bucket.key_num, key_bucket.total
+    group by key_bucket.key, key_bucket.key_num, key_bucket.total, key_bucket.datid
   )
   select
     per_key.key,
     per_key.key_num,
+    per_key.datid,
     v_source,
     ash.ts_to_timestamptz(v_start_ts),
     ash.ts_to_timestamptz(v_end_ts),
@@ -6928,10 +6965,12 @@ begin
   limit greatest(n, 0)
   loop
     query_text := null;
-    if dimension = 'query_id' and v_has_pgss and v_key_num is not null then
+    if dimension = 'query_id' and v_has_pgss
+       and v_key_num is not null and v_datid is not null then
       -- schema-qualified single lookup point (#115); returns null on any
-      -- failure, never text from a shadowing relation.
-      query_text := ash._pgss_query_text(v_key_num, 100);
+      -- failure, never text from a shadowing relation. A NULL v_datid means
+      -- the key spans ASH databases, so attaching one database's text is unsafe.
+      query_text := ash._pgss_query_text(v_key_num, 100, v_datid);
     end if;
     return next;
   end loop;
@@ -7008,6 +7047,7 @@ declare
   v_grain2 int4;
   v_source1 text;
   v_source2 text;
+  v_datid oid;
   v_exact_query boolean;
   v_extrema_mismatch boolean;
 begin
@@ -7032,10 +7072,9 @@ begin
   end if;
 
   /*
-   * Per-window coverage probe (rollup-backed, cheap). buckets_with_data = 0
-   * means the window holds no data at all — its side must read NULL, and the
-   * caller is warned: comparing against an uncovered window says nothing
-   * about a regression.
+   * Scalar coverage probe and shared input validation. Dimensional reads
+   * recheck coverage below, after planning their own bounds and read grain.
+   * An uncovered window must not produce a delta against a fake zero.
    */
   select * into v_aas1 from ash.aas(v_from1, v_to1,
     wait_event_type, wait_event, query_id, database, bucket);
@@ -7043,21 +7082,6 @@ begin
     wait_event_type, wait_event, query_id, database, bucket);
   v_cov1 := v_aas1.buckets_with_data > 0;
   v_cov2 := v_aas2.buckets_with_data > 0;
-  if not v_cov1 then
-    raise notice
-      'ash.compare: window 1 (% to %) has no data coverage — its columns '
-      'and avg_delta are NULL, not zero. Check retention with ash.status() '
-      'before reading a delta as a change.',
-      v_aas1.period_start, v_aas1.period_end;
-  end if;
-  if not v_cov2 then
-    raise notice
-      'ash.compare: window 2 (% to %) has no data coverage — its columns '
-      'and avg_delta are NULL, not zero. Check retention with ash.status() '
-      'before reading a delta as a change.',
-      v_aas2.period_start, v_aas2.period_end;
-  end if;
-
   /*
    * The displayed bucket can be the same even when one side consists of one
    * retained hour average and the other consists of minute observations.
@@ -7084,6 +7108,161 @@ begin
          ) then 3600
     else 60
   end;
+
+  if dimension is not null then
+    /*
+     * Plan the dimensional windows independently. This cannot reuse aas()'s
+     * effective grain: an unfiltered scalar rollup_1h read can use minute_counts
+     * while a wait/query breakdown over that same physical source is hourly.
+     */
+    v_requested_bucket_secs := extract(epoch from bucket);
+    v_start1 := (ash.ts_from_timestamptz(date_trunc('minute', v_from1, 'UTC')) / 60) * 60;
+    v_end1 := (ash.ts_from_timestamptz(date_trunc('minute', v_to1, 'UTC')) / 60) * 60;
+    if v_end1 <= v_start1 then
+      v_end1 := least(v_start1::bigint + 60, 2147483647)::int4;
+    end if;
+    v_start2 := (ash.ts_from_timestamptz(date_trunc('minute', v_from2, 'UTC')) / 60) * 60;
+    v_end2 := (ash.ts_from_timestamptz(date_trunc('minute', v_to2, 'UTC')) / 60) * 60;
+    if v_end2 <= v_start2 then
+      v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
+    end if;
+
+    v_exact_query := query_id is not null
+                     or (
+                       dimension = 'query_id'
+                       and (
+                         wait_event_type is not null
+                         or wait_event is not null
+                       )
+                     );
+
+    if v_exact_query then
+      perform ash._require_raw_ring('exact query attribution');
+      v_source1 := 'raw';
+      v_source2 := 'raw';
+    else
+      v_source1 := ash._pick_source_agg(
+        ash.ts_to_timestamptz(v_start1),
+        ash.ts_to_timestamptz(v_end1)
+      );
+      v_source2 := ash._pick_source_agg(
+        ash.ts_to_timestamptz(v_start2),
+        ash.ts_to_timestamptz(v_end2)
+      );
+    end if;
+    v_grain1 := case when v_source1 = 'rollup_1h' then 3600 else 60 end;
+    v_grain2 := case when v_source2 = 'rollup_1h' then 3600 else 60 end;
+
+    if v_source1 = 'rollup_1h'
+       and dimension = 'database'
+       and wait_event_type is null
+       and wait_event is null
+       and query_id is null then
+      if ash._rollup_1h_has_flat(v_start1, v_end1, database) then
+        v_source1 := 'rollup_1h_flat';
+      else
+        v_grain1 := 60;
+      end if;
+    end if;
+    if v_source2 = 'rollup_1h'
+       and dimension = 'database'
+       and wait_event_type is null
+       and wait_event is null
+       and query_id is null then
+      if ash._rollup_1h_has_flat(v_start2, v_end2, database) then
+        v_source2 := 'rollup_1h_flat';
+      else
+        v_grain2 := 60;
+      end if;
+    end if;
+
+    if v_grain1 = 3600 then
+      v_start1 := ((v_start1::bigint / 3600) * 3600)::int4;
+      v_end1 := least(
+        ((v_end1::bigint + 3599) / 3600) * 3600,
+        2147483647
+      )::int4;
+    end if;
+    if v_grain2 = 3600 then
+      v_start2 := ((v_start2::bigint / 3600) * 3600)::int4;
+      v_end2 := least(
+        ((v_end2::bigint + 3599) / 3600) * 3600,
+        2147483647
+      )::int4;
+    end if;
+    v_effective_bucket_secs1 := (
+      (
+        greatest(ceil(v_requested_bucket_secs)::int4, v_grain1)::bigint
+        + v_grain1 - 1
+      )
+      / v_grain1 * v_grain1
+    )::int4;
+    v_effective_bucket_secs2 := (
+      (
+        greatest(ceil(v_requested_bucket_secs)::int4, v_grain2)::bigint
+        + v_grain2 - 1
+      )
+      / v_grain2 * v_grain2
+    )::int4;
+    v_extrema_mismatch :=
+      v_grain1 <> v_grain2
+      or v_effective_bucket_secs1 <> v_effective_bucket_secs2;
+
+    -- Minute rollup plans share aas() coverage, including sparse database detail.
+    -- Raw and hourly plans need only source-row existence, not decoded counts.
+    select db.oid into v_datid from pg_database as db where db.datname = database;
+    select case
+      when v_source1 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start1), ash.ts_to_timestamptz(v_end1)))::smallint[])
+          and s.sample_ts >= v_start1 and s.sample_ts < v_end1
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain1 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start1 and h.ts < v_end1
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov1
+    end into v_cov1;
+    select case
+      when v_source2 = 'raw' then exists (
+        select from ash.sample as s
+        where s.slot = any((select ash._active_slots_for_at(
+          ash.ts_to_timestamptz(v_start2), ash.ts_to_timestamptz(v_end2)))::smallint[])
+          and s.sample_ts >= v_start2 and s.sample_ts < v_end2
+          and (database is null or s.datid = v_datid)
+      )
+      when v_grain2 = 3600 then exists (
+        select from ash.rollup_1h as h
+        where h.ts >= v_start2 and h.ts < v_end2
+          and (database is null or h.datid = v_datid)
+      )
+      else v_cov2
+    end into v_cov2;
+  end if;
+
+  if not v_cov1 then
+    raise notice
+      'ash.compare: window 1 (% to %) has no data coverage — its columns '
+      'and avg_delta are NULL, not zero. Check retention with ash.status() '
+      'before reading a delta as a change.',
+      case when dimension is null then v_aas1.period_start
+           else ash.ts_to_timestamptz(v_start1) end,
+      case when dimension is null then v_aas1.period_end
+           else ash.ts_to_timestamptz(v_end1) end;
+  end if;
+  if not v_cov2 then
+    raise notice
+      'ash.compare: window 2 (% to %) has no data coverage — its columns '
+      'and avg_delta are NULL, not zero. Check retention with ash.status() '
+      'before reading a delta as a change.',
+      case when dimension is null then v_aas2.period_start
+           else ash.ts_to_timestamptz(v_start2) end,
+      case when dimension is null then v_aas2.period_end
+           else ash.ts_to_timestamptz(v_end2) end;
+  end if;
 
   if dimension is null then
     v_extrema_mismatch :=
@@ -7116,103 +7295,6 @@ begin
     return;
   end if;
 
-  /*
-   * Plan the dimensional windows independently. This cannot reuse aas()'s
-   * effective grain: an unfiltered scalar rollup_1h read can use minute_counts
-   * while a wait/query breakdown over that same physical source is hourly.
-   */
-  v_requested_bucket_secs := extract(epoch from bucket);
-  v_start1 := (ash.ts_from_timestamptz(date_trunc('minute', v_from1, 'UTC')) / 60) * 60;
-  v_end1 := (ash.ts_from_timestamptz(date_trunc('minute', v_to1, 'UTC')) / 60) * 60;
-  if v_end1 <= v_start1 then
-    v_end1 := least(v_start1::bigint + 60, 2147483647)::int4;
-  end if;
-  v_start2 := (ash.ts_from_timestamptz(date_trunc('minute', v_from2, 'UTC')) / 60) * 60;
-  v_end2 := (ash.ts_from_timestamptz(date_trunc('minute', v_to2, 'UTC')) / 60) * 60;
-  if v_end2 <= v_start2 then
-    v_end2 := least(v_start2::bigint + 60, 2147483647)::int4;
-  end if;
-
-  v_exact_query := query_id is not null
-                   or (
-                     dimension = 'query_id'
-                     and (
-                       wait_event_type is not null
-                       or wait_event is not null
-                     )
-                   );
-
-  if v_exact_query then
-    v_source1 := 'raw';
-    v_source2 := 'raw';
-  else
-    v_source1 := ash._pick_source_agg(
-      ash.ts_to_timestamptz(v_start1),
-      ash.ts_to_timestamptz(v_end1)
-    );
-    v_source2 := ash._pick_source_agg(
-      ash.ts_to_timestamptz(v_start2),
-      ash.ts_to_timestamptz(v_end2)
-    );
-  end if;
-  v_grain1 := case when v_source1 = 'rollup_1h' then 3600 else 60 end;
-  v_grain2 := case when v_source2 = 'rollup_1h' then 3600 else 60 end;
-
-  if v_source1 = 'rollup_1h'
-     and dimension = 'database'
-     and wait_event_type is null
-     and wait_event is null
-     and query_id is null then
-    if ash._rollup_1h_has_flat(v_start1, v_end1, database) then
-      v_source1 := 'rollup_1h_flat';
-    else
-      v_grain1 := 60;
-    end if;
-  end if;
-  if v_source2 = 'rollup_1h'
-     and dimension = 'database'
-     and wait_event_type is null
-     and wait_event is null
-     and query_id is null then
-    if ash._rollup_1h_has_flat(v_start2, v_end2, database) then
-      v_source2 := 'rollup_1h_flat';
-    else
-      v_grain2 := 60;
-    end if;
-  end if;
-
-  if v_grain1 = 3600 then
-    v_start1 := ((v_start1::bigint / 3600) * 3600)::int4;
-    v_end1 := least(
-      ((v_end1::bigint + 3599) / 3600) * 3600,
-      2147483647
-    )::int4;
-  end if;
-  if v_grain2 = 3600 then
-    v_start2 := ((v_start2::bigint / 3600) * 3600)::int4;
-    v_end2 := least(
-      ((v_end2::bigint + 3599) / 3600) * 3600,
-      2147483647
-    )::int4;
-  end if;
-  v_effective_bucket_secs1 := (
-    (
-      greatest(ceil(v_requested_bucket_secs)::int4, v_grain1)::bigint
-      + v_grain1 - 1
-    )
-    / v_grain1 * v_grain1
-  )::int4;
-  v_effective_bucket_secs2 := (
-    (
-      greatest(ceil(v_requested_bucket_secs)::int4, v_grain2)::bigint
-      + v_grain2 - 1
-    )
-    / v_grain2 * v_grain2
-  )::int4;
-  v_extrema_mismatch :=
-    v_grain1 <> v_grain2
-    or v_effective_bucket_secs1 <> v_effective_bucket_secs2;
-
   return query
   with window1 as (
     select * from ash.top(dimension, v_from1, v_to1,
@@ -7224,7 +7306,10 @@ begin
   )
   select
     coalesce(window1.key, window2.key),
-    coalesce(window1.query_text, window2.query_text),
+    case when database is not null
+           or window1.key is null or window2.key is null
+           or window1.query_text = window2.query_text
+         then coalesce(window1.query_text, window2.query_text) end,
     v_source1,
     v_source2,
     ash.ts_to_timestamptz(v_start1),
@@ -7270,11 +7355,13 @@ $$;
  * caller lacks USAGE on, so an unqualified reference could fall through to a
  * planted public.pg_stat_statements and leak attacker-controlled query_text.
  * Returns null when unavailable (including permission-denied on the real
- * pgss schema) — degraded, never spoofed.
+ * pgss schema) — degraded, never spoofed. Query IDs are database-local.
+ * Unscoped lookups return NULL when matching or hidden IDs span databases.
  */
 create or replace function ash._pgss_query_text(
   query_id bigint,
-  maxlen int default 80
+  maxlen int,
+  database_oid oid
 )
 returns text
 language plpgsql
@@ -7289,15 +7376,32 @@ begin
     return null;
   end if;
   begin
+    -- Other users' hidden IDs can collide in another database. Count those
+    -- databases too, but select text only from visible matching IDs.
     execute format(
-      'select left(query, $1) from %I.pg_stat_statements '
-      'where queryid = $2 limit 1', v_pgss_schema)
-      into v_text using maxlen, query_id;
+      'select left(min(query) filter (where queryid = $2), $1) from %I.pg_stat_statements '
+      'where (queryid = $2 or ($3 is null and queryid is null)) '
+      'and ($3 is null or dbid = $3) '
+      'having $3 is not null or count(distinct dbid) = 1', v_pgss_schema)
+      into v_text using maxlen, query_id, database_oid;
   exception when others then
     v_text := null;
   end;
   return v_text;
 end;
+$$;
+
+-- Preserve existing calls. Without a database, only an unambiguous lookup is safe.
+create or replace function ash._pgss_query_text(
+  query_id bigint,
+  maxlen int default 80
+)
+returns text
+language sql
+stable
+set search_path = pg_catalog, ash
+as $$
+  select ash._pgss_query_text($1, $2, null::oid);
 $$;
 
 /*
@@ -7424,7 +7528,7 @@ begin
     resolved.active_count,
     resolved.wait_event,
     resolved.qid,
-    case when v_has_pgss then ash._pgss_query_text(resolved.qid, 80)
+    case when v_has_pgss then ash._pgss_query_text(resolved.qid, 80, resolved.datid)
          else null end
   from resolved
   left join pg_database as db on db.oid = resolved.datid
@@ -8097,6 +8201,10 @@ begin
     if extract(epoch from bucket) < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
+    if ceil(extract(epoch from bucket)) > 2147483647 then
+      raise exception 'ash.chart: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
+    end if;
     v_bucket_secs := ceil(extract(epoch from bucket))::int4;
   end if;
 
@@ -8114,6 +8222,10 @@ begin
   end if;
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.chart: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -8184,7 +8296,7 @@ begin
            sum(grain_by_row.cnt) * v_si
            / (least(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs
-                  + v_bucket_secs, v_end_ts)
+                  + v_bucket_secs::bigint, v_end_ts)
               - greatest(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs,
                 v_start_ts)) as tot
@@ -8227,11 +8339,11 @@ begin
     per_bucket as (
       select buckets.bstart,
              round(coalesce(sum(bucket_events.cnt), 0) * v_si
-                   / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                   / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                       - greatest(buckets.bstart, v_start_ts)), 2) as total,
              coalesce(jsonb_object_agg(bucket_events.ev,
                round(bucket_events.cnt * v_si
-                     / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                     / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                         - greatest(buckets.bstart, v_start_ts)), 2))
                filter (where bucket_events.ev is not null),
                '{}'::jsonb) as events
@@ -8456,7 +8568,7 @@ comment on function ash.rollup_hour() is
 $$Admin: fold completed hours of ash.rollup_1m into ash.rollup_1h. minute_counts preserves available per-minute totals and must sum to the hourly wait total; missing stored rows remain NULL slots because idle and uncovered minutes are indistinguishable (#137). Returns hours processed.$$;
 
 comment on function ash.rollup_cleanup() is
-$$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Rotation deliberately does not require minute rollups that this cleanup is entitled to delete. Returns a summary of rows deleted.$$;
+$$Admin: delete rollup rows past retention (rollup_1m_retention_days / rollup_1h_retention_days in ash.config; the daily job scheduled by ash.start()). Pending hourly input can exceed minute retention until aggregated or its destination hour expires under hourly retention. Rotation deliberately does not require minute rollups that this cleanup is entitled to delete. Returns a summary of rows deleted.$$;
 
 comment on function ash.rebuild_partitions(int, text) is
 $$Admin, DESTRUCTIVE: drop and recreate the sample/query-map partitions and query_map_all view with num_partitions slots (3-32). Before changing state, rejects geometry where (num_partitions - 1) * rotation_period exceeds rollup_1m_retention_days; rotation_period is whole-day only. Readable raw retention is approximately (num_partitions - 2) * rotation_period. The current partial period may add more. Requires confirm => 'yes' and must be called as the ash schema owner. DELETES ALL RAW SAMPLES (rollups are kept). Complete ash.grant_reader() bundles, including the default pg_monitor bundle, are preserved across the rebuild. Any job-stop or rebuild failure raises and rolls back jobs, config, raw data, and DDL; success deliberately leaves sampling disabled until ash.start() is called.$$;
@@ -8493,9 +8605,9 @@ comment on function ash._pgss_schema() is
   'Returns the schema name of the installed pg_stat_statements extension, or NULL if not installed. Used to keep reader functions portable across managed services and custom install schemas.';
 
 /*
- * Helper: re-apply search_path on the pgss reader functions using the
- * currently detected pgss schema. Run this after installing / moving
- * pg_stat_statements if it lives outside `public`. Safe to re-run.
+ * Defense in depth: refresh pgss reader search_path using the detected schema.
+ * SQL-text lookup is schema-qualified per call (#115), so this helper is not
+ * required after pgss installation or relocation. Safe to re-run.
  */
 create or replace function ash._apply_pgss_search_path()
 returns text
@@ -8565,7 +8677,7 @@ end;
 $$;
 
 comment on function ash._apply_pgss_search_path() is
-  'Re-applies search_path on pgss reader functions using the currently detected pg_stat_statements schema. Run after installing pg_stat_statements if it lives outside the public schema.';
+  'Refreshes reader search_path as defense in depth. SQL-text lookup resolves the pg_stat_statements schema on each call and does not require this helper after extension installation or relocation.';
 
 -- Apply now so installs that have pgss in a non-public schema work out of the
 -- box. No-op (keeps default) when pgss is absent or lives in public.
@@ -8635,6 +8747,25 @@ declare
   v_admin_funcs constant text[] := ash._admin_funcs();
   v_rec record;
 begin
+  -- Scrub historical admin grants before restoring schema-owner access.
+  -- The schema owner can differ from the function owner; cascade still
+  -- removes prior grant options and delegated grants, as DROP used to.
+  for v_rec in
+    select distinct func_acl.grantee, proc.oid::regprocedure as sig
+    from pg_temp._ash_install_func_acl as func_acl
+    join pg_proc as proc on proc.proname = func_acl.proname
+    where proc.pronamespace = 'ash'::regnamespace
+      and proc.proname in (
+        'uninstall', 'rebuild_partitions', 'start', 'set_debug_logging',
+        'rollup_minute', 'grant_reader', 'revoke_reader',
+        '_register_wait', '_merge_wait_counts', '_merge_query_counts',
+        '_truncate_pairs'
+      )
+  loop
+    execute format('revoke execute on function %s from %I cascade',
+                   v_rec.sig, v_rec.grantee);
+  end loop;
+
   /*
    * Admin routines: revoke from PUBLIC and grant only to the schema owner.
    * Resolve signatures dynamically via pg_proc so any future overload or
@@ -8984,19 +9115,21 @@ end $$;
  *   * Admin functions (ash._admin_funcs()) are never restored. They are
  *     locked to the owner by the hardening block above and are never handed
  *     out by ash.grant_reader(); re-applying a stray manual grant on one
- *     would silently undo that hardening on every install. Excluding them
- *     here preserves the pre-#107 behaviour where DROP FUNCTION scrubbed
- *     such grants.
+ *     would silently undo that hardening on every install. The hardening
+ *     block scrubs grants on historically dropped admins before restoring
+ *     schema-owner access. This restore must not reintroduce those grants.
  *   * Each grant is restored to the exact same signature when it still
  *     exists, so a role that held only one overload of a function is not
  *     widened to its siblings. Only when the snapshotted signature is gone
  *     (a genuine cross-version signature change — the case this restore
  *     exists to cover) does it fall back to every current overload of the
  *     name.
+ *   * The legacy query-text wrapper also needs its database-aware dependency.
+ *     Its grantees retain that EXECUTE privilege with the same grant option.
  * This mirrors what CREATE OR REPLACE would have preserved: function names
  * that no longer exist (removed/renamed) are skipped, roles dropped
- * mid-script are skipped, and a role with only partial FUNCTION grants is
- * not widened. Roles that held the FULL pre-upgrade reader-function bundle
+ * mid-script are skipped, and a role with only partial FUNCTION grants gets
+ * no unrelated privileges. Roles with the FULL pre-upgrade reader-function bundle
  * (detected in the snapshot block at the top of this script) are additionally
  * re-run through ash.grant_reader() afterwards, so they can also execute
  * helpers introduced by this version — otherwise the readers they kept would
@@ -9023,6 +9156,10 @@ begin
       and (
         -- the snapshotted overload still exists: restore exactly it
         pg_catalog.pg_get_function_identity_arguments(proc.oid) = func_acl.args
+        or (
+          proc.oid = 'ash._pgss_query_text(bigint,integer,oid)'::regprocedure
+          and func_acl.args = 'query_id bigint, maxlen integer'
+        )
         -- the snapshotted overload is gone (signature changed): fall back
         -- to restoring every current overload of the name
         or not exists (

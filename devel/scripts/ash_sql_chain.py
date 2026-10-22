@@ -287,10 +287,13 @@ def validate_development_overlay(
         )
 
     if not released_is_prerelease:
+        # A release stamp recreates this exact baseline for the next cycle.
+        if dev_install.read_bytes() == (ROOT / "sql" / "ash-install.sql").read_bytes():
+            return
         raise SystemExit(
-            "a lone development installer is valid only after a prerelease; "
-            f"the released payload {released_version} is final, so add a "
-            "connected development migration"
+            f"the released payload {released_version} is final, but the "
+            "development installer is not byte-identical; add a connected "
+            "development migration"
         )
 
 
