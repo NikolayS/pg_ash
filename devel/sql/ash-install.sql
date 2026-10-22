@@ -8565,7 +8565,7 @@ end;
 $$;
 
 comment on function ash._apply_pgss_search_path() is
-  'Re-applies search_path on pgss reader functions using the currently detected pg_stat_statements schema. Run after installing pg_stat_statements if it lives outside the public schema.';
+  'Refreshes reader search_path as defense in depth. SQL-text lookup resolves the pg_stat_statements schema on each call and does not require this helper after extension installation or relocation.';
 
 -- Apply now so installs that have pgss in a non-public schema work out of the
 -- box. No-op (keeps default) when pgss is absent or lives in public.
