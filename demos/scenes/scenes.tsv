@@ -34,7 +34,7 @@
 # name	hold	reel_order	title	markers	sql
 status	0.0	0	Collection settings	2.0,external scheduler	select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','raw_retention','pg_cron_available');
 periods	0.0	0	Available history	1m,1h,raw	select period, source, buckets_with_data, avg_aas, peak_aas, p99_aas from ash.periods($UNTIL);
-chart	6.5	1	1. When did load rise?	Lock:transactionid,Lock:tuple,█,▓,▒	select to_char(bucket_start, 'HH24:MI') as bucket, aas, rtrim(chart) as chart from ash.chart(since => $SINCE, until => $UNTIL, bucket => '2 minutes', n => 4, width => 66, color => true);
+chart	6.5	1	1. When did load rise?	Lock:transactionid,Lock:tuple,█,▓,▒	select to_char(bucket_start, 'HH24:MI') as bucket, aas, rtrim(chart) as chart from ash.chart(since => $SINCE, until => $UNTIL, bucket => '2 minutes', n => 5, width => 66, color => true);
 top_event	5.0	2	2. What were sessions waiting for?	Lock:transactionid	select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', since => $STORM_SINCE, until => $STORM_UNTIL, n => 6);
 top_query	5.5	3	3. Which statements experienced this wait?	pgbench_accounts	select key, left(query_text, 52) as query_text, avg_aas, pct from ash.top('query_id', since => $STORM_SINCE, until => $STORM_UNTIL, wait_event => $STORM_EVENT, n => 3);
 compare	5.5	4	4. What changed from the baseline?	avg_delta,Lock:transactionid	select key, avg_aas_1, avg_aas_2, avg_delta, pct_2 from ash.compare($BASE_SINCE, $BASE_UNTIL, $STORM_SINCE, $STORM_UNTIL, dimension => 'wait_event', n => 5);
