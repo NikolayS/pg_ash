@@ -1,0 +1,37 @@
+[
+  {
+    "wrapper_call": 1,
+    "select_statements_submitted": 1,
+    "select_statements_attempted": 1,
+    "all_sql_statements_submitted": 1,
+    "sql": "select * from ash.periods();"
+  },
+  {
+    "wrapper_call": 2,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.status(); select * from ash.aas(since=>'2026-10-21 21:56:00+00',until=>'2026-10-21 22:01:00+00'); select * from ash.chart(since=>'2026-10-21 21:56:00+00',until=>'2026-10-21 22:01:00+00',color=>false); commit;"
+  },
+  {
+    "wrapper_call": 3,
+    "select_statements_submitted": 4,
+    "select_statements_attempted": 4,
+    "all_sql_statements_submitted": 7,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.aas(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00'); select * from ash.top('wait_event',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',order_by=>'peak'); select * from ash.top('query_id',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',wait_event=>'Client:ClientRead'); select * from ash.samples(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',wait_event=>'Client:ClientRead',n=>40); commit;"
+  },
+  {
+    "wrapper_call": 4,
+    "select_statements_submitted": 6,
+    "select_statements_attempted": 6,
+    "all_sql_statements_submitted": 9,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.top('wait_event',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:00:00+00',query_id=>-9127212586606946335); select sample_time,count(*) as decoded_rows,min(active_backends) as reported_active_backends from ash.samples(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',n=>1000) group by sample_time order by sample_time; select * from ash.aas(since=>'2026-10-21 21:57:00+00',until=>'2026-10-21 21:59:00+00'); select * from ash.chart(since=>'2026-10-21 21:57:00+00',until=>'2026-10-21 21:59:00+00',color=>false); select * from ash.compare('2026-10-21 21:57:00+00','2026-10-21 21:59:00+00','2026-10-21 21:59:00+00','2026-10-21 22:01:00+00',dimension=>'wait_event'); select datname,application_name,state,wait_event_type,wait_event,query_id,xact_start,query_start from pg_stat_activity where backend_type='client backend' and pid<>pg_backend_pid(); commit;"
+  },
+  {
+    "wrapper_call": 5,
+    "select_statements_submitted": 14,
+    "select_statements_attempted": 14,
+    "all_sql_statements_submitted": 17,
+    "sql": "\\set ON_ERROR_STOP on\n\\pset pager off\nbegin read only;\nset local statement_timeout='30s';\nselect * from ash.status();\nselect * from ash.periods();\nselect * from ash.aas(since=>'2026-10-21 21:56:00+00',until=>'2026-10-21 22:01:00+00');\nselect * from ash.chart(since=>'2026-10-21 21:56:00+00',until=>'2026-10-21 22:01:00+00',color=>false);\nselect * from ash.aas(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00');\nselect * from ash.top('wait_event',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',order_by=>'peak');\nselect * from ash.top('query_id',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',wait_event=>'Client:ClientRead');\nselect * from ash.top('wait_event',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:00:00+00',query_id=>-9127212586606946335);\nselect * from ash.samples(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',wait_event=>'Client:ClientRead',n=>4);\nselect sample_time,count(*) as decoded_rows,min(active_backends) as reported_active_backends from ash.samples(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',n=>1000) group by sample_time order by sample_time;\nselect * from ash.aas(since=>'2026-10-21 21:57:00+00',until=>'2026-10-21 21:59:00+00');\nselect * from ash.chart(since=>'2026-10-21 21:57:00+00',until=>'2026-10-21 21:59:00+00',color=>false);\nselect * from ash.compare('2026-10-21 21:57:00+00','2026-10-21 21:59:00+00','2026-10-21 21:59:00+00','2026-10-21 22:01:00+00',dimension=>'wait_event');\nselect datname,application_name,state,wait_event_type,wait_event,query_id,xact_start,query_start from pg_stat_activity where backend_type='client backend' and pid<>pg_backend_pid();\ncommit;\n"
+  }
+]

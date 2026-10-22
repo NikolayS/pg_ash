@@ -1,0 +1,44 @@
+{
+  "case_id": "s49m2cnh",
+  "frozen_rubric_sha256": "317d392b51e1f2954c60a489f07126e6756782cac2661622bd03841a35deda86",
+  "mechanism": "cpu",
+  "expected": {
+    "event": "CPU*",
+    "query": "select sum(length(md5(i::text))) from generate_series($1, $2) as i",
+    "acceptable": "Active backend with no reported wait, consistent with bounded expression work. CPU* is not measured CPU utilization; container CPU quota may throttle execution.",
+    "unsupported": "CPU percentage, host saturation or a proven CPU bottleneck from CPU* alone."
+  },
+  "observed_windows": [
+    {
+      "window": {
+        "index": 1,
+        "start": "2026-10-21T22:01:21.852289+00:00",
+        "end": "2026-10-21T22:01:36.588135+00:00"
+      },
+      "ash_matching_rows": 13,
+      "independent_matching_observations": 0,
+      "query_ids": [
+        2642533687498376244
+      ],
+      "valid": false
+    },
+    {
+      "window": {
+        "index": 2,
+        "start": "2026-10-21T22:01:56.588689+00:00",
+        "end": "2026-10-21T22:02:15.082508+00:00"
+      },
+      "ash_matching_rows": 17,
+      "independent_matching_observations": 0,
+      "query_ids": [
+        2642533687498376244
+      ],
+      "valid": false
+    }
+  ],
+  "certified_at": "2026-10-21T22:02:50.200001+00:00",
+  "service_sessions_remaining": [],
+  "sampler_errors_or_skips": [],
+  "rollup_rows": 1,
+  "certified": false
+}

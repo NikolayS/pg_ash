@@ -1,0 +1,44 @@
+[
+  {
+    "wrapper_call": 1,
+    "select_statements_submitted": 0,
+    "select_statements_attempted": 0,
+    "all_sql_statements_submitted": 0,
+    "sql": "\\dt"
+  },
+  {
+    "wrapper_call": 2,
+    "select_statements_submitted": 1,
+    "select_statements_attempted": 1,
+    "all_sql_statements_submitted": 1,
+    "sql": "select * from ash.periods();"
+  },
+  {
+    "wrapper_call": 3,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.status(); select * from ash.aas(); select * from ash.chart(since=>'2026-10-21 22:09:00+00',until=>'2026-10-21 22:15:00+00',color=>false); commit;"
+  },
+  {
+    "wrapper_call": 4,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.aas(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00'); select * from ash.top('wait_event',since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00'); select * from ash.timeline(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',bucket=>'1 second'); commit;"
+  },
+  {
+    "wrapper_call": 5,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.top('query_id',since=>'2026-10-21 22:12:00+00',until=>'2026-10-21 22:13:00+00',wait_event=>'Lock:relation',order_by=>'peak'); select * from ash.samples(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',n=>100); select * from ash.aas(since=>'2026-10-21 22:09:00+00',until=>'2026-10-21 22:11:00+00'); commit;"
+  },
+  {
+    "wrapper_call": 6,
+    "select_statements_submitted": 9,
+    "select_statements_attempted": 9,
+    "all_sql_statements_submitted": 12,
+    "sql": "\\set ON_ERROR_STOP on\nbegin read only;\nset local statement_timeout = '30s';\nselect * from ash.status();\nselect * from ash.aas(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00');\nselect * from ash.timeline(since=>'2026-10-21 22:09:00+00',until=>'2026-10-21 22:15:00+00',bucket=>'1 minute');\nselect * from ash.top('wait_event',since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',order_by=>'peak');\nselect * from ash.top('query_id',since=>'2026-10-21 22:12:00+00',until=>'2026-10-21 22:13:00+00',wait_event=>'Lock:relation',order_by=>'peak');\nselect * from ash.top('wait_event',since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',query_id=>-9127212586606946335);\nselect * from ash.samples(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',n=>100);\nwith ticks as (\n select sample_time, count(*) as observations\n from ash.samples(since=>'2026-10-21 22:11:00+00',until=>'2026-10-21 22:13:00+00',n=>100)\n group by sample_time\n), gaps as (\n select *, sample_time - lag(sample_time) over (order by sample_time) as gap from ticks\n)\nselect min(sample_time) as first_sample, max(sample_time) as last_sample, count(*) as ticks, min(observations) as min_observations, max(observations) as max_observations, max(gap) as largest_gap from gaps;\nselect * from ash.aas(since=>'2026-10-21 22:09:00+00',until=>'2026-10-21 22:11:00+00');\ncommit;\n"
+  }
+]

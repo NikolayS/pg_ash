@@ -1,0 +1,30 @@
+[
+  {
+    "wrapper_call": 1,
+    "select_statements_submitted": 1,
+    "select_statements_attempted": 1,
+    "all_sql_statements_submitted": 1,
+    "sql": "select * from ash.periods();"
+  },
+  {
+    "wrapper_call": 2,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.status(); select * from ash.aas(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:04:00+00'); select * from ash.timeline(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:04:00+00'); commit;"
+  },
+  {
+    "wrapper_call": 3,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 6,
+    "sql": "begin read only; set local statement_timeout='30s'; select * from ash.top('wait_event',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:04:00+00',order_by=>'peak'); select * from ash.top('database',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:04:00+00'); select * from ash.samples(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:04:00+00',n=>100); rollback;"
+  },
+  {
+    "wrapper_call": 4,
+    "select_statements_submitted": 10,
+    "select_statements_attempted": 10,
+    "all_sql_statements_submitted": 14,
+    "sql": "\\set ON_ERROR_STOP on\n\\pset pager off\n\\pset null '(null)'\nbegin isolation level repeatable read read only;\nset local statement_timeout='30s';\nset local timezone='UTC';\nselect * from ash.status();\nselect * from ash.aas(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:04:00+00');\nselect * from ash.timeline(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:04:00+00');\nselect * from ash.aas(since=>'2026-10-21 22:01:00+00',until=>'2026-10-21 22:03:00+00');\nselect * from ash.top('wait_event',since=>'2026-10-21 22:01:00+00',until=>'2026-10-21 22:03:00+00',order_by=>'peak');\nselect * from ash.top('query_id',since=>'2026-10-21 22:01:00+00',until=>'2026-10-21 22:03:00+00',wait_event=>'CPU*',order_by=>'peak');\nselect * from ash.top('wait_event',since=>'2026-10-21 22:01:00+00',until=>'2026-10-21 22:03:00+00',query_id=>2642533687498376244);\nselect * from ash.samples(since=>'2026-10-21 22:01:00+00',until=>'2026-10-21 22:03:00+00',wait_event=>'CPU*',query_id=>2642533687498376244,n=>100);\nselect * from ash.aas(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00');\nselect * from ash.compare('2026-10-21 21:59:00+00','2026-10-21 22:01:00+00','2026-10-21 22:01:00+00','2026-10-21 22:03:00+00',dimension=>'wait_event');\nrollback;\n"
+  }
+]

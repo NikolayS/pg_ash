@@ -1,0 +1,30 @@
+[
+  {
+    "ts": 25394460,
+    "datid": 16384,
+    "samples": 16,
+    "peak_backends": 1,
+    "wait_counts": [
+      1,
+      16
+    ],
+    "query_counts": [
+      2642533687498376244,
+      16
+    ]
+  },
+  {
+    "ts": 25394520,
+    "datid": 16384,
+    "samples": 14,
+    "peak_backends": 1,
+    "wait_counts": [
+      1,
+      14
+    ],
+    "query_counts": [
+      2642533687498376244,
+      14
+    ]
+  }
+]

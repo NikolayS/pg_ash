@@ -1,0 +1,130 @@
+Pager usage is off.
+Null display is "(null)".
+BEGIN
+SET
+SET
+           metric            |             value             
+-----------------------------+-------------------------------
+ version                     | 2.0-rc1
+ in_recovery                 | false
+ color                       | off
+ num_partitions              | 3
+ sample_unlogged             | false
+ sampling_enabled            | true
+ skipped_samples             | 0
+ current_slot                | 0
+ sample_interval             | 00:00:01
+ sample_interval_supported   | true
+ rotation_period             | 1 day
+ rotation_period_contract    | day-granular; minimum 1 day
+ raw_retention               | 1 day + current partial
+ include_bg_workers          | false
+ debug_logging               | false
+ missed_samples              | 0
+ insert_errors               | 0
+ installed_at                | 2026-10-21 21:52:45.498407+00
+ rotated_at                  | 2026-10-21 21:52:45.498407+00
+ time_since_rotation         | 00:12:24.688443
+ consecutive_rotate_failures | 0
+ last_sample_ts              | 2026-10-21 22:03:57+00
+ time_since_last_sample      | 00:01:13.18685
+ samples_in_current_slot     | 31
+ samples_total               | 31
+ wait_event_map_count        | 2
+ wait_event_map_utilization  | 0.01%
+ register_wait_cap_hits      | 0
+ query_map_count             | 2
+ rollup_1m_rows              | 3
+ rollup_1m_oldest            | 2026-10-21 22:01:00+00
+ rollup_1m_newest            | 2026-10-21 22:03:00+00
+ rollup_1m_retention         | 30 days
+ rollup_1h_rows              | 0
+ rollup_1h_retention         | 1825 days
+ last_rollup_1m_ts           | 2026-10-21 22:04:00+00
+ raw_retention_start         | 2026-10-20 21:52:00+00
+ rollup_1m_retention_start   | 2026-10-21 22:01:00+00
+ rollup_1h_retention_start   | no rollups
+ epoch_seconds_remaining     | 2122088937
+ pg_cron_available           | no (use external scheduler)
+(41 rows)
+
+      period_start      |       period_end       |  source   | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+-----------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 21:59:00+00 | 2026-10-21 22:04:00+00 | rollup_1m | 00:01:00         |                5 |                 3 |    0.10 |     0.27 |    0.27 |           31.00
+(1 row)
+
+      bucket_start      |  source   | data_points | avg_aas | peak_aas | p99_aas 
+------------------------+-----------+-------------+---------+----------+---------
+ 2026-10-21 21:59:00+00 | rollup_1m |           0 |  (null) |   (null) |  (null)
+ 2026-10-21 22:00:00+00 | rollup_1m |           0 |  (null) |   (null) |  (null)
+ 2026-10-21 22:01:00+00 | rollup_1m |           1 |    0.27 |     0.27 |    0.27
+ 2026-10-21 22:02:00+00 | rollup_1m |           1 |    0.23 |     0.23 |    0.23
+ 2026-10-21 22:03:00+00 | rollup_1m |           1 |    0.02 |     0.02 |    0.02
+(5 rows)
+
+      period_start      |       period_end       | source | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+--------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 22:01:00+00 | 2026-10-21 22:03:00+00 | raw    | 00:01:00         |                2 |                 2 |    0.25 |     0.27 |    0.27 |           30.00
+(1 row)
+
+ key  | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ CPU* | (null)     | raw    | 2026-10-21 22:01:00+00 | 2026-10-21 22:03:00+00 | 00:01:00         |    0.25 |     0.27 |    0.27 |           30.00 | 100.00
+(1 row)
+
+         key         |                             query_text                             | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+---------------------+--------------------------------------------------------------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i | raw    | 2026-10-21 22:01:00+00 | 2026-10-21 22:03:00+00 | 00:01:00         |    0.25 |     0.27 |    0.27 |           30.00 | 100.00
+(1 row)
+
+ key  | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ CPU* | (null)     | raw    | 2026-10-21 22:01:00+00 | 2026-10-21 22:03:00+00 | 00:01:00         |    0.25 |     0.27 |    0.27 |           30.00 | 100.00
+(1 row)
+
+      sample_time       | database_name | active_backends | wait_event |      query_id       |                             query_text                             
+------------------------+---------------+-----------------+------------+---------------------+--------------------------------------------------------------------
+ 2026-10-21 22:02:14+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:13+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:12+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:11+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:10+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:09+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:08+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:07+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:05+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:04+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:03+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:02+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:01+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:02:00+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:59+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:58+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:57+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:36+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:35+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:34+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:33+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:32+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:31+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:30+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:29+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:28+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:27+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:25+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:24+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+ 2026-10-21 22:01:22+00 | appdb         |               1 | CPU*       | 2642533687498376244 | select sum(length(md5(i::text))) from generate_series($1, $2) as i
+(30 rows)
+
+      period_start      |       period_end       |  source   | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+-----------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 21:59:00+00 | 2026-10-21 22:01:00+00 | rollup_1m | 00:01:00         |                2 |                 0 |    0.00 |        0 |       0 |            0.00
+(1 row)
+
+ key  | query_text | source_1  | source_2 |     period_start_1     |      period_end_1      |     period_start_2     |      period_end_2      | effective_bucket_1 | effective_bucket_2 | avg_aas_1 | avg_aas_2 | avg_delta | peak_aas_1 | peak_aas_2 | p99_aas_1 | p99_aas_2 | pct_1  | pct_2  
+------+------------+-----------+----------+------------------------+------------------------+------------------------+------------------------+--------------------+--------------------+-----------+-----------+-----------+------------+------------+-----------+-----------+--------+--------
+ CPU* | (null)     | rollup_1m | raw      | 2026-10-21 21:59:00+00 | 2026-10-21 22:01:00+00 | 2026-10-21 22:01:00+00 | 2026-10-21 22:03:00+00 | 00:01:00           | 00:01:00           |    (null) |      0.25 |    (null) |     (null) |       0.27 |    (null) |      0.27 | (null) | 100.00
+(1 row)
+
+ROLLBACK
+psql:/tmp/pgash-blind-trial-20261021/investigators/s49m2cnh/evidence.sql:16: NOTICE:  ash.compare: window 1 (2026-10-21 21:59:00+00 to 2026-10-21 22:01:00+00) has no data coverage — its columns and avg_delta are NULL, not zero. Check retention with ash.status() before reading a delta as a change.
