@@ -8655,6 +8655,23 @@ declare
   v_admin_funcs constant text[] := ash._admin_funcs();
   v_rec record;
 begin
+  -- Scrub historical admin grants before restoring schema-owner access.
+  -- The schema owner can differ from the function owner; cascade still
+  -- removes prior grant options and delegated grants, as DROP used to.
+  for v_rec in
+    select distinct func_acl.grantee, proc.oid::regprocedure as sig
+    from pg_temp._ash_install_func_acl as func_acl
+    join pg_proc as proc on proc.proname = func_acl.proname
+    where proc.pronamespace = 'ash'::regnamespace
+      and proc.proname in (
+        'uninstall', 'rebuild_partitions', 'start', 'set_debug_logging',
+        'rollup_minute', 'grant_reader', 'revoke_reader'
+      )
+  loop
+    execute format('revoke execute on function %s from %I cascade',
+                   v_rec.sig, v_rec.grantee);
+  end loop;
+
   /*
    * Admin routines: revoke from PUBLIC and grant only to the schema owner.
    * Resolve signatures dynamically via pg_proc so any future overload or
@@ -9032,22 +9049,6 @@ declare
   v_admin_funcs constant text[] := ash._admin_funcs();
   v_reader_roles text;
 begin
-  -- Replacing these unchanged admins now preserves ACLs too. Remove the
-  -- same non-owner grants that the former DROP FUNCTION used to discard.
-  for v_rec in
-    select distinct func_acl.grantee, proc.oid::regprocedure as sig
-    from pg_temp._ash_install_func_acl as func_acl
-    join pg_proc as proc on proc.proname = func_acl.proname
-    where proc.pronamespace = 'ash'::regnamespace
-      and proc.proname in (
-        'uninstall', 'rebuild_partitions', 'start', 'set_debug_logging',
-        'rollup_minute', 'grant_reader', 'revoke_reader'
-      )
-  loop
-    execute format('revoke execute on function %s from %I cascade',
-                   v_rec.sig, v_rec.grantee);
-  end loop;
-
   for v_rec in
     select distinct func_acl.grantee, func_acl.grantable, proc.proname,
            pg_catalog.pg_get_function_identity_arguments(proc.oid) as args
