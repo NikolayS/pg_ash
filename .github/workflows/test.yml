@@ -3793,6 +3793,8 @@ jobs:
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/compare_effective_coverage.sql
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/query_text_database.sql
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             --file=devel/tests/raw_slot_selection.sql
 
       - name: "Test 2.0: report totals and formatting edges"
@@ -4290,8 +4292,8 @@ jobs:
           alter extension pg_stat_statements set schema ash_pgss_ext;
           select ash._apply_pgss_search_path();
 
-          -- (1) Catalog form: every pgss-probing reader lists the pgss schema
-          -- before public, and the catalog-derived set has not drifted.
+          -- (1) Readers with public in search_path must put the pgss schema first.
+          -- The catalog-derived set must not drift.
           do $$
           declare
             r record;
@@ -4310,7 +4312,7 @@ jobs:
               if r.cfg like 'search_path=%' then
                 v_ext_pos := position('ash_pgss_ext' in r.cfg);
                 v_pub_pos := position('public' in r.cfg);
-                if v_ext_pos = 0 or v_ext_pos > v_pub_pos then
+                if v_pub_pos > 0 and (v_ext_pos = 0 or v_ext_pos > v_pub_pos) then
                   v_bad := v_bad || r.proname || ' ';
                 end if;
               end if;
@@ -9304,6 +9306,9 @@ jobs:
             if not exists (select from pg_roles where rolname = 'lp_reader')   then create role lp_reader   login password 'x'; end if;
             if not exists (select from pg_roles where rolname = 'lp_stray')    then create role lp_stray    login password 'x'; end if;
             if not exists (select from pg_roles where rolname = 'lp_overload') then create role lp_overload login password 'x'; end if;
+            create role lp_query;
+            create role lp_query_grant;
+            create role lp_query_delegate;
           end $$;
 
           -- legitimate reader: must SURVIVE re-apply (guards the #107 fix)
@@ -9313,7 +9318,16 @@ jobs:
           -- single-overload grant: must NOT widen to the sibling overload
           grant execute on function ash.decode_sample(integer[], smallint) to lp_overload;
 
+          -- Partial helper grants must retain only their new required dependency.
+          grant usage on schema ash to lp_query, lp_query_grant, lp_query_delegate;
+          grant execute on function ash._pgss_schema() to lp_query, lp_query_grant, lp_query_delegate;
+          grant execute on function ash._pgss_query_text(bigint, integer) to lp_query;
+          grant execute on function ash._pgss_query_text(bigint, integer) to lp_query_grant with grant option;
+
           do $$ begin
+            assert not has_function_privilege('lp_query', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
+              and not has_function_privilege('lp_query_grant', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE'),
+              'precondition: legacy-only grants must not already include the new dependency';
             assert has_function_privilege('lp_stray', 'ash.rebuild_partitions(int,text)', 'EXECUTE'),
               'precondition: stray admin grant present before re-apply';
             assert has_function_privilege('lp_overload', 'ash.decode_sample(integer[],smallint)', 'EXECUTE'),
@@ -9324,6 +9338,15 @@ jobs:
 
           -- re-apply the installer: drop/recreate + snapshot/restore + hardening
           \i /tmp/ash_fresh_install.sql
+
+          -- A NULL query ID still executes the wrapper's SECURITY INVOKER dependency.
+          -- This privilege regression also runs without optional pg_stat_statements.
+          set role lp_query;
+          do $$ begin
+            assert ash._pgss_query_text(null::bigint) is null,
+              'partial grantee must still execute the legacy helper';
+          end $$;
+          reset role;
 
           do $$ begin
             -- (1) #107 still fixed: legitimate reader keeps every reader grant
@@ -9352,14 +9375,37 @@ jobs:
             assert not has_function_privilege('public', 'ash.top(text,timestamptz,timestamptz,text,text,bigint,name,int,interval,text)', 'EXECUTE'),
               'PUBLIC must stay revoked';
 
+            assert not has_function_privilege('lp_query', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE WITH GRANT OPTION'),
+              'ordinary helper EXECUTE must not gain a grant option';
+            assert has_function_privilege('lp_query_grant', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE WITH GRANT OPTION'),
+              'delegable legacy helper must retain a delegable dependency';
+            assert not has_function_privilege('lp_overload', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
+              and not has_function_privilege('public', 'ash._pgss_query_text(bigint,integer,oid)', 'EXECUTE')
+              and not has_table_privilege('lp_query', 'ash.sample', 'SELECT')
+              and not has_function_privilege('lp_query', 'ash.take_sample()', 'EXECUTE'),
+              'helper dependency restore must not widen unrelated access';
+
             raise notice 'issue #107 follow-up: grant restore stayed least-privilege';
           end $$;
 
-          drop owned by lp_reader, lp_stray, lp_overload;
+          set role lp_query_grant;
+          grant execute on function ash._pgss_query_text(bigint, integer),
+            ash._pgss_query_text(bigint, integer, oid) to lp_query_delegate;
+          reset role;
+          \i /tmp/ash_fresh_install.sql
+          set role lp_query_delegate;
+          do $$ begin
+            assert ash._pgss_query_text(null::bigint, 6) is null,
+              'delegated legacy helper must remain executable after another re-apply';
+          end $$;
+          reset role;
+
+          drop owned by lp_reader, lp_stray, lp_overload, lp_query, lp_query_grant, lp_query_delegate;
           select ash.uninstall('yes');
           drop role lp_reader;
           drop role lp_stray;
           drop role lp_overload;
+          drop role lp_query, lp_query_grant, lp_query_delegate;
           EOF
 
       - name: "Migration rollback includes installer and config normalization"
