@@ -1,0 +1,514 @@
+[
+  {
+    "sample_time": "2026-10-21 22:00:11+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:11+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:10+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:10+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:09+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:09+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:08+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:08+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:07+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:07+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:06+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:06+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:05+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:05+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:04+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:04+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:03+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:03+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:02+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:02+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:01+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:01+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:00+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 22:00:00+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:59+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:59+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:58+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:58+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:57+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:57+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:56+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:56+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:55+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:55+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:54+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:54+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:33+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:33+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:32+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:32+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:31+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:31+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:30+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:30+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:29+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:29+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:28+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:28+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:27+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:27+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:26+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:26+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:25+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:25+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:24+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:24+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:23+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:23+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:22+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:22+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:21+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:21+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:20+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  },
+  {
+    "sample_time": "2026-10-21 21:59:20+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Client:ClientRead",
+    "query_id": -9127212586606946335,
+    "query_text": "select payload from records where id = $1"
+  }
+]

@@ -1,0 +1,5 @@
+{"phase": "baseline", "start": "2026-10-21T22:11:15.401525+00:00", "end": "2026-10-21T22:11:50.401659+00:00", "seconds": 35, "sessions": 0}
+{"phase": "spike", "index": 1, "start": "2026-10-21T22:11:50.401896+00:00", "end": "2026-10-21T22:12:04.425244+00:00", "seconds_requested": 14, "preparation": "same SELECT executed with prepare=True before blocker", "errors": []}
+{"phase": "intermission", "start": "2026-10-21T22:12:04.425532+00:00", "end": "2026-10-21T22:12:24.425630+00:00", "seconds": 20, "sessions": 0}
+{"phase": "spike", "index": 2, "start": "2026-10-21T22:12:24.425759+00:00", "end": "2026-10-21T22:12:42.446143+00:00", "seconds_requested": 18, "preparation": "same SELECT executed with prepare=True before blocker", "errors": []}
+{"phase": "recovery", "start": "2026-10-21T22:12:42.446329+00:00", "end": "2026-10-21T22:13:17.446420+00:00", "seconds": 35, "sessions": 0}

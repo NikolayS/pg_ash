@@ -1,0 +1,16 @@
+{
+  "export_policy": "Explicit allowlist: neutral task prompts, investigator reports/SQL/tool I/O, independent activity/sampler/controller evidence, frozen certifications, two invalid attempts, controller correction snapshots. No raw rollout or internal/system/developer prompts, reasoning, credential files, wrapper source or full server logs.",
+  "private_credential_values_checked": 21,
+  "matches_after_redaction": 0,
+  "redacted_files": [],
+  "neutral_prompt_count": 5,
+  "parent_launch_plaintext_equality_verified": false,
+  "encrypted_parent_child_payload_equality_verified": true,
+  "saved_prompt_frozen_hashes_verified": true,
+  "child_assignment_encrypted": true,
+  "case_reports_count": 5,
+  "publication_authorized_after_all_five_complete": true,
+  "offline_certification_replay": "PASS: five valid cases, invalid relation, original CPU validator, incomplete sleep exception",
+  "full_server_logs_included": false,
+  "neutral_prompt_comparison_limit": "Plaintext unavailable in both retained parent and child encrypted assignments; frozen saved hashes and exact encrypted transport equality verified."
+}

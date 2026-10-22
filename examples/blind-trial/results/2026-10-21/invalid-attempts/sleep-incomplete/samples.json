@@ -1,0 +1,82 @@
+[
+  {
+    "sample_time": "2026-10-21 21:54:10+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:10+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:09+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:09+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:08+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:08+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:07+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:07+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:06+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  },
+  {
+    "sample_time": "2026-10-21 21:54:06+00:00",
+    "database_name": "appdb",
+    "active_backends": 2,
+    "wait_event": "Timeout:PgSleep",
+    "query_id": -7209068558248614225,
+    "query_text": "select pg_sleep($1)"
+  }
+]

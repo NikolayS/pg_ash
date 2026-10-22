@@ -1,0 +1,62 @@
+{
+  "case_id": "swe7j6wu",
+  "actual_models": [
+    "gpt-6.1-sol"
+  ],
+  "runtime_transcript_filename": "rollout-2026-10-21T22-09-54-01a16083-8650-73c2-80e3-7baa02293136.jsonl",
+  "runtime_transcript_sha256": "162d577a9556c5b01944ed5ead913cb9a8a50a2641117b338271ee6a4ed932fd",
+  "started_at": "2026-10-21T22:09:54.804Z",
+  "completed_at": "2026-10-21T22:11:02.708Z",
+  "elapsed_seconds": 67.904,
+  "orchestration_calls": 8,
+  "nested_exec_command_calls": 7,
+  "nested_apply_patch_calls": 1,
+  "documentation_lookup_operations_including_listing": 2,
+  "documentation_content_lookups": 1,
+  "documentation_operations": [
+    "rg --files /tmp/pgash-blind-trial-20261021/investigators/docs",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md"
+  ],
+  "sql_wrapper_calls": 5,
+  "wrapper_rows_excluded_outside_runtime": 0,
+  "sql_select_with_submitted": 17,
+  "sql_select_with_attempted": 17,
+  "sql_select_with_successful": 17,
+  "all_sql_statements_submitted_including_transaction_control": 17,
+  "sql_error_count": 0,
+  "failures": [],
+  "agent_retries": 0,
+  "sql_wrapper_elapsed_seconds_total": 0.812,
+  "launch_frozen_hashes_match": {
+    "/tmp/pgash-blind-trial-20261021/investigators/swe7j6wu/psql": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/swe7j6wu/answer-sealed.json": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/swe7j6wu/investigator-prompt.txt": true
+  },
+  "answer_certified": true,
+  "observed_mechanism": "Timeout:PgSleep",
+  "sample_export_summary": [
+    {
+      "event": "Timeout:PgSleep",
+      "query_id": -7209068558248614225,
+      "query_text": "select pg_sleep($1)",
+      "decoded_rows": 65,
+      "distinct_ticks": 33,
+      "first": "2026-10-21 22:07:45+00:00",
+      "last": "2026-10-21 22:08:37+00:00"
+    }
+  ],
+  "scores": {
+    "window": 2,
+    "mechanism": 2,
+    "query": 2,
+    "evidence": 2,
+    "next_check": 2
+  },
+  "score_total": 10,
+  "classification": "solved",
+  "confident_causal_or_blocker_fabrication": false,
+  "boundary_audit": "All tool inputs inspected: only frozen docs, supplied SQL wrapper, and own artifacts. No wrapper-source/setup/controller/answer/other-case/GitHub reads, no delegation.",
+  "sanitization_changed_tool_archive": true,
+  "report_sha256": "e1b68c7b6cad60f4fed233154bed79c77e1db4476cc6462a3920abe30d190314",
+  "boundary_caveat": "Allowed pg_stat_statements top-15 query exposed generic installer and supervisor sampler/reader SQL through normal database observability. No scenario-specific controller text or answer key appeared. This is not file access or a procedural violation; shared observability is not strong isolation."
+}

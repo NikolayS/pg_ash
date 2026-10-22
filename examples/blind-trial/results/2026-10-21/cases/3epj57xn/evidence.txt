@@ -1,0 +1,177 @@
+\set ON_ERROR_STOP on
+\pset pager off
+Pager usage is off.
+begin read only;
+BEGIN
+set local statement_timeout='30s';
+SET
+select * from ash.status();
+           metric            |             value             
+-----------------------------+-------------------------------
+ version                     | 2.0-rc1
+ in_recovery                 | false
+ color                       | off
+ num_partitions              | 3
+ sample_unlogged             | false
+ sampling_enabled            | true
+ skipped_samples             | 0
+ current_slot                | 0
+ sample_interval             | 00:00:01
+ sample_interval_supported   | true
+ rotation_period             | 1 day
+ rotation_period_contract    | day-granular; minimum 1 day
+ raw_retention               | 1 day + current partial
+ include_bg_workers          | false
+ debug_logging               | false
+ missed_samples              | 0
+ insert_errors               | 0
+ installed_at                | 2026-10-21 21:52:40.730065+00
+ rotated_at                  | 2026-10-21 21:52:40.730065+00
+ time_since_rotation         | 00:09:31.090538
+ consecutive_rotate_failures | 0
+ last_sample_ts              | 2026-10-21 22:00:11+00
+ time_since_last_sample      | 00:02:00.820603
+ samples_in_current_slot     | 32
+ samples_total               | 32
+ wait_event_map_count        | 2
+ wait_event_map_utilization  | 0.01%
+ register_wait_cap_hits      | 0
+ query_map_count             | 2
+ rollup_1m_rows              | 2
+ rollup_1m_oldest            | 2026-10-21 21:59:00+00
+ rollup_1m_newest            | 2026-10-21 22:00:00+00
+ rollup_1m_retention         | 30 days
+ rollup_1h_rows              | 0
+ rollup_1h_retention         | 1825 days
+ last_rollup_1m_ts           | 2026-10-21 22:01:00+00
+ raw_retention_start         | 2026-10-20 21:52:00+00
+ rollup_1m_retention_start   | 2026-10-21 21:59:00+00
+ rollup_1h_retention_start   | no rollups
+ epoch_seconds_remaining     | 2122089115
+ pg_cron_available           | no (use external scheduler)
+(41 rows)
+
+select * from ash.periods();
+ period |      period_start      |       period_end       |  source   |  bucket  | buckets_with_data | avg_aas | peak_aas | p99_aas 
+--------+------------------------+------------------------+-----------+----------+-------------------+---------+----------+---------
+ 1m     | 2026-10-21 22:01:00+00 | 2026-10-21 22:02:00+00 | raw       | 00:01:00 |                 0 |    0.00 |        0 |       0
+ 5m     | 2026-10-21 21:57:00+00 | 2026-10-21 22:02:00+00 | rollup_1m | 00:01:00 |                 2 |    0.21 |     0.67 |    0.66
+ 1h     | 2026-10-21 21:02:00+00 | 2026-10-21 22:02:00+00 | rollup_1m | 00:01:00 |                 2 |    0.02 |     0.67 |    0.66
+ 1d     | 2026-10-20 22:02:00+00 | 2026-10-21 22:02:00+00 | rollup_1m | 00:01:00 |                 2 |    0.00 |     0.67 |    0.66
+ 1w     | 2026-10-14 22:02:00+00 | 2026-10-21 22:02:00+00 | rollup_1m | 00:01:00 |                 2 |    0.00 |     0.67 |    0.66
+ 1mo    | 2026-09-21 22:02:00+00 | 2026-10-21 22:02:00+00 | rollup_1m | 00:01:00 |                 2 |    0.00 |     0.67 |    0.66
+(6 rows)
+
+select * from ash.aas(since=>'2026-10-21 21:56:00+00',until=>'2026-10-21 22:01:00+00');
+      period_start      |       period_end       |  source   | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+-----------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 21:56:00+00 | 2026-10-21 22:01:00+00 | rollup_1m | 00:01:00         |                5 |                 2 |    0.21 |     0.67 |    0.66 |           64.00
+(1 row)
+
+select * from ash.chart(since=>'2026-10-21 21:56:00+00',until=>'2026-10-21 22:01:00+00',color=>false);
+      bucket_start      | aas  |         detail         |                  chart                   
+------------------------+------+------------------------+------------------------------------------
+                        |      |                        | █ Client:ClientRead  · Other
+ 2026-10-21 21:56:00+00 | 0.00 |                        |                             
+ 2026-10-21 21:57:00+00 | 0.00 |                        |                             
+ 2026-10-21 21:58:00+00 | 0.00 |                        |                             
+ 2026-10-21 21:59:00+00 | 0.67 | Client:ClientRead=0.67 | ████████████████████████████████████████
+ 2026-10-21 22:00:00+00 | 0.40 | Client:ClientRead=0.40 | ████████████████████████    
+(6 rows)
+
+select * from ash.aas(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00');
+      period_start      |       period_end       | source | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+--------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 21:59:00+00 | 2026-10-21 22:01:00+00 | raw    | 00:01:00         |                2 |                 2 |    0.53 |     0.67 |    0.66 |           64.00
+(1 row)
+
+select * from ash.top('wait_event',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',order_by=>'peak');
+        key        | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+-------------------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ Client:ClientRead |            | raw    | 2026-10-21 21:59:00+00 | 2026-10-21 22:01:00+00 | 00:01:00         |    0.53 |     0.67 |    0.66 |           64.00 | 100.00
+(1 row)
+
+select * from ash.top('query_id',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',wait_event=>'Client:ClientRead');
+         key          |                query_text                 | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+----------------------+-------------------------------------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ -9127212586606946335 | select payload from records where id = $1 | raw    | 2026-10-21 21:59:00+00 | 2026-10-21 22:01:00+00 | 00:01:00         |    0.53 |     0.67 |    0.66 |           64.00 | 100.00
+(1 row)
+
+select * from ash.top('wait_event',since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:00:00+00',query_id=>-9127212586606946335);
+        key        | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+-------------------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ Client:ClientRead |            | raw    | 2026-10-21 21:59:00+00 | 2026-10-21 22:00:00+00 | 00:01:00         |    0.67 |     0.67 |    0.67 |           40.00 | 100.00
+(1 row)
+
+select * from ash.samples(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',wait_event=>'Client:ClientRead',n=>4);
+      sample_time       | database_name | active_backends |    wait_event     |       query_id       |                query_text                 
+------------------------+---------------+-----------------+-------------------+----------------------+-------------------------------------------
+ 2026-10-21 22:00:11+00 | appdb         |               2 | Client:ClientRead | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:00:11+00 | appdb         |               2 | Client:ClientRead | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:00:10+00 | appdb         |               2 | Client:ClientRead | -9127212586606946335 | select payload from records where id = $1
+ 2026-10-21 22:00:10+00 | appdb         |               2 | Client:ClientRead | -9127212586606946335 | select payload from records where id = $1
+(4 rows)
+
+select sample_time,count(*) as decoded_rows,min(active_backends) as reported_active_backends from ash.samples(since=>'2026-10-21 21:59:00+00',until=>'2026-10-21 22:01:00+00',n=>1000) group by sample_time order by sample_time;
+      sample_time       | decoded_rows | reported_active_backends 
+------------------------+--------------+--------------------------
+ 2026-10-21 21:59:20+00 |            2 |                        2
+ 2026-10-21 21:59:21+00 |            2 |                        2
+ 2026-10-21 21:59:22+00 |            2 |                        2
+ 2026-10-21 21:59:23+00 |            2 |                        2
+ 2026-10-21 21:59:24+00 |            2 |                        2
+ 2026-10-21 21:59:25+00 |            2 |                        2
+ 2026-10-21 21:59:26+00 |            2 |                        2
+ 2026-10-21 21:59:27+00 |            2 |                        2
+ 2026-10-21 21:59:28+00 |            2 |                        2
+ 2026-10-21 21:59:29+00 |            2 |                        2
+ 2026-10-21 21:59:30+00 |            2 |                        2
+ 2026-10-21 21:59:31+00 |            2 |                        2
+ 2026-10-21 21:59:32+00 |            2 |                        2
+ 2026-10-21 21:59:33+00 |            2 |                        2
+ 2026-10-21 21:59:54+00 |            2 |                        2
+ 2026-10-21 21:59:55+00 |            2 |                        2
+ 2026-10-21 21:59:56+00 |            2 |                        2
+ 2026-10-21 21:59:57+00 |            2 |                        2
+ 2026-10-21 21:59:58+00 |            2 |                        2
+ 2026-10-21 21:59:59+00 |            2 |                        2
+ 2026-10-21 22:00:00+00 |            2 |                        2
+ 2026-10-21 22:00:01+00 |            2 |                        2
+ 2026-10-21 22:00:02+00 |            2 |                        2
+ 2026-10-21 22:00:03+00 |            2 |                        2
+ 2026-10-21 22:00:04+00 |            2 |                        2
+ 2026-10-21 22:00:05+00 |            2 |                        2
+ 2026-10-21 22:00:06+00 |            2 |                        2
+ 2026-10-21 22:00:07+00 |            2 |                        2
+ 2026-10-21 22:00:08+00 |            2 |                        2
+ 2026-10-21 22:00:09+00 |            2 |                        2
+ 2026-10-21 22:00:10+00 |            2 |                        2
+ 2026-10-21 22:00:11+00 |            2 |                        2
+(32 rows)
+
+select * from ash.aas(since=>'2026-10-21 21:57:00+00',until=>'2026-10-21 21:59:00+00');
+      period_start      |       period_end       |  source   | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+-----------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 21:57:00+00 | 2026-10-21 21:59:00+00 | rollup_1m | 00:01:00         |                2 |                 0 |    0.00 |        0 |       0 |            0.00
+(1 row)
+
+select * from ash.chart(since=>'2026-10-21 21:57:00+00',until=>'2026-10-21 21:59:00+00',color=>false);
+ bucket_start | aas | detail | chart 
+--------------+-----+--------+-------
+(0 rows)
+
+select * from ash.compare('2026-10-21 21:57:00+00','2026-10-21 21:59:00+00','2026-10-21 21:59:00+00','2026-10-21 22:01:00+00',dimension=>'wait_event');
+        key        | query_text | source_1  | source_2 |     period_start_1     |      period_end_1      |     period_start_2     |      period_end_2      | effective_bucket_1 | effective_bucket_2 | avg_aas_1 | avg_aas_2 | avg_delta | peak_aas_1 | peak_aas_2 | p99_aas_1 | p99_aas_2 | pct_1 | pct_2  
+-------------------+------------+-----------+----------+------------------------+------------------------+------------------------+------------------------+--------------------+--------------------+-----------+-----------+-----------+------------+------------+-----------+-----------+-------+--------
+ Client:ClientRead |            | rollup_1m | raw      | 2026-10-21 21:57:00+00 | 2026-10-21 21:59:00+00 | 2026-10-21 21:59:00+00 | 2026-10-21 22:01:00+00 | 00:01:00           | 00:01:00           |           |      0.53 |           |            |       0.67 |           |      0.66 |       | 100.00
+(1 row)
+
+select datname,application_name,state,wait_event_type,wait_event,query_id,xact_start,query_start from pg_stat_activity where backend_type='client backend' and pid<>pg_backend_pid();
+ datname | application_name | state | wait_event_type | wait_event |      query_id       | xact_start |          query_start          
+---------+------------------+-------+-----------------+------------+---------------------+------------+-------------------------------
+ appdb   | collector        | idle  | Client          | ClientRead | -649674272853049531 |            | 2026-10-21 22:02:12.323334+00
+(1 row)
+
+commit;
+COMMIT
+psql:/tmp/pgash-blind-trial-20261021/investigators/3epj57xn/evidence.sql:17: NOTICE:  ash.compare: window 1 (2026-10-21 21:57:00+00 to 2026-10-21 21:59:00+00) has no data coverage — its columns and avg_delta are NULL, not zero. Check retention with ash.status() before reading a delta as a change.

@@ -1,0 +1,65 @@
+{
+  "case_id": "s49m2cnh",
+  "actual_models": [
+    "gpt-6.1-sol"
+  ],
+  "runtime_transcript_filename": "rollout-2026-10-21T22-04-38-01a1607e-b390-7670-b75a-f074f83acdbd.jsonl",
+  "runtime_transcript_sha256": "5ca32e9c58b51d7ea2156d700b6a3832b257c9b1ceb1dc7a1831ce7b2d1ddc80",
+  "started_at": "2026-10-21T22:04:38.707Z",
+  "completed_at": "2026-10-21T22:05:43.074Z",
+  "elapsed_seconds": 64.367,
+  "orchestration_calls": 7,
+  "nested_exec_command_calls": 10,
+  "nested_apply_patch_calls": 0,
+  "documentation_lookup_operations_including_listing": 6,
+  "documentation_content_lookups": 5,
+  "documentation_operations": [
+    "ls /tmp/pgash-blind-trial-20261021/investigators/docs",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/README.md",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/examples/llm-prompt.md",
+    "rg -n 'periods|diagnostic|coverage|resolution' /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md",
+    "sed -n '20,145p' /tmp/pgash-blind-trial-20261021/investigators/docs/docs/REFERENCE.md",
+    "cat /tmp/pgash-blind-trial-20261021/investigators/docs/examples/llm-investigation.sql"
+  ],
+  "sql_wrapper_calls": 4,
+  "wrapper_rows_excluded_outside_runtime": 0,
+  "sql_select_with_submitted": 17,
+  "sql_select_with_attempted": 17,
+  "sql_select_with_successful": 17,
+  "all_sql_statements_submitted_including_transaction_control": 27,
+  "sql_error_count": 0,
+  "failures": [],
+  "agent_retries": 0,
+  "sql_wrapper_elapsed_seconds_total": 0.948,
+  "launch_frozen_hashes_match": {
+    "/tmp/pgash-blind-trial-20261021/investigators/s49m2cnh/psql": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/s49m2cnh/answer-sealed.json": true,
+    "/tmp/pgash-blind-trial-20261021/supervisor/s49m2cnh/investigator-prompt.txt": true
+  },
+  "answer_certified": true,
+  "observed_mechanism": "CPU*",
+  "sample_export_summary": [
+    {
+      "event": "CPU*",
+      "query_id": 2642533687498376244,
+      "query_text": "select sum(length(md5(i::text))) from generate_series($1, $2) as i",
+      "decoded_rows": 30,
+      "distinct_ticks": 30,
+      "first": "2026-10-21 22:01:22+00:00",
+      "last": "2026-10-21 22:02:14+00:00"
+    }
+  ],
+  "scores": {
+    "window": 2,
+    "mechanism": 2,
+    "query": 2,
+    "evidence": 2,
+    "next_check": 2
+  },
+  "score_total": 10,
+  "classification": "solved",
+  "confident_causal_or_blocker_fabrication": false,
+  "boundary_audit": "All tool inputs inspected: only frozen docs, supplied SQL wrapper, and own artifacts. No wrapper-source/setup/controller/answer/other-case/GitHub reads, no delegation.",
+  "sanitization_changed_tool_archive": false,
+  "report_sha256": "b94a6698a230affd8568197bc1dcbda2d3eb95cce20149cae56d4ac00973539e"
+}

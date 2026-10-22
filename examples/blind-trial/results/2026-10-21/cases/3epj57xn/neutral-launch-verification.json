@@ -1,0 +1,11 @@
+{
+  "task_name": "investigate_3epj57xn",
+  "fork_turns": "none",
+  "model": "gpt-6.1-sol",
+  "timestamp": "2026-10-21T22:01:18.347Z",
+  "plaintext_parent_launch_equality": null,
+  "saved_prompt_sha256": "25f0f598a2cf1a25ee27a1028ff7a4b1448eaf259ef6ac6297e1071ddef86564",
+  "saved_prompt_matches_prelaunch_frozen_hash": true,
+  "encrypted_parent_launch_equals_child_assignment": true,
+  "comparison_note": "Parent spawn message and child assignment are encrypted in retained runtime files. Their encrypted payloads are identical, but saved neutral plaintext cannot be independently compared to them. Parent attests saved prompt was passed verbatim. No ciphertext, workspace user context, internal prompts or parent transcript exported."
+}

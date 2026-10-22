@@ -1,0 +1,13 @@
+--- harness-v2-valid-generation-cpu-validator-defect.py
++++ harness-v3-cpu-normalization-corrected.py
+@@ -313,7 +313,9 @@
+         normalize = lambda stamp: dt.datetime.fromisoformat(str(stamp)).isoformat()
+         matching_samples = [row for row in samples if within(normalize(row['sample_time'])) and row['wait_event'] == expected['event']]
+         independent = [row for batch in obs if within(batch['at']) for row in batch['sessions']
+-                       if f"{row['wait_event_type']}:{row['wait_event']}" == expected['event']]
++                       if (f"{row['wait_event_type']}:{row['wait_event']}" == expected['event']
++                           or (expected['event'] == 'CPU*' and row['state'] == 'active'
++                               and row['wait_event_type'] is None and row['wait_event'] is None))]
+         if case['mechanism'] == 'idletx':
+             independent = [row for row in independent if row['state'] == 'idle in transaction']
+         result = {'window': window, 'ash_matching_rows': len(matching_samples), 'independent_matching_observations': len(independent),

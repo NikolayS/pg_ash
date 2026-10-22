@@ -1,0 +1,37 @@
+[
+  {
+    "wrapper_call": 1,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 3,
+    "sql": "select now(); select * from ash.status(); select * from ash.periods();"
+  },
+  {
+    "wrapper_call": 2,
+    "select_statements_submitted": 4,
+    "select_statements_attempted": 4,
+    "all_sql_statements_submitted": 4,
+    "sql": "select * from ash.timeline('2026-10-21 22:05+00','2026-10-21 22:10+00'); select * from ash.top('wait_event','2026-10-21 22:05+00','2026-10-21 22:10+00',order_by=>'peak'); select * from ash.top('query_id','2026-10-21 22:05+00','2026-10-21 22:10+00',order_by=>'peak'); select * from ash.top('database','2026-10-21 22:05+00','2026-10-21 22:10+00');"
+  },
+  {
+    "wrapper_call": 3,
+    "select_statements_submitted": 4,
+    "select_statements_attempted": 4,
+    "all_sql_statements_submitted": 4,
+    "sql": "select * from ash.samples('2026-10-21 22:05+00','2026-10-21 22:10+00',n=>100); select * from ash.top('query_id','2026-10-21 22:07+00','2026-10-21 22:09+00',wait_event=>'Timeout:PgSleep'); select * from ash.aas('2026-10-21 22:07+00','2026-10-21 22:09+00'); select pid,datname,state,wait_event_type,wait_event,query_id,query,pg_blocking_pids(pid) as blocking_pids from pg_stat_activity where backend_type='client backend';"
+  },
+  {
+    "wrapper_call": 4,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 3,
+    "sql": "select extname from pg_extension; select queryid,calls,total_exec_time,mean_exec_time,rows,query from pg_stat_statements order by total_exec_time desc limit 15; select sample_time,count(*) as decoded_backend_rows,max(active_backends) as active_backends from ash.samples('2026-10-21 22:05+00','2026-10-21 22:10+00',n=>1000) group by sample_time order by sample_time;"
+  },
+  {
+    "wrapper_call": 5,
+    "select_statements_submitted": 3,
+    "select_statements_attempted": 3,
+    "all_sql_statements_submitted": 3,
+    "sql": "select queryid,calls,total_exec_time,mean_exec_time,min_exec_time,max_exec_time,rows,query from pg_stat_statements where queryid=-7209068558248614225; select current_setting('compute_query_id') as compute_query_id, pg_has_role(current_user,'pg_read_all_stats','member') as has_all_stats; select * from ash.top('wait_event','2026-10-21 22:01+00','2026-10-21 22:10+00',order_by=>'peak');"
+  }
+]
