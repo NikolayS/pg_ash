@@ -6945,7 +6945,8 @@ begin
     if dimension = 'query_id' and v_has_pgss
        and v_key_num is not null and v_datid is not null then
       -- schema-qualified single lookup point (#115); returns null on any
-      -- failure, never text from a shadowing relation.
+      -- failure, never text from a shadowing relation. A NULL v_datid means
+      -- the key spans ASH databases, so attaching one database's text is unsafe.
       query_text := ash._pgss_query_text(v_key_num, 100, v_datid);
     end if;
     return next;
