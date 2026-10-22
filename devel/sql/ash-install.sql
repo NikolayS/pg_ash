@@ -5918,6 +5918,10 @@ begin
    * Round UP to the nearest grain multiple so the effective bucket is never
    * finer than the caller requested.
    */
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.aas: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6128,6 +6132,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.timeline: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6777,6 +6785,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.top: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -8130,6 +8142,10 @@ begin
   end if;
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.chart: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
