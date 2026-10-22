@@ -3,6 +3,8 @@ import copy
 import fcntl
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import sys
@@ -146,6 +148,133 @@ class OwnershipTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('another controller owns this run directory', result.stderr)
                 self.assertFalse((Path(tmp) / 'supervisor').exists())
+
+
+class SeedTests(unittest.TestCase):
+    def setup_manifest(self, root, seed=None, shell_effect=None):
+        docs = root / 'docs'
+        for name in ('README.md', 'docs/REFERENCE.md', 'examples/llm-prompt.md',
+                     'examples/llm-investigation.sql'):
+            path = docs / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('frozen input')
+        installer = root / 'install.sql'
+        installer.write_text('select 1;')
+        run = root / 'run'
+        argv = ['trial.py', 'setup', '--run-dir', str(run), '--prefix',
+                'pgash_blind_test', '--sql-file', str(installer), '--docs-dir', str(docs)]
+        if seed is not None:
+            argv += ['--seed', str(seed)]
+        with mock.patch.object(sys, 'argv', argv), \
+                mock.patch.object(trial.signal, 'signal'), \
+                mock.patch.object(trial, 'sh', side_effect=shell_effect or
+                                  ['image-id', RuntimeError('stop before Docker')]):
+            with self.assertRaisesRegex(RuntimeError, 'stop before Docker'):
+                trial.main()
+        manifest = run / 'supervisor/manifest.json'
+        return json.loads(manifest.read_text()) if manifest.exists() else None
+
+    def test_failed_container_start_keeps_id_for_cleanup(self):
+        def shell(command, **kwargs):
+            if command[1:3] == ['image', 'inspect']:
+                return 'image-id'
+            if command[1] == 'create':
+                return 'created-id'
+            raise RuntimeError('stop before Docker')
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = self.setup_manifest(Path(tmp), shell_effect=shell)
+            self.assertEqual(manifest['cases'][0].get('container_id'), 'created-id')
+
+    def test_missing_image_does_not_create_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Setup has no manifest when the image lookup fails.
+            self.assertIsNone(self.setup_manifest(
+                root, shell_effect=[RuntimeError('stop before Docker')]))
+            self.assertFalse((root / 'run/artifacts').exists())
+
+    def test_default_seed_is_private_entropy_and_replayable(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(trial.secrets, 'randbits', side_effect=[123456789, 987654321]) as entropy:
+            root = Path(tmp)
+            first = self.setup_manifest(root / 'first')
+            second = self.setup_manifest(root / 'second')
+            replay = self.setup_manifest(root / 'replay', first['seed'])
+            self.assertEqual(entropy.call_args_list, [mock.call(128), mock.call(128)])
+            self.assertEqual([first['seed'], second['seed']], [123456789, 987654321])
+            mapping = lambda m: [(c['id'], c['mechanism']) for c in m['cases']]
+            self.assertNotEqual(mapping(first), mapping(second))
+            self.assertEqual(mapping(first), mapping(replay))
+            self.assertEqual((root / 'first/run/supervisor/manifest.json').stat().st_mode & 0o777, 0o600)
+
+    def test_explicit_zero_seed_does_not_request_entropy(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(trial.secrets, 'randbits') as entropy:
+            first = self.setup_manifest(Path(tmp) / 'first', 0)
+            second = self.setup_manifest(Path(tmp) / 'second', 0)
+            entropy.assert_not_called()
+            self.assertEqual(first['seed'], 0)
+            self.assertEqual([(c['id'], c['mechanism']) for c in first['cases']],
+                             [(c['id'], c['mechanism']) for c in second['cases']])
+
+
+class ReaderAuditTests(unittest.TestCase):
+    def run_reader(self, args, sql=''):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copyfile(Path(trial.__file__).with_name('reader.py'), root / 'reader.py')
+            (root / 'connection.json').write_text(json.dumps({'port': 1, 'role': 'observer'}))
+            # A process boundary verifies stdin forwarding and returned failures.
+            psql = root / 'psql'
+            psql.write_text('#!/usr/bin/env python3\nimport sys\n'
+                            'if "missing.sql" in " ".join(sys.argv):\n'
+                            '    sys.stderr.write("missing.sql: No such file\\n"); sys.exit(1)\n'
+                            'sys.stdout.write(sys.stdin.read())\n')
+            psql.chmod(0o700)
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'])
+            result = subprocess.run([sys.executable, str(root / 'reader.py'), *args],
+                                    input=sql, text=True, capture_output=True, env=env)
+            audit = root / 'audit.jsonl'
+            self.assertTrue(audit.exists(), result.stderr)
+            entries = [json.loads(line) for line in audit.read_text().splitlines()]
+            self.assertEqual(len(entries), 1)
+            return result, entries[0]
+
+    def test_stdin_file_forms_are_forwarded_and_audited(self):
+        for args in (['-f', '-'], ['--file', '-'], ['-f-'], ['--file=-'], []):
+            with self.subTest(args=args):
+                result, record = self.run_reader(args, 'select 42;\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, 'select 42;\n')
+                self.assertEqual(record['stdin'], 'select 42;\n')
+                self.assertEqual(record['returncode'], 0)
+
+    def test_missing_file_failure_is_audited(self):
+        for args in (['-f', 'missing.sql'], ['--file=missing.sql'], ['-fmissing.sql']):
+            with self.subTest(args=args):
+                result, record = self.run_reader(args)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(record['returncode'], 1)
+                self.assertIn('missing.sql', record['stderr'])
+                self.assertIn('missing.sql', record['script_file_errors'])
+
+
+class InputPreparationTests(unittest.TestCase):
+    def test_failed_reconstruction_leaves_output_available_for_retry(self):
+        spec = importlib.util.spec_from_file_location(
+            'prepare_inputs', Path(trial.__file__).with_name('prepare_inputs.py'))
+        inputs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inputs)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'inputs'
+            argv = ['prepare_inputs.py', '--repo', tmp, '--out', str(out)]
+            with mock.patch.object(sys, 'argv', argv), \
+                    mock.patch.object(inputs.subprocess, 'check_output', return_value=b'select 1;'), \
+                    mock.patch.object(inputs.subprocess, 'run'):
+                for attempt in range(2):
+                    with self.assertRaisesRegex(RuntimeError, 'differs from the frozen executable'):
+                        inputs.main()
+                    self.assertFalse(out.exists())
 
 
 if __name__ == '__main__':

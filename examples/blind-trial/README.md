@@ -55,6 +55,11 @@ python3 examples/blind-trial/trial.py run \
   --run-dir /tmp/blind-run --keep-sampling
 ```
 
+Setup creates a fresh random 128-bit seed and records it in the private supervisor manifest.
+The seed controls case IDs and mechanism order. Keep it private until all investigations finish.
+Use `--seed <recorded-integer>` only for explicit replay, not for a new blind trial.
+A published replay seed exposes its case mappings. The original archived trial remains unchanged.
+
 Setup records exact container IDs, an independent run label, pinned local image
 ID, input hashes and dedicated credentials. Every reader is granted
 `ash.grant_reader` and `pg_read_all_stats` for query-text visibility. Setup tests
@@ -87,6 +92,8 @@ supervisor paths. Shared-host isolation is procedural, not a security boundary.
 The wrapper records SQL arguments/stdin/script contents, output, errors, return
 codes and elapsed times. Do not use alternate connection tools. Audit transcripts
 for boundary violations and classify contaminated runs explicitly.
+psql meta-commands (`\i`, `\ir`, `\!`) and bundled short options can bypass file-content capture.
+Use full transcript audits to detect these boundary violations.
 
 Use the same model, no inherited transcript and one initial 15-minute run per
 case. Record actual launch UTC, collection age, tool/file accesses, errors,
@@ -154,12 +161,14 @@ python3 examples/blind-trial/trial.py --help
 
 Fresh full-five-fixture validation passed on Postgres 18.6 with the exact frozen
 SQL/doc inputs. All ten windows passed unchanged counts and attribution checks;
-all five reader wrappers and 25 actual ACL denials passed. Eleven offline safety
-tests passed. Final immutable-ID cleanup removed all five owned validation
+all five reader wrappers and 25 actual ACL denials passed. The historical validation ran eleven offline safety
+tests. The current suite has eighteen tests, including later seed, audit, and input-preparation regressions. Final immutable-ID cleanup removed all five owned validation
 containers, and an absent-ID retry succeeded.
 
 [Validation record](validation-2026-10-21.json) includes exact source hashes:
-the full replay used the pre-hardening controller; later setup ID-persistence
+the historical replay used the then-default fixed seed, so its case IDs repeat original trial IDs.
+Its repaired relation fixture is separate from the rejected original fixture with the same ID.
+The full replay used the pre-hardening controller; later setup ID-persistence
 and cleanup changes were tested separately. Workload, connection, sampler,
 phase, certification and run function ASTs are identical. This is a new harness
 validation, not a retry or additional blind-agent trial. Raw originals and the
