@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 devel/scripts/test_release_stamp.py -v
           python3 devel/scripts/test_staged_migration.py -v
+          python3 devel/scripts/test_promoted_upgrade_cli.py -v
 
       # Lives here, not in `test`, on purpose: this suite parses test.yml, and
       # a job inside that workflow's matrix cannot be trusted to report on the
