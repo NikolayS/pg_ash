@@ -32,12 +32,12 @@
 # pass and the animation pass, run minutes apart, agree on every digit.
 #
 # name	hold	reel_order	title	markers	sql
-status	2.5	1	pg_ash 2.0 — is it collecting?	2.0,external scheduler	select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','raw_retention','pg_cron_available');
-periods	3.2	2	ash.periods() — what do I even have?	1m,1h,raw	select period, source, buckets_with_data, avg_aas, peak_aas, p99_aas from ash.periods($UNTIL);
-chart	5.5	3	ash.chart() — AAS by wait event	Lock:transactionid,Lock:tuple,█,▓,▒	select to_char(bucket_start, 'HH24:MI') as bucket, aas, rtrim(chart) as chart from ash.chart(since => $SINCE, until => $UNTIL, bucket => '2 minutes', n => 4, width => 66, color => true);
-top_event	3.5	4	ash.top('wait_event') — the exact wait	Lock:transactionid	select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', since => $STORM_SINCE, until => $STORM_UNTIL, n => 6);
-top_query	4.0	5	ash.top('query_id') — which statement?	pgbench_accounts	select key, left(query_text, 52) as query_text, avg_aas, pct from ash.top('query_id', since => $STORM_SINCE, until => $STORM_UNTIL, n => 3);
-compare	3.5	6	ash.compare() — incident vs baseline	avg_delta,Lock:transactionid	select key, avg_aas_1, avg_aas_2, avg_delta, pct_2 from ash.compare($BASE_SINCE, $BASE_UNTIL, $STORM_SINCE, $STORM_UNTIL, dimension => 'wait_event', n => 5);
+status	0.0	0	Collection settings	2.0,external scheduler	select metric, value from ash.status() where metric in ('version','sampling_enabled','sample_interval','samples_total','raw_retention','pg_cron_available');
+periods	0.0	0	Available history	1m,1h,raw	select period, source, buckets_with_data, avg_aas, peak_aas, p99_aas from ash.periods($UNTIL);
+chart	6.5	1	1. When did load rise?	Lock:transactionid,Lock:tuple,█,▓,▒	select to_char(bucket_start, 'HH24:MI') as bucket, aas, rtrim(chart) as chart from ash.chart(since => $SINCE, until => $UNTIL, bucket => '2 minutes', n => 4, width => 66, color => true);
+top_event	5.0	2	2. What were sessions waiting for?	Lock:transactionid	select key, avg_aas, peak_aas, p99_aas, pct from ash.top('wait_event', since => $STORM_SINCE, until => $STORM_UNTIL, n => 6);
+top_query	5.5	3	3. Which statements experienced this wait?	pgbench_accounts	select key, left(query_text, 52) as query_text, avg_aas, pct from ash.top('query_id', since => $STORM_SINCE, until => $STORM_UNTIL, wait_event => $STORM_EVENT, n => 3);
+compare	5.5	4	4. What changed from the baseline?	avg_delta,Lock:transactionid	select key, avg_aas_1, avg_aas_2, avg_delta, pct_2 from ash.compare($BASE_SINCE, $BASE_UNTIL, $STORM_SINCE, $STORM_UNTIL, dimension => 'wait_event', n => 5);
 summary	0.0	0	ash.summary() — the one-paragraph verdict	peak_aas,Lock:transactionid,pgbench_accounts	select metric, value from ash.summary(since => $STORM_SINCE, until => $STORM_UNTIL);
 # cluster_name is a host setting and its key is absent when unset; omit it so
 # the scene and its contract fingerprint do not depend on local configuration.

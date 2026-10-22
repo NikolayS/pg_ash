@@ -104,17 +104,17 @@ jobs:
             fi
           done
 
-          if ! grep -Fq "Only \`ash.rebuild_partitions\` and \`ash.uninstall\` require the exact \`'yes'\` confirmation token." README.md; then
-            echo "README.md must limit the exact 'yes' confirmation contract to rebuild_partitions and uninstall." >&2
+          if ! grep -Fq "Only \`ash.rebuild_partitions\` and \`ash.uninstall\` require the exact \`'yes'\` confirmation token." docs/REFERENCE.md; then
+            echo "docs/REFERENCE.md must limit the exact 'yes' confirmation contract to rebuild_partitions and uninstall." >&2
             exit 1
           fi
-          if grep -Fq "All destructive calls require" README.md; then
+          if grep -Fq "All destructive calls require" README.md docs/REFERENCE.md; then
             echo "README.md must not claim every destructive operation takes a confirmation token." >&2
             exit 1
           fi
 
-          grep -q "ash.grant_reader" README.md
-          grep -q "SECURITY.md#advisory-lock-squat-dos" README.md
+          grep -q "ash.grant_reader" docs/REFERENCE.md
+          grep -q "SECURITY.md#advisory-lock-squat-dos" docs/REFERENCE.md
           grep -q "SECURITY.md#advisory-lock-squat-dos" RELEASE_NOTES.md
 
           # Release-stamped operator wording is two-sided: require the corrected
@@ -133,11 +133,11 @@ jobs:
           fi
           grep -Fq \
             'named by `cron.database_name`; it still observes activity from every database.' \
-            README.md
-          grep -Fq 'Base metrics and top events read `ash.rollup_1m`.' README.md
-          grep -Fq 'read raw samples for eligible extreme minutes.' README.md
+            docs/REFERENCE.md
+          grep -Fq 'Base metrics and top events read `ash.rollup_1m`.' docs/REFERENCE.md
+          grep -Fq 'read raw samples for eligible extreme minutes.' docs/REFERENCE.md
           python3 devel/scripts/check_llm_docs.py
-          grep -Fq 'it returns SQL `NULL` and emits a NOTICE' README.md
+          grep -Fq 'it returns SQL `NULL` and emits a NOTICE' docs/REFERENCE.md
           grep -Fq "breaking reader API and removes parameter-name" RELEASE_NOTES.md
           grep -Fq "lifecycle ownership behavior as described below" RELEASE_NOTES.md
           if grep -Fq "lifecycle/admin functions remain compatible" RELEASE_NOTES.md; then
