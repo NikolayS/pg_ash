@@ -92,6 +92,8 @@ supervisor paths. Shared-host isolation is procedural, not a security boundary.
 The wrapper records SQL arguments/stdin/script contents, output, errors, return
 codes and elapsed times. Do not use alternate connection tools. Audit transcripts
 for boundary violations and classify contaminated runs explicitly.
+psql meta-commands (`\i`, `\ir`, `\!`) and bundled short options can bypass file-content capture.
+Use full transcript audits to detect these boundary violations.
 
 Use the same model, no inherited transcript and one initial 15-minute run per
 case. Record actual launch UTC, collection age, tool/file accesses, errors,
@@ -164,7 +166,9 @@ tests. The current suite has eighteen tests, including later seed, audit, and in
 containers, and an absent-ID retry succeeded.
 
 [Validation record](validation-2026-10-21.json) includes exact source hashes:
-the full replay used the pre-hardening controller; later setup ID-persistence
+the historical replay used the then-default fixed seed, so its case IDs repeat original trial IDs.
+Its repaired relation fixture is separate from the rejected original fixture with the same ID.
+The full replay used the pre-hardening controller; later setup ID-persistence
 and cleanup changes were tested separately. Workload, connection, sampler,
 phase, certification and run function ASTs are identical. This is a new harness
 validation, not a retry or additional blind-agent trial. Raw originals and the
