@@ -2580,27 +2580,28 @@ begin
     job_type := 'sampler';
     job_id := null;
     status := format(
-      'interval set to %s — schedule externally (pg_cron not available)',
+      'interval set to %s — schedule externally with CALL ash.run_take_sample() '
+      '(pg_cron not available in this database)',
       every);
     return next;
 
     job_type := 'rotation';
     job_id := null;
     status := format(
-      'rotation_period is %s — schedule ash.rotate() externally',
+      'rotation_period is %s — schedule CALL ash.run_rotate() externally',
       (select rotation_period from ash.config where singleton));
     return next;
 
     job_type := 'rollup';
     job_id := null;
     status :=
-      'schedule ash.rollup_minute() every minute, ash.rollup_hour() '
-      'at minute 1 every hour, ash.rollup_cleanup() daily';
+      'schedule CALL ash.run_rollup_minute() every minute, CALL ash.run_rollup_hour() '
+      'at minute 1 every hour, CALL ash.run_rollup_cleanup() daily';
     return next;
 
     raise notice
-      'pg_cron is not available in this database. To sample, call '
-      'ash.take_sample() from an external scheduler:';
+      'pg_cron is not available in this database. To sample, execute '
+      'CALL ash.run_take_sample() from an external scheduler:';
     v_cron_database :=
       nullif(current_setting('cron.database_name', true), '');
     if v_cron_database is null then
@@ -3280,7 +3281,7 @@ begin
     job_type := 'info';
     job_id := null;
     status :=
-      'pg_cron not installed — remember to stop your external scheduler '
+      'pg_cron is not available in this database — stop your external scheduler '
       '(cron, systemd timer, loop script, etc.)';
     return next;
     return;
@@ -4017,10 +4018,22 @@ begin
       loop
         return next;
       end loop;
+      -- Schema/table grants do not reveal the owner's jobs through cron RLS.
+      if pg_catalog.row_security_active('cron.job'::regclass)
+         and current_user <> pg_catalog.pg_get_userbyid(
+           (select nspowner from pg_catalog.pg_namespace where nspname = 'ash')
+         ) then
+        metric := 'cron_jobs';
+        value := '<cron.job visibility is limited by row-level security; '
+          'missing rows do not mean jobs are stopped. '
+          'Ask the pg_ash owner to inspect scheduling.>';
+        return next;
+      end if;
     exception when insufficient_privilege then
       metric := 'cron_jobs';
       value := format(
-        '<no cron.job access; grant USAGE ON SCHEMA cron TO %I>',
+        '<no cron.job access; ask an administrator for USAGE ON SCHEMA cron '
+        'and SELECT ON cron.job for %I; row-level security may still hide jobs>',
         current_user
       );
       return next;
