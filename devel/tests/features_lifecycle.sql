@@ -397,15 +397,15 @@ begin
     assert v_start_rows = '{
         "sampler": [
           null,
-          "interval set to 00:00:02 — schedule externally (pg_cron not available)"
+          "interval set to 00:00:02 — schedule externally with CALL ash.run_take_sample() (pg_cron not available in this database)"
         ],
         "rotation": [
           null,
-          "rotation_period is 1 day — schedule ash.rotate() externally"
+          "rotation_period is 1 day — schedule CALL ash.run_rotate() externally"
         ],
         "rollup": [
           null,
-          "schedule ash.rollup_minute() every minute, ash.rollup_hour() at minute 1 every hour, ash.rollup_cleanup() daily"
+          "schedule CALL ash.run_rollup_minute() every minute, CALL ash.run_rollup_hour() at minute 1 every hour, CALL ash.run_rollup_cleanup() daily"
         ]
       }'::jsonb
       and (
@@ -432,7 +432,7 @@ begin
     assert v_stop_rows = '[[
         "info",
         null,
-        "pg_cron not installed — remember to stop your external scheduler (cron, systemd timer, loop script, etc.)"
+        "pg_cron is not available in this database — stop your external scheduler (cron, systemd timer, loop script, etc.)"
       ]]'::jsonb
       and not (
         select sampling_enabled

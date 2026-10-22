@@ -36,10 +36,6 @@ begin
   -- Existing automatic bucket and large, representable bucket inputs stay valid.
   perform * from ash.timeline(bucket => null);
   perform * from ash.chart(bucket => null);
-  perform * from ash.aas(bucket => interval '68 years');
-  perform * from ash.timeline(bucket => interval '68 years');
-  perform * from ash.top('wait_event', bucket => interval '68 years');
-  perform * from ash.chart(bucket => interval '68 years');
 end;
 $$;
 -- A flat hourly source has a different maximum aligned bucket.
@@ -74,6 +70,28 @@ begin
   assert (select avg_aas = 1 and backend_seconds = 3600
           from ash.aas(hour_start, hour_start + interval '1 hour',
                        bucket => interval '2147482800 seconds'));
+end;
+$$;
+-- A valid large bucket can end beyond int4 even when its data does not.
+do $$
+declare
+  wait_id smallint := ash._register_wait('active', 'CPU*', 'CPU*');
+  window_start timestamptz := ash.ts_to_timestamptz(1200000000);
+  window_end timestamptz := ash.ts_to_timestamptz(1200000060);
+  large_bucket interval := interval '1100000040 seconds';
+begin
+  insert into ash.rollup_1m(ts, datid, samples, peak_backends, wait_counts, query_counts)
+  select 1200000000, oid, 60, 1, array[wait_id, 60], '{}'::int8[]
+  from pg_database where datname = current_database();
+  assert (select avg_aas = 1 and peak_aas = 1 and backend_seconds = 60
+          from ash.aas(window_start, window_end, bucket => large_bucket));
+  assert (select count(*) = 1 and bool_and(avg_aas = 1 and data_points = 1)
+          from ash.timeline(window_start, window_end, bucket => large_bucket));
+  assert (select count(*) = 1 and bool_and(avg_aas = 1 and peak_aas = 1 and pct = 100)
+          from ash.top('wait_event', window_start, window_end, bucket => large_bucket));
+  assert (select count(*) = 1 and bool_and(aas = 1)
+          from ash.chart(window_start, window_end, bucket => large_bucket)
+          where bucket_start is not null);
 end;
 $$;
 rollback;

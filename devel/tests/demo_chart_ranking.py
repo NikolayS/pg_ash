@@ -64,6 +64,13 @@ def main():
             else:
                 assert result.returncode != 0, case + " wrongly passed"
                 assert "shape: only 1 Lock:* event(s) rank in the top" in result.stderr, result.stderr
+            chart_rows = [line.split("|", 2) for line in output.splitlines()
+                          if len(line.split("|", 2)) == 3
+                          and len(line.split("|", 1)[0]) == 5
+                          and line[2] == ":"]
+            assert len(chart_rows) > 1, output
+            assert len({len(row[0]) + len(row[1]) for row in chart_rows}) == 1, (
+                "chart bars must start in the same column", chart_rows)
             assert "Lock:transactionid" in output, (case, output)
             assert ("Lock:tuple" in output) == should_pass, (case, output)
             print(f"PASS {case}: tuple rank={rank}, chart and full shape gate agree")

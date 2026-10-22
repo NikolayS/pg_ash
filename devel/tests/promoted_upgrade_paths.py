@@ -158,6 +158,7 @@ def main() -> None:
                         "bool_and(data_points = 0 and avg_aas is null) "
                         "from public.ash_dependency_timeline"]).strip() == "t"
 
+            # periods() has six fixed horizons: 1m, 5m, 1h, 1d, 1w, and 1mo.
             assert run(["--command", "select count(*) from public.ash_dependency_periods"]).strip() == "6"
             if run(["--command", "select to_regclass('public.ash_dependency_top') is not null"]).strip() == "t":
                 assert run(["--command", "select count(*) from public.ash_dependency_top"]).strip() == "0"

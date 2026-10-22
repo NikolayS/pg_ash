@@ -288,7 +288,6 @@ def validate_development_overlay(
 
     if not released_is_prerelease:
         # A release stamp recreates this exact baseline for the next cycle.
-        # Compare bytes: even comment or line-ending changes require a migration.
         if dev_install.read_bytes() == (ROOT / "sql" / "ash-install.sql").read_bytes():
             return
         raise SystemExit(
