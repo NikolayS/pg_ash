@@ -5810,6 +5810,10 @@ begin
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
   end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.aas: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
   -- Floor before rounding, then align again after the int4 horizon clamp.
@@ -5917,6 +5921,10 @@ begin
    * Round UP to the nearest grain multiple so the effective bucket is never
    * finer than the caller requested.
    */
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.aas: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -5950,7 +5958,7 @@ begin
   ),
   bucket_aas as (
     select bstart,
-           (cnt * v_si / (least(bstart + v_bucket_secs, v_end_ts)
+           (cnt * v_si / (least(bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(bstart, v_start_ts))) as aas
     from per_bucket
   )
@@ -6053,6 +6061,10 @@ begin
     if v_requested_bucket_secs < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
+    if ceil(v_requested_bucket_secs) > 2147483647 then
+      raise exception 'ash.timeline: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
+    end if;
     v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
   end if;
 
@@ -6123,6 +6135,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.timeline: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6188,7 +6204,7 @@ begin
     v_source,
     coalesce(agg.n, 0)::bigint,
     case when agg.n > 0 then
-      round(agg.cnt * v_si / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+      round(agg.cnt * v_si / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                             - greatest(buckets.bstart, v_start_ts)), 2)
     end,
     case when agg.n > 0 and v_extrema_supported then
@@ -6672,7 +6688,7 @@ begin
       'ash.top: since must be less than or equal to until';
   end if;
 
-  if dimension not in (
+  if dimension is null or dimension not in (
        'wait_event_type', 'wait_event', 'query_id', 'database'
      ) then
     raise exception
@@ -6685,6 +6701,10 @@ begin
   v_requested_bucket_secs := extract(epoch from bucket);
   if v_requested_bucket_secs is null or v_requested_bucket_secs < 60 then
     raise exception 'bucket must be at least 1 minute, got %', bucket;
+  end if;
+  if ceil(v_requested_bucket_secs) > 2147483647 then
+    raise exception 'ash.top: bucket exceeds 2147483647 seconds, got %', bucket
+      using errcode = '22023';
   end if;
   v_bucket_secs := ceil(v_requested_bucket_secs)::int4;
 
@@ -6776,6 +6796,10 @@ begin
 
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.top: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -6909,13 +6933,13 @@ begin
                  / (v_end_ts - v_start_ts)::numeric, 2) as avg_aas,
            case when v_extrema_supported then
              round(max(key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))), 2)
            end as peak_aas,
            case when v_extrema_supported then
              round(percentile_cont(0.99) within group (
                      order by key_bucket.bcnt * v_si
-                       / (least(key_bucket.bstart + v_bucket_secs, v_end_ts)
+                       / (least(key_bucket.bstart::bigint + v_bucket_secs, v_end_ts)
                           - greatest(key_bucket.bstart, v_start_ts))
                    )::numeric, 2)
            end as p99_aas
@@ -8181,6 +8205,10 @@ begin
     if extract(epoch from bucket) < 60 then
       raise exception 'bucket must be at least 1 minute, got %', bucket;
     end if;
+    if ceil(extract(epoch from bucket)) > 2147483647 then
+      raise exception 'ash.chart: bucket exceeds 2147483647 seconds, got %', bucket
+        using errcode = '22023';
+    end if;
     v_bucket_secs := ceil(extract(epoch from bucket))::int4;
   end if;
 
@@ -8198,6 +8226,10 @@ begin
   end if;
   -- snap to a whole grain multiple (see ash.aas): a non-multiple bucket
   -- misaligns with the grain rows and fabricates per-bucket AAS.
+  if v_bucket_secs > (2147483647 / v_grain_secs) * v_grain_secs then
+    raise exception 'ash.chart: bucket exceeds the supported range after grain alignment, got %', bucket
+      using errcode = '22023';
+  end if;
   v_bucket_secs := (
     (greatest(v_bucket_secs, v_grain_secs)::bigint + v_grain_secs - 1)
     / v_grain_secs * v_grain_secs
@@ -8268,7 +8300,7 @@ begin
            sum(grain_by_row.cnt) * v_si
            / (least(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs
-                  + v_bucket_secs, v_end_ts)
+                  + v_bucket_secs::bigint, v_end_ts)
               - greatest(
                 (grain_by_row.ts / v_bucket_secs) * v_bucket_secs,
                 v_start_ts)) as tot
@@ -8311,11 +8343,11 @@ begin
     per_bucket as (
       select buckets.bstart,
              round(coalesce(sum(bucket_events.cnt), 0) * v_si
-                   / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                   / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                       - greatest(buckets.bstart, v_start_ts)), 2) as total,
              coalesce(jsonb_object_agg(bucket_events.ev,
                round(bucket_events.cnt * v_si
-                     / (least(buckets.bstart + v_bucket_secs, v_end_ts)
+                     / (least(buckets.bstart::bigint + v_bucket_secs, v_end_ts)
                         - greatest(buckets.bstart, v_start_ts)), 2))
                filter (where bucket_events.ev is not null),
                '{}'::jsonb) as events

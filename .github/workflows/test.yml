@@ -365,6 +365,12 @@ jobs:
         run: |
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$(python3 devel/scripts/ash_sql_chain.py fresh-install-path)"
 
+      - name: "#177: reader input validation"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f devel/tests/reader_input_validation.sql
+
       - name: "#122: disclose selected partial rollup source"
         env:
           PGHOST: localhost
