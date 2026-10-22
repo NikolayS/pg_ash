@@ -47,8 +47,9 @@ def tagged_installer(archived: Path, tag: str) -> Path:
     source_line = version.group("release_line")
     if version.group("stage") == "alpha":
         candidate = archived / "devel/sql/ash-install.sql"
-        if candidate.is_file():
-            return candidate
+        if not candidate.is_file():
+            raise RuntimeError(f"{tag}: missing alpha development installer")
+        return candidate
     candidates = [archived / "sql" / name for name in (
         "ash-install.sql", f"ash--{source_line}.sql", f"ash-{source_line}.sql"
     )]

@@ -29,6 +29,14 @@ class PromotedCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('usage:', result.stdout)
 
+    def test_alpha_does_not_fall_back_to_stable_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'sql').mkdir()
+            (root / 'sql/ash-install.sql').write_text('-- stable baseline')
+            with self.assertRaisesRegex(RuntimeError, 'alpha.*installer'):
+                promoted.tagged_installer(root, 'v2.0-alpha1')
+
     def test_actual_tagged_payloads(self):
         for tag in ('v1.0', 'v1.5', 'v2.0-alpha1', 'v2.0-alpha5',
                     'v2.0-beta1', 'v2.0-rc1'):
