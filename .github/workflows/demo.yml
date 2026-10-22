@@ -173,6 +173,7 @@ jobs:
           {
             echo "PGHOST=/var/run/postgresql"
             echo "PGUSER=$ci_role"
+            echo "PGDATABASE=postgres"
           } >> "$GITHUB_ENV"
 
       - name: "#291: chart ranking regression"
