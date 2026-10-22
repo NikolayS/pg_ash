@@ -160,7 +160,7 @@ python3 examples/blind-trial/trial.py --help
 Fresh full-five-fixture validation passed on Postgres 18.6 with the exact frozen
 SQL/doc inputs. All ten windows passed unchanged counts and attribution checks;
 all five reader wrappers and 25 actual ACL denials passed. The historical validation ran eleven offline safety
-tests. The current suite has sixteen tests, including later seed, audit, and input-preparation regressions. Final immutable-ID cleanup removed all five owned validation
+tests. The current suite has eighteen tests, including later seed, audit, and input-preparation regressions. Final immutable-ID cleanup removed all five owned validation
 containers, and an absent-ID retry succeeded.
 
 [Validation record](validation-2026-10-21.json) includes exact source hashes:

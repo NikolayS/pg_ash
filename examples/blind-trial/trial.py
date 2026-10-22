@@ -83,6 +83,7 @@ def setup(args):
     for relative in DOC_FILES:
         if not (args.docs_dir / relative).is_file():
             raise RuntimeError('missing documentation: ' + relative)
+    image_id = sh(['docker', 'image', 'inspect', args.image, '--format', '{{.Id}}']).strip()
     PRIVATE.mkdir(mode=0o700, parents=True, exist_ok=True)
     PUBLIC.mkdir(mode=0o700, parents=True, exist_ok=True)
     (ROOT / 'artifacts').mkdir()
@@ -106,7 +107,7 @@ def setup(args):
     manifest = dict(created=now(), seed=seed, model=args.model,
                     sql_commit=args.sql_revision, docs_commit=args.docs_revision,
                     sql_sha256=sha(ROOT / 'artifacts/ash-install.sql'),
-                    image_id=sh(['docker', 'image', 'inspect', args.image, '--format', '{{.Id}}']).strip(),
+                    image_id=image_id,
                     prefix=args.prefix, run_id=uuid.uuid4().hex,
                     limits={'memory': '192m', 'cpus': '0.25', 'shared_buffers': '16MB', 'max_connections': 16},
                     retention='Default raw retention: one day plus current partial; unchanged.',
@@ -129,7 +130,7 @@ def setup(args):
         role = 'observer_' + case['id']
         env = os.environ.copy()
         env['POSTGRES_PASSWORD'] = case['passwords']['postgres']
-        out = sh(['docker', 'run', '-d', '--name', case['container'], '--label', 'pgash-blind-run=' + manifest['run_id'],
+        out = sh(['docker', 'create', '--name', case['container'], '--label', 'pgash-blind-run=' + manifest['run_id'],
                   '--memory=192m', '--memory-swap=192m', '--cpus=0.25', '--pids-limit=96', '--shm-size=32m',
                   '-p', '127.0.0.1::5432', '-e', 'POSTGRES_PASSWORD', '-e', 'POSTGRES_DB=appdb',
                   '-e', 'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256',
@@ -139,6 +140,7 @@ def setup(args):
                   '-c', 'timezone=UTC', '-c', 'jit=off'], env=env).strip()
         case['container_id'] = out
         dump(PRIVATE / 'manifest.json', manifest)
+        sh(['docker', 'start', case['container_id']])
         mapping = json.loads(sh(['docker', 'container', 'inspect', case['container_id']]))[0]
         validate_owned(case, mapping, manifest)
         binding = mapping['NetworkSettings']['Ports']['5432/tcp'][0]

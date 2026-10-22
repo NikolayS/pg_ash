@@ -151,7 +151,7 @@ class OwnershipTests(unittest.TestCase):
 
 
 class SeedTests(unittest.TestCase):
-    def setup_manifest(self, root, seed=None):
+    def setup_manifest(self, root, seed=None, shell_effect=None):
         docs = root / 'docs'
         for name in ('README.md', 'docs/REFERENCE.md', 'examples/llm-prompt.md',
                      'examples/llm-investigation.sql'):
@@ -167,10 +167,31 @@ class SeedTests(unittest.TestCase):
             argv += ['--seed', str(seed)]
         with mock.patch.object(sys, 'argv', argv), \
                 mock.patch.object(trial.signal, 'signal'), \
-                mock.patch.object(trial, 'sh', side_effect=['image-id', RuntimeError('stop before Docker')]):
+                mock.patch.object(trial, 'sh', side_effect=shell_effect or
+                                  ['image-id', RuntimeError('stop before Docker')]):
             with self.assertRaisesRegex(RuntimeError, 'stop before Docker'):
                 trial.main()
-        return json.loads((run / 'supervisor/manifest.json').read_text())
+        manifest = run / 'supervisor/manifest.json'
+        return json.loads(manifest.read_text()) if manifest.exists() else None
+
+    def test_failed_container_start_keeps_id_for_cleanup(self):
+        def shell(command, **kwargs):
+            if command[1:3] == ['image', 'inspect']:
+                return 'image-id'
+            if command[1] == 'create':
+                return 'created-id'
+            raise RuntimeError('stop before Docker')
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = self.setup_manifest(Path(tmp), shell_effect=shell)
+            self.assertEqual(manifest['cases'][0].get('container_id'), 'created-id')
+
+    def test_missing_image_does_not_create_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Setup has no manifest when the image lookup fails.
+            self.assertIsNone(self.setup_manifest(
+                root, shell_effect=[RuntimeError('stop before Docker')]))
+            self.assertFalse((root / 'run/artifacts').exists())
 
     def test_default_seed_is_private_entropy_and_replayable(self):
         with tempfile.TemporaryDirectory() as tmp, \
