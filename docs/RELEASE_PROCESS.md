@@ -126,9 +126,17 @@ migrations connect the requested starting version to the released head. It
 then verifies that both installers remain on that prerelease's `X.Y` line and
 appends the candidate to the full-upgrade, pinned public-wrapper, and re-apply
 chains as a re-apply-safe overlay. A lone installer for another release line is
-rejected before any SQL is emitted. Once the shipped payload is final, a
-connected development migration is mandatory even when the candidate has not
-yet received its next release identity. This makes the beta-to-final path
+rejected before any SQL is emitted.
+
+After a final release, the helper accepts a lone development installer only
+when it is byte-identical to `sql/ash-install.sql`. It validates both installers'
+version stamps and the released migration graph before accepting this baseline.
+It appends this baseline once to full, pinned public-wrapper, and re-apply chains.
+Any changed bytes require a connected development migration, including comments
+or line endings. This requirement applies even before the candidate receives
+its next release identity.
+
+This makes the beta-to-final path
 exercise the same candidate as a fresh install without allowing the overlay to
 hide a missing migration or inventing a prerelease-specific migration filename.
 The helper also requires the promoted released installer to name the head of
@@ -172,10 +180,10 @@ promote the development SQL into released core SQL:
    (empty output). The next cycle then begins with the baseline already
    present, so no feature PR carries an ~8000-line copy alongside its own
    change.
-   A no-op overlay is safe for CI: `ash_sql_chain.py` still discovers it and
-   appends it to the full, re-apply and pinned upgrade paths, and applying an
-   installer identical to the released one is exactly the idempotent re-apply
-   those paths already assert.
+   This baseline works after prerelease and final stamps. After a final stamp,
+   `ash_sql_chain.py` requires byte identity before it appends the baseline.
+   Full, re-apply, and pinned upgrade paths include it once.
+   CI checks installer re-application through these paths.
 7. Leave CI on discovery-based helpers; remove only obsolete `devel/sql/`
    references if the helper no longer emits them after promotion.
 8. From the exact candidate commit, dispatch `test.yml` with the intended tag
