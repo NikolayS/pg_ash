@@ -136,7 +136,7 @@ Any changed bytes require a connected development migration, including comments
 or line endings. This requirement applies even before the candidate receives
 its next release identity.
 
-This makes the beta-to-final path
+The prerelease overlay makes the beta-to-final path
 exercise the same candidate as a fresh install without allowing the overlay to
 hide a missing migration or inventing a prerelease-specific migration filename.
 The helper also requires the promoted released installer to name the head of

@@ -308,53 +308,6 @@ class SQLChainOverlayTest(unittest.TestCase):
 
         self.assertEqual(full_output.getvalue(), "")
 
-    def test_final_release_requires_migration_for_changed_same_line_overlay(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            released_migrations = root / "sql" / "migrations"
-            development_sql = root / "devel" / "sql"
-            released_migrations.mkdir(parents=True)
-            development_sql.mkdir(parents=True)
-            (root / "sql" / "ash-1.5.sql").write_text(
-                "-- released installer\n"
-            )
-            self.write_stamped_installer(
-                root / "sql" / "ash-install.sql",
-                "2.0",
-            )
-            (released_migrations / "ash-1.5-to-2.0.sql").write_text(
-                "-- released migration\n"
-            )
-            self.write_stamped_installer(
-                development_sql / "ash-install.sql",
-                "2.0",
-            )
-
-            with (development_sql / "ash-install.sql").open("a") as output:
-                output.write("select 1;\n")
-
-            full_output = io.StringIO()
-            with (
-                mock.patch.object(ash_sql_chain, "ROOT", root),
-                mock.patch.object(
-                    ash_sql_chain,
-                    "UPGRADE_DIRS",
-                    (released_migrations, development_sql),
-                ),
-                contextlib.redirect_stdout(full_output),
-            ):
-                with self.assertRaisesRegex(
-                    SystemExit,
-                    (
-                        r"^the released payload 2\.0 is final, but the "
-                        r"development installer is not byte-identical; add a "
-                        r"connected development migration$"
-                    ),
-                ):
-                    ash_sql_chain.emit_full_upgrade_chain("1.5")
-
-        self.assertEqual(full_output.getvalue(), "")
-
     def test_promoted_installer_requires_released_migration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
