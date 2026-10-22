@@ -30,10 +30,13 @@ These changes target the development candidate, not the published RC1 payload.
 - Comparison deltas use effective windows and coverage. Incomplete windows return NULL deltas instead of misleading changes. (#280)
 - Sampling timestamps use the wall clock after acquiring the sampler lock, not the transaction start time. (#281)
 - Query text follows the source database identity, including missing statistics entries and restricted-role visibility. Ambiguous attribution returns NULL. (#282)
-- The README starts with incident investigation. The reference, agent tasks, and lock lab provide detailed follow-up workflows. (#284)
-- The release-chain helper accepts a byte-identical final-release baseline. Changed development SQL still requires a connected migration. (#289)
 - Reapplying the installer preserves unchanged reader routines and their dependent objects. Changed return types still fail atomically when dependencies block replacement. (#290)
 - Oversized reader buckets get reader-specific validation errors, including overflow during grain alignment. `top(NULL)` now rejects the invalid dimension. (#177, #293)
+
+### Documentation and release tooling
+
+- The README starts with incident investigation. The reference, agent tasks, and lock lab provide detailed follow-up workflows. (#284)
+- The release-chain helper accepts a byte-identical final-release baseline. Changed development SQL still requires a connected migration. (#289)
 - Historical-upgrade tests use the actual alpha installers. Their help command no longer connects to a database. (#296)
 
 ## 2.0 highlights

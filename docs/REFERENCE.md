@@ -115,6 +115,15 @@ from ash.chart(
 );
 ```
 
+Enable ANSI colors for the session:
+
+```sql
+set ash.color = on;
+```
+
+The chart uses glyphs as well as colors, but glyphs repeat when there are more than four series.
+Use the legend and typed `ash.top()` results when color or repeated glyphs make a series hard to distinguish.
+
 psql's aligned formatter escapes ANSI bytes. Add this to `.psqlrc` for colored
 terminal output:
 
@@ -530,17 +539,6 @@ Installing or relocating the extension does not require a helper call.
 Readers also need `usage` on the schema that contains `pg_stat_statements`.
 An administrator must grant this privilege when the extension uses a restricted schema.
 Without schema access, query text can remain NULL despite statistics-role membership.
-
-## Chart presentation
-
-Enable ANSI colors for one chart with `color => true`, or for the session:
-
-```sql
-set ash.color = on;
-```
-
-The chart uses glyphs as well as colors, but glyphs repeat when there are more than four series.
-Use the legend and typed `ash.top()` results when color or repeated glyphs make a series hard to distinguish.
 
 ## Catalog docs
 
