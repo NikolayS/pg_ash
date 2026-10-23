@@ -30,6 +30,7 @@ help:
 	@echo '  make check      NO DATABASE: re-render the committed fixtures and diff'
 	@echo '  make rot        did a reader change its columns? (needs a fresh capture)'
 	@echo '  make fixtures   refresh fixtures/ from the current capture (manual, reviewable)'
+	@echo '  make asset-manifest  record reviewed artifact and input hashes'
 	@echo '  make clean      remove out/'
 	@echo '  make down       remove only a database/container this harness created'
 	@echo '  make open       open the produced GIF (macOS)'

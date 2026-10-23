@@ -459,11 +459,23 @@ After changing capture inputs:
 
 1. Run `make all fixtures`.
 2. Inspect the stills, animation, and fixtures.
-3. Run `make asset-manifest` and review the manifest diff.
-4. Commit the regenerated files together.
+3. Stage new or removed input and artifact files with `git add`.
+4. Run `make asset-manifest` and review the manifest diff.
+5. Commit the regenerated files together.
 
 Do not update the manifest alone to bypass a freshness failure.
-The initial manifest binds the visually reviewed assets from `49f481c` to their inputs.
+The initial artifacts come from the visually reviewed `49f481c` tree.
+The recorded input hashes describe this PR's tree, including its added verification scripts.
+Capture/rendering code and committed artifacts remain unchanged from `49f481c`.
+
+For edits confined to checks, tests, or help text, first verify that producer code and artifacts are unchanged.
+Then record the manifest and run `make check` plus `python3 bin/test-asset-freshness.py -v` from `demos/`.
+Review the diff. This check-only path does not require regenerating unchanged images.
+
+In Git checkouts, the manifest covers tracked and staged source files, declared scene images, and the two reels.
+Source archives use the same directory scope without Git metadata.
+Editor temporary files and unrelated images under `assets/` are excluded.
+Installer selection covers the repository helper and both repository installers, not external `ASH_INSTALL_SQL` overrides or tool versions.
 
 Hosted demo checks run three independent seeds, with no retry after a failure.
 The first two seeds each run `capture` and `rot`.

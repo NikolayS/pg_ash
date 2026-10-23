@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 import json
+import re
+import subprocess
 from pathlib import Path
 import sys
 
@@ -11,12 +13,39 @@ MANIFEST = ROOT / 'demos/fixtures/assets.json'
 
 
 def fingerprints():
-    paths = {ROOT / 'devel/sql/ash-install.sql', ROOT / 'demos/Makefile'}
-    for directory in ('assets', 'demos/bin', 'demos/scenes', 'demos/lib', 'demos/render',
-                      'demos/theme', 'demos/fonts', 'demos/fixtures'):
-        paths.update(p for p in (ROOT / directory).rglob('*')
-                     if p.is_file() and '__pycache__' not in p.parts
-                     and p.suffix != '.pyc' and p != MANIFEST)
+    source_dirs = ('demos/bin', 'demos/scenes', 'demos/lib', 'demos/render',
+                   'demos/theme', 'demos/fonts', 'demos/fixtures')
+    fixed = ('demos/Makefile', 'devel/sql/ash-install.sql',
+             'sql/ash-install.sql', 'devel/scripts/ash_sql_chain.py')
+    artifacts = {'assets/ash_demo.gif', 'assets/ash_demo.mp4'}
+    scenes = ROOT / 'demos/scenes/scenes.tsv'
+    if scenes.exists():
+        for line in scenes.read_text().splitlines():
+            name = line.split('\t', 1)[0]
+            if re.fullmatch(r'[a-z0-9_]+', name):
+                artifacts.update(f'assets/{name}.{suffix}' for suffix in ('svg', 'png'))
+    # Git checkouts verify committed inputs, including staged new files.
+    # Source archives use the same scope without requiring Git metadata.
+    try:
+        top = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--show-toplevel'],
+                             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        in_git = top.returncode == 0 and Path(top.stdout.strip()).resolve() == ROOT
+    except FileNotFoundError:
+        in_git = False
+    if in_git:
+        names = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'ls-files', '-z', '--',
+             *source_dirs, *fixed, *sorted(artifacts)]).decode().split('\0')
+        paths = {ROOT / name for name in names if name}
+    else:
+        paths = {ROOT / name for name in (*fixed, *artifacts)}
+        for directory in source_dirs:
+            paths.update((ROOT / directory).rglob('*'))
+    paths = {p for p in paths if p.is_file() and p != MANIFEST
+             and '__pycache__' not in p.parts
+             and not any(part.startswith('.') for part in p.relative_to(ROOT).parts)
+             and p.suffix not in ('.pyc', '.swp', '.swo', '.tmp')
+             and not p.name.endswith('~')}
     return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(paths)}
 
