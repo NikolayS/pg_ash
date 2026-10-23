@@ -28,6 +28,7 @@ def main():
     def execute(command, source=None, timeout=45):
         result = subprocess.run(['docker', 'exec', '-i', '-u', 'postgres',
                                  container, *command], input=source, text=True,
+                                stdin=subprocess.DEVNULL if source is None else None,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 timeout=timeout)
         if result.returncode:
