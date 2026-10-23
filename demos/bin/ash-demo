@@ -190,9 +190,9 @@ cmd_demo() {
 }
 
 cmd_check() {
-  # No database, no seed, no window: this proves the RENDERER still works on
-  # frozen input. It cannot notice that the input no longer reflects what
-  # pg_ash does — only the nightly re-capture can. Says so in `make help`.
+  # Verify the reviewed input/artifact association, then the frozen renderer.
+  # Live captures remain necessary to verify behavior and workload shape.
+  python3 "$ASH_HOME/bin/asset-freshness.py"
   _run_peer bin/check-fixtures.sh
 }
 
