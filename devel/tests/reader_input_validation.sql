@@ -5,6 +5,10 @@ do $$
 declare
   hour_start timestamptz := date_trunc('hour', now()) - interval '45 days';
   wait_id smallint := ash._register_wait('active', 'CPU*', 'CPU*');
+  minute_start timestamptz := hour_start + interval '2 hours';
+  first_start timestamptz;
+  second_start timestamptz;
+  reversed boolean;
   dimension_name text;
   message text;
   result record;
@@ -36,6 +40,39 @@ begin
       assert message like 'ash.compare: bucket exceeds the supported range after grain alignment%', message;
     end;
   end loop;
+  -- Different source grains must validate both windows, in either order.
+  insert into ash.rollup_1m (
+    ts, datid, samples, peak_backends, wait_counts, query_counts
+  )
+  select ash.ts_from_timestamptz(minute_start) + minute * 60, oid, 60, 1,
+         array[wait_id, 60], array[307, 60]::bigint[]
+  from pg_database cross join generate_series(0, 59) as fixture(minute)
+  where datname = current_database();
+  foreach reversed in array array[false, true] loop
+    first_start := case when reversed then minute_start else hour_start end;
+    second_start := case when reversed then hour_start else minute_start end;
+    foreach dimension_name in array array['wait_event', 'wait_event_type', 'query_id'] loop
+      select * into strict result from ash.compare(
+        first_start, first_start + interval '1 hour',
+        second_start, second_start + interval '1 hour',
+        dimension => dimension_name, bucket => interval '2147482800 seconds');
+      assert result.source_1 = case when reversed then 'rollup_1m' else 'rollup_1h' end
+         and result.source_2 = case when reversed then 'rollup_1h' else 'rollup_1m' end
+         and result.avg_aas_1 = 1 and result.avg_aas_2 = 1 and result.avg_delta = 0,
+        format('mixed source comparison changed results: %s', row_to_json(result));
+      begin
+        perform * from ash.compare(
+          first_start, first_start + interval '1 hour',
+          second_start, second_start + interval '1 hour',
+          dimension => dimension_name, bucket => interval '2147483640 seconds');
+        raise exception 'accepted mixed-grain overflow: %, reversed=%', dimension_name, reversed;
+      exception when invalid_parameter_value then
+        get stacked diagnostics message = message_text;
+        assert message like 'ash.compare: bucket exceeds the supported range after grain alignment%', message;
+      end;
+    end loop;
+  end loop;
+  truncate ash.rollup_1m;
   -- Scalar and database reads retain genuine minute detail and its larger bound.
   foreach dimension_name in array array[null::text, 'database'] loop
     select * into strict result from ash.compare(
