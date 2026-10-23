@@ -49,11 +49,16 @@ class AssetFreshnessTests(unittest.TestCase):
                     with self.subTest(noise=name, git=git_checkout):
                         path = root / name
                         path.write_bytes(b'not a demo input')
+                        tracked_noise = git_checkout and name == 'assets/unrelated.png'
+                        if tracked_noise:
+                            subprocess.run(['git', '-C', str(root), 'add', '--', name], check=True)
                         try:
                             result = check()
                             self.assertEqual(result.returncode, 0, result.stdout)
                         finally:
                             path.unlink()
+                            if tracked_noise:
+                                subprocess.run(['git', '-C', str(root), 'rm', '--cached', '-q', '--', name], check=True)
             for name in ('assets/chart.svg', 'assets/status.png',
                          'assets/ash_demo.gif', 'demos/scenes/scenes.tsv',
                          'devel/sql/ash-install.sql', 'sql/ash-install.sql',
