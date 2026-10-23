@@ -448,3 +448,23 @@ what would otherwise cost a 75-second recording to discover.
 Exit codes are uniform across every script: `1` usage/config, `2` missing
 dependency, `3` backend or frozen-window failure, `4` seed assertion, `5` capture
 verification, `6` render, `7` animation sync.
+
+### Committed asset freshness
+
+`make check` also checks hashes for committed assets, fixtures, and capture inputs.
+A changed scene, installer, renderer, or artifact invalidates that manifest.
+This check detects stale committed files; it does not prove their visual correctness.
+
+After changing capture inputs:
+
+1. Run `make all fixtures`.
+2. Inspect the stills, animation, and fixtures.
+3. Run `make asset-manifest` and review the manifest diff.
+4. Commit the regenerated files together.
+
+Do not update the manifest alone to bypass a freshness failure.
+The initial manifest binds the visually reviewed assets from `49f481c` to their inputs.
+
+Hosted demo checks run three independent seeds, with no retry after a failure.
+Each seed must pass the real lock-ranking assertions and capture contract checks.
+Repeated runs improve flake detection; they cannot guarantee success under every host load.

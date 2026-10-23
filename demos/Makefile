@@ -140,3 +140,8 @@ open:
 	  exit 1; \
 	fi; \
 	open ../assets/ash_demo.gif
+
+# Record only after regeneration and manual visual review.
+.PHONY: asset-manifest
+asset-manifest:
+	@python3 bin/asset-freshness.py --record

@@ -98,6 +98,9 @@ jobs:
           fi
           echo "no removed-reader references"
 
+      - name: Asset freshness regression tests
+        run: python3 demos/bin/test-asset-freshness.py -v
+
       - name: make check — re-render fixtures and compare byte-for-byte
         run: ASH_SVG_ONLY=1 make -C demos check
 
@@ -203,6 +206,17 @@ jobs:
       - name: make doctor
         if: steps.gate.outputs.run == 'yes'
         run: make -C demos doctor
+
+      - name: Two independent seed and capture checks
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          ASH_BACKEND: local
+        run: |
+          # Fail on the first bad shape. These are checks, not retries.
+          make -C demos capture
+          make -C demos rot
+          make -C demos capture
+          make -C demos rot
 
       - name: make all — seed, capture, stills, reel
         if: steps.gate.outputs.run == 'yes'
