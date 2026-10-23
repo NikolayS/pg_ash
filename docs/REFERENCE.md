@@ -219,6 +219,10 @@ explain these semantics to an LLM.
 The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
 and `uninstall()` to run as the `ash` schema owner, including when another
 superuser administers the installation. Use `SET ROLE` to the owner first.
+The installer grants the schema owner access to pg_ash tables, sequences, and routines.
+This permits `take_sample()`, `start()`, `stop()`, and `status()` when the installer owns the objects.
+Install as the schema owner when that role must also perform ownership-dependent DDL, such as rebuilding partitions.
+These grants do not replace the documented Postgres monitoring or pg_cron privileges.
 A failed lifecycle call rolls back its configuration, job and DDL changes.
 `stop()` reports only jobs actually removed, with their real IDs. A successful
 rebuild leaves sampling disabled until an explicit `start()`.
