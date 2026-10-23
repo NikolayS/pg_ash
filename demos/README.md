@@ -466,5 +466,7 @@ Do not update the manifest alone to bypass a freshness failure.
 The initial manifest binds the visually reviewed assets from `49f481c` to their inputs.
 
 Hosted demo checks run three independent seeds, with no retry after a failure.
+The first two seeds each run `capture` and `rot`.
+The third runs through `make all`, followed by the workflow's `Demo-rot alarm` (`make rot`).
 Each seed must pass the real lock-ranking assertions and capture contract checks.
 Repeated runs improve flake detection; they cannot guarantee success under every host load.

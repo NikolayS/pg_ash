@@ -11,14 +11,12 @@ MANIFEST = ROOT / 'demos/fixtures/assets.json'
 
 
 def fingerprints():
-    paths = {ROOT / 'devel/sql/ash-install.sql'}
-    for directory in ('assets', 'demos/scenes', 'demos/lib', 'demos/render',
+    paths = {ROOT / 'devel/sql/ash-install.sql', ROOT / 'demos/Makefile'}
+    for directory in ('assets', 'demos/bin', 'demos/scenes', 'demos/lib', 'demos/render',
                       'demos/theme', 'demos/fonts', 'demos/fixtures'):
         paths.update(p for p in (ROOT / directory).rglob('*')
                      if p.is_file() and '__pycache__' not in p.parts
                      and p.suffix != '.pyc' and p != MANIFEST)
-    for name in ('ash-demo', 'capture-stills.sh', 'record-demo.sh', 'make-fixtures.sh'):
-        paths.add(ROOT / 'demos/bin' / name)
     return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(paths)}
 

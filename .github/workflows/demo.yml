@@ -221,6 +221,7 @@ jobs:
           make -C demos capture
           make -C demos rot
 
+      # Third fresh seed. The Demo-rot alarm below checks its capture contract.
       - name: make all — seed, capture, stills, reel
         if: steps.gate.outputs.run == 'yes'
         env:
