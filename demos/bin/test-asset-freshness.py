@@ -71,53 +71,53 @@ class AssetFreshnessTests(unittest.TestCase):
                             path.unlink()
                             if tracked_noise:
                                 subprocess.run(['git', '-C', str(root), 'rm', '--cached', '-q', '--', name], check=True)
-            for name in ('assets/chart.svg', 'assets/status.png',
-                         'assets/ash_demo.gif', 'demos/scenes/scenes.tsv',
-                         'devel/sql/ash-install.sql', 'sql/ash-install.sql',
-                         'devel/scripts/ash_sql_chain.py', 'demos/Makefile',
-                         'demos/bin/check-fixtures.sh',
-                         'demos/bin/asset-freshness.py'):
-                with self.subTest(path=name):
+                for name in ('assets/chart.svg', 'assets/status.png',
+                             'assets/ash_demo.gif', 'demos/scenes/scenes.tsv',
+                             'devel/sql/ash-install.sql', 'sql/ash-install.sql',
+                             'devel/scripts/ash_sql_chain.py', 'demos/Makefile',
+                             'demos/bin/check-fixtures.sh',
+                             'demos/bin/asset-freshness.py'):
+                    with self.subTest(path=name):
+                        path = root / name
+                        original = path.read_bytes()
+                        # Keep shell/Python/Makefile syntax valid. Failure must
+                        # come from freshness validation, not a parser error.
+                        path.write_bytes(original + b'\n# freshness mutation\n')
+                        try:
+                            assert_changed(name)
+                        finally:
+                            path.write_bytes(original)
+
+                name = 'demos/fixtures/chart.ansi'
+                with self.subTest(deleted=name):
                     path = root / name
                     original = path.read_bytes()
-                    # Keep shell/Python/Makefile syntax valid. Failure must
-                    # come from freshness validation, not a parser error.
-                    path.write_bytes(original + b'\n# freshness mutation\n')
+                    path.unlink()
                     try:
                         assert_changed(name)
                     finally:
                         path.write_bytes(original)
 
-            name = 'demos/fixtures/chart.ansi'
-            with self.subTest(deleted=name):
-                path = root / name
-                original = path.read_bytes()
-                path.unlink()
-                try:
-                    assert_changed(name)
-                finally:
-                    path.write_bytes(original)
-
-            manifest = root / 'demos/fixtures/assets.json'
-            original = manifest.read_bytes()
-            with self.subTest(missing_manifest=True):
-                manifest.unlink()
-                try:
-                    result = check()
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn('Demo asset manifest missing', result.stdout)
-                finally:
-                    manifest.write_bytes(original)
-            with self.subTest(unsupported_format=True):
-                data = json.loads(original)
-                data['format'] = 2
-                manifest.write_text(json.dumps(data))
-                try:
-                    result = check()
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn('Unsupported demo asset manifest format', result.stdout)
-                finally:
-                    manifest.write_bytes(original)
+                manifest = root / 'demos/fixtures/assets.json'
+                original = manifest.read_bytes()
+                with self.subTest(missing_manifest=True):
+                    manifest.unlink()
+                    try:
+                        result = check()
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn('Demo asset manifest missing', result.stdout)
+                    finally:
+                        manifest.write_bytes(original)
+                with self.subTest(unsupported_format=True):
+                    data = json.loads(original)
+                    data['format'] = 2
+                    manifest.write_text(json.dumps(data))
+                    try:
+                        result = check()
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn('Unsupported demo asset manifest format', result.stdout)
+                    finally:
+                        manifest.write_bytes(original)
 
 
 if __name__ == '__main__':
