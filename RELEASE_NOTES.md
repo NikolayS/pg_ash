@@ -1,14 +1,14 @@
-# pg_ash 2.0 rc 1 release notes
+# pg_ash 2.0 rc 2 release notes
 
-This release candidate stamps the tested 2.0 installer as `2.0-rc1`. Fresh
+This release candidate stamps the tested 2.0 installer as `2.0-rc2`. Fresh
 installs use `\i sql/ash-install.sql`; upgrades from 1.5 or an earlier 2.0
 prerelease use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any
-missing 1.x migrations. The same migration is safe to reapply to `2.0-rc1`.
+missing 1.x migrations. The same migration is safe to reapply to `2.0-rc2`.
 Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for compatibility.
 
 The 2.0 line introduces a breaking reader API and removes parameter-name
-prefixes. RC1 also changes cadence safeguards, storage options, scheduler
-procedures, and lifecycle ownership behavior as described below. The 1.x
+prefixes. The release candidates also change cadence safeguards, storage options,
+scheduler procedures, and lifecycle ownership behavior as described below. The 1.x
 reader surface has been replaced by the AAS-oriented 2.0 API:
 
 | 1.x | 2.0 |
@@ -22,9 +22,9 @@ reader surface has been replaced by the AAS-oriented 2.0 API:
 | `event_queries(e)` | `top('query_id', wait_event => e)` |
 | `samples_by_database` | `top('database')` |
 
-## Pending changes after 2.0 rc 1
+## Changes since 2.0 rc 1
 
-These changes target the development candidate, not the published RC1 payload.
+These fixes are included in the RC2 installer and public upgrade path.
 
 - Cleanup keeps minute rows that pending hourly aggregation still needs. (#277)
 - Comparison deltas use effective windows and coverage. Incomplete windows return NULL deltas instead of misleading changes. (#280)
@@ -32,12 +32,20 @@ These changes target the development candidate, not the published RC1 payload.
 - Query text follows the source database identity, including missing statistics entries and restricted-role visibility. Ambiguous attribution returns NULL. (#282)
 - Reapplying the installer preserves unchanged reader routines and their dependent objects. Changed return types still fail atomically when dependencies block replacement. (#290)
 - Oversized reader buckets get reader-specific validation errors, including overflow during grain alignment. `top(NULL)` now rejects the invalid dimension. (#177, #293)
+- Invariant reader work no longer scales with sample rows or output keys. Retention, slot selection, source planning, timestamp bounds, and chart color use bounded evaluation. (#305)
+- Query-text readers resolve the trusted extension schema once per call and share one constant SQL template. Database scoping, visibility checks, and 80/100-character limits remain unchanged. (#305)
+- Manual query-text grants retain their required helper dependencies without gaining unrelated reader or admin privileges. Installer reapply preserves grant options where required. (#282, #305)
+- Upgrades revoke historical admin-helper grants, including delegated grants, while retaining schema-owner access. (#290)
+- Scheduler status explains pg_cron row visibility and external-scheduler operation without implying that collection has stopped. (#301)
 
 ### Documentation and release tooling
 
 - The README starts with incident investigation. The reference, agent tasks, and lock lab provide detailed follow-up workflows. (#284)
 - The release-chain helper accepts a byte-identical final-release baseline. Changed development SQL still requires a connected migration. (#289)
 - Historical-upgrade tests use the actual alpha installers. Their help command no longer connects to a database. (#296)
+- The SQL review rule requires real executed plans, bounded helper-call counts, exact results, growing fixtures, and cached-plan coverage. CI runs these regressions on supported Postgres versions. (#305)
+- The demo gives both lock events room in its chart ranking and aligns numeric labels. Its launcher suppresses psql and TLS startup banners while retaining query results and errors. (#291, #302)
+- The blind-agent trial includes reproducible fixtures, input auditing, independent scoring, and disclosed limitations. It does not establish a general investigation success rate. (#285, #288)
 
 ## 2.0 highlights
 

@@ -44,7 +44,8 @@ def main():
 \set ph_storm 5
 """
         for case, rank, should_pass in [("rank4", 4, True), ("rank5", 5, True),
-                                       ("rank6", 6, False), ("one_lock", None, False)]:
+                                       ("rank6", 6, False), ("wal_rank6", 6, False),
+                                       ("one_lock", None, False)]:
             setup = "begin;\n\\set fixture_case " + case + "\n" + fixture
             # Run the unchanged production scene separately, even for failures.
             captured = run(psql, sql=setup + "\\echo CHART_BEGIN\n" + chart
@@ -54,7 +55,8 @@ def main():
             keys = [line.split("|")[0] for line in ranking.splitlines()
                     if "|" in line and line.split("|")[0] in
                     ("CPU*", "Client:ClientRead", "IO:DataFileRead",
-                     "Lock:transactionid", "Lock:tuple", "Timeout:PgSleep")]
+                     "Lock:transactionid", "Lock:tuple", "Timeout:PgSleep",
+                     "IO:WalSync", "LWLock:WALWrite")]
             actual_rank = keys.index("Lock:tuple") + 1 if "Lock:tuple" in keys else None
             assert actual_rank == rank, (case, keys)
             result = run(psql, sql=setup + settings + shape + "\nrollback;\n", check=False)
@@ -64,6 +66,10 @@ def main():
             else:
                 assert result.returncode != 0, case + " wrongly passed"
                 assert "shape: only 1 Lock:* event(s) rank in the top" in result.stderr, result.stderr
+                if case == "wal_rank6":
+                    assert keys.index("IO:WalSync") < actual_rank - 1, keys
+                    assert keys.index("LWLock:WALWrite") < actual_rank - 1, keys
+                    assert "ASH_LOAD_STORM_BG_CLIENTS" in result.stderr, result.stderr
             chart_rows = [line.split("|", 2) for line in output.splitlines()
                           if len(line.split("|", 2)) == 3
                           and len(line.split("|", 1)[0]) == 5

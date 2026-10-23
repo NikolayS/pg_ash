@@ -140,16 +140,28 @@ The manual demo sampler is not a production scheduler.
 
 For continuous collection on your own database:
 
-This branch contains the `2.0-rc1` candidate.
+This checkout contains the `2.0-rc2` release-candidate payload.
 For the latest stable release, check out `v1.5` instead.
 Use the instructions and SQL from the same checkout.
 Postgres 14 or newer is required.
 
-Check out the release-candidate branch:
+After `v2.0-rc2` is published, clone its immutable release tag:
 
 ```bash
-git clone --branch release/2.0-rc1 https://github.com/NikolayS/pg_ash.git
+git clone --branch v2.0-rc2 https://github.com/NikolayS/pg_ash.git
 cd pg_ash
+```
+
+Before publication, use an exact reviewed candidate from
+[the stamp PR's verification report](https://github.com/NikolayS/pg_ash/pull/306).
+Set `reviewed_sha` to the full commit SHA named in that report, then run:
+
+```bash
+git clone https://github.com/NikolayS/pg_ash.git
+cd pg_ash
+git fetch origin "$reviewed_sha"
+git switch --detach "$reviewed_sha"
+test "$(git rev-parse HEAD)" = "$reviewed_sha"
 ```
 
 Install in the database that will store the history:
@@ -313,6 +325,7 @@ Measure sampler latency, WAL, storage growth, and scheduler lateness on your tar
 pg_ash is part of SAMO: self-driving Postgres.
 
 <a id="upgrade-to-20-rc-1"></a>
+<a id="upgrade-to-20-rc-2"></a>
 <a id="rc-upgrade-safety"></a>
 
 ## Upgrading an existing installation
@@ -320,4 +333,4 @@ pg_ash is part of SAMO: self-driving Postgres.
 Test on a disposable instance first.
 Keep a verified backup; SQL downgrades are not supported.
 Do not use `ash.uninstall()` as rollback: it deletes collected data.
-Follow the [upgrade procedure](docs/REFERENCE.md#upgrade-to-20-rc-1).
+Follow the [upgrade procedure](docs/REFERENCE.md#upgrade-to-20-rc-2).
