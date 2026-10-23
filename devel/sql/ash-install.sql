@@ -7113,10 +7113,17 @@ begin
    * recheck coverage below, after planning their own bounds and read grain.
    * An uncovered window must not produce a delta against a fake zero.
    */
-  select * into v_aas1 from ash.aas(v_from1, v_to1,
-    wait_event_type, wait_event, query_id, database, bucket);
-  select * into v_aas2 from ash.aas(v_from2, v_to2,
-    wait_event_type, wait_event, query_id, database, bucket);
+  begin
+    select * into v_aas1 from ash.aas(v_from1, v_to1,
+      wait_event_type, wait_event, query_id, database, bucket);
+    select * into v_aas2 from ash.aas(v_from2, v_to2,
+      wait_event_type, wait_event, query_id, database, bucket);
+  exception when invalid_parameter_value then
+    if sqlerrm like 'ash.aas: bucket %' then
+      raise exception 'ash.compare:%', substr(sqlerrm, 9) using errcode = '22023';
+    end if;
+    raise;
+  end;
   v_cov1 := v_aas1.buckets_with_data > 0;
   v_cov2 := v_aas2.buckets_with_data > 0;
   /*
@@ -7226,6 +7233,13 @@ begin
         ((v_end2::bigint + 3599) / 3600) * 3600,
         2147483647
       )::int4;
+    end if;
+    if ceil(v_requested_bucket_secs) > least(
+         (2147483647 / v_grain1) * v_grain1,
+         (2147483647 / v_grain2) * v_grain2
+       ) then
+      raise exception 'ash.compare: bucket exceeds the supported range after grain alignment, got %', bucket
+        using errcode = '22023';
     end if;
     v_effective_bucket_secs1 := (
       (
