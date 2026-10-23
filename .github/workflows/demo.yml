@@ -187,17 +187,20 @@ jobs:
 
       - name: Install the tier-3 dependencies
         if: steps.gate.outputs.run == 'yes'
+        timeout-minutes: 5
         run: |
-          set -Eeuo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tmux ffmpeg gifsicle postgresql-client
-          python -m pip install --quiet asciinema pillow fonttools brotli
+          set -Eeuxo pipefail
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 install -y tmux ffmpeg gifsicle postgresql-client
+          python -m pip install --timeout 30 --retries 2 asciinema pillow fonttools brotli
           # agg ships a single release binary. No cargo build, no Docker Hub,
           # no registry auth. Pin its digest so a changed download fails loud.
           AGG_VER="1.7.0"
           AGG_SHA256="b72c773c22ef73149540f5728b37290dffe88418f0a16ceab29bc8e43699abf7"
           agg_tmp="$RUNNER_TEMP/agg"
-          curl -fsSL -o "$agg_tmp" \
+          curl -fsSL --connect-timeout 20 --max-time 90 --retry 2 -o "$agg_tmp" \
             "https://github.com/asciinema/agg/releases/download/v${AGG_VER}/agg-x86_64-unknown-linux-gnu"
           printf '%s  %s\n' "$AGG_SHA256" "$agg_tmp" | sha256sum -c -
           sudo install -m 0755 "$agg_tmp" /usr/local/bin/agg
