@@ -8903,6 +8903,13 @@ begin
   loop
     execute format('revoke select on ash.%I from public', v_rec.relname);
   end loop;
+
+  -- Lifecycle routines run with caller privileges. A pre-existing schema
+  -- can belong to another role, so EXECUTE on entry points is not enough.
+  -- Restore access to their helper calls, state tables, and sequences too.
+  execute format('grant execute on all routines in schema ash to %I', v_owner);
+  execute format('grant select, insert, update, delete, truncate on all tables in schema ash to %I', v_owner);
+  execute format('grant usage, select, update on all sequences in schema ash to %I', v_owner);
 end $$;
 
 --------------------------------------------------------------------------------

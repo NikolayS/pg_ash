@@ -73,14 +73,48 @@ def main():
         print(sql("select version(), current_setting('cron.use_background_workers'), current_setting('cron.host')"), flush=True)
         payload = installer.read_text()
         print('Installer SHA256:', hashlib.sha256(payload.encode()).hexdigest(), flush=True)
-        sql(payload)
+        sql(f'create role {OWNER} login; create schema ash authorization {OWNER};')
+        sql('create role ash_owner_outsider; create role ash_owner_reader;')
+        for installation in ('fresh', 're-apply'):
+            sql(payload)
+            sql("grant usage on schema ash to ash_owner_outsider; select ash.grant_reader('ash_owner_reader');")
+            # Use real denied operations, not only ACL catalog checks.
+            for role in ('ash_owner_outsider', 'ash_owner_reader'):
+                commands = ["update ash.config set sampling_enabled=false",
+                            "delete from ash.sample"]
+                if role == 'ash_owner_outsider':
+                    commands += ["select * from ash.config", "select * from ash.sample"]
+                for command in commands:
+                    sql(f"""set role {role};
+                        do $$ begin
+                          {command};
+                          raise exception 'unexpected access: {role}: {command}';
+                        exception when insufficient_privilege then null;
+                        end $$;
+                    """)
+            print(f'PASS {installation}: unrelated role denied reads/writes; reader denied writes', flush=True)
+            sql(f"""set role {OWNER};
+                create function ash.owner_trigger_probe() returns trigger
+                language plpgsql as $$ begin return new; end $$;
+                do $$ begin
+                  create trigger owner_trigger_probe before update on ash.config
+                    for each row execute function ash.owner_trigger_probe();
+                  raise exception 'unexpected TRIGGER privilege on installer-owned config';
+                exception when insufficient_privilege then null;
+                end $$;
+                do $$ begin
+                  create table ash.owner_reference_probe (
+                    singleton boolean references ash.config(singleton));
+                  raise exception 'unexpected REFERENCES privilege on installer-owned config';
+                exception when insufficient_privilege then null;
+                end $$;
+                drop function ash.owner_trigger_probe();
+                reset role;
+            """)
+            print(f'PASS {installation}: schema owner denied TRIGGER and REFERENCES on installer-owned tables', flush=True)
+
         sql(f'''
-            create role {OWNER} login;
             grant pg_monitor to {OWNER};
-            alter schema ash owner to {OWNER};
-            grant all on all tables in schema ash to {OWNER};
-            grant all on all sequences in schema ash to {OWNER};
-            grant execute on all routines in schema ash to {OWNER};
             grant usage on schema cron to {OWNER};
             grant select on cron.job to {OWNER};
         ''')
@@ -97,6 +131,9 @@ def main():
             time.sleep(.1)
         else:
             raise AssertionError('private tagged workload did not become active')
+        assert_sql(f"set role {OWNER}; select ash.take_sample() > 0;", 'SET\nt')
+        assert_sql(f"set role {OWNER}; select value from ash.status() where metric='sampling_enabled';", 'SET\ntrue')
+        print('PASS split-owner take_sample and status after re-apply', flush=True)
         # pg_monitor includes pg_read_all_settings; visibility is not UPDATE.
         print(sql(f"set role {OWNER}; select current_setting('cron.host'); select * from ash.start('1 second'); select * from ash.start('1 second'); reset role;"), flush=True)
         assert_sql(f"select count(*)=5 and bool_and(active) and bool_and(nodename='localhost') from cron.job where username='{OWNER}'", 't')
@@ -128,7 +165,9 @@ def main():
 
         # Stop and remove this private fixture's jobs before changing cadence.
         # No history is silently purged by the API; fixture reset is explicit.
-        sql(f"set role {OWNER}; select ash.stop(); reset role; select cron.unschedule(jobid) from cron.job where username='{OWNER}';")
+        sql(f"set role {OWNER}; select ash.stop(); reset role;")
+        assert_sql(f"set role {OWNER}; select value from ash.status() where metric='sampling_enabled';", 'SET\nfalse')
+        assert_sql(f"select count(*) from cron.job where username='{OWNER}'", '0')
         time.sleep(1)
         sql('truncate ash.sample, ash.rollup_1m, ash.rollup_1h; update ash.config set sample_interval=interval \'60 seconds\';')
         # pg_cron 1.3 supports names but predates alter_job (introduced in1.4).
