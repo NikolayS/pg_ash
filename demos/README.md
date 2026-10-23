@@ -277,7 +277,7 @@ ages between `make seed` and `make demo`):
 |---|---|---|
 | 1–4 | calm (slack) | read-only range aggregates |
 | 5–12 | calm baseline | read-only range aggregates |
-| 13–17 | **the incident** | 12 clients contending on one row + 3 write clients |
+| 13–17 | **the incident** | 12 clients contending on one row + 1 background writer |
 | 18–20 | recovery | mixed read/write |
 | 21–28 | busy tail | heavier reads |
 
