@@ -27,7 +27,7 @@
     "demos/bin/make-fixtures.sh": "4d4a23efdf1020516493860ae7b3111720ce91bc863312f5c780c486c8406eed",
     "demos/bin/record-demo.sh": "6e3e382eedd9d28e873fc638c8d54d50695e4bd337eb6ffede534f97f6d2d94a",
     "demos/bin/rot-check.sh": "212441676f058b2704b082cee193a90211e870b29d3abbaf84dc7a5443b719d4",
-    "demos/bin/test-asset-freshness.py": "dd24f450e25834546d94e1a5452e807de1300a1ec98ac56d1c5e0712c56b44c5",
+    "demos/bin/test-asset-freshness.py": "d82f6a78b81855c251c67446f0ad8a738f0e3caebf233bd342a58d1dada1cba0",
     "demos/fixtures/chart.ansi": "00888e3e2d2d496e34cc6160f5c1bc2f6bd77cb186a672194ff5b9b2dc44ef71",
     "demos/fixtures/compare.ansi": "1401d54db251d7aae633e5fbce7a50a1f77a68f1bf22fc23fb785882471cdb9d",
     "demos/fixtures/expected/chart.svg": "39d944050b81f1241d9119dc633f63f2224dbe0656355e6f5293498f99f8a57b",

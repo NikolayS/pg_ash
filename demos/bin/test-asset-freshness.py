@@ -44,6 +44,18 @@ class AssetFreshnessTests(unittest.TestCase):
                     subprocess.run(['git', 'init', '-q', str(root)], check=True)
                     subprocess.run(['git', '-C', str(root), 'add', '-f', '--',
                                     'demos', 'assets', 'devel', 'sql'], check=True)
+                name = 'demos/lib/freshness-probe.txt'
+                with self.subTest(added=name, git=git_checkout):
+                    path = root / name
+                    path.write_text('new capture input\n')
+                    if git_checkout:
+                        subprocess.run(['git', '-C', str(root), 'add', '--', name], check=True)
+                    try:
+                        assert_changed(name)
+                    finally:
+                        path.unlink()
+                        if git_checkout:
+                            subprocess.run(['git', '-C', str(root), 'rm', '--cached', '-q', '--', name], check=True)
                 for name in ('demos/lib/.DS_Store', 'demos/lib/seed.sh.swp',
                              'assets/unrelated.png'):
                     with self.subTest(noise=name, git=git_checkout):
@@ -75,17 +87,6 @@ class AssetFreshnessTests(unittest.TestCase):
                         assert_changed(name)
                     finally:
                         path.write_bytes(original)
-
-            name = 'demos/lib/freshness-probe.txt'
-            with self.subTest(added=name):
-                path = root / name
-                path.write_text('new capture input\n')
-                subprocess.run(['git', '-C', str(root), 'add', '--', name], check=True)
-                try:
-                    assert_changed(name)
-                finally:
-                    path.unlink()
-                    subprocess.run(['git', '-C', str(root), 'rm', '--cached', '-q', '--', name], check=True)
 
             name = 'demos/fixtures/chart.ansi'
             with self.subTest(deleted=name):
