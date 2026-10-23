@@ -93,6 +93,26 @@ def main():
                         end $$;
                     """)
             print(f'PASS {installation}: unrelated role denied reads/writes; reader denied writes', flush=True)
+            sql(f"""set role {OWNER};
+                create function ash.owner_trigger_probe() returns trigger
+                language plpgsql as $$ begin return new; end $$;
+                do $$ begin
+                  create trigger owner_trigger_probe before update on ash.config
+                    for each row execute function ash.owner_trigger_probe();
+                  raise exception 'unexpected TRIGGER privilege on installer-owned config';
+                exception when insufficient_privilege then null;
+                end $$;
+                do $$ begin
+                  create table ash.owner_reference_probe (
+                    singleton boolean references ash.config(singleton));
+                  raise exception 'unexpected REFERENCES privilege on installer-owned config';
+                exception when insufficient_privilege then null;
+                end $$;
+                drop function ash.owner_trigger_probe();
+                reset role;
+            """)
+            print(f'PASS {installation}: schema owner denied TRIGGER and REFERENCES on installer-owned tables', flush=True)
+
         sql(f'''
             grant pg_monitor to {OWNER};
             grant usage on schema cron to {OWNER};
