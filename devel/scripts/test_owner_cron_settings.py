@@ -74,8 +74,25 @@ def main():
         payload = installer.read_text()
         print('Installer SHA256:', hashlib.sha256(payload.encode()).hexdigest(), flush=True)
         sql(f'create role {OWNER} login; create schema ash authorization {OWNER};')
-        sql(payload)
-        sql(payload)  # Re-apply must preserve split-owner lifecycle access.
+        sql('create role ash_owner_outsider; create role ash_owner_reader;')
+        for installation in ('fresh', 're-apply'):
+            sql(payload)
+            sql("grant usage on schema ash to ash_owner_outsider; select ash.grant_reader('ash_owner_reader');")
+            # Use real denied operations, not only ACL catalog checks.
+            for role in ('ash_owner_outsider', 'ash_owner_reader'):
+                commands = ["update ash.config set sampling_enabled=false",
+                            "delete from ash.sample"]
+                if role == 'ash_owner_outsider':
+                    commands += ["select * from ash.config", "select * from ash.sample"]
+                for command in commands:
+                    sql(f"""set role {role};
+                        do $$ begin
+                          {command};
+                          raise exception 'unexpected access: {role}: {command}';
+                        exception when insufficient_privilege then null;
+                        end $$;
+                    """)
+            print(f'PASS {installation}: unrelated role denied reads/writes; reader denied writes', flush=True)
         sql(f'''
             grant pg_monitor to {OWNER};
             grant usage on schema cron to {OWNER};
@@ -128,7 +145,7 @@ def main():
 
         # Stop and remove this private fixture's jobs before changing cadence.
         # No history is silently purged by the API; fixture reset is explicit.
-        sql(f"set role {OWNER}; select ash.stop(); reset role; select cron.unschedule(jobid) from cron.job where username='{OWNER}';")
+        sql(f"set role {OWNER}; select ash.stop(); reset role;")
         assert_sql(f"set role {OWNER}; select value from ash.status() where metric='sampling_enabled';", 'SET\nfalse')
         assert_sql(f"select count(*) from cron.job where username='{OWNER}'", '0')
         time.sleep(1)
