@@ -29,6 +29,10 @@ declare
   packed int[];
   active_count int;
 begin
+  if fixture_case = 'wal_rank6' then
+    events[3] := ash._register_wait('active', 'IO', 'WalSync');
+    events[6] := ash._register_wait('active', 'LWLock', 'WALWrite');
+  end if;
   insert into ash.query_map_0 (query_id) values (291) returning id into map_id;
   for minute_idx in 0..27 loop
     counts := array[1, 1, 1, 0, 0, 0];
@@ -41,7 +45,7 @@ begin
         counts[5] := 0;
       end if;
     end if;
-    if fixture_case = 'rank6' then counts[6] := 1; end if;
+    if fixture_case in ('rank6', 'wal_rank6') then counts[6] := 1; end if;
     packed := '{}'::int[];
     active_count := 0;
     for event_idx in 1..6 loop

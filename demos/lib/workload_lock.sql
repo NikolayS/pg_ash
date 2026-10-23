@@ -11,10 +11,11 @@
 --
 -- What the sampler sees (this is the actual Postgres locking protocol, not a
 -- contrivance): one waiter holds the tuple lock and waits on the holder's
--- transaction id (Lock:transactionid); every other waiter queues behind that
--- tuple lock (Lock:tuple). So a 12-client storm produces a large Lock:tuple
--- population with a Lock:transactionid alongside it, plus the holder's own
--- CPU*/IO:DataFileRead — a textbook row-contention signature.
+-- transaction id (Lock:transactionid); other waiters can queue behind that
+-- tuple lock (Lock:tuple). Waiters can also share the transaction-id wait
+-- after the tuple lock is released. Their relative counts vary with timing.
+-- The holder contributes CPU/IO work. Background writers also contribute
+-- WAL waits, which can displace the smaller lock series in the chart.
 BEGIN;
 UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = 1;
 SELECT sum(abalance) FROM pgbench_accounts WHERE bid = 1;

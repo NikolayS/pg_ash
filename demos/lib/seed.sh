@@ -50,7 +50,9 @@ ASH_SEED_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 : "${ASH_LOAD_BASELINE_JOBS:=2}"
 : "${ASH_LOAD_STORM_CLIENTS:=12}"
 : "${ASH_LOAD_STORM_JOBS:=4}"
-: "${ASH_LOAD_STORM_BG_CLIENTS:=3}"
+# Extra writers can push the secondary lock wait out of the chart's top five.
+# Keep one writer for real background traffic without dominating WAL waits.
+: "${ASH_LOAD_STORM_BG_CLIENTS:=1}"
 : "${ASH_LOAD_RECOVERY_CLIENTS:=4}"
 : "${ASH_LOAD_READIO_CLIENTS:=2}"
 : "${ASH_LOAD_READIO_JOBS:=2}"

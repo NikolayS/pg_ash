@@ -1,8 +1,8 @@
-status	13df03331aa35b028b830105cef7439aabdfc1ad8fa8893d36dec1742cd7aa9b	Collection settings
-periods	1ffcf392f3450ea4fdc778cc8637e058dd45df1a5879face152e97375eb31ccd	Available history
-chart	2bd47413077e1e3a3cbcb57baba18a71387dabf3c669d7b02f14da23eac0f7af	1. When did load rise?
-top_event	4e7ebecefd1b38f5978167b5ba47559220fc6ecdfa249e91437981208f6ae8fa	2. What were sessions waiting for?
-top_query	1fe8c470ba75e749a240685e817c676cd134ccda93ecce240223b14f078526ff	3. Which statements experienced this wait?
-compare	e152bebac186c87b1f48ea4c84a22293b5f2a4e37a0018a7c19d36c8a3f70fe7	4. What changed from the baseline?
-summary	b785b5b02be21e8909ab269d2d20d6ba5b1181b41aa6ec32be9027e374aff750	ash.summary() — the one-paragraph verdict
-report	cf37b1fea93de7b5317f462138dd9059cbfe4dfb0d1eaf856e0d8f5577641920	ash.report() — hand this to an LLM
+status	1771957a68ff7c6e6dcb3df9a5a59d3fabcfd7218534b7187a91f4ad8a00315c	Collection settings
+periods	f13f4ec24c20d09fe17505124562b101024cee58a1ecc2b5669554a42750afda	Available history
+chart	39d944050b81f1241d9119dc633f63f2224dbe0656355e6f5293498f99f8a57b	1. When did load rise?
+top_event	6646bdce16fe0bf2196474dc5ba3ada3dab702b684d3cf1f1fc96935f0d79b44	2. What were sessions waiting for?
+top_query	528cb76546cf487b5b0807cf88551cf008fe5f4abe657192bf5bf75b1b68d086	3. Which statements experienced this wait?
+compare	54aaa75740440201a247892a8d9c040aa3406cac56f89da583b3b860116ad098	4. What changed from the baseline?
+summary	574c69252fae70cd32635ee20f26e474c490c28f2419913ac494777d4355607a	ash.summary() — the one-paragraph verdict
+report	d28a2e6d5b95626b5db00bb0875526ff80a46237535c2cdaa24431cca331c2ae	ash.report() — hand this to an LLM
