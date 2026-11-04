@@ -49,13 +49,13 @@ def main():
         actual = sql(statement)
         assert actual == expected, (statement, expected, actual)
 
-    def wait_fired(job_id):
+    def wait_fired(job_id, after_run_id=0):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            if sql(f"select exists(select from cron.job_run_details where jobid={job_id} and status='succeeded')") == 't':
+            if sql(f"select exists(select from cron.job_run_details where jobid={job_id} and runid>{after_run_id} and status='succeeded')") == 't':
                 return
             time.sleep(.25)
-        raise AssertionError('LOGIN sampler did not fire successfully: ' + sql(
+        raise AssertionError('LOGIN job did not fire successfully: ' + sql(
             f"select row_to_json(d) from cron.job_run_details d where jobid={job_id}"))
 
     try:
@@ -78,7 +78,7 @@ def main():
         for installation in ('fresh', 're-apply', 'second re-apply'):
             if installation != 'fresh':
                 # Re-apply must still remove legacy admin access from readers.
-                sql('grant execute on function ash._admin_funcs() to ash_owner_reader;')
+                sql('grant execute on function ash._admin_funcs(), ash._restart_query_map_identity(int) to ash_owner_reader;')
             sql(payload)
             sql("grant usage on schema ash to ash_owner_outsider; select ash.grant_reader('ash_owner_reader');")
             # Test delegation separately from lifecycle DML rights. Grant options
@@ -168,6 +168,10 @@ def main():
                 reset role;
             """)
             print(f'PASS {installation}: schema owner denied TRIGGER and REFERENCES on installer-owned tables', flush=True)
+            identity_start = 7 if installation == 're-apply' else 1
+            sql(f"\\set owner_role {OWNER}\n\\set identity_start {identity_start}\n" +
+                (ROOT / 'devel/tests/owner_rotation.sql').read_text())
+            print(f'PASS {installation}: forced rotation, rollback, identity and helper security', flush=True)
 
         sql(f'''
             grant pg_monitor to {OWNER};
@@ -197,6 +201,20 @@ def main():
         wait_fired(first_job)
         assert_sql('select count(*)>0 from ash.sample', 't')
         print('PASS LOGIN owner with pg_monitor, no UPDATE: first/repeated start and actual libpq execution', flush=True)
+
+        rotation_job = int(sql(f"select jobid from cron.job where username='{OWNER}' and jobname='ash_rotation'"))
+        prior_run = int(sql(f"select coalesce(max(runid),0) from cron.job_run_details where jobid={rotation_job}"))
+        sql("truncate ash.sample_2, ash.query_map_2 restart identity; "
+            "insert into ash.query_map_2(query_id) values (909090),(909091); "
+            "update ash.config set current_slot=0, rotated_at=now()-interval '2 days';")
+        sql(f"select cron.alter_job({rotation_job}, schedule=>'1 second');")
+        wait_fired(rotation_job, prior_run)
+        assert_sql('select current_slot from ash.config', '1')
+        assert_sql('select count(*) from ash.sample_2', '0')
+        assert_sql('select count(*) from ash.query_map_2', '0')
+        assert_sql(f"set role {OWNER}; insert into ash.query_map_2(query_id) values (909092) returning id;", 'SET\n1\nINSERT 0 1')
+        sql(f"select cron.alter_job({rotation_job}, schedule=>'0 0 * * *');")
+        print('PASS scheduled split-owner CALL rotation advances slot and resets identity', flush=True)
 
         # Do not grant cron.alter_job: its absent EXECUTE permission selects
         # the reschedule fallback. Only the needed column can be updated.

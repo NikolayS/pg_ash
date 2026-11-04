@@ -219,12 +219,24 @@ explain these semantics to an LLM.
 The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
 and `uninstall()` to run as the `ash` schema owner, including when another
 superuser administers the installation. Use `SET ROLE` to the owner first.
-The installer grants the schema owner access to pg_ash tables, sequences, and routines.
+The installer grants these administrative privileges to the schema owner:
+
+- `select`, `insert`, `update`, `delete`, and `truncate` on existing tables.
+- `usage`, `select`, and `update` on existing sequences.
+- `execute` on all pg_ash routines, including private admin helpers.
+
+These grants do not transfer object ownership or grant table `trigger` or `references` privileges.
 A different role may run the installer while another role owns the `ash` schema.
-The schema owner can then call `take_sample()`, `start()`, `stop()`, and `status()`.
+The schema owner can then call `take_sample()`, `start()`, `stop()`, `rotate()`, and `status()`.
+Rotation truncates tables as the caller. A private owner-privileged helper restarts only the validated query-map identity sequence.
+The restart, truncation, and slot update roll back together if rotation fails.
+A truncate trigger must not repopulate the query dictionary. Rotation rejects that case and rolls back instead of resetting behind inserted rows.
 These grants cover existing objects. Re-apply the installer after another role adds objects that these calls need.
 Install as the schema owner when that role must also perform ownership-dependent DDL, such as rebuilding partitions.
 These grants do not replace the documented Postgres monitoring or pg_cron privileges.
+Reader delegation also needs object ownership or the required grant options; routine execution alone does not confer delegation rights.
+Changing schema ownership does not revoke existing explicit grants. Review and revoke the former owner's grants during an ownership transfer.
+Re-apply the installer for the new owner. Re-apply can restore operational privileges that an administrator previously revoked.
 A failed lifecycle call rolls back its configuration, job and DDL changes.
 `stop()` reports only jobs actually removed, with their real IDs. A successful
 rebuild leaves sampling disabled until an explicit `start()`.
