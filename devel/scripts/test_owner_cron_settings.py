@@ -40,9 +40,9 @@ def main():
     running = False
     workload = None
 
-    def sql(statement):
+    def sql(statement, database='postgres'):
         return execute(['psql', '-XAt', '-h', '/var/run/postgresql', '-p', str(port),
-                        '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'],
+                        '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1'],
                        statement)
 
     def assert_sql(statement, expected):
@@ -74,7 +74,49 @@ def main():
         payload = installer.read_text()
         print('Installer SHA256:', hashlib.sha256(payload.encode()).hexdigest(), flush=True)
         sql(f'create role {OWNER} login; create schema ash authorization {OWNER};')
-        sql('create role ash_owner_outsider; create role ash_owner_reader; create role ash_owner_delegate;')
+        sql('create role ash_owner_outsider; create role ash_owner_reader; create role ash_owner_delegate; create role ash_owner_successor;')
+        # A new helper can first appear under a different upgrade administrator.
+        # Keep the released payload's original owner, including managed-role installs.
+        previous_payload = (ROOT / 'sql/ash-install.sql').read_text()
+        for kind in ('super', 'plain'):
+            origin = 'ash_origin_' + kind
+            database = 'ash_owner_upgrade_' + kind
+            attributes = 'superuser' if kind == 'super' else 'nosuperuser'
+            sql(f'create role {origin} {attributes};')
+            sql(f'create database {database};')
+            sql(f'grant create on database {database} to {origin};')
+            sql(f'create schema ash authorization {origin};', database)
+            sql(f'set role {origin};\n' + previous_payload + '\nreset role;', database)
+            sql(f'alter schema ash owner to {OWNER};', database)
+            for upgrade_pass in ('first', 're-apply'):
+                sql(payload, database)
+                expected = f'postgres|{origin}|{origin}'
+                actual = sql("select pg_get_userbyid(p.proowner), "
+                    "pg_get_userbyid(c.relowner), pg_get_userbyid(q.relowner) "
+                    "from pg_proc p, pg_class c, pg_class q "
+                    "where p.oid='ash._restart_query_map_identity(int)'::regprocedure "
+                    "and c.oid='ash.config'::regclass and q.oid='ash.query_map_2'::regclass", database)
+                assert actual == expected, (kind, upgrade_pass, actual, expected)
+                sql("grant usage on schema ash to ash_owner_outsider; "
+                    "select ash.grant_reader('ash_owner_reader');", database)
+                sql(f"\\set owner_role {OWNER}\n\\set identity_start 1\n" +
+                    (ROOT / 'devel/tests/owner_rotation.sql').read_text(), database)
+                print(f'PASS {kind} original installer, {upgrade_pass} upgrade by another admin: rotation and ownership', flush=True)
+            sql('alter schema ash owner to ash_owner_successor;', database)
+            sql(payload, database)
+            sql(f"""set role {OWNER};
+                do $$ begin
+                  begin
+                    perform ash._restart_query_map_identity(2);
+                    raise exception 'former schema owner retained identity helper access';
+                  exception when insufficient_privilege then null;
+                  end;
+                end $$;
+                reset role;
+            """, database)
+            sql("\\set owner_role ash_owner_successor\n\\set identity_start 1\n" +
+                (ROOT / 'devel/tests/owner_rotation.sql').read_text(), database)
+            print(f'PASS {kind} original installer: transferred owner rotates; former owner denied private helper', flush=True)
         for installation in ('fresh', 're-apply', 'second re-apply'):
             if installation != 'fresh':
                 # Re-apply must still remove legacy admin access from readers.
@@ -262,6 +304,23 @@ def main():
             rollback;
         '''), flush=True)
         print('PASS old named-job version with absent alter_job uses fallback', flush=True)
+        sql("""begin;
+            alter schema ash owner to postgres;
+            update ash.config set rollup_1m_retention_days=32;
+            select ash.rebuild_partitions(32, 'yes');
+            update ash.config set current_slot=29, rotated_at=now()-interval '2 days';
+            insert into ash.query_map_31(query_id) values (909090),(909091);
+            do $$ declare result text; next_id int; begin
+              result := ash.rotate();
+              assert result='rotated: slot 29 -> 30, truncated slot 31 (sample + query_map)', result;
+              assert ash.current_slot()=30, 'maximum ring rotation did not advance';
+              assert (select count(*) from ash.query_map_31)=0, 'maximum ring dictionary survived';
+              insert into ash.query_map_31(query_id) values (909092) returning id into next_id;
+              assert next_id=1, 'maximum ring identity did not restart';
+            end $$;
+            rollback;
+        """)
+        print('PASS maximum 32-slot ring rotates slot 31 and restarts identity', flush=True)
         print('PASS owner cron settings privilege regression suite', flush=True)
     finally:
         if running:

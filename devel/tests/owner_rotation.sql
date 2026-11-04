@@ -183,3 +183,19 @@ do $$ begin
 end $$;
 reset role;
 rollback;
+
+-- The installation-owner anchor must remain a real config table.
+begin;
+alter table ash.config rename to owner_saved_config;
+create view ash.config as select true as singleton;
+set role :"owner_role";
+do $$ begin
+  begin
+    perform ash._restart_query_map_identity(2);
+    raise exception 'identity helper accepted a non-table config anchor';
+  exception when insufficient_privilege then
+    assert sqlerrm = 'ash._restart_query_map_identity: unsupported identity for slot 2', sqlerrm;
+  end;
+end $$;
+reset role;
+rollback;

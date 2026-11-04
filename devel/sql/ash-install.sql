@@ -1746,17 +1746,22 @@ declare
   v_sequence name;
   v_definer oid := (select oid from pg_catalog.pg_roles where rolname = current_user);
 begin
+  -- ash.config constrains the ring to 3..32 partitions.
   if slot is null or slot < 0 or slot > 31 then
     raise exception using errcode = '22023',
       message = 'ash._restart_query_map_identity: slot must be between 0 and 31';
   end if;
 
   -- Resolve the real identity dependency, including renamed sequences.
-  -- Accept only installer-owned or schema-owner-owned dictionary objects.
+  -- The persistent config owner anchors upgrades by a different installer.
+  -- Read catalog ownership only; never run config data or user expressions.
   select seq_nsp.nspname, seq.relname
   into v_schema, v_sequence
   from pg_catalog.pg_class as tbl
   join pg_catalog.pg_namespace as nsp on nsp.oid = tbl.relnamespace
+  join pg_catalog.pg_class as config
+    on config.relnamespace = nsp.oid and config.relname = 'config'
+      and config.relkind = 'r'
   join pg_catalog.pg_attribute as col
     on col.attrelid = tbl.oid and col.attname = 'id'
       and col.attnum > 0 and not col.attisdropped
@@ -1774,7 +1779,7 @@ begin
     and seq.relkind = 'S'
     and seq.relnamespace = tbl.relnamespace
     and seq.relowner = tbl.relowner
-    and tbl.relowner in (v_definer, nsp.nspowner);
+    and tbl.relowner in (v_definer, nsp.nspowner, config.relowner);
 
   if not found then
     raise exception using errcode = '42501',

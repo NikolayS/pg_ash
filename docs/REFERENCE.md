@@ -219,7 +219,7 @@ explain these semantics to an LLM.
 The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
 and `uninstall()` to run as the `ash` schema owner, including when another
 superuser administers the installation. Use `SET ROLE` to the owner first.
-The installer grants these administrative privileges to the schema owner:
+The installer grants these administrative privileges to the current schema owner, without grant options:
 
 - `select`, `insert`, `update`, `delete`, and `truncate` on existing tables.
 - `usage`, `select`, and `update` on existing sequences.
@@ -230,7 +230,10 @@ A different role may run the installer while another role owns the `ash` schema.
 The schema owner can then call `take_sample()`, `start()`, `stop()`, `rotate()`, and `status()`.
 Rotation truncates tables as the caller. A private owner-privileged helper restarts only the validated query-map identity sequence.
 The restart, truncation, and slot update roll back together if rotation fails.
+Dictionary ownership must match the schema owner, the private helper's owner, or the persistent `ash.config` table's owner.
+The config owner preserves the original installation identity when a different administrator upgrades pg_ash.
 A truncate trigger must not repopulate the query dictionary. Rotation rejects that case and rolls back instead of resetting behind inserted rows.
+Ownership and trigger errors raise exceptions. Check the scheduler error log; these exceptions do not increment `consecutive_rotate_failures`.
 These grants cover existing objects. Re-apply the installer after another role adds objects that these calls need.
 Install as the schema owner when that role must also perform ownership-dependent DDL, such as rebuilding partitions.
 These grants do not replace the documented Postgres monitoring or pg_cron privileges.
