@@ -228,7 +228,9 @@ The installer grants these administrative privileges to the current schema owner
 These grants do not transfer object ownership or grant table `trigger` or `references` privileges.
 A different role may run the installer while another role owns the `ash` schema.
 The schema owner can then call `take_sample()`, `start()`, `stop()`, `rotate()`, and `status()`.
-Rotation truncates tables as the caller. A private owner-privileged helper restarts only the validated query-map identity sequence.
+Rotation truncates tables as the caller. It restarts a caller-owned dictionary identity with caller privileges.
+Otherwise, a private owner-privileged helper restarts only the validated query-map identity sequence.
+Re-apply restores schema `usage` for the helper owner, including after schema ownership transfers.
 The restart, truncation, and slot update roll back together if rotation fails.
 Dictionary ownership must match the schema owner, the private helper's owner, or the persistent `ash.config` table's owner.
 The config owner preserves the original installation identity when a different administrator upgrades pg_ash.

@@ -1814,6 +1814,8 @@ declare
   v_endangered_rows bigint;
   v_unrolled_groups bigint;
   v_dictionary_repopulated bool;
+  v_identity_schema name;
+  v_identity_sequence name;
 begin
   if ash._in_recovery() then
     raise notice
@@ -1972,7 +1974,7 @@ begin
      * Lockstep TRUNCATE: sample partition + matching query_map partition.
      * Zero bloat everywhere — no DELETE, no dead tuples, no GC needed.
      * TRUNCATE runs as the caller, including any table triggers.
-     * The private helper restarts only the validated dictionary identity.
+     * Restart the validated identity as its owner: caller or private helper.
      * Both operations and the slot update roll back together on failure.
      */
     execute format(
@@ -1987,7 +1989,43 @@ begin
       raise exception using errcode = '55000',
         message = 'ash.rotate: a truncate trigger repopulated the query dictionary; rotation rolled back';
     end if;
-    perform ash._restart_query_map_identity(v_truncate_slot::int);
+    -- A replacement dictionary can belong to the caller, not the definer.
+    -- Validate the same identity shape before restarting with caller rights.
+    select seq_nsp.nspname, seq.relname
+    into v_identity_schema, v_identity_sequence
+    from pg_catalog.pg_class as tbl
+    join pg_catalog.pg_namespace as nsp on nsp.oid = tbl.relnamespace
+    join pg_catalog.pg_class as config
+      on config.relnamespace = nsp.oid and config.relname = 'config'
+        and config.relkind = 'r'
+    join pg_catalog.pg_attribute as col
+      on col.attrelid = tbl.oid and col.attname = 'id'
+        and col.attnum > 0 and not col.attisdropped
+        and col.attidentity in ('a', 'd')
+    join pg_catalog.pg_depend as dep
+      on dep.refclassid = 'pg_catalog.pg_class'::regclass
+        and dep.refobjid = tbl.oid and dep.refobjsubid = col.attnum
+        and dep.classid = 'pg_catalog.pg_class'::regclass
+        and dep.deptype = 'i'
+    join pg_catalog.pg_class as seq on seq.oid = dep.objid
+    join pg_catalog.pg_namespace as seq_nsp on seq_nsp.oid = seq.relnamespace
+    join pg_catalog.pg_proc as helper
+      on helper.oid = 'ash._restart_query_map_identity(int)'::regprocedure
+    where nsp.nspname = 'ash'
+      and tbl.relname = format('query_map_%s', v_truncate_slot)
+      and tbl.relkind = 'r'
+      and seq.relkind = 'S'
+      and seq.relnamespace = tbl.relnamespace
+      and seq.relowner = tbl.relowner
+      and tbl.relowner = (select oid from pg_catalog.pg_roles where rolname = current_user)
+      and tbl.relowner in (helper.proowner, nsp.nspowner, config.relowner);
+
+    if found then
+      execute format('alter sequence %I.%I restart',
+                     v_identity_schema, v_identity_sequence);
+    else
+      perform ash._restart_query_map_identity(v_truncate_slot::int);
+    end if;
 
     return format(
       'rotated: slot %s -> %s, truncated slot %s (sample + query_map)',
@@ -8872,7 +8910,7 @@ comment on function ash._admin_funcs() is
 do $$
 declare
   v_owner text := (
-    select nspowner::regrole::text from pg_namespace where nspname = 'ash'
+    select pg_get_userbyid(nspowner) from pg_namespace where nspname = 'ash'
   );
   v_admin_funcs constant text[] := ash._admin_funcs();
   v_rec record;
@@ -8987,6 +9025,11 @@ begin
   -- Lifecycle routines run with caller privileges. A pre-existing schema
   -- can belong to another role, so EXECUTE on entry points is not enough.
   -- Restore access to their helper calls, state tables, and sequences too.
+  -- A non-superuser helper owner loses implicit USAGE after schema transfer.
+  -- Preserve only the schema access needed to restart its own sequences.
+  execute format('grant usage on schema ash to %I',
+    (select pg_get_userbyid(proowner) from pg_proc
+     where oid = 'ash._restart_query_map_identity(int)'::regprocedure));
   execute format('grant execute on all routines in schema ash to %I', v_owner);
   execute format('grant select, insert, update, delete, truncate on all tables in schema ash to %I', v_owner);
   execute format('grant usage, select, update on all sequences in schema ash to %I', v_owner);
@@ -9237,7 +9280,7 @@ comment on function ash.revoke_reader(name) is
 do $$
 declare
   v_owner text := (
-    select nspowner::regrole::text from pg_namespace where nspname = 'ash'
+    select pg_get_userbyid(nspowner) from pg_namespace where nspname = 'ash'
   );
 begin
   execute format('revoke all on function ash.grant_reader(name) from public');

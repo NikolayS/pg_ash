@@ -119,12 +119,39 @@ begin
 end $fn$;
 create trigger owner_rotation_trigger after truncate on ash.query_map_2
   for each statement execute function ash.owner_rotation_trigger();
-select ash._restart_query_map_identity(2);
+do $$ begin
+  begin
+    perform ash._restart_query_map_identity(2);
+  exception when insufficient_privilege then
+    -- A non-superuser definer cannot reset the caller's replacement sequence.
+    null;
+  end;
+end $$;
 do $$ begin
   assert (select count(*) from ash.owner_rotation_audit) = 0, 'identity helper ran a table trigger';
 end $$;
+insert into ash.query_map_2(query_id) values (909080), (909081);
 update ash.config set current_slot = 0, rotated_at = now() - interval '2 days';
-select ash.rotate();
+do $$ declare result text; next_id int; begin
+  begin
+    result := ash.rotate();
+    assert result = 'rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)', result;
+    insert into ash.query_map_2(query_id) values (909082) returning id into next_id;
+    assert next_id = 1, 'caller-owned rotation did not restart identity';
+    raise exception using errcode = 'P0002', message = 'fixture rollback';
+  exception when no_data_found then null;
+  end;
+  assert ash.current_slot() = 0, 'caller-owned rollback advanced slot';
+  assert (select count(*) from ash.query_map_2) = 2, 'caller-owned rollback lost dictionary';
+  next_id := nextval(pg_get_serial_sequence('ash.query_map_2', 'id'))::int;
+  assert next_id = 3, 'caller-owned rollback did not restore identity';
+  result := ash.rotate();
+  assert result = 'rotated: slot 0 -> 1, truncated slot 2 (sample + query_map)', result;
+  assert ash.current_slot() = 1, 'caller-owned rotation did not advance';
+  assert (select count(*) from ash.query_map_2) = 0, 'caller-owned rotation retained dictionary';
+  next_id := nextval(pg_get_serial_sequence('ash.query_map_2', 'id'))::int;
+  assert next_id = 1, 'caller-owned rotation did not restart identity';
+end $$;
 do $$ begin
   assert (select count(*) from ash.owner_rotation_audit) = 1, 'rotation did not run the table trigger';
   assert (select who from ash.owner_rotation_audit) = current_user, 'rotation elevated a table trigger';

@@ -75,10 +75,23 @@ def main():
         print('Installer SHA256:', hashlib.sha256(payload.encode()).hexdigest(), flush=True)
         sql(f'create role {OWNER} login; create schema ash authorization {OWNER};')
         sql('create role ash_owner_outsider; create role ash_owner_reader; create role ash_owner_delegate; create role ash_owner_successor;')
+        # Role names requiring identifier quoting must survive both grant blocks.
+        quoted_owner = 'ash owner-quoted'
+        quoted_database = 'ash_owner_quoted'
+        sql(f'create role "{quoted_owner}";')
+        sql(f'create database {quoted_database};')
+        sql(f'create schema ash authorization "{quoted_owner}";', quoted_database)
+        for quoted_pass in ('fresh', 're-apply'):
+            sql(payload, quoted_database)
+            sql("grant usage on schema ash to ash_owner_outsider; "
+                "select ash.grant_reader('ash_owner_reader');", quoted_database)
+            sql(f"\\set owner_role '{quoted_owner}'\n\\set identity_start 1\n" +
+                (ROOT / 'devel/tests/owner_rotation.sql').read_text(), quoted_database)
+            print(f'PASS quoted schema owner: {quoted_pass} rotation and access', flush=True)
         # A new helper can first appear under a different upgrade administrator.
         # Keep the released payload's original owner, including managed-role installs.
         previous_payload = (ROOT / 'sql/ash-install.sql').read_text()
-        for kind in ('super', 'plain'):
+        for kind in ('super', 'plain', 'plain_helper'):
             origin = 'ash_origin_' + kind
             database = 'ash_owner_upgrade_' + kind
             attributes = 'superuser' if kind == 'super' else 'nosuperuser'
@@ -86,11 +99,13 @@ def main():
             sql(f'create database {database};')
             sql(f'grant create on database {database} to {origin};')
             sql(f'create schema ash authorization {origin};', database)
-            sql(f'set role {origin};\n' + previous_payload + '\nreset role;', database)
+            origin_payload = payload if kind == 'plain_helper' else previous_payload
+            sql(f'set role {origin};\n' + origin_payload + '\nreset role;', database)
             sql(f'alter schema ash owner to {OWNER};', database)
             for upgrade_pass in ('first', 're-apply'):
                 sql(payload, database)
-                expected = f'postgres|{origin}|{origin}'
+                helper_owner = origin if kind == 'plain_helper' else 'postgres'
+                expected = f'{helper_owner}|{origin}|{origin}'
                 actual = sql("select pg_get_userbyid(p.proowner), "
                     "pg_get_userbyid(c.relowner), pg_get_userbyid(q.relowner) "
                     "from pg_proc p, pg_class c, pg_class q "
@@ -104,6 +119,9 @@ def main():
                 print(f'PASS {kind} original installer, {upgrade_pass} upgrade by another admin: rotation and ownership', flush=True)
             sql('alter schema ash owner to ash_owner_successor;', database)
             sql(payload, database)
+            # Ownership transfer does not revoke ordinary explicit grants.
+            assert sql(f"select has_table_privilege('{OWNER}', 'ash.config', 'UPDATE') "
+                f"and has_function_privilege('{OWNER}', 'ash.take_sample()', 'EXECUTE')", database) == 't'
             sql(f"""set role {OWNER};
                 do $$ begin
                   begin
