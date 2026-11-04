@@ -125,6 +125,12 @@ begin
     insert into pg_temp._ash_install_reader_roles (rolname)
     select func_acl.grantee
     from pg_temp._ash_install_func_acl as func_acl
+    -- The schema owner is an administrator, not a preserved reader.
+    where func_acl.grantee <> (
+      select pg_catalog.pg_get_userbyid(nsp.nspowner)
+      from pg_catalog.pg_namespace as nsp
+      where nsp.nspname = 'ash'
+    )
     group by func_acl.grantee
     having not exists (
       select 1

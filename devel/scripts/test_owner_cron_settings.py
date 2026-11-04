@@ -74,13 +74,69 @@ def main():
         payload = installer.read_text()
         print('Installer SHA256:', hashlib.sha256(payload.encode()).hexdigest(), flush=True)
         sql(f'create role {OWNER} login; create schema ash authorization {OWNER};')
-        sql('create role ash_owner_outsider; create role ash_owner_reader;')
-        for installation in ('fresh', 're-apply'):
+        sql('create role ash_owner_outsider; create role ash_owner_reader; create role ash_owner_delegate;')
+        for installation in ('fresh', 're-apply', 'second re-apply'):
+            if installation != 'fresh':
+                # Re-apply must still remove legacy admin access from readers.
+                sql('grant execute on function ash._admin_funcs() to ash_owner_reader;')
             sql(payload)
             sql("grant usage on schema ash to ash_owner_outsider; select ash.grant_reader('ash_owner_reader');")
+            # Test delegation separately from lifecycle DML rights. Grant options
+            # are explicit prerequisites, not part of the installer's contract.
+            # Never grant EXECUTE on admin helpers here: that would hide the bug.
+            sql(f"""begin;
+                grant select on all tables in schema ash to {OWNER} with grant option;
+                do $$ declare f record; begin
+                  for f in
+                    select p.oid::regprocedure as signature
+                    from pg_proc as p
+                    join pg_namespace as n on n.oid=p.pronamespace
+                    where n.nspname='ash' and p.prokind='f'
+                      and p.proname::text <> all (ash._admin_funcs())
+                  loop
+                    execute format('grant execute on function %s to %I with grant option',
+                                   f.signature, '{OWNER}');
+                  end loop;
+                end $$;
+                set role {OWNER};
+                select ash.grant_reader('ash_owner_delegate');
+                reset role;
+                set role ash_owner_delegate;
+                do $$ begin
+                  assert (select count(*) from ash.config)=1,
+                    'delegated reader cannot read config';
+                  perform * from ash.status();
+                  begin
+                    perform ash._admin_funcs();
+                    raise exception 'reader gained admin helper access';
+                  exception when insufficient_privilege then null;
+                  end;
+                end $$;
+                reset role;
+                set role {OWNER};
+                select ash.revoke_reader('ash_owner_delegate');
+                reset role;
+                set role ash_owner_delegate;
+                do $$ begin
+                  begin
+                    perform * from ash.config;
+                    raise exception 'revoked reader still reads config';
+                  exception when insufficient_privilege then null;
+                  end;
+                  begin
+                    perform * from ash.status();
+                    raise exception 'revoked reader still calls status';
+                  exception when insufficient_privilege then null;
+                  end;
+                end $$;
+                reset role;
+                rollback;
+            """)
+            print(f'PASS {installation}: schema owner grants/revokes readers; admin helper stays private', flush=True)
             # Use real denied operations, not only ACL catalog checks.
             for role in ('ash_owner_outsider', 'ash_owner_reader'):
-                commands = ["update ash.config set sampling_enabled=false",
+                commands = ["select ash._admin_funcs()",
+                            "update ash.config set sampling_enabled=false",
                             "delete from ash.sample"]
                 if role == 'ash_owner_outsider':
                     commands += ["select * from ash.config", "select * from ash.sample"]
