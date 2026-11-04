@@ -135,7 +135,7 @@ def main():
             print(f'PASS {installation}: schema owner grants/revokes readers; admin helper stays private', flush=True)
             # Use real denied operations, not only ACL catalog checks.
             for role in ('ash_owner_outsider', 'ash_owner_reader'):
-                commands = ["select ash._admin_funcs()",
+                commands = ["perform ash._admin_funcs()",
                             "update ash.config set sampling_enabled=false",
                             "delete from ash.sample"]
                 if role == 'ash_owner_outsider':
