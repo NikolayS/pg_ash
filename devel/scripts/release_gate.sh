@@ -359,11 +359,16 @@ run_ci_selection() {
   local step_name
   local step_body
   local step_count=0
+  local selected_count
   local -a helper_args=("$@")
 
   PYTHONDONTWRITEBYTECODE=1 python3 "${CI_STEP_HELPER}" \
     "${helper_args[@]}" \
     --null >"${selection_file}"
+
+  selected_count="$(python3 -c \
+    'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_bytes().count(b"\0") // 2)' \
+    "${selection_file}")"
 
   while IFS= read -r -d '' step_name \
     && IFS= read -r -d '' step_body; do
@@ -379,7 +384,7 @@ run_ci_selection() {
       -e \
       -o pipefail \
       -c "${step_body}" \
-      ci-step; then
+      ci-step </dev/null; then
       err "canonical CI step failed: ${step_name}"
       return 1
     fi
@@ -389,6 +394,11 @@ run_ci_selection() {
     err "CI selection returned no executable steps"
     return 1
   fi
+  if ((step_count != selected_count)); then
+    err "executed ${step_count} of ${selected_count} selected steps"
+    return 1
+  fi
+  printf 'Executed %s/%s selected CI steps\n' "${step_count}" "${selected_count}"
 }
 
 run_fresh_install() {
