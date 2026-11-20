@@ -448,3 +448,37 @@ what would otherwise cost a 75-second recording to discover.
 Exit codes are uniform across every script: `1` usage/config, `2` missing
 dependency, `3` backend or frozen-window failure, `4` seed assertion, `5` capture
 verification, `6` render, `7` animation sync.
+
+### Committed asset freshness
+
+`make check` also checks hashes for committed assets, fixtures, and capture inputs.
+A changed scene, installer, renderer, or artifact invalidates that manifest.
+This check detects stale committed files; it does not prove their visual correctness.
+
+After changing capture inputs:
+
+1. Run `make all fixtures`.
+2. Inspect the stills, animation, and fixtures.
+3. Stage new or removed input and artifact files with `git add`.
+4. Run `make asset-manifest` and review the manifest diff.
+5. Commit the regenerated files together.
+
+Do not update the manifest alone to bypass a freshness failure.
+The initial artifacts come from the visually reviewed `49f481c` tree.
+The recorded input hashes describe this PR's tree, including its added verification scripts.
+Capture/rendering code and committed artifacts remain unchanged from `49f481c`.
+
+For edits confined to checks, tests, or help text, first verify that producer code and artifacts are unchanged.
+Then record the manifest and run `make check` plus `python3 bin/test-asset-freshness.py -v` from `demos/`.
+Review the diff. This check-only path does not require regenerating unchanged images.
+
+In Git checkouts, the manifest covers tracked and staged source files, declared scene images, and the two reels.
+Source archives use the same directory scope without Git metadata.
+Editor temporary files and unrelated images under `assets/` are excluded.
+Installer selection covers the repository helper and both repository installers, not external `ASH_INSTALL_SQL` overrides or tool versions.
+
+Hosted demo checks run three independent seeds, with no retry after a failure.
+The first two seeds each run `capture` and `rot`.
+The third runs through `make all`, followed by the workflow's `Demo-rot alarm` (`make rot`).
+Each seed must pass the real lock-ranking assertions and capture contract checks.
+Repeated runs improve flake detection; they cannot guarantee success under every host load.
