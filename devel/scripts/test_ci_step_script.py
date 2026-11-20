@@ -62,6 +62,11 @@ class WorkflowParserTests(unittest.TestCase):
         self.assertEqual(steps[1].run, "echo second")
         self.assertEqual(steps[2].run, "echo third\n\n")
 
+    def test_outdented_yaml_comment_ends_shell_block(self) -> None:
+        text = SAMPLE + "  # Next job is not part of the shell script.\n  next:\n    runs-on: ubuntu-latest\n"
+        steps = self.parse(text)
+        self.assertEqual(steps[-1].run, "echo third\n\n")
+
     def test_duplicate_workflow_names_fail_with_locations(self) -> None:
         text = SAMPLE.replace(
             "      - name: 'Third''s step'",

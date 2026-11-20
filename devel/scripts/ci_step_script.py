@@ -192,7 +192,12 @@ def _deindent_literal_block(
 ) -> str:
     block_end = end
     for idx in range(start, end):
+        text = _without_eol(lines[idx])
         indentation = _indent(lines[idx], line_number=idx + 1)
+        # Outdented YAML comments terminate a literal block too. Comments
+        # inside the indented Bash body must remain part of that body.
+        if text.lstrip().startswith("#"):
+            indentation = len(text) - len(text.lstrip(" "))
         if indentation is not None and indentation <= parent_indent:
             block_end = idx
             break
