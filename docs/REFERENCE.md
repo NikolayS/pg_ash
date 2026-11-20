@@ -219,6 +219,29 @@ explain these semantics to an LLM.
 The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
 and `uninstall()` to run as the `ash` schema owner, including when another
 superuser administers the installation. Use `SET ROLE` to the owner first.
+The installer grants these administrative privileges to the current schema owner, without grant options:
+
+- `select`, `insert`, `update`, `delete`, and `truncate` on existing tables.
+- `usage`, `select`, and `update` on existing sequences.
+- `execute` on all pg_ash routines, including private admin helpers.
+
+These grants do not transfer object ownership or grant table `trigger` or `references` privileges.
+A different role may run the installer while another role owns the `ash` schema.
+The schema owner can then call `take_sample()`, `start()`, `stop()`, `rotate()`, and `status()`.
+Rotation truncates tables as the caller. It restarts a caller-owned dictionary identity with caller privileges.
+Otherwise, a private owner-privileged helper restarts only the validated query-map identity sequence.
+Re-apply restores schema `usage` for the helper owner, including after schema ownership transfers.
+The restart, truncation, and slot update roll back together if rotation fails.
+Dictionary ownership must match the schema owner, the private helper's owner, or the persistent `ash.config` table's owner.
+The config owner preserves the original installation identity when a different administrator upgrades pg_ash.
+A truncate trigger must not repopulate the query dictionary. Rotation rejects that case and rolls back instead of resetting behind inserted rows.
+Ownership and trigger errors raise exceptions. Check the scheduler error log; these exceptions do not increment `consecutive_rotate_failures`.
+These grants cover existing objects. Re-apply the installer after another role adds objects that these calls need.
+Install as the schema owner when that role must also perform ownership-dependent DDL, such as rebuilding partitions.
+These grants do not replace the documented Postgres monitoring or pg_cron privileges.
+Reader delegation also needs object ownership or the required grant options; routine execution alone does not confer delegation rights.
+Changing schema ownership does not revoke existing explicit grants. Review and revoke the former owner's grants during an ownership transfer.
+Re-apply the installer for the new owner. Re-apply can restore operational privileges that an administrator previously revoked.
 A failed lifecycle call rolls back its configuration, job and DDL changes.
 `stop()` reports only jobs actually removed, with their real IDs. A successful
 rebuild leaves sampling disabled until an explicit `start()`.
