@@ -1005,6 +1005,7 @@ begin
       "io": 1.75,
       "ipc": 0.00,
       "lock": 1.25,
+      "buffer": 0.00,
       "lwlock": 0.00
     }'::jsonb
     and v_report -> 'aas_worst1m' = '{
@@ -1013,6 +1014,7 @@ begin
       "io": 3.00,
       "ipc": 0.00,
       "lock": 4.00,
+      "buffer": 0.00,
       "lwlock": 0.00
     }'::jsonb
     and v_report -> 'aas_p99' = '{
@@ -1021,6 +1023,7 @@ begin
       "io": 2.97,
       "ipc": 0.00,
       "lock": 3.91,
+      "buffer": 0.00,
       "lwlock": 0.00
     }'::jsonb
     and v_report -> 'aas_p999' = '{
@@ -1029,6 +1032,7 @@ begin
       "io": 3.00,
       "ipc": 0.00,
       "lock": 3.99,
+      "buffer": 0.00,
       "lwlock": 0.00
     }'::jsonb,
     format(
@@ -1043,18 +1047,21 @@ begin
       "io": ["DataFileRead(3.0)"],
       "ipc": [],
       "lock": ["tuple(4.0)"],
+      "buffer": [],
       "lwlock": []
     }'::jsonb
     and v_report -> 'top_events_p99' = '{
       "io": ["DataFileRead(3.0)"],
       "ipc": [],
       "lock": ["tuple(4.0)"],
+      "buffer": [],
       "lwlock": []
     }'::jsonb
     and v_report -> 'top_events_p999' = '{
       "io": ["DataFileRead(3.0)"],
       "ipc": [],
       "lock": ["tuple(4.0)"],
+      "buffer": [],
       "lwlock": []
     }'::jsonb,
     format(
@@ -1069,6 +1076,7 @@ begin
       "io": ["20202(3.0)"],
       "ipc": [],
       "lock": ["30303(4.0)"],
+      "buffer": [],
       "lwlock": []
     }'::jsonb
     and v_report -> 'top_queryids_p99' = '{
