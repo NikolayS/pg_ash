@@ -196,7 +196,8 @@ begin
     raise exception
       'shape: only % Lock:* event(s) rank in the top 5 of the chart window — '
       'both lock waits must remain named in ash.chart(n => 5). '
-      'Lower ASH_LOAD_BASELINE_CLIENTS / ASH_LOAD_READIO_CLIENTS.', v_chart_locks;
+      'For WAL waits, lower ASH_LOAD_STORM_BG_CLIENTS first. '
+      'For CPU/IO waits, lower ASH_LOAD_BASELINE_CLIENTS / ASH_LOAD_READIO_CLIENTS.', v_chart_locks;
   end if;
 
   ------------------------------------------------------------------------

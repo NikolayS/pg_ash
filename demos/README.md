@@ -277,7 +277,7 @@ ages between `make seed` and `make demo`):
 |---|---|---|
 | 1–4 | calm (slack) | read-only range aggregates |
 | 5–12 | calm baseline | read-only range aggregates |
-| 13–17 | **the incident** | 12 clients contending on one row + 3 write clients |
+| 13–17 | **the incident** | 12 clients contending on one row + 1 background writer |
 | 18–20 | recovery | mixed read/write |
 | 21–28 | busy tail | heavier reads |
 
@@ -310,6 +310,11 @@ incident.
   The scene uses `n => 5` too. The extra slot gives margin when calm CPU/IO activity changes rank.
   The chart also preserves each bucket's leading event, but this does not guarantee both lock waits remain named.
   The gate still rejects captures that lose the secondary lock wait from the top five.
+
+The storm uses one background writer by default.
+More writers can push the secondary lock wait below WAL waits.
+For this failure, lower `ASH_LOAD_STORM_BG_CLIENTS` first.
+Lower `ASH_LOAD_BASELINE_CLIENTS` or `ASH_LOAD_READIO_CLIENTS` only when CPU/IO series displace the lock wait.
 
 That last one is worth its own note. Deleting `ash.rollup_1m` without also
 setting `last_rollup_1m_ts = null` leaves `ash.rollup_minute()` convinced it has
