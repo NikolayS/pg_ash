@@ -214,21 +214,6 @@ def main() -> None:
                 if tag in ("v2.0-beta1", "v2.0-rc1"):
                     before = dependencies()
                     incompatible_dependency(tag)
-                if tag == "v1.5":
-                    # Custom column storage options must still fail atomically even
-                    # when PostgreSQL's server-owned pg_attver option is present.
-                    run(["--command",
-                         "alter table ash.config alter column sample_interval set (n_distinct = 1)"])
-                    before_schema = snapshot()
-                    try:
-                        install(wrapper)
-                    except RuntimeError as error:
-                        assert "unsupported custom column storage properties" in str(error), str(error)
-                    else:
-                        raise AssertionError("v1.5: custom n_distinct option did not block upgrade")
-                    assert snapshot() == before_schema, "v1.5: rejected custom option changed schema"
-                    run(["--command",
-                         "alter table ash.config alter column sample_interval reset (n_distinct)"])
                 run(["--command", "update ash.config set sample_interval = interval '5 seconds', "
                      "include_bg_workers = true where singleton"])
                 # Preserve the actual tagged origin before applying finalized
@@ -239,6 +224,24 @@ def main() -> None:
                 for path in origin_paths:
                     if path.name != canonical.name:
                         install(promoted / "sql/migrations" / path.name)
+                if tag == "v1.0":
+                    # Upgrading from v1.0 reaches ash-1.5-to-2.0.sql with
+                    # non-canonical ash.config column order, exercising table
+                    # recreation. Custom column options must fail atomically
+                    # even alongside server-owned pg_attver metadata, and
+                    # resetting only n_distinct must let normalization succeed.
+                    run(["--command",
+                         "alter table ash.config alter column sample_interval set (n_distinct = 1)"])
+                    before_schema = snapshot()
+                    try:
+                        install(wrapper)
+                    except RuntimeError as error:
+                        assert "unsupported custom column storage properties" in str(error), str(error)
+                    else:
+                        raise AssertionError("v1.0->2.0: custom n_distinct option did not block normalization")
+                    assert snapshot() == before_schema, "v1.0->2.0: rejected custom option changed schema"
+                    run(["--command",
+                         "alter table ash.config alter column sample_interval reset (n_distinct)"])
                 install(wrapper)
                 assert run(["--command", "select version from ash.config where singleton"]).strip() == expected_version, tag
                 assert run(["--command", "select sample_interval = interval '5 seconds' "

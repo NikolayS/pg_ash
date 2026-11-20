@@ -91,8 +91,9 @@ AAS-oriented 2.0 API:
 - **Reader performance and invariant hoisting.** Readers hoist invariant global
   helper lookups, reuse the trusted `pg_stat_statements` schema once per call,
   and share a single `pg_stat_statements` text lookup template; filtered raw
-  readers select active slots once per call instead of once per scanned row.
-  (issue #269; [PR #305](https://github.com/NikolayS/pg_ash/pull/305))
+  readers and `ash._hr_top_queryids()` select active slots once per call
+  instead of once per scanned row. (issue #269;
+  [PR #305](https://github.com/NikolayS/pg_ash/pull/305))
 - **Restricted `pg_cron` RLS visibility hints.** `ash.status()` now explains
   hidden `cron.job` rows clearly under row-level security for non-superuser
   owners and monitoring roles. (issue #299)

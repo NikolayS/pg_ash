@@ -90,8 +90,11 @@ def main():
                 (ROOT / 'devel/tests/owner_rotation.sql').read_text(), quoted_database)
             print(f'PASS quoted schema owner: {quoted_pass} rotation and access', flush=True)
         # A new helper can first appear under a different upgrade administrator.
-        # Keep the released payload's original owner, including managed-role installs.
-        previous_payload = (ROOT / 'sql/ash-install.sql').read_text()
+        # Pin the pre-helper v2.0-rc1 payload by immutable tag so stamping 2.0-rc2
+        # does not turn this upgrade-from-older-release fixture into a same-version replay.
+        previous_payload = subprocess.check_output(
+            ['git', 'show', 'v2.0-rc1:sql/ash-install.sql'],
+            cwd=ROOT, text=True)
         for kind in ('super', 'plain', 'plain_helper'):
             origin = 'ash_origin_' + kind
             database = 'ash_owner_upgrade_' + kind
