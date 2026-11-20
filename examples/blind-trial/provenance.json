@@ -1,0 +1,16 @@
+{
+  "issue": "https://github.com/NikolayS/pg_ash/issues/285",
+  "original_executable_commit": "fe3e7b4dc56f5be9977624de7c549165bc180882",
+  "sql_sha256": "94b3d80b6864999922bd9d70794dac4073e8e10e5d11f918d2a0947adf6b6444",
+  "docs_commit": "95e1ecf83ce68ab9423af2568af678b87c8d9e2f",
+  "historical_controller_sha256": {
+    "harness-v2-valid-generation-cpu-validator-defect.py": "89257b9aa29db89be3bd5e7cf214ccf1a532e42462946b446f92cfb336f7422f",
+    "harness-v4-deliverable.py": "046e7698fde785bfe1d01db23a5cbad9bd7fe3d3ea6cb4a8432b6e827716025e",
+    "harness-v1-invalid-sleep-deadline.py": "d2edca91820ed6667757ce9062f6173e3427aebd8512e899baae60596fc7bf0f",
+    "harness-v6-final-deliverable.py": "8c3e2bb1b1d4e3416fc38aa79e7354ced334d794cc6c516dfce37b95a23224b4",
+    "harness-v3-cpu-normalization-corrected.py": "bbedcd025a7525bef934a7724934b02f601042417547e5f5a0038398ef010bd3",
+    "harness-v5-deliverable-credential-hygiene.py": "6cfb238ec62182a9563ab55aeaf274c463ff478029d0ecd93d64a11ee8d82903",
+    "fourth_replacement.py": "ffdda72c14f3078e7c996ce4135cf477e828cc6c33ab2c6c498969e235a3d976"
+  },
+  "packaged_controller": "Refactored controller, not byte-identical historical source; original private archive retained. See README for corrections and validation status."
+}

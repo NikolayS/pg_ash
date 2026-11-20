@@ -31,6 +31,19 @@ begin
   assert (select query_text from ash.samples(v_from, now()) limit 1) is null,
     'samples query_text should be NULL without pgss';
 
+  /*
+   * The documented degraded-mode contract (README "Optional dependencies") is
+   * that query *IDs* survive without pg_stat_statements and only the *text* is
+   * lost. Asserting NULL text alone cannot distinguish "text degraded" from
+   * "query attribution gone", so pin the exact surviving query_id.
+   */
+  assert (select key from ash.top('query_id', v_from, now()) limit 1) = '999999',
+    format('top must still attribute the exact query_id without pgss, got %s',
+      (select key from ash.top('query_id', v_from, now()) limit 1));
+  assert (select query_id from ash.samples(v_from, now()) limit 1) = 999999,
+    format('samples must still carry the exact query_id without pgss, got %s',
+      (select query_id from ash.samples(v_from, now()) limit 1));
+
   -- report still produces query ids (they come from samples, not pgss).
   j := ash.report(v_from, now());
   assert j is not null, 'report should work without pgss';

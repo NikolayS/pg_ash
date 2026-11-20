@@ -1,0 +1,50 @@
+{
+  "issue": 285,
+  "phase_seconds": [
+    35,
+    14,
+    20,
+    18,
+    35
+  ],
+  "scoring": {
+    "window": "2: both observed spikes or enclosing window with calm/recovery; 1: one spike or loose correct window; 0: wrong window.",
+    "mechanism": "2: observed specific event/mechanism; 1: correct broad class; 0: wrong.",
+    "query": "2: affected sampled query ID/text when present; 1: partial correct attribution or explicitly justified limitation; 0: unsupported/wrong.",
+    "evidence": "2: separates observation from unproven root cause; 1: minor overclaim; 0: invented blocker, CPU utilization or causal assertion.",
+    "next_check": "2: targeted read-only next check; 1: generic reasonable check; 0: unsupported destructive/remediation claim."
+  },
+  "certification": "Before handoff each spike must have >=8 matching independent activity observations and >=8 matching actual ASH samples; statement attribution available; no remaining service sessions. Failure invalidates fixture; no weakened thresholds.",
+  "expected": {
+    "transactionid": {
+      "event": "Lock:transactionid",
+      "query": "update records set value = value + 1 where id = $1",
+      "acceptable": "Rows blocked waiting for a transaction to finish; blocker identity and transaction intent cannot be recovered from ASH alone.",
+      "unsupported": "Specific blocking PID, owner, long transaction root cause or query plan problem proved by ASH alone."
+    },
+    "relation": {
+      "event": "Lock:relation",
+      "query": "select payload from records where id = $1",
+      "acceptable": "Heavyweight relation-lock contention on the sampled select; inspect live pg_locks/pg_blocking_pids if recurring.",
+      "unsupported": "Exact blocker SQL or exact lock mode identified from historical ASH alone."
+    },
+    "cpu": {
+      "event": "CPU*",
+      "query": "select sum(length(md5(i::text))) from generate_series($1, $2) as i",
+      "acceptable": "Active backend with no reported wait, consistent with bounded expression work. CPU* is not measured CPU utilization; container CPU quota may throttle execution.",
+      "unsupported": "CPU percentage, host saturation or a proven CPU bottleneck from CPU* alone."
+    },
+    "sleep": {
+      "event": "Timeout:PgSleep",
+      "query": "select pg_sleep($1)",
+      "acceptable": "Explicit server-side sleep dominates sampled active time; elapsed active time is not CPU utilization.",
+      "unsupported": "Disk, lock, CPU saturation or production reason for sleep proved."
+    },
+    "idletx": {
+      "event": "Client:ClientRead",
+      "query": "select payload from records where id = $1",
+      "acceptable": "ClientRead with independently retained idle-in-transaction state; historical client wait alone cannot prove client/network pathology. Last query is not necessarily executing.",
+      "unsupported": "Active slow SELECT or network failure proved from ClientRead alone."
+    }
+  }
+}

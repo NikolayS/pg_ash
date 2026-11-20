@@ -2,8 +2,8 @@
 # Run the pg_ash release-gate surfaces against disposable Docker PostgreSQL.
 #
 # Usage:
-#   devel/scripts/release_gate.sh <14|15|16|17|18|19beta2> [surface|all]
-#   PG_MAJORS="14 15 16 17 18 19beta2" devel/scripts/release_gate.sh all
+#   devel/scripts/release_gate.sh <14|15|16|17|18|19> [surface|all]
+#   PG_MAJORS="14 15 16 17 18 19" devel/scripts/release_gate.sh all
 #
 # The GitHub Actions workflow remains the canonical source for the large
 # regression and upgrade assertion sets. ci_step_script.py selects its exact
@@ -13,6 +13,11 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  echo 'release_gate: Bash 4.4+ is required; on macOS use Homebrew bash.' >&2
+  exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -20,13 +25,13 @@ readonly REPO_ROOT
 readonly DOCKERFILE="${REPO_ROOT}/devel/docker/Dockerfile"
 readonly CHAIN_HELPER="${SCRIPT_DIR}/ash_sql_chain.py"
 readonly CI_STEP_HELPER="${SCRIPT_DIR}/ci_step_script.py"
-readonly DEFAULT_MAJORS="14 15 16 17 18 19beta2"
+readonly DEFAULT_MAJORS="14 15 16 17 18 19"
 readonly IMAGE_REPOSITORY="pg-ash-release-gate"
 readonly POSTGRES_USER="postgres"
 readonly POSTGRES_DATABASE="postgres"
 readonly POSTGRES_PASSWORD="pg_ash_release_gate"
 
-readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19beta2)
+readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19)
 readonly -a SURFACES=(
   fresh-install
   upgrade-chain
@@ -58,7 +63,7 @@ Usage:
   devel/scripts/release_gate.sh all [surface|all]
 
 Supported majors:
-  14 15 16 17 18 19beta2
+  14 15 16 17 18 19
 
 Supported surfaces:
   fresh-install
@@ -138,7 +143,6 @@ require_commands() {
     pg_isready
     psql
     python3
-    script
     sed
     sort
   )
@@ -270,6 +274,7 @@ start_container() {
   fi
 
   export PGPORT
+  export PGHOST=127.0.0.1
   export PGPASSWORD="${POSTGRES_PASSWORD}"
   export PGUSER="${POSTGRES_USER}"
   export PGDATABASE="${POSTGRES_DATABASE}"
@@ -354,11 +359,16 @@ run_ci_selection() {
   local step_name
   local step_body
   local step_count=0
+  local selected_count
   local -a helper_args=("$@")
 
   PYTHONDONTWRITEBYTECODE=1 python3 "${CI_STEP_HELPER}" \
     "${helper_args[@]}" \
     --null >"${selection_file}"
+
+  selected_count="$(python3 -c \
+    'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_bytes().count(b"\0") // 2)' \
+    "${selection_file}")"
 
   while IFS= read -r -d '' step_name \
     && IFS= read -r -d '' step_body; do
@@ -368,13 +378,13 @@ run_ci_selection() {
     # Parallel major workers must not share the workflow's historical /tmp
     # filenames. This is the only transformation made to canonical step bodies.
     step_body="${step_body//\/tmp\//${surface_temp_dir}/}"
-    if ! bash \
+    if ! "${BASH}" \
       --noprofile \
       --norc \
       -e \
       -o pipefail \
       -c "${step_body}" \
-      ci-step; then
+      ci-step </dev/null; then
       err "canonical CI step failed: ${step_name}"
       return 1
     fi
@@ -384,17 +394,29 @@ run_ci_selection() {
     err "CI selection returned no executable steps"
     return 1
   fi
+  if ((step_count != selected_count)); then
+    err "executed ${step_count} of ${selected_count} selected steps"
+    return 1
+  fi
+  printf 'Executed %s/%s selected CI steps\n' "${step_count}" "${selected_count}"
 }
 
 run_fresh_install() {
   assert_extension_state t t
   install_fresh
+  # New candidate tests precede the historical atomic-install range. The
+  # physical standby is a separately recorded runtime acceptance surface;
+  # this range runs the discriminating recovery seam on every server major.
+  run_ci_selection \
+    range \
+    "#177: reader input validation" \
+    "#222: recovery guard coverage on every PostgreSQL version"
   run_ci_selection \
     range \
     "Test SQL entrypoints fail atomically" \
     "Test uninstall" \
     --exclude \
-    "H-CI-3: end-to-end pg_cron fires ash.take_sample (#46)"
+    "H-CI-3: end-to-end pg_cron fires ash.run_take_sample (#46)"
 }
 
 run_upgrade_chain() {
@@ -448,7 +470,8 @@ run_feature_mode() {
 run_degraded_no_cron() {
   assert_extension_state f t
   install_fresh
-  psql_gate --file="${REPO_ROOT}/devel/tests/degraded_no_cron.sql"
+  # Reuse the canonical tagged workload, readiness check, and cleanup too.
+  CRON=off run_ci_selection step "Degraded mode: without pg_cron"
   run_feature_mode no-cron false true
 }
 
@@ -468,7 +491,8 @@ run_degraded_neither() {
   uninstall_if_present
   install_fresh
   assert_extension_state f f
-  psql_gate --file="${REPO_ROOT}/devel/tests/degraded_no_cron.sql"
+  # Reuse the canonical tagged workload, readiness check, and cleanup too.
+  CRON=off run_ci_selection step "Degraded mode: without pg_cron"
   run_feature_mode neither false false
 }
 
@@ -479,7 +503,9 @@ run_cron_path() {
     step \
     "Verify pg_cron wiring" \
     "Test start/stop" \
-    "H-CI-3: end-to-end pg_cron fires ash.take_sample (#46)" \
+    "Lifecycle ownership, job collisions and teardown atomicity" \
+    "Owner cron settings and column privileges" \
+    "H-CI-3: end-to-end pg_cron fires ash.run_take_sample (#46)" \
     "Test all interval formats (issue #2)" \
     "Test #61: status() works for non-superuser without cron.job access"
 }
@@ -545,7 +571,7 @@ failure_detail() {
   local detail
 
   detail="$(awk '
-    /::error::|ERROR:|FAILED|assertion failed|FATAL:/ {
+    /::error::|ERROR:|FAIL:|FAILED|assertion failed|FATAL:/ {
       sub(/^[[:space:]]+/, "")
       print
       exit
@@ -865,7 +891,7 @@ run_all_majors() {
     child_summary="${parent_output}/pg_${safe_major}.tsv"
     RELEASE_GATE_OUTPUT_DIR="${child_output}" \
       RELEASE_GATE_SUMMARY="${child_summary}" \
-      "${BASH_SOURCE[0]}" "${major}" "${selector}" \
+      "${BASH}" "${BASH_SOURCE[0]}" "${major}" "${selector}" \
       >"${parent_output}/worker_${safe_major}.log" 2>&1 &
     pid=$!
     active_pids+=("${pid}")

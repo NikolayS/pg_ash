@@ -10,7 +10,7 @@
 #                 works on frozen input. It cannot notice that pg_ash's output
 #                 changed shape underneath it. Only demo-refresh catches that.
 #
-#   demo-refresh  nightly, on demand, and whenever demos/** or sql/** changes.
+#   demo-refresh  nightly, on demand, and when candidate SQL/consumers change.
 #                 ~3 min. Seeds a real PostgreSQL, re-captures every scene, and
 #                 records the reel. `make -C demos rot` compares the fresh
 #                 reader contract with fixtures/shape.tsv: a changed capture
@@ -98,6 +98,9 @@ jobs:
           fi
           echo "no removed-reader references"
 
+      - name: Asset freshness regression tests
+        run: python3 demos/bin/test-asset-freshness.py -v
+
       - name: make check — re-render fixtures and compare byte-for-byte
         run: ASH_SVG_ONLY=1 make -C demos check
 
@@ -121,8 +124,8 @@ jobs:
           python-version: '3.12'
 
       - name: Decide whether this run needs the full pass
-        # On push/PR, only when demos/** or sql/** actually changed. Schedules
-        # and manual dispatches always run.
+        # Include development SQL: it is the active installer between stamps.
+        # Schedules and manual dispatches always run.
         id: gate
         run: |
           set -Eeuo pipefail
@@ -138,9 +141,10 @@ jobs:
           # base tree and use a two-tree diff; any fetch/diff error must fail
           # this step, never turn the expensive gate into a false green.
           git fetch --no-tags --depth=1 origin "$base"
-          changed="$(git diff --name-only "$base" HEAD -- demos sql)"
-          if [ -n "$changed" ]; then echo "run=yes" >> "$GITHUB_OUTPUT"
-          else echo "run=no" >> "$GITHUB_OUTPUT"; fi
+          changed="$(git diff --name-only "$base" HEAD)"
+          needed="$(printf '%s\n' "$changed" \
+            | python3 devel/scripts/ci_guards.py demo-needed)"
+          echo "run=$needed" >> "$GITHUB_OUTPUT"
 
       - name: Start the runner's own PostgreSQL cluster
         if: steps.gate.outputs.run == 'yes'
@@ -172,21 +176,31 @@ jobs:
           {
             echo "PGHOST=/var/run/postgresql"
             echo "PGUSER=$ci_role"
+            echo "PGDATABASE=postgres"
           } >> "$GITHUB_ENV"
+
+      - name: "#291: chart ranking regression"
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          python3 devel/tests/demo_chart_ranking.py
+          python3 devel/tests/demo_startup.py
 
       - name: Install the tier-3 dependencies
         if: steps.gate.outputs.run == 'yes'
+        timeout-minutes: 5
         run: |
-          set -Eeuo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tmux ffmpeg gifsicle postgresql-client
-          python -m pip install --quiet asciinema pillow fonttools brotli
+          set -Eeuxo pipefail
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 install -y tmux ffmpeg gifsicle postgresql-client
+          python -m pip install --timeout 30 --retries 2 asciinema pillow fonttools brotli
           # agg ships a single release binary. No cargo build, no Docker Hub,
           # no registry auth. Pin its digest so a changed download fails loud.
           AGG_VER="1.7.0"
           AGG_SHA256="b72c773c22ef73149540f5728b37290dffe88418f0a16ceab29bc8e43699abf7"
           agg_tmp="$RUNNER_TEMP/agg"
-          curl -fsSL -o "$agg_tmp" \
+          curl -fsSL --connect-timeout 20 --max-time 90 --retry 2 -o "$agg_tmp" \
             "https://github.com/asciinema/agg/releases/download/v${AGG_VER}/agg-x86_64-unknown-linux-gnu"
           printf '%s  %s\n' "$AGG_SHA256" "$agg_tmp" | sha256sum -c -
           sudo install -m 0755 "$agg_tmp" /usr/local/bin/agg
@@ -196,11 +210,27 @@ jobs:
         if: steps.gate.outputs.run == 'yes'
         run: make -C demos doctor
 
+      - name: Two independent seed and capture checks
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          ASH_BACKEND: local
+        run: |
+          # Fail on the first bad shape. These are checks, not retries.
+          make -C demos capture
+          make -C demos rot
+          make -C demos capture
+          make -C demos rot
+
+      # Third fresh seed. The Demo-rot alarm below checks its capture contract.
       - name: make all — seed, capture, stills, reel
         if: steps.gate.outputs.run == 'yes'
         env:
           ASH_BACKEND: local
-        run: make -C demos all
+        run: |
+          # Checkout contains these tracked reels. Removing them makes the
+          # post-capture existence checks prove this run recreated both.
+          rm -f -- assets/ash_demo.gif assets/ash_demo.mp4
+          make -C demos all
 
       - name: Demo-rot alarm
         if: steps.gate.outputs.run == 'yes'
@@ -217,12 +247,21 @@ jobs:
         # red is a check nobody reads. See demos/render/scene_shape.py.
         run: make -C demos rot
 
+      - name: Verify fresh capture evidence exists
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          set -euo pipefail
+          test -s demos/out/window.env
+          test -s demos/out/transcript.log
+          test -s assets/ash_demo.gif
+          test -s assets/ash_demo.mp4
+
       - name: Upload the artifacts a human can eyeball
         if: steps.gate.outputs.run == 'yes' && always()
         uses: actions/upload-artifact@v7
         with:
           name: demo-assets
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
           path: |
             assets/*.svg
@@ -233,6 +272,7 @@ jobs:
             demos/out/stderr.log
             demos/out/window.env
             demos/out/shots/*.ansi
+            demos/out/raw/**
 
       - name: Teardown
         if: always() && steps.gate.outputs.run == 'yes'

@@ -6,14 +6,13 @@
 -- container the round trip dwarfs the work and EVERY backend reads as `idle`
 -- at every sampling instant. Measured on the docker backend: six clients,
 -- 100% idle, zero samples, and a seed that failed at virtual minute 1 with a
--- perfectly accurate "the workload was not running".
+-- failure because no qualifying activity was captured.
 --
 -- So the read load does a real range aggregate instead. A few thousand rows
--- through the primary key is a couple of milliseconds of genuine CPU plus, on
--- a table larger than shared_buffers, genuine IO:DataFileRead. The backend is
--- therefore active when we look at it — on any backend, over any transport —
--- and the wait mix it produces (CPU* with an IO tail) is what a read-heavy
--- system actually looks like.
+-- through the primary key increases real server work per request, with CPU
+-- and possible IO:DataFileRead waits. The active fraction still depends on
+-- hardware and transport. If the seed captures no samples, inspect sampler
+-- health and increase the span using the profile in demos/README.md.
 --
 -- :span is supplied per phase with pgbench -D span=N, so the same script gives
 -- a light calm baseline and a heavier read tail.

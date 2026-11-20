@@ -7,9 +7,9 @@
 #   local   DEFAULT and the CI path. Whatever cluster the ambient PG* variables
 #           already reach. Needs psql + pgbench and nothing else: no Docker
 #           daemon, no registry pull, no ALTER SYSTEM, no restart. pg_cron is
-#           NOT required — the seeder drives ash.take_sample() itself, which is
-#           both the portable path and the honest one, because that is exactly
-#           how pg_ash runs on RDS / Cloud SQL / Supabase / AlloyDB / Neon.
+#           NOT required — the seeder drives ash.take_sample() itself. This
+#           exercises external scheduling without assuming which extensions
+#           a managed service or deployment permits.
 #   docker  Optional. For pinning a specific major, or for a cluster that
 #           really has pg_cron. Never on the critical path.
 #   remote  Standard PG* variables against someone else's server, with two

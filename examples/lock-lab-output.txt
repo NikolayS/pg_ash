@@ -1,0 +1,145 @@
+Captured on Postgres 18, 2026-10-21 UTC. Functional fixture, not a benchmark.
+Source SHA-256: c24b35d3556b7d680b655b1e79e2dea2eb664a98eb060c2f5e919399b37d9490
+Console and tick sections below are copied verbatim from the successful run.
+
+--- Console ---
+Database: ash_demo_final18; output: /tmp/pgash-incident-lab/pg18-final
+before: window [2026-10-21 19:37:00+00, 2026-10-21 19:38:00+00); 8 manual sample ticks
+before: all four updates committed; all workload connections exited
+before: waiting 44.4s for this minute to complete
+Pager usage is off.
+Null display is "(null)".
+BEGIN
+SET
+before: workload has ended; inspect stored load and bounds
+      period_start      |       period_end       | source | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+--------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 19:37:00+00 | 2026-10-21 19:38:00+00 | raw    | 00:01:00         |                1 |                 1 |    0.53 |     0.53 |    0.53 |           32.00
+(1 row)
+
+Rank stored waits
+        key         | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct  
+--------------------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+-------
+ Lock:tuple         | (null)     | raw    | 2026-10-21 19:37:00+00 | 2026-10-21 19:38:00+00 | 00:01:00         |    0.27 |     0.27 |    0.27 |           16.00 | 50.00
+ Client:ClientRead  | (null)     | raw    | 2026-10-21 19:37:00+00 | 2026-10-21 19:38:00+00 | 00:01:00         |    0.13 |     0.13 |    0.13 |            8.00 | 25.00
+ Lock:transactionid | (null)     | raw    | 2026-10-21 19:37:00+00 | 2026-10-21 19:38:00+00 | 00:01:00         |    0.13 |     0.13 |    0.13 |            8.00 | 25.00
+(3 rows)
+
+Locate lock waits in time
+      bucket_start      | source | data_points | avg_aas | peak_aas | p99_aas 
+------------------------+--------+-------------+---------+----------+---------
+ 2026-10-21 19:37:00+00 | raw    |           1 |    0.40 |     0.40 |    0.40
+(1 row)
+
+Attribute lock waits to historical query IDs
+         key         | query_text | source |      period_start      |       period_end       | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds |  pct   
+---------------------+------------+--------+------------------------+------------------------+------------------+---------+----------+---------+-----------------+--------
+ 1190936949977786619 | (null)     | raw    | 2026-10-21 19:37:00+00 | 2026-10-21 19:38:00+00 | 00:01:00         |    0.40 |     0.40 |    0.40 |           24.00 | 100.00
+(1 row)
+
+Inspect raw lock evidence; one row per sampled backend observation
+      sample_time       |  database_name   | active_backends |     wait_event     |      query_id       | query_text 
+------------------------+------------------+-----------------+--------------------+---------------------+------------
+ 2026-10-21 19:37:15+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:15+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:15+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:14+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:14+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:14+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:13+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:13+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:13+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:12+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:12+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:12+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:11+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:11+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:11+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:10+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:10+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:10+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:09+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:09+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:09+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:08+00 | ash_demo_final18 |               4 | Lock:transactionid | 1190936949977786619 | (null)
+ 2026-10-21 19:37:08+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+ 2026-10-21 19:37:08+00 | ash_demo_final18 |               4 | Lock:tuple         | 1190936949977786619 | (null)
+(24 rows)
+
+ROLLBACK
+
+before: 24 sampled Lock backend-observations
+Change: commit before client-side work; keep that work outside the transaction
+after: window [2026-10-21 19:38:00+00, 2026-10-21 19:39:00+00); 8 manual sample ticks
+after: all four updates committed; all workload connections exited
+after: waiting 51.2s for this minute to complete
+Pager usage is off.
+Null display is "(null)".
+BEGIN
+SET
+after: workload has ended; inspect stored load and bounds
+      period_start      |       period_end       | source | effective_bucket | buckets_expected | buckets_with_data | avg_aas | peak_aas | p99_aas | backend_seconds 
+------------------------+------------------------+--------+------------------+------------------+-------------------+---------+----------+---------+-----------------
+ 2026-10-21 19:38:00+00 | 2026-10-21 19:39:00+00 | raw    | 00:01:00         |                1 |                 0 |    0.00 |        0 |       0 |            0.00
+(1 row)
+
+Rank stored waits
+ key | query_text | source | period_start | period_end | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds | pct 
+-----+------------+--------+--------------+------------+------------------+---------+----------+---------+-----------------+-----
+(0 rows)
+
+Locate lock waits in time
+      bucket_start      | source | data_points | avg_aas | peak_aas | p99_aas 
+------------------------+--------+-------------+---------+----------+---------
+ 2026-10-21 19:38:00+00 | raw    |           0 |  (null) |   (null) |  (null)
+(1 row)
+
+Attribute lock waits to historical query IDs
+ key | query_text | source | period_start | period_end | effective_bucket | avg_aas | peak_aas | p99_aas | backend_seconds | pct 
+-----+------------+--------+--------------+------------+------------------+---------+----------+---------+-----------------+-----
+(0 rows)
+
+Inspect raw lock evidence; one row per sampled backend observation
+ sample_time | database_name | active_backends | wait_event | query_id | query_text 
+-------------+---------------+-----------------+------------+----------+------------
+(0 rows)
+
+ROLLBACK
+
+after: 0 sampled Lock backend-observations
+Verified: sampled Lock observations 24 -> 0; 8 manual ticks and four committed updates in each phase
+This is sampled evidence, not a latency or throughput benchmark. Missing stored rows do not prove idle time or scheduler health. The tick log independently records these manual calls.
+
+--- Sample-call audit (JSON Lines) ---
+{"sample_call_started_at": "2026-10-21T19:37:07.5131+00:00", "sample_second": "2026-10-21T19:37:08+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:07.521152+00:00", "phase": "before", "tick": 1}
+{"sample_call_started_at": "2026-10-21T19:37:08.515732+00:00", "sample_second": "2026-10-21T19:37:09+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:08.523321+00:00", "phase": "before", "tick": 2}
+{"sample_call_started_at": "2026-10-21T19:37:09.517073+00:00", "sample_second": "2026-10-21T19:37:10+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:09.524712+00:00", "phase": "before", "tick": 3}
+{"sample_call_started_at": "2026-10-21T19:37:10.516439+00:00", "sample_second": "2026-10-21T19:37:11+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:10.524344+00:00", "phase": "before", "tick": 4}
+{"sample_call_started_at": "2026-10-21T19:37:11.515627+00:00", "sample_second": "2026-10-21T19:37:12+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:11.523112+00:00", "phase": "before", "tick": 5}
+{"sample_call_started_at": "2026-10-21T19:37:12.515638+00:00", "sample_second": "2026-10-21T19:37:13+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:12.522949+00:00", "phase": "before", "tick": 6}
+{"sample_call_started_at": "2026-10-21T19:37:13.51598+00:00", "sample_second": "2026-10-21T19:37:14+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:13.523323+00:00", "phase": "before", "tick": 7}
+{"sample_call_started_at": "2026-10-21T19:37:14.516055+00:00", "sample_second": "2026-10-21T19:37:15+00:00", "inserted_database_rows": 1, "sample_call_finished_at": "2026-10-21T19:37:14.523598+00:00", "phase": "before", "tick": 8}
+{"sample_call_started_at": "2026-10-21T19:38:00.770702+00:00", "sample_second": "2026-10-21T19:38:01+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:00.77746+00:00", "phase": "after", "tick": 1}
+{"sample_call_started_at": "2026-10-21T19:38:01.774809+00:00", "sample_second": "2026-10-21T19:38:02+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:01.783674+00:00", "phase": "after", "tick": 2}
+{"sample_call_started_at": "2026-10-21T19:38:02.759621+00:00", "sample_second": "2026-10-21T19:38:03+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:02.765965+00:00", "phase": "after", "tick": 3}
+{"sample_call_started_at": "2026-10-21T19:38:03.759672+00:00", "sample_second": "2026-10-21T19:38:04+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:03.764523+00:00", "phase": "after", "tick": 4}
+{"sample_call_started_at": "2026-10-21T19:38:04.756766+00:00", "sample_second": "2026-10-21T19:38:05+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:04.76157+00:00", "phase": "after", "tick": 5}
+{"sample_call_started_at": "2026-10-21T19:38:05.756679+00:00", "sample_second": "2026-10-21T19:38:06+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:05.761316+00:00", "phase": "after", "tick": 6}
+{"sample_call_started_at": "2026-10-21T19:38:06.759143+00:00", "sample_second": "2026-10-21T19:38:07+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:06.763902+00:00", "phase": "after", "tick": 7}
+{"sample_call_started_at": "2026-10-21T19:38:07.758888+00:00", "sample_second": "2026-10-21T19:38:08+00:00", "inserted_database_rows": 0, "sample_call_finished_at": "2026-10-21T19:38:07.763976+00:00", "phase": "after", "tick": 8}
+
+--- Sampler counters ---
+{
+  "before": {
+    "skipped_samples": 0,
+    "missed_samples": 0,
+    "insert_errors": 0,
+    "register_wait_cap_hits": 0
+  },
+  "after": {
+    "skipped_samples": 0,
+    "missed_samples": 0,
+    "insert_errors": 0,
+    "register_wait_cap_hits": 0
+  }
+}

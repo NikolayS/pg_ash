@@ -329,6 +329,16 @@ begin
   j := ash.report(v_from, v_to);
   assert j is not null, 'report returned null on covered window';
 
+  -- cluster_name is optional report metadata, inherited from the server.
+  if nullif(current_setting('cluster_name', true), '') is not null then
+    expected_keys := array_append(expected_keys, 'cluster_name');
+    assert j->>'cluster_name' = current_setting('cluster_name'),
+      'report cluster_name must match server setting';
+  else
+    assert not (j ? 'cluster_name'),
+      'report must omit empty cluster_name';
+  end if;
+
   -- exact top-level key set.
   assert (select array_agg(k order by k) from jsonb_object_keys(j) k)
          = (select array_agg(k order by k) from unnest(expected_keys) k),
@@ -445,7 +455,7 @@ begin
 
   -- invariant across the event-attributed classes: aas_p99 > 0 must never
   -- come with an empty top_events_p99 (cpu has no per-event breakdown).
-  for v_class in select unnest(array['io','ipc','lock','lwlock']) loop
+  for v_class in select unnest(array['io','ipc','lock','lwlock','buffer']) loop
     if coalesce((j->'aas_p99'->>v_class)::numeric, 0) > 0 then
       assert jsonb_array_length(coalesce(j->'top_events_p99'->v_class, '[]'::jsonb)) > 0,
          format('class %s: aas_p99 > 0 but top_events_p99 empty', v_class);

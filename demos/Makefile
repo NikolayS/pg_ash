@@ -27,17 +27,18 @@ help:
 	@echo '  make demo       seed + record the reel -> assets/ash_demo.gif + .mp4'
 	@echo '  make render     re-render the LAST recording (skips the 75s tmux pass)'
 	@echo '  make all        stills + demo, from ONE seed and ONE frozen window'
-	@echo '  make check      NO DATABASE: re-render the committed fixtures and diff'
+	@echo '  make check      NO DATABASE: verify manifest and re-render fixtures'
 	@echo '  make rot        did a reader change its columns? (needs a fresh capture)'
 	@echo '  make fixtures   refresh fixtures/ from the current capture (manual, reviewable)'
+	@echo '  make asset-manifest  record reviewed artifact and input hashes'
 	@echo '  make clean      remove out/'
 	@echo '  make down       remove only a database/container this harness created'
 	@echo '  make open       open the produced GIF (macOS)'
 	@echo
 	@echo 'What `make check` proves, and what it does not:'
-	@echo '  It proves the RENDERER still turns known bytes into the same SVG.'
-	@echo '  It CANNOT notice that those bytes no longer reflect what pg_ash does —'
-	@echo '  a renamed reader or a moved column keeps the fixtures green.'
+	@echo '  It verifies recorded asset/input hashes and frozen renderer output.'
+	@echo '  Refresh hashes with `make asset-manifest` only after review.'
+	@echo '  Hashes detect drift, not visual correctness or live reader behavior.'
 	@echo '  `make rot` is the other half: it re-captures against a real database'
 	@echo '  and compares the READER CONTRACT (column names, count, report keys)'
 	@echo '  with fixtures/shape.tsv. Measured values are excluded, because they'
@@ -115,8 +116,8 @@ scenes:
 ## rot: has a reader's contract changed since the fixtures were taken?
 #
 # Needs a fresh capture (`make capture` or `make stills`) and fixtures/shape.tsv.
-# This is the check `make check` cannot make: `check` proves the RENDERER still
-# works on frozen bytes, `rot` proves the BYTES still have the shape they had.
+# `check` validates the manifest and frozen renderer output.
+# `rot` validates reader shape against a fresh database capture.
 rot:
 	@./bin/rot-check.sh
 
@@ -140,3 +141,8 @@ open:
 	  exit 1; \
 	fi; \
 	open ../assets/ash_demo.gif
+
+# Record only after regeneration and manual visual review.
+.PHONY: asset-manifest
+asset-manifest:
+	@python3 bin/asset-freshness.py --record
