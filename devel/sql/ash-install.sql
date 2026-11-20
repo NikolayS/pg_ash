@@ -3786,7 +3786,7 @@ $$;
  *   IPC             cyan           0, 200, 255
  *   Client          yellow         255, 220, 100
  *   Timeout         orange         255, 165, 0
- *   BufferPin       teal           0, 210, 180
+ *   Buffer/BufferPin teal           0, 210, 180
  *   Activity        purple         150, 100, 255
  *   Extension       light purple   190, 150, 255
  *   Unknown/Other   gray           180, 180, 180
@@ -3829,7 +3829,7 @@ as $$
       when event like 'IPC:%' then E'\033[38;2;000;200;255m'        -- cyan
       when event like 'Client:%' then E'\033[38;2;255;220;100m'     -- yellow
       when event like 'Timeout:%' then E'\033[38;2;255;165;000m'    -- orange
-      when event like 'BufferPin:%' then E'\033[38;2;000;210;180m'  -- teal
+      when event like 'BufferPin:%' or event like 'Buffer:%' then E'\033[38;2;000;210;180m'  -- teal
       when event like 'Activity:%' then E'\033[38;2;150;100;255m'   -- purple
       when event like 'Extension:%' then E'\033[38;2;190;150;255m'  -- light purple
       else E'\033[38;2;180;180;180m'                                   -- gray (unknown)
@@ -6160,6 +6160,10 @@ as $$
 $$;
 
 /*
+ * PG19's native Buffer class is reported separately, including BufferCleanup.
+ * Existing keys and native event names remain unchanged. Older BufferPin
+ * events keep their historical exclusion from the report's total.
+ *
  * report helper: top wait events at a set of minutes for one wait class,
  * from rollup_1m, as pre-formatted "event(aas)" strings (aas = avg per-minute
  * AAS across the given minutes, 1 decimal). Empty array when nothing matched.
@@ -6201,7 +6205,7 @@ $$;
 
 /*
  * report helper: top query ids at a set of minutes, optionally within one
- * wait class (type null = the five classes included in the 'total' key), read
+ * wait class (type null = the six classes included in the 'total' key), read
  * from RAW samples (the wait<->query tie). "queryid(aas)" strings, int64-safe.
  */
 create or replace function ash._hr_top_queryids(
@@ -6255,7 +6259,7 @@ as $$
      */
     where (
       (_hr_top_queryids.type is null
-       and event_map.type in ('CPU*', 'IO', 'IPC', 'Lock', 'LWLock'))
+       and event_map.type in ('CPU*', 'IO', 'IPC', 'Lock', 'LWLock', 'Buffer'))
       or event_map.type = _hr_top_queryids.type
     )
     group by query_map.query_id
@@ -6427,7 +6431,7 @@ begin
   for v_class in
     select * from (values
       ('cpu','CPU*'), ('io','IO'), ('ipc','IPC'),
-      ('lock','Lock'), ('lwlock','LWLock')
+      ('lock','Lock'), ('lwlock','LWLock'), ('buffer','Buffer')
     ) as class_def(k, t)
   loop
     declare
@@ -6530,7 +6534,7 @@ begin
       v_p99 := v_p99 || jsonb_build_object(v_class.k, v_cp99);
       v_p999 := v_p999 || jsonb_build_object(v_class.k, v_cp999);
       /*
-       * top_events (rollup) and top_queryids (raw) for the four non-cpu
+       * top_events (rollup) and top_queryids (raw) for the five non-cpu
        * classes; top_queryids 'total' is handled once, outside this loop.
        */
       if v_class.k <> 'cpu' then
@@ -6588,7 +6592,7 @@ begin
         on event_map.id = rollup_min.wait_counts[pos]
       where pos % 2 = 1 and rollup_min.ts >= v_start_ts
         and rollup_min.ts < v_end_ts
-        and event_map.type in ('CPU*', 'IO', 'IPC', 'Lock', 'LWLock')
+        and event_map.type in ('CPU*', 'IO', 'IPC', 'Lock', 'LWLock', 'Buffer')
       group by rollup_min.ts
     ) as total_counts on total_counts.ts = covered.ts
   )
@@ -6628,7 +6632,7 @@ begin
         on event_map.id = rollup_min.wait_counts[pos]
       where pos % 2 = 1 and rollup_min.ts >= v_start_ts
         and rollup_min.ts < v_end_ts
-        and event_map.type in ('CPU*', 'IO', 'IPC', 'Lock', 'LWLock')
+        and event_map.type in ('CPU*', 'IO', 'IPC', 'Lock', 'LWLock', 'Buffer')
       group by rollup_min.ts
     ) as total_counts on total_counts.ts = covered.ts
   ) as minute_grid;
@@ -7110,7 +7114,7 @@ comment on function ash.samples(timestamptz, timestamptz, int, text, text, bigin
 $$Decoded raw sample rows, newest first (US-5 raw evidence) over [since, until) (default last 1 hour), up to n. Uniform filters wait_event_type/wait_event/query_id/database. Columns (sample_time, database_name, active_backends, wait_event, query_id, query_text). query_text needs pg_stat_statements AND that the caller holds pg_read_all_stats (e.g. via pg_monitor membership); it is null otherwise — a plain ash.grant_reader() role without pg_read_all_stats sees null even with pgss installed, because pgss restricts query text to the owning role. When pgss lives outside public, the caller also needs USAGE on that schema, else query_text is null. Reads ash.sample directly (raw retention only).$$;
 
 comment on function ash.report(timestamptz, timestamptz, int, int) is
-$$Machine-readable load report as one jsonb (US-8) for [since, until) (no bounds: last 1 day; until-only: preceding 1 hour). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the four non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution; raw_retention_start is the logical planning/loss boundary, not the physical query-attribution cutoff. vcpus (echoed, never used) and cluster_name are pass-throughs. Reads ash.rollup_1m only. If it has no coverage for the window, returns null even when raw or rollup_1h has coverage, emits a NOTICE naming that source, and never raises for missing coverage. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
+$$Machine-readable load report as one jsonb (US-8) for [since, until) (no bounds: last 1 day; until-only: preceding 1 hour). Per wait class (cpu=CPU*, io=IO, ipc=IPC, lock=Lock, lwlock=LWLock, buffer=Buffer; total = their sum) at 1-minute resolution: aas_avg / aas_worst1m / aas_p99 / aas_p999. Plus top_events_{worst1m,p99,p999} (keys io/ipc/lock/lwlock/buffer, entries "event(aas)") and top_queryids_{worst1m,p99,p999} (keys total+the five non-cpu classes, entries "queryid(aas)"). Query attribution is decided per extreme minute: a top_queryids key appears when raw samples still cover that class's worst/percentile minute(s), even if the window start predates raw retention (percentile sets attribute over their raw-covered minutes). top_queryids_available (boolean, always present) says whether any attribution was possible — branch on it, not on key absence. coverage {from, to, source, minutes_expected, minutes_with_data, raw_retention_start} reconciles the payload against ash.aas()/ash.top() and flags degraded resolution; raw_retention_start is the logical planning/loss boundary, not the physical query-attribution cutoff. vcpus (echoed, never used) and cluster_name are pass-throughs. Reads ash.rollup_1m only. If it has no coverage for the window, returns null even when raw or rollup_1h has coverage, emits a NOTICE naming that source, and never raises for missing coverage. Payload contract is frozen per 2.0 minor line (keys only added, never renamed/removed); scoring/normalization is the consumer's job.$$;
 
 comment on function ash.chart(timestamptz, timestamptz, interval, int, int, boolean) is
 $$Human render helper: stacked ASCII per-bucket AAS chart over [since, until) (default last 1 hour). Series/legend = the window-wide top n wait events PLUS any event that is top-1 in at least one bucket, plus Other. bucket => null auto-selects grain by span. On rollup_1h the chart snaps partial bounds/buckets outward and emits a NOTICE naming source and effective plan; it never silently falls through to unavailable rollup_1m data. Presentation-only (bucket_start, aas, detail, chart); for typed data use ash.timeline(). Enable ANSI color with color => true or "set ash.color = on".$$;

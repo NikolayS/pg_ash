@@ -25,6 +25,16 @@ below: if the ruleset is ever extended beyond `~DEFAULT_BRANCH`, requiring
 arrive. Switching to advanced setup (a committed `codeql.yml`) is the way to
 get CodeQL onto release branches, and is out of scope here.
 
+## PostgreSQL 19 image
+
+The PostgreSQL 19 lane builds the released 19.0 source archive with a pinned
+SHA-256 checksum (`devel/docker/Dockerfile.pg19`). The PostgreSQL 18 base image
+supplies Debian and the official entrypoint, not the server under test. The
+build selects the 19 binaries and asserts `postgres --version` is 19.0. It also
+builds pg_stat_statements, dblink, and pg_cron 1.6.8 from source. Older lanes
+continue to use their matching official images. The local release gate uses
+the same source image; it does not fall back to PostgreSQL 18.
+
 ## The `ci-required` aggregator
 
 `test.yml` ends with a `ci-required` job: `if: always()`, `needs: [docs-lint,
@@ -32,7 +42,7 @@ test]`, failing if any needed job reports anything other than `success` or
 `skipped`.
 
 It exists because the matrix contexts embed PostgreSQL versions — `test (14,
-on)`, `test (19beta2, on)` — and are renamed at every version bump. Requiring
+on)`, `test (19, on)` — and are renamed at every version bump. Requiring
 those names directly means the ruleset silently stops covering a version the
 moment the matrix changes, or blocks every PR on a context that no longer
 exists. `ci-required` is one stable name that transitively covers the whole

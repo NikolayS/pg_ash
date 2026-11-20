@@ -11,7 +11,7 @@ SQL style guide: https://gitlab.com/postgres-ai/rules/-/blob/main/rules/developm
 CI via GitHub Actions:
 
 - **test.yml**: runs on pushes, PRs, and manual pre-tag dispatches — tests
-  across PostgreSQL 14, 15, 16, 17, 18, 19 beta
+  across PostgreSQL 14, 15, 16, 17, 18, 19
 - Tests: fresh development install, discovered full upgrade chain up to the in-progress release, schema equivalence between fresh install and upgrade chain, idempotent re-apply of discovered re-apply-safe upgrade scripts, degraded mode (no pgss/pg_cron)
 - Version schema: `vMAJOR.MINOR` (e.g. `v1.3`). Tag on main after all PRs merged.
 

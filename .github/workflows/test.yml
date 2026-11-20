@@ -126,8 +126,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PG19 is still beta, so the official image tag is 19beta2 until GA.
-        postgres: [14, 15, 16, 17, 18, 19beta2]
+        postgres: [14, 15, 16, 17, 18, 19]
         # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
         # compares these as strings in the step-level `if`/conditionals.
         cron: ["on"]
@@ -138,30 +137,35 @@ jobs:
           - postgres: 17
             cron: "off"
 
-    services:
-      postgres:
-        image: postgres:${{ matrix.postgres }}
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
+      - name: Start PostgreSQL
+        env:
+          PG_MAJOR: ${{ matrix.postgres }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$PG_MAJOR" = 19 ]; then
+            docker build -t postgres:19 -f devel/docker/Dockerfile.pg19 .
+          fi
+          docker run -d --name pg-ash-test \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            -p 5432:5432 "postgres:$PG_MAJOR"
+          ready=0
+          for attempt in $(seq 1 60); do
+            if docker exec pg-ash-test pg_isready -U postgres -d postgres; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          docker exec pg-ash-test psql -U postgres -d postgres -Atc 'select version()'
+
       - name: Install pg_cron in container
-        # The GitHub Actions `services:` block does not let us mount a custom
-        # postgresql.conf or set `command: -c shared_preload_libraries=...` on
-        # the existing postgres service. So we `docker exec` into the already-
-        # running service container to (1) apt-install pg_cron from PGDG and
+        # Configure the disposable container: install pg_cron from PGDG and
         # (2) append `shared_preload_libraries` to postgresql.conf, then
         # `docker restart` so PostgreSQL re-reads the config. Without the
         # restart, pg_cron's background worker never starts.
@@ -173,7 +177,7 @@ jobs:
         # coded today but future edits shouldn't break the pattern).
         env:
           CRON: ${{ matrix.cron }}
-          CONTAINER_ID: ${{ job.services.postgres.id }}
+          CONTAINER_ID: pg-ash-test
         run: |
           if [ "$CRON" = "off" ]; then
             echo "matrix.cron=off — skipping pg_cron install to test degraded mode"
@@ -185,15 +189,14 @@ jobs:
             exit 0
           fi
           # Install pg_cron inside the PostgreSQL container (not on host).
-          # Allow apt failures to be non-fatal here — PGDG sometimes lags on
-          # new PG majors (e.g. PG19 while still in beta), and we want to
-          # still exercise the no-cron branch rather than fail the whole job.
-          # The follow-up "Verify pg_cron install matches expectation" step
-          # enforces the expected state.
+          # cron=on must exercise real scheduling on every supported major.
+          # The explicit cron=off matrix entry covers the degraded path.
           docker exec "$CONTAINER_ID" bash -c "
-            apt-get update && apt-get install -y postgresql-\${PG_MAJOR}-cron
-          " || echo "pg_cron install failed — will fall back to no-cron mode"
-          # Configure pg_cron (or fall back to pgss-only if install failed).
+            if [ ! -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control ]; then
+              apt-get update && apt-get install -y postgresql-\${PG_MAJOR}-cron
+            fi
+          "
+          # Configure pg_cron and pg_stat_statements.
           # cron.use_background_workers = on makes pg_cron run each scheduled
           # command as a bgworker instead of opening a libpq connection to
           # localhost. That bypasses pg_hba.conf / TCP / username concerns
@@ -242,10 +245,8 @@ jobs:
           if [ "$CRON" = "off" ]; then
             echo "matrix.cron=off — not creating pg_cron extension"
           else
-            # pg_cron may legitimately be unavailable on new PG majors before
-            # PGDG catches up (e.g. PG19 while still in beta). Don't fail the job; downstream
-            # cron-gated tests check `pg_extension` and skip themselves.
-            psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available (PGDG package missing for this PG major)"
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "create extension if not exists pg_cron;"
 
             # Issue #46: pg_cron's scheduler/maintenance threads open a libpq
             # connection back to localhost as the container's OS user (root).
@@ -2629,7 +2630,7 @@ jobs:
         if: ${{ matrix.cron == 'on' }}
         env:
           PGPASSWORD: postgres
-          CONTAINER_ID: ${{ job.services.postgres.id }}
+          CONTAINER_ID: pg-ash-test
         run: |
           # Skip cleanly if pg_cron isn't actually installed (PGDG lag).
           if ! psql -h localhost -U postgres -d postgres -tAc \
@@ -2807,7 +2808,7 @@ jobs:
             v_schedule text;
             v_has_pgcron boolean;
           begin
-            -- Skip cron schedule tests if pg_cron not available (e.g., PG19 beta)
+            -- Skip cron schedule tests in the explicit no-cron variant.
             select exists (select from pg_extension where extname = 'pg_cron') into v_has_pgcron;
             if not v_has_pgcron then
               -- Just verify start() works without pg_cron (no error)
@@ -3886,6 +3887,66 @@ jobs:
             assert ash._wait_color('CPU*') = '', 'default color off';
             raise notice '_wait_color tests PASSED';
           end $$;
+          EOF
+
+      - name: "Test PostgreSQL 19 buffer wait compatibility"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 << 'EOF'
+          begin;
+          truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
+          do $$
+          declare
+            v_id smallint;
+            v_old smallint;
+            v_cleanup smallint;
+            v_pin smallint;
+            v_q int4;
+            v_ts int4 := ash.ts_from_timestamptz(date_trunc('minute', now()) - interval '2 minutes');
+            v_event text;
+            v_metric text;
+            j jsonb;
+          begin
+            update ash.config set sample_interval = interval '1 second' where singleton;
+            update ash.config set current_slot = 0, rotated_at = now() where singleton;
+            insert into ash.query_map_0 (query_id) values (1900019) on conflict (query_id) do nothing;
+            select id into v_q from ash.query_map_0 where query_id = 1900019;
+            v_old := ash._register_wait('active', 'LWLock', 'BufferContent');
+            v_cleanup := ash._register_wait('active', 'Buffer', 'BufferCleanup');
+            v_pin := ash._register_wait('active', 'BufferPin', 'BufferPin');
+            foreach v_event in array array['BufferShared', 'BufferShareExclusive', 'BufferExclusive'] loop
+              v_id := ash._register_wait('active', 'Buffer', v_event);
+              truncate ash.rollup_1m, ash.sample;
+              insert into ash.sample (sample_ts, datid, active_count, data, slot)
+              values (v_ts, 1, 240,
+                array[-v_id::int4, 60] || array_fill(v_q, array[60]) ||
+                array[-v_cleanup::int4, 60] || array_fill(v_q, array[60]) ||
+                array[-v_old::int4, 60] || array_fill(v_q, array[60]) ||
+                array[-v_pin::int4, 60] || array_fill(v_q, array[60]), 0);
+              insert into ash.rollup_1m (ts, datid, samples, peak_backends, wait_counts, query_counts)
+              values (v_ts, 1, 60, 4, array[v_id, 60, v_old, 60, v_cleanup, 60, v_pin, 60]::int4[], '{}'::int8[]);
+              j := ash.report(ash.ts_to_timestamptz(v_ts), ash.ts_to_timestamptz(v_ts + 60));
+              foreach v_metric in array array['aas_avg', 'aas_worst1m', 'aas_p99', 'aas_p999'] loop
+                assert (j->v_metric->>'buffer')::numeric = 2, v_metric || ': buffer content waits lost';
+                assert (j->v_metric->>'lwlock')::numeric = 1, v_metric || ': legacy LWLock changed';
+                assert (j->v_metric->>'total')::numeric = 3, v_metric || ': total loses native buffer waits';
+              end loop;
+              assert j->'top_events_worst1m'->'buffer' @> jsonb_build_array(v_event || '(1.0)'),
+                'native PG19 event name missing from report';
+              foreach v_metric in array array['top_queryids_worst1m', 'top_queryids_p99', 'top_queryids_p999'] loop
+                assert j->v_metric->'buffer' = '["1900019(2.0)"]'::jsonb, v_metric || ': buffer attribution';
+                assert j->v_metric->'total' = '["1900019(3.0)"]'::jsonb, v_metric || ': total attribution';
+              end loop;
+              assert ash._hr_top_queryids('Buffer', array[v_ts], 3, 1) = array['1900019(2.0)'], 'buffer query attribution';
+              assert ash._hr_top_queryids(null, array[v_ts], 3, 1) = array['1900019(3.0)'], 'total query attribution';
+              assert ash._wait_color('Buffer:' || v_event, true) = E'\033[38;2;000;210;180m', 'Buffer color';
+              assert ash._wait_color('Buffer:' || v_event, false) = '', 'Buffer color disabled';
+            end loop;
+            assert ash._wait_color('Buffer:BufferCleanup', true) = ash._wait_color('BufferPin:BufferPin', true),
+              'renamed buffer cleanup color changed';
+          end $$;
+          rollback;
           EOF
 
       - name: "Test 2.0: input validation and least-privilege guards"
@@ -7494,7 +7555,7 @@ jobs:
           # precondition assert. Everything from the last released migration
           # onward is the payload under test.
           split_line="$(
-            grep -n '^.i sql/migrations/' /tmp/ash_full_upgrade_chain.sql \
+            grep -nE '^.i sql/migrations/|^-- released-migration:' /tmp/ash_full_upgrade_chain.sql \
               | tail -n 1 | cut -d: -f1
           )"
           if [ -z "${split_line}" ]; then
@@ -8514,6 +8575,46 @@ jobs:
             exit 1
           fi
 
+      - name: "PG19 upgrade preserves custom storage rejection"
+        if: matrix.postgres == 19
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -Eeuo pipefail
+          fixture_dir="$(mktemp -d)"
+          trap 'rm -rf "$fixture_dir"' EXIT
+          python3 devel/scripts/ash_sql_chain.py full-upgrade-chain > "$fixture_dir/full.sql"
+          split_line="$(grep -nE '^.i sql/migrations/|^-- released-migration:' "$fixture_dir/full.sql" | tail -n 1 | cut -d: -f1)"
+          head -n "$((split_line - 1))" "$fixture_dir/full.sql" > "$fixture_dir/previous.sql"
+          python3 devel/scripts/ash_sql_chain.py pinned-upgrade-chain 1.5 > "$fixture_dir/upgrade.sql"
+          if [ "$(psql -h localhost -U postgres -d postgres -tAc "select to_regnamespace('ash') is not null")" = t ]; then
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "select ash.uninstall('yes')" >/dev/null
+          fi
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f "$fixture_dir/previous.sql" \
+            -c "alter table ash.config alter column singleton set (n_distinct = 1)" >/dev/null
+          if psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f "$fixture_dir/upgrade.sql" > "$fixture_dir/rejection.log" 2>&1; then
+            echo 'FAIL: upgrade accepted a custom storage option'
+            exit 1
+          fi
+          grep -Fq 'cannot normalize ash.config: unsupported custom column storage properties' "$fixture_dir/rejection.log"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          do $$
+          begin
+            assert exists (
+              select from pg_attribute
+              where attrelid = 'ash.config'::regclass and attname = 'singleton'
+                and attoptions @> array['n_distinct=1']
+                and exists (select from unnest(attoptions) as opt where opt ~ '^pg_attver=[0-9]+$')
+            ), 'rejected normalization must preserve custom and server-owned options';
+          end $$;
+          alter table ash.config alter column singleton reset (n_distinct);
+          SQL
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f "$fixture_dir/upgrade.sql" >/dev/null
+
       - name: "Degraded mode: without pg_stat_statements"
         env:
           PGPASSWORD: postgres
@@ -8543,7 +8644,7 @@ jobs:
         run: |
           # Install pg_ash fresh without pg_cron.
           # `drop extension if exists` is a no-op when pg_cron isn't installed
-          # (e.g. PG19 beta where PGDG package may be missing, or matrix.cron=off).
+          # (the explicit matrix.cron=off variant).
           # Use ON_ERROR_STOP so unrelated failures don't get silenced.
           psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "drop extension if exists pg_cron cascade"
@@ -8853,8 +8954,13 @@ jobs:
         run: |
           echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
 
+      - name: Remove disposable PostgreSQL
+        if: always()
+        run: |
+          docker rm -f pg-ash-test
+
   # One stable check name for the branch ruleset's required status checks.
-  # The matrix contexts embed PG versions ("test (19beta2, on)") and change
+  # The matrix contexts embed PG versions ("test (19, on)") and change
   # every release, so requiring them by name would rot. Fails if any needed
   # job failed or was cancelled; a job that never ran leaves this pending.
   ci-required:

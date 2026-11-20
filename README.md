@@ -339,7 +339,11 @@ select ash.report(
 It includes:
 
 - `aas_avg`, `aas_worst1m`, `aas_p99`, `aas_p999`
-- wait classes: `total`, `cpu`, `io`, `ipc`, `lock`, `lwlock`
+- wait classes: `total`, `cpu`, `io`, `ipc`, `lock`, `lwlock`, `buffer`
+- `buffer` reports PostgreSQL 19's native `Buffer` waits, including
+  `BufferCleanup`. These contribute to `total`. On older servers this class
+  is zero; `BufferPin` remains outside the report's selected classes.
+  Consumers must accept additive class keys.
 - top wait events and top query IDs for extreme minutes
 - `top_queryids_available`, so scrapers can branch without guessing
 - `coverage`, so consumers can reconcile against `ash.aas()` and `ash.top()`;

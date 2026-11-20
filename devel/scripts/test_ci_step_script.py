@@ -163,7 +163,7 @@ class WorkflowParserTests(unittest.TestCase):
         steps = ci_step_script.parse_workflow(ci_step_script.DEFAULT_WORKFLOW)
         names = [step.name for step in steps]
         self.assertGreater(len(steps), 40)
-        self.assertEqual(names[0], "Install pg_cron in container")
+        self.assertEqual(names[0], "Start PostgreSQL")
         self.assertIn("Test schema and infrastructure", names)
         self.assertIn("Degraded mode: without pg_stat_statements", names)
         self.assertNotIn("Guard SQL release workflow", names)

@@ -2,8 +2,8 @@
 # Run the pg_ash release-gate surfaces against disposable Docker PostgreSQL.
 #
 # Usage:
-#   devel/scripts/release_gate.sh <14|15|16|17|18|19beta2> [surface|all]
-#   PG_MAJORS="14 15 16 17 18 19beta2" devel/scripts/release_gate.sh all
+#   devel/scripts/release_gate.sh <14|15|16|17|18|19> [surface|all]
+#   PG_MAJORS="14 15 16 17 18 19" devel/scripts/release_gate.sh all
 #
 # The GitHub Actions workflow remains the canonical source for the large
 # regression and upgrade assertion sets. ci_step_script.py selects its exact
@@ -20,13 +20,13 @@ readonly REPO_ROOT
 readonly DOCKERFILE="${REPO_ROOT}/devel/docker/Dockerfile"
 readonly CHAIN_HELPER="${SCRIPT_DIR}/ash_sql_chain.py"
 readonly CI_STEP_HELPER="${SCRIPT_DIR}/ci_step_script.py"
-readonly DEFAULT_MAJORS="14 15 16 17 18 19beta2"
+readonly DEFAULT_MAJORS="14 15 16 17 18 19"
 readonly IMAGE_REPOSITORY="pg-ash-release-gate"
 readonly POSTGRES_USER="postgres"
 readonly POSTGRES_DATABASE="postgres"
 readonly POSTGRES_PASSWORD="pg_ash_release_gate"
 
-readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19beta2)
+readonly -a SUPPORTED_MAJORS=(14 15 16 17 18 19)
 readonly -a SURFACES=(
   fresh-install
   upgrade-chain
@@ -58,7 +58,7 @@ Usage:
   devel/scripts/release_gate.sh all [surface|all]
 
 Supported majors:
-  14 15 16 17 18 19beta2
+  14 15 16 17 18 19
 
 Supported surfaces:
   fresh-install
@@ -693,7 +693,13 @@ build_image() {
   local build_log
   build_log="${output_dir}/build_$(safe_component "${major}").log"
 
-  if [[ "${RELEASE_GATE_PULL:-1}" == "1" ]]; then
+  if [[ "${major}" == "19" ]]; then
+    if ! docker build -t postgres:19 -f "${REPO_ROOT}/devel/docker/Dockerfile.pg19" \
+      "${REPO_ROOT}" >"${build_log}" 2>&1; then
+      err "PostgreSQL 19.0 source image build failed"
+      return 1
+    fi
+  elif [[ "${RELEASE_GATE_PULL:-1}" == "1" ]]; then
     if ! docker pull "postgres:${major}" >"${build_log}" 2>&1; then
       err "docker pull failed for postgres:${major}"
       return 1
