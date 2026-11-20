@@ -1,8 +1,8 @@
 /*
- * pg_ash: upgrade from 1.5 or any earlier 2.0 prerelease to 2.0 rc 1
+ * pg_ash: upgrade from 1.5 or any earlier 2.0 prerelease to 2.0 rc 2
  *
  * 2.0 is a breaking release: the reader API is redesigned (issue #113,
- * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 rc 1
+ * blueprints/AAS_API.md). This upgrade wrapper replays the 2.0 rc 2
  * installer, which:
  *   * snapshots existing reader-role EXECUTE grants, then drops every removed
  *     v1.x reader and draft aas_* function (all overloads / _at twins), the
@@ -22,14 +22,16 @@
  *   * grants the default reader bundle to pg_monitor (best-effort, new in
  *     2.0 — see the block at the end of the installer; opt out afterwards
  *     with `select ash.revoke_reader('pg_monitor')`), and
- *   * stamps ash.config.version = '2.0-rc1' (and the column default), and
+ *   * stamps ash.config.version = '2.0-rc2' (and the column default), and
  *   * normalizes ash.config's physical column order to match a fresh 2.0
  *     install while preserving its singleton row and catalog properties.
  *
  * The release candidate installer owns the API, lifecycle and storage changes.
- * Normalization includes sample_unlogged while retaining operator choices.
+ * Normalization includes sample_unlogged while retaining operator choices, and
+ * allows PostgreSQL's server-owned pg_attver column metadata while still
+ * rejecting custom column storage options.
  * This cumulative migration and its relative installer include are promoted
- * together for the 2.0 rc 1 release candidate.
+ * together for the 2.0 rc 2 release candidate.
  * Re-apply-safe: the installer is idempotent (CREATE OR REPLACE / IF NOT
  * EXISTS plus the deterministic drop block), and the config normalization
  * exits without replacing the table once the canonical order is present.
@@ -336,7 +338,13 @@ begin
         or attribute.attstattarget <> -1
         or attribute.attstorage <> data_type.typstorage
         or attribute.attcompression <> ''
-        or attribute.attoptions is not null
+        -- pg_attver is server-owned attribute version metadata (PG19 and
+        -- patched PG14-18), not a custom column storage option.
+        or exists (
+          select
+          from unnest(attribute.attoptions) as option(value)
+          where not (option.value ~ '^pg_attver=[0-9]+$')
+        )
         or (
           data_type.typcollation <> 0
           and attribute.attcollation <> data_type.typcollation

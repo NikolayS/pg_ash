@@ -1,15 +1,17 @@
-# pg_ash 2.0 rc 1 release notes
+# pg_ash 2.0 rc 2 release notes
 
-This release candidate stamps the tested 2.0 installer as `2.0-rc1`. Fresh
-installs use `\i sql/ash-install.sql`; upgrades from 1.5 or an earlier 2.0
-prerelease use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any
-missing 1.x migrations. The same migration is safe to reapply to `2.0-rc1`.
+This release candidate stamps the tested 2.0 installer as `2.0-rc2` and adds
+full PostgreSQL 19 GA support. Fresh installs use `\i sql/ash-install.sql`;
+upgrades from 1.5 or any earlier 2.0 prerelease (`2.0-alpha1` through
+`2.0-rc1`) use `\i sql/migrations/ash-1.5-to-2.0.sql` after applying any
+missing 1.x migrations. The same migration is safe to reapply to `2.0-rc2`.
 Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for compatibility.
 
 The 2.0 line introduces a breaking reader API and removes parameter-name
-prefixes. RC1 also changes cadence safeguards, storage options, scheduler
-procedures, and lifecycle ownership behavior as described below. The 1.x
-reader surface has been replaced by the AAS-oriented 2.0 API:
+prefixes. It also adds cadence safeguards, optional unlogged raw partitions,
+primary-only replica guards, `CALL`-able maintenance procedures, and explicit
+lifecycle ownership behavior. The 1.x reader surface has been replaced by the
+AAS-oriented 2.0 API:
 
 | 1.x | 2.0 |
 |---|---|
@@ -22,22 +24,98 @@ reader surface has been replaced by the AAS-oriented 2.0 API:
 | `event_queries(e)` | `top('query_id', wait_event => e)` |
 | `samples_by_database` | `top('database')` |
 
-## Pending changes after 2.0 rc 1
+## PostgreSQL 19 GA support
 
-These changes target the development candidate, not the published RC1 payload.
+- **Full PostgreSQL 14–19 GA test matrix.** CI and the local Docker release
+  gate now run against official PostgreSQL 14, 15, 16, 17, 18, and 19 GA images
+  with official `postgresql-19-cron` (`1.6.8`) and `pg_stat_statements`.
+  `cron=on` jobs now require real `pg_cron` scheduling on every supported major.
+  ([PR #315](https://github.com/NikolayS/pg_ash/pull/315))
+- **Native PostgreSQL 19 `Buffer` wait class in `ash.report()` and charts.**
+  `ash.report()` adds an additive `buffer` key to `aas_avg`, `aas_worst1m`,
+  `aas_p99`, `aas_p999`, `top_events_*`, and `top_queryids_*`, and includes
+  native `Buffer` waits (`BufferShared`, `BufferShareExclusive`,
+  `BufferExclusive`, `BufferCleanup`) in `total` metrics and query attribution.
+  Existing `lwlock` keys remain unchanged; on PostgreSQL 14–18 `buffer` is
+  `0.00` / `[]` and historical `BufferPin` remains excluded from `total`.
+  `ash._wait_color()` colors `Buffer:*` teal, matching `BufferPin:*`.
+  Consumers must accept additive keys per the 2.0 report contract.
+- **Upgrade compatibility with `pg_attver` metadata.**
+  `sql/migrations/ash-1.5-to-2.0.sql` now permits PostgreSQL's server-owned
+  `pg_attver=[0-9]+` column metadata (introduced in PostgreSQL 19 and
+  backpatched to recent 14–18 point releases) while continuing to reject custom
+  column storage options such as `n_distinct` atomically.
 
-- Cleanup keeps minute rows that pending hourly aggregation still needs. (#277)
-- Comparison deltas use effective windows and coverage. Incomplete windows return NULL deltas instead of misleading changes. (#280)
-- Sampling timestamps use the wall clock after acquiring the sampler lock, not the transaction start time. (#281)
-- Query text follows the source database identity, including missing statistics entries and restricted-role visibility. Ambiguous attribution returns NULL. (#282)
-- Reapplying the installer preserves unchanged reader routines and their dependent objects. Changed return types still fail atomically when dependencies block replacement. (#290)
-- Oversized reader buckets get reader-specific validation errors, including overflow during grain alignment. `top(NULL)` now rejects the invalid dimension. (#177, #293)
+## Changes since 2.0 rc 1
 
-### Documentation and release tooling
+### Correctness, security, and lifecycle fixes
 
-- The README starts with incident investigation. The reference, agent tasks, and lock lab provide detailed follow-up workflows. (#284)
-- The release-chain helper accepts a byte-identical final-release baseline. Changed development SQL still requires a connected migration. (#289)
-- Historical-upgrade tests use the actual alpha installers. Their help command no longer connects to a database. (#296)
+- **Split schema/object owner lifecycle and rotation privileges.** When the
+  `ash` schema owner differs from the installer role, the installer now grants
+  the schema owner the exact DML, sequence, and routine privileges required by
+  `SECURITY INVOKER` lifecycle routines without granting `TRIGGER`,
+  `REFERENCES`, or reader/PUBLIC access. `ash.rotate()` keeps caller privileges
+  for truncation and triggers while restarting validated dictionary identity
+  sequences transactionally for both caller-owned and installer-owned
+  dictionaries. Re-apply preserves schema-owner admin access while continuing
+  to scrub legacy admin-helper grants from ordinary readers. (issues #308,
+  #314; [PR #312](https://github.com/NikolayS/pg_ash/pull/312))
+- **Dimensional `ash.compare()` bucket validation.** `ash.compare()` now
+  validates aligned bucket spans for both minute and hourly dimensional grains
+  before `int4` conversion, raising clear validation errors instead of bare
+  `integer out of range` failures. (issue #307;
+  [PR #310](https://github.com/NikolayS/pg_ash/pull/310))
+- **Oversized reader buckets and `NULL` dimension rejection.** Reader functions
+  now raise reader-specific validation errors for oversized bucket intervals,
+  including overflow during grain alignment, and `ash.top(NULL)` rejects the
+  invalid dimension explicitly. (issues #177, #293)
+- **Preserved reader OIDs and dependent views/functions on upgrade.**
+  Upgrading or re-applying `2.0-rc2` preserves unchanged reader routine OIDs
+  and their dependent views and SQL functions instead of dropping and
+  recreating them. Incompatible return-type changes still fail atomically via
+  `DROP RESTRICT`. Historical legacy admin-helper grants are scrubbed cleanly.
+  (issue #290)
+- **Database-scoped query text attribution.** Query text lookups now match
+  source `datid`, handle missing `pg_stat_statements` entries and restricted
+  role visibility accurately, and return `NULL` when database attribution is
+  ambiguous. (issue #279)
+- **Effective-window coverage in `ash.compare()`.** Comparison deltas now use
+  effective windows and per-side coverage; uncovered windows return `NULL`
+  deltas with a diagnostic notice instead of misleading changes. (issue #278)
+- **Sampler timestamps taken after acquiring the lock.** `ash.take_sample()`
+  now reads the wall clock after acquiring the sampler advisory lock rather
+  than using transaction start time. (issue #276)
+- **Pending hourly rollup input preserved during cleanup.**
+  `ash.rollup_cleanup()` retains `rollup_1m` rows that pending `rollup_hour()`
+  aggregation still requires. (issue #275)
+- **Reader performance and invariant hoisting.** Readers hoist invariant global
+  helper lookups, reuse the trusted `pg_stat_statements` schema once per call,
+  and share a single `pg_stat_statements` text lookup template; filtered raw
+  readers select active slots once per call instead of once per scanned row.
+  (issue #269; [PR #305](https://github.com/NikolayS/pg_ash/pull/305))
+- **Restricted `pg_cron` RLS visibility hints.** `ash.status()` now explains
+  hidden `cron.job` rows clearly under row-level security for non-superuser
+  owners and monitoring roles. (issue #299)
+
+### Documentation, demos, and release tooling
+
+- **Incident-first README and verified blind-agent examples.** README now leads
+  with an incident investigation walkthrough backed by executable SQL scripts,
+  the reference guide, a before/after lock lab, and a reproducible blind-agent
+  evaluation harness. (issues #283, #285)
+- **Reliable demo captures and asset freshness verification.** Demo workload
+  tuning reduces background storm writers so secondary lock waits stay visible
+  in the top-5 chart, suppresses psql startup banners, aligns stacked bars, and
+  adds a SHA-256 asset freshness manifest (`demos/fixtures/assets.json`) with
+  graceful malformed-manifest diagnostics plus 3-seed live CI checks.
+  (issues #291, #302; [PR #313](https://github.com/NikolayS/pg_ash/pull/313))
+- **Release-gate and discovery hardening.** `devel/scripts/release_gate.sh` now
+  isolates child `stdin` and verifies that every selected CI step actually
+  executed (issue #309; [PR #311](https://github.com/NikolayS/pg_ash/pull/311)).
+  `devel/scripts/ash_sql_chain.py` accepts a byte-identical final-release
+  baseline overlay while requiring a connected migration for any changed
+  development SQL (issue #289). Historical upgrade tests now rehearse actual
+  `v2.0-alpha*` installers (issue #296).
 
 ## 2.0 highlights
 
@@ -46,21 +124,24 @@ These changes target the development candidate, not the published RC1 payload.
   report whether data came from raw samples, 1-minute rollups, or 1-hour rollups.
 - **Machine-readable report.** `ash.report()` returns a stable JSONB payload for
   incident automation, dashboards, and AI/database copilots. The 2.0 minor line
-  may add keys, but existing keys are not renamed or removed.
+  may add keys (such as `buffer` for PostgreSQL 19), but existing keys are not
+  renamed or removed.
 - **Upgrade convergence.** The 1.5-to-2.0 wrapper replays the 2.0 release-candidate
-  installer, removes stale 1.x and earlier draft reader functions, and restores
-  eligible explicit reader-function grants. Roles that held the full
-  reader-function bundle receive the full current reader bundle; the installer
-  warns that this can re-grant operator-narrowed table privileges.
+  installer, removes stale 1.x and earlier draft reader functions, preserves
+  unchanged reader identities and their dependent objects, and restores eligible
+  explicit reader-function grants. Roles that held the full reader-function
+  bundle receive the full current reader bundle; the installer warns that this
+  can re-grant operator-narrowed table privileges.
 - **Default monitoring access.** Fresh installs and upgrades grant the reader
   bundle to `pg_monitor` on a best-effort basis; opt out with
-  `select ash.revoke_reader('pg_monitor');`. Repeat this opt-out after each upgrade or installer re-apply.
-- **Postgres 19 prerelease testing.** CI covers Postgres 14–18 and 19 RC1.
-  This release candidate uses the official `postgres:19rc1` image.
-  Prerelease testing does not establish Postgres 19 GA support.
-- **Docs refreshed.** README examples now use the 2.0 named-argument API.
+  `select ash.revoke_reader('pg_monitor');`. Repeat this opt-out after each
+  upgrade or installer re-apply.
+- **PostgreSQL 14–19 GA support.** Tested across official PostgreSQL 14, 15,
+  16, 17, 18, and 19 GA images with `pg_cron` and `pg_stat_statements`, plus
+  degraded modes without either or both extensions.
+- **Docs refreshed.** README and reference examples use the 2.0 named-argument API.
 
-## Changes since 2.0 beta 1
+## Changes since 2.0 beta 1 (included in 2.0 rc 1)
 
 - **Filtered raw readers avoid repeated slot selection.** Each helper selects retained slots once per call, rather than once per scanned row. (#269)
   [Dedicated-fixture measurements](https://github.com/NikolayS/pg_ash/pull/267#issuecomment-6282719259) show 23x faster custom plans and 12x faster generic plans.
