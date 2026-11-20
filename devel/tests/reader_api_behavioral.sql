@@ -455,7 +455,7 @@ begin
 
   -- invariant across the event-attributed classes: aas_p99 > 0 must never
   -- come with an empty top_events_p99 (cpu has no per-event breakdown).
-  for v_class in select unnest(array['io','ipc','lock','lwlock']) loop
+  for v_class in select unnest(array['io','ipc','lock','lwlock','buffer']) loop
     if coalesce((j->'aas_p99'->>v_class)::numeric, 0) > 0 then
       assert jsonb_array_length(coalesce(j->'top_events_p99'->v_class, '[]'::jsonb)) > 0,
          format('class %s: aas_p99 > 0 but top_events_p99 empty', v_class);

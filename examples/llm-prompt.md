@@ -135,10 +135,12 @@ For an ash.report() payload:
   averages or percentiles when observations are missing.
 - cpu means CPU*: active with no reported wait, including uninstrumented paths.
   io includes IO waits, ipc interprocess coordination, lock transaction or
-  object locks, and lwlock internal lightweight locks.
-- total includes only cpu, io, ipc, lock, and lwlock. Other captured classes
-  are excluded. Each class has its own extreme minutes: class maxima need not
-  coincide with the total peak and must not be added together.
+  object locks, lwlock internal lightweight locks, and buffer PostgreSQL 19
+  native Buffer waits (including BufferCleanup; zero on older servers).
+- total includes only cpu, io, ipc, lock, lwlock, and buffer. Other captured
+  classes (including legacy BufferPin) are excluded. Each class has its own
+  extreme minutes: class maxima need not coincide with the total peak and must
+  not be added together.
 - top_events_* describe each non-CPU class's own extreme minute or percentile
   set. top_queryids_* contain IDs, not SQL text, for raw-covered extreme
   minutes. Missing class keys and partial attribution are possible. Values in

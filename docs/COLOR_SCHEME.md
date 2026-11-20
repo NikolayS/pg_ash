@@ -16,7 +16,7 @@ Grafana dashboards (Dashboard 4 — Wait Sampling).
 | IPC | $\color{#00C8FF}{\rule{40pt}{12pt}}$ cyan | `#00C8FF` | 0, 200, 255 | `\033[38;2;0;200;255m` |
 | Client | $\color{#FFDC64}{\rule{40pt}{12pt}}$ yellow | `#FFDC64` | 255, 220, 100 | `\033[38;2;255;220;100m` |
 | Timeout | $\color{#FFA500}{\rule{40pt}{12pt}}$ orange | `#FFA500` | 255, 165, 0 | `\033[38;2;255;165;0m` |
-| BufferPin | $\color{#00D2B4}{\rule{40pt}{12pt}}$ teal | `#00D2B4` | 0, 210, 180 | `\033[38;2;0;210;180m` |
+| Buffer / BufferPin | $\color{#00D2B4}{\rule{40pt}{12pt}}$ teal | `#00D2B4` | 0, 210, 180 | `\033[38;2;0;210;180m` |
 | Activity | $\color{#9664FF}{\rule{40pt}{12pt}}$ purple | `#9664FF` | 150, 100, 255 | `\033[38;2;150;100;255m` |
 | Extension | $\color{#BE96FF}{\rule{40pt}{12pt}}$ light purple | `#BE96FF` | 190, 150, 255 | `\033[38;2;190;150;255m` |
 | Unknown/Other | $\color{#B4B4B4}{\rule{40pt}{12pt}}$ gray | `#B4B4B4` | 180, 180, 180 | `\033[38;2;180;180;180m` |

@@ -118,6 +118,21 @@ class AssetFreshnessTests(unittest.TestCase):
                         self.assertIn('Unsupported demo asset manifest format', result.stdout)
                     finally:
                         manifest.write_bytes(original)
+                for label, bad_body, expected_msg in (
+                    ('corrupt_json', '{not valid json', 'Demo asset manifest invalid'),
+                    ('non_object_json', '[]', 'top-level JSON value must be an object'),
+                    ('missing_sha256', '{"format": 1}', 'sha256 must be a string map'),
+                    ('non_dict_sha256', '{"format": 1, "sha256": []}', 'sha256 must be a string map'),
+                ):
+                    with self.subTest(malformed_manifest=label, git=git_checkout):
+                        manifest.write_text(bad_body)
+                        try:
+                            result = check()
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn(expected_msg, result.stdout)
+                            self.assertNotIn('Traceback', result.stdout)
+                        finally:
+                            manifest.write_bytes(original)
 
 
 if __name__ == '__main__':

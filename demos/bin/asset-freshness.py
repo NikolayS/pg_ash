@@ -63,11 +63,22 @@ def main():
     if not MANIFEST.exists():
         print('Demo asset manifest missing; regenerate and review the artifacts.', file=sys.stderr)
         return 1
-    expected = json.loads(MANIFEST.read_text())
+    try:
+        expected = json.loads(MANIFEST.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(f'Demo asset manifest invalid: {exc}', file=sys.stderr)
+        return 1
+    if not isinstance(expected, dict):
+        print('Demo asset manifest invalid: top-level JSON value must be an object.', file=sys.stderr)
+        return 1
     if expected.get('format') != 1:
         print('Unsupported demo asset manifest format.', file=sys.stderr)
         return 1
-    old = expected['sha256']
+    old = expected.get('sha256')
+    if not isinstance(old, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in old.items()):
+        print('Demo asset manifest invalid: sha256 must be a string map.', file=sys.stderr)
+        return 1
     changed = sorted(name for name in old.keys() | actual.keys()
                      if old.get(name) != actual.get(name))
     if changed:

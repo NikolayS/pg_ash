@@ -31,7 +31,7 @@ begin
   v_until := ash.ts_to_timestamptz(v_start + 180);
 
   -- Two observed minutes, one absent minute; distinct IO and Lock peaks.
-  -- Client appears in storage but is outside report.total's five-class scope.
+  -- Client appears in storage but is outside report.total's six-class scope.
   insert into ash.rollup_1m (
     ts, datid, samples, peak_backends, wait_counts, query_counts
   ) values
@@ -60,7 +60,7 @@ begin
     assert jsonb_typeof(v_report -> v_field) = 'object',
       'AAS statistics must remain objects';
     assert (v_report -> v_field) ?& array[
-      'total', 'cpu', 'io', 'ipc', 'lock', 'lwlock'
+      'total', 'cpu', 'io', 'ipc', 'lock', 'lwlock', 'buffer'
     ], 'missing a documented AAS class';
   end loop;
   assert (v_report -> 'coverage') ?& array[

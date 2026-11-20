@@ -152,8 +152,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Keep the PG19 prerelease ABI aligned with current PGDG extensions.
-        postgres: [14, 15, 16, 17, 18, 19rc1]
+        # PostgreSQL 14–19 GA official images.
+        postgres: [14, 15, 16, 17, 18, 19]
         # Quoted so YAML doesn't coerce on/off into booleans — GitHub Actions
         # compares these as strings in the step-level `if`/conditionals.
         cron: ["on"]
@@ -211,15 +211,12 @@ jobs:
             exit 0
           fi
           # Install pg_cron inside the PostgreSQL container (not on host).
-          # Allow apt failures to be non-fatal here — PGDG sometimes lags on
-          # new PG majors (e.g. PG19 while still in beta), and we want to
-          # still exercise the no-cron branch rather than fail the whole job.
-          # The follow-up "Verify pg_cron install matches expectation" step
-          # enforces the expected state.
+          # cron=on must exercise real scheduling on every supported major;
+          # the explicit cron=off matrix entry covers the degraded path.
           docker exec "$CONTAINER_ID" bash -c "
             apt-get update && apt-get install -y postgresql-\${PG_MAJOR}-cron
-          " || echo "pg_cron install failed — will fall back to no-cron mode"
-          # Configure pg_cron (or fall back to pgss-only if install failed).
+          "
+          # Configure pg_cron and pg_stat_statements.
           # cron.use_background_workers = on makes pg_cron run each scheduled
           # command as a bgworker instead of opening a libpq connection to
           # localhost. That bypasses pg_hba.conf / TCP / username concerns
@@ -227,13 +224,10 @@ jobs:
           # running pg_cron in a CI service container. Supported since
           # pg_cron 1.5 (PGDG packages are always >= 1.6 now).
           docker exec "$CONTAINER_ID" bash -c "
-            if [ -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control ]; then
-              echo \"shared_preload_libraries = 'pg_cron,pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
-              echo 'cron.database_name = postgres' >> \${PGDATA}/postgresql.conf
-              echo 'cron.use_background_workers = on' >> \${PGDATA}/postgresql.conf
-            else
-              echo \"shared_preload_libraries = 'pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
-            fi
+            test -f /usr/share/postgresql/\${PG_MAJOR}/extension/pg_cron.control
+            echo \"shared_preload_libraries = 'pg_cron,pg_stat_statements'\" >> \${PGDATA}/postgresql.conf
+            echo 'cron.database_name = postgres' >> \${PGDATA}/postgresql.conf
+            echo 'cron.use_background_workers = on' >> \${PGDATA}/postgresql.conf
           "
           docker restart "$CONTAINER_ID"
           sleep 5
@@ -268,10 +262,7 @@ jobs:
           if [ "$CRON" = "off" ]; then
             echo "matrix.cron=off — not creating pg_cron extension"
           else
-            # pg_cron may legitimately be unavailable on new PG majors before
-            # PGDG catches up (e.g. PG19 while still in beta). Don't fail the job; downstream
-            # cron-gated tests check `pg_extension` and skip themselves.
-            psql -h localhost -U postgres -d postgres -c "create extension if not exists pg_cron;" || echo "pg_cron not available (PGDG package missing for this PG major)"
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "create extension if not exists pg_cron;"
 
             # Issue #46: pg_cron's scheduler/maintenance threads open a libpq
             # connection back to localhost as the container's OS user (root).
@@ -3942,6 +3933,13 @@ jobs:
             raise notice 'ash.report totals and formatting edges PASSED';
           end $$;
           EOF
+
+      - name: "Test PostgreSQL 19 native Buffer wait compatibility"
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            --file=devel/tests/pg19_buffer_waits.sql
 
       - name: "Test 2.0: until-only windows and inverted-window validation (#165)"
         env:
@@ -10085,7 +10083,7 @@ jobs:
           echo "All tests passed for PostgreSQL $PG_MAJOR (pg_cron=$CRON)"
 
   # One stable check name for the branch ruleset's required status checks.
-  # The matrix contexts embed PG versions ("test (19rc1, on)") and change
+  # The matrix contexts embed PG versions ("test (19, on)") and change
   # every release, so requiring them by name would rot. Fails if any needed
   # job does not report success, including skipped/cancelled jobs; a workflow
   # that never starts leaves this pending.
