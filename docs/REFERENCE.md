@@ -7,7 +7,7 @@ Start with an [agent-led incident investigation](../README.md#investigate-an-inc
 - [Admin API](#admin-api) and [scheduling](#scheduling)
 - [Retention](#retention-and-storage) and [privileges](#privileges)
 - [Requirements](#requirements) and [known limits](#known-limits)
-- [Upgrade from an existing installation](#upgrade-to-20-rc-1)
+- [Upgrade from an existing installation](#upgrade-to-20-rc-2)
 
 ## Reader API
 
@@ -216,7 +216,7 @@ explain these semantics to an LLM.
 | `ash.revoke_reader(role)` | Revoke the monitoring-reader bundle |
 | `ash.uninstall('yes')` | Drop pg_ash and unschedule jobs |
 
-The development candidate requires `start()`, `stop()`, `rebuild_partitions()`
+pg_ash 2.0 requires `start()`, `stop()`, `rebuild_partitions()`,
 and `uninstall()` to run as the `ash` schema owner, including when another
 superuser administers the installation. Use `SET ROLE` to the owner first.
 The installer grants these administrative privileges to the current schema owner, without grant options:
@@ -367,9 +367,7 @@ item in [issue #227](https://github.com/NikolayS/pg_ash/issues/227).
 
 Both `ash.start()` and installer re-apply update recognized command text
 pg_ash scheduled. Customized commands are preserved with a notice naming the
-recommended form. Lifecycle changes under review are tracked in
-[#248](https://github.com/NikolayS/pg_ash/issues/248); follow the contract of the
-SQL version installed in your database.
+recommended form.
 
 ## Scheduling
 
@@ -413,11 +411,10 @@ Also schedule maintenance, with the connection routed to the primary:
 0 3 * * * psql -X -v ON_ERROR_STOP=1 -d mydb -c "call ash.run_rollup_cleanup();"
 ```
 
-The published beta accepts wider minute/hour intervals, but its historical
-AAS is weighted by the current configured interval. Keep the interval fixed
-while retaining that history. The development candidate's cadence safeguards
-are tracked in [#137](https://github.com/NikolayS/pg_ash/issues/137); use the
-candidate's catalog documentation when testing unreleased changes.
+New sampling intervals must be whole seconds from 1 to 60 seconds.
+Explicit interval changes are refused while raw or rollup history exists, so
+changing configuration cannot reweight historical AAS. Per-sample cadence
+persistence remains tracked in [#137](https://github.com/NikolayS/pg_ash/issues/137).
 
 pg_cron can add a `cron.job_run_details` row per invocation and has no automatic
 retention for this table. Monitor its growth, configure cleanup, or disable
@@ -440,7 +437,7 @@ Raw samples use a PGQ-style ring of partitions. Defaults:
 - `rollup_1m` retention is 30 days
 - `rollup_1h` retention is 5 years
 
-The [pending cleanup correction](https://github.com/NikolayS/pg_ash/pull/277) retains expired minutes needed by hourly aggregation.
+Cleanup retains expired minutes needed by pending hourly aggregation.
 Those rows remain until hourly aggregation completes or their destination hour expires.
 With default retention, a stopped hourly job can retain that backlog for up to five years.
 Monitor `last_rollup_1h_ts` and rollup row counts in `ash.status()`.
@@ -552,8 +549,9 @@ not grant `pg_read_all_stats`. Monitoring roles that need `query_text` from
 `pg_stat_statements` usually need membership in `pg_monitor` or
 `pg_read_all_stats` too.
 
-The [pending database-attribution correction](https://github.com/NikolayS/pg_ash/pull/282) derives the source database from ASH rows when it is unique. Unsafe attribution returns NULL.
-With that correction, a `database` filter resolves cross-database ambiguity.
+Query-text lookup derives the source database from ASH rows when it is unique.
+Unsafe cross-database attribution returns NULL. A `database` filter resolves
+cross-database ambiguity.
 Reading another role's SQL still requires the appropriate statistics privileges.
 
 SQL-text lookup finds the `pg_stat_statements` schema on each call.

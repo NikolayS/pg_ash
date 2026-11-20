@@ -33,6 +33,16 @@ begin
       perform * from ash.compare(
         hour_start, hour_start + interval '1 hour',
         hour_start, hour_start + interval '1 hour',
+        dimension => dimension_name, bucket => interval '2147482800.1 seconds');
+      raise exception 'accepted fractional overflowing dimensional bucket: %', dimension_name;
+    exception when invalid_parameter_value then
+      get stacked diagnostics message = message_text;
+      assert message like 'ash.compare: bucket exceeds the supported range after grain alignment%', message;
+    end;
+    begin
+      perform * from ash.compare(
+        hour_start, hour_start + interval '1 hour',
+        hour_start, hour_start + interval '1 hour',
         dimension => dimension_name, bucket => interval '2147483640 seconds');
       raise exception 'accepted overflowing dimensional bucket: %', dimension_name;
     exception when invalid_parameter_value then

@@ -272,7 +272,30 @@ def main():
             "insert into ash.query_map_2(query_id) values (909090),(909091); "
             "update ash.config set current_slot=0, rotated_at=now()-interval '2 days';")
         sql(f"select cron.alter_job({rotation_job}, schedule=>'1 second');")
-        wait_fired(rotation_job, prior_run)
+        # Wait for scheduled rotation to advance the slot: if ash_sampler holds
+        # the sampler advisory lock in the same second, run_rotate() logs a
+        # succeeded 'skipped' tick and retries on the next second. Fail fast on
+        # any failed run_details entry.
+        rot_deadline = time.monotonic() + 20
+        while time.monotonic() < rot_deadline:
+            failed = sql(f"select coalesce(string_agg(return_message, '; '), '') "
+                         f"from cron.job_run_details where jobid={rotation_job} "
+                         f"and runid>{prior_run} and status='failed'")
+            assert not failed, 'scheduled rotation failed: ' + failed
+            if (sql(f"select exists(select from cron.job_run_details "
+                    f"where jobid={rotation_job} and runid>{prior_run} "
+                    f"and status='succeeded')") == 't'
+                    and sql('select current_slot from ash.config') == '1'):
+                break
+            time.sleep(.25)
+        else:
+            raise AssertionError(
+                'scheduled rotation did not advance current_slot to 1: '
+                + sql(f"select current_slot from ash.config") + ' '
+                + sql(f"select coalesce(json_agg(d order by runid)::text, '[]') "
+                      f"from cron.job_run_details d where jobid={rotation_job} "
+                      f"and runid>{prior_run}")
+            )
         assert_sql('select current_slot from ash.config', '1')
         assert_sql('select count(*) from ash.sample_2', '0')
         assert_sql('select count(*) from ash.query_map_2', '0')

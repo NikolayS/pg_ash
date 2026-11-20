@@ -56,6 +56,17 @@ class AssetFreshnessTests(unittest.TestCase):
                         path.unlink()
                         if git_checkout:
                             subprocess.run(['git', '-C', str(root), 'rm', '--cached', '-q', '--', name], check=True)
+                untracked = root / 'demos/lib/untracked-probe.txt'
+                with self.subTest(untracked='demos/lib/untracked-probe.txt', git=git_checkout):
+                    untracked.write_text('untracked probe\n')
+                    try:
+                        if git_checkout:
+                            result = check()
+                            self.assertEqual(result.returncode, 0, result.stdout)
+                        else:
+                            assert_changed('demos/lib/untracked-probe.txt')
+                    finally:
+                        untracked.unlink()
                 for name in ('demos/lib/.DS_Store', 'demos/lib/seed.sh.swp',
                              'assets/unrelated.png'):
                     with self.subTest(noise=name, git=git_checkout):
@@ -119,13 +130,15 @@ class AssetFreshnessTests(unittest.TestCase):
                     finally:
                         manifest.write_bytes(original)
                 for label, bad_body, expected_msg in (
-                    ('corrupt_json', '{not valid json', 'Demo asset manifest invalid'),
-                    ('non_object_json', '[]', 'top-level JSON value must be an object'),
-                    ('missing_sha256', '{"format": 1}', 'sha256 must be a string map'),
-                    ('non_dict_sha256', '{"format": 1, "sha256": []}', 'sha256 must be a string map'),
+                    ('corrupt_json', b'{not valid json', 'Demo asset manifest invalid'),
+                    ('invalid_utf8', b'\xff\xfe', 'Demo asset manifest invalid'),
+                    ('non_object_json', b'[]', 'top-level JSON value must be an object'),
+                    ('missing_sha256', b'{"format": 1}', 'sha256 must be a string map'),
+                    ('non_dict_sha256', b'{"format": 1, "sha256": []}', 'sha256 must be a string map'),
+                    ('non_str_sha256_val', b'{"format": 1, "sha256": {"assets/chart.svg": 123}}', 'sha256 must be a string map'),
                 ):
                     with self.subTest(malformed_manifest=label, git=git_checkout):
-                        manifest.write_text(bad_body)
+                        manifest.write_bytes(bad_body)
                         try:
                             result = check()
                             self.assertNotEqual(result.returncode, 0)

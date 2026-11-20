@@ -343,7 +343,7 @@ begin
         or exists (
           select
           from unnest(attribute.attoptions) as option(value)
-          where not (option.value ~ '^pg_attver=[0-9]+$')
+          where (option.value ~ '^pg_attver=[0-9]+$') is not true
         )
         or (
           data_type.typcollation <> 0

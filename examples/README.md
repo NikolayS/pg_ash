@@ -32,7 +32,7 @@ one-minute concurrency.
 |---|---|---|
 | Headline | 28 backend-seconds over two minutes; average 0.23 AAS, peak minute 0.47 AAS | Activity is concentrated in one observed minute; the other minute has no stored observation |
 | Waits | Lock:tuple 14 backend-seconds, Lock:transactionid 7, Timeout:PgSleep 7 | Lock waiting dominates the sampled active time; the sleep is the fixture's open transaction |
-| Timeline | The selected tuple-lock wait appears at 22:25 UTC on 2026-09-04 | Use that minute for the query drill |
+| Timeline | The selected tuple-lock wait appears at 18:35 UTC on 2026-11-20 | Use that minute for the query drill |
 | Query | `update public.pgash_llm_demo_orders set status = $1 where id = $2` carries all 14 tuple-lock backend-seconds | This statement experienced the selected wait |
 | Raw evidence | The query appears with both tuple and transaction-ID lock waits | Investigate transaction scope and the blocking transaction; the stored sample alone does not identify it |
 
@@ -45,7 +45,7 @@ metrics would misread the evidence.
 A supported finding from this evidence would be:
 
 > The selected update experienced tuple and transaction-ID lock waits during
-> the 22:25 UTC minute. This supports lock contention as the next investigation
+> the 18:35 UTC minute. This supports lock contention as the next investigation
 > target. Inspect the blocking transaction's duration and scope; this history
 > does not establish which session blocked it or which row values conflicted.
 > The unobserved minute cannot establish scheduler health or idle activity.
@@ -58,7 +58,7 @@ and waits with NULL text.
 
 ## Reproduce in a disposable database
 
-Install the development candidate in a disposable database on an otherwise
+Install `pg_ash` in a disposable database on an otherwise
 quiet Postgres instance: sampling observes every database on the server. Then
 run the live test. It creates and drops only its fixture table, starts
 sampling, and leaves the collected history available for inspection. Use
@@ -71,15 +71,16 @@ also works without a preloaded optional module:
 export PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGDATABASE=ash_example
 export PGOPTIONS='-c compute_query_id=on'
 createdb "$PGDATABASE"
-psql -X -v ON_ERROR_STOP=1 -f devel/sql/ash-install.sql
+psql -X -v ON_ERROR_STOP=1 -f sql/ash-install.sql
 python3 devel/tests/llm_example_live.py --output /tmp/llm-investigation-output.txt
 ```
 
-For the text variant, install pg_stat_statements in that database on a server
-where it is preloaded, then run `select ash._apply_pgss_search_path();` before
-the live test. The test also works without the extension and checks that no
-fixture SQL text appears. It never installs optional extensions itself. CI validates the no-extension
-variant; the SQL-text variant above was also verified manually.
+For the text variant, install `pg_stat_statements` in that database on a server
+where it is preloaded; SQL-text lookup resolves the extension schema
+automatically on each call. The test also works without the extension and checks
+that no fixture SQL text appears. It never installs optional extensions itself.
+CI validates the no-extension variant; the SQL-text variant above was also
+verified manually.
 
 Preserve NOTICE diagnostics alongside exported rows and JSON. In particular,
 `pg_ash partial source:` means newer completed raw observations were omitted

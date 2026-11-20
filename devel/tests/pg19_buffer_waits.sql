@@ -89,14 +89,16 @@ begin
         v_metric || ': total loses native buffer waits';
     end loop;
 
-    assert j->'top_events_worst1m'->'buffer' @> jsonb_build_array(v_event || '(1.0)'),
-      'native PG19 event name missing from top_events_worst1m';
-    assert j->'top_events_worst1m'->'buffer' @> '["BufferCleanup(1.0)"]'::jsonb,
-      'BufferCleanup missing from top_events_worst1m';
-    assert j->'top_events_p99'->'buffer' @> jsonb_build_array(v_event || '(1.0)'),
-      'native PG19 event name missing from top_events_p99';
-    assert j->'top_events_p999'->'buffer' @> jsonb_build_array(v_event || '(1.0)'),
-      'native PG19 event name missing from top_events_p999';
+    foreach v_metric in array array[
+      'top_events_worst1m', 'top_events_p99', 'top_events_p999'
+    ] loop
+      assert jsonb_array_length(j->v_metric->'buffer') = 2,
+        v_metric || ': expected exactly two native Buffer events';
+      assert j->v_metric->'buffer' @> jsonb_build_array(v_event || '(1.0)'),
+        v_metric || ': native PG19 event name missing';
+      assert j->v_metric->'buffer' @> '["BufferCleanup(1.0)"]'::jsonb,
+        v_metric || ': BufferCleanup missing';
+    end loop;
 
     foreach v_metric in array array[
       'top_queryids_worst1m', 'top_queryids_p99', 'top_queryids_p999'

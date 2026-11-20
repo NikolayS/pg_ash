@@ -11,6 +11,22 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parent
 
 
+def bash_executable():
+    configured = os.environ.get('BASH')
+    if configured:
+        return configured
+    for candidate in ('/opt/homebrew/bin/bash', '/usr/local/bin/bash',
+                      shutil.which('bash') or 'bash'):
+        if Path(candidate).exists() or candidate == 'bash':
+            probe = subprocess.run([candidate, '-c', 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"'],
+                                   capture_output=True, text=True)
+            if probe.returncode == 0:
+                parts = probe.stdout.strip().split('.')
+                if len(parts) == 2 and (int(parts[0]), int(parts[1])) >= (4, 4):
+                    return candidate
+    return 'bash'
+
+
 class GateExecutionTests(unittest.TestCase):
     def run_steps(self, bodies):
         with tempfile.TemporaryDirectory() as directory:
@@ -34,7 +50,7 @@ class GateExecutionTests(unittest.TestCase):
             marker = root / 'executed'
             env = dict(os.environ, TEST_DIR=str(root), TEST_WORKFLOW=str(workflow),
                        TEST_MARKER=str(marker))
-            result = subprocess.run(['bash', str(script)], env=env, text=True,
+            result = subprocess.run([bash_executable(), str(script)], env=env, text=True,
                                     capture_output=True, timeout=15)
             return result, marker.read_text().splitlines() if marker.exists() else []
 

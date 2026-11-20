@@ -3589,7 +3589,7 @@ jobs:
             v_has_pgcron boolean;
           begin
             truncate ash.sample, ash.rollup_1m, ash.rollup_1h;
-            -- Skip cron schedule tests if pg_cron not available (e.g., PG19 beta)
+            -- Skip cron schedule tests in the explicit no-cron variant.
             select exists (select from pg_extension where extname = 'pg_cron') into v_has_pgcron;
             if not v_has_pgcron then
               -- Just verify start() works without pg_cron (no error)

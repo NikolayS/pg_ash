@@ -81,9 +81,9 @@ Colors also render natively in pgcli, DataGrip, and other clients that pass raw 
 ## Implementation
 
 Colors are implemented in `ash._wait_color(event text, color boolean)`.
-The function is `IMMUTABLE` and `language sql` — Postgres inlines it into the
-calling query. When `color = false` (the default), it returns an empty string
-with zero overhead.
+The function is `STABLE` and `language sql` with a pinned `search_path`.
+When `color = false` (the default), it checks `ash._color_on(color)` (which
+reads the session `ash.color` GUC) and returns an empty string unless enabled.
 
 Functions that support color:
 

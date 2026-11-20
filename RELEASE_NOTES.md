@@ -10,8 +10,8 @@ Root-level `sql/ash-X.Y-to-A.B.sql` wrappers remain for compatibility.
 The 2.0 line introduces a breaking reader API and removes parameter-name
 prefixes. It also adds cadence safeguards, optional unlogged raw partitions,
 primary-only replica guards, `CALL`-able maintenance procedures, and explicit
-lifecycle ownership behavior. The 1.x reader surface has been replaced by the
-AAS-oriented 2.0 API:
+lifecycle ownership behavior as described below. The 1.x reader surface has
+been replaced by the AAS-oriented 2.0 API:
 
 | 1.x | 2.0 |
 |---|---|
@@ -32,71 +32,69 @@ AAS-oriented 2.0 API:
   `cron=on` jobs now require real `pg_cron` scheduling on every supported major.
   ([PR #315](https://github.com/NikolayS/pg_ash/pull/315))
 - **Native PostgreSQL 19 `Buffer` wait class in `ash.report()` and charts.**
-  `ash.report()` adds an additive `buffer` key to `aas_avg`, `aas_worst1m`,
-  `aas_p99`, `aas_p999`, `top_events_*`, and `top_queryids_*`, and includes
-  native `Buffer` waits (`BufferShared`, `BufferShareExclusive`,
-  `BufferExclusive`, `BufferCleanup`) in `total` metrics and query attribution.
-  Existing `lwlock` keys remain unchanged; on PostgreSQL 14–18 `buffer` is
-  `0.00` / `[]` and historical `BufferPin` remains excluded from `total`.
-  `ash._wait_color()` colors `Buffer:*` teal, matching `BufferPin:*`.
-  Consumers must accept additive keys per the 2.0 report contract.
+  `ash.report()` adds a `buffer` key to `aas_*`, `top_events_*`, and
+  `top_queryids_*`. Native `Buffer` waits (`BufferShared`,
+  `BufferShareExclusive`, `BufferExclusive`, `BufferCleanup`) now count toward
+  `total` metrics and query attribution. Existing `lwlock` keys stay unchanged.
+  On PostgreSQL 14–18, `buffer` is `0.00` or `[]`, and legacy `BufferPin` stays
+  excluded from `total`. `ash._wait_color()` renders `Buffer:*` in teal,
+  matching `BufferPin:*`. Consumers must accept additive keys per the 2.0
+  report contract.
 - **Upgrade compatibility with `pg_attver` metadata.**
-  `sql/migrations/ash-1.5-to-2.0.sql` now permits PostgreSQL's server-owned
-  `pg_attver=[0-9]+` column metadata (introduced in PostgreSQL 19 and
-  backpatched to recent 14–18 point releases) while continuing to reject custom
-  column storage options such as `n_distinct` atomically.
+  `sql/migrations/ash-1.5-to-2.0.sql` now allows PostgreSQL's server-owned
+  `pg_attver=[0-9]+` column metadata (PostgreSQL 19 and patched 14–18). Custom
+  column storage options such as `n_distinct` still fail atomically.
 
 ## Changes since 2.0 rc 1
 
 ### Correctness, security, and lifecycle fixes
 
-- **Split schema/object owner lifecycle and rotation privileges.** When the
-  `ash` schema owner differs from the installer role, the installer now grants
-  the schema owner the exact DML, sequence, and routine privileges required by
-  `SECURITY INVOKER` lifecycle routines without granting `TRIGGER`,
+- **Split schema/object owner lifecycle and rotation privileges.** When another
+  role installs `pg_ash` into an owner's `ash` schema, the installer grants
+  that schema owner the exact DML, sequence, and routine privileges required
+  for `SECURITY INVOKER` lifecycle calls. It does not grant `TRIGGER`,
   `REFERENCES`, or reader/PUBLIC access. `ash.rotate()` keeps caller privileges
   for truncation and triggers while restarting validated dictionary identity
-  sequences transactionally for both caller-owned and installer-owned
-  dictionaries. Re-apply preserves schema-owner admin access while continuing
-  to scrub legacy admin-helper grants from ordinary readers. (issues #308,
-  #314; [PR #312](https://github.com/NikolayS/pg_ash/pull/312))
+  sequences transactionally for both caller-owned and installer-owned tables.
+  Re-apply keeps schema-owner admin access and removes legacy admin-helper
+  grants from ordinary readers. (issues #308, #314;
+  [PR #312](https://github.com/NikolayS/pg_ash/pull/312))
 - **Dimensional `ash.compare()` bucket validation.** `ash.compare()` now
-  validates aligned bucket spans for both minute and hourly dimensional grains
-  before `int4` conversion, raising clear validation errors instead of bare
-  `integer out of range` failures. (issue #307;
+  validates aligned bucket spans for minute and hourly dimensional grains
+  before `int4` conversion. Oversized spans raise clear validation errors
+  instead of bare `integer out of range` failures. (issue #307;
   [PR #310](https://github.com/NikolayS/pg_ash/pull/310))
 - **Oversized reader buckets and `NULL` dimension rejection.** Reader functions
-  now raise reader-specific validation errors for oversized bucket intervals,
-  including overflow during grain alignment, and `ash.top(NULL)` rejects the
-  invalid dimension explicitly. (issues #177, #293)
+  raise clear validation errors for oversized bucket intervals, including
+  overflow during grain alignment. `ash.top(NULL)` now rejects the invalid
+  dimension explicitly. (issues #177, #293)
 - **Preserved reader OIDs and dependent views/functions on upgrade.**
   Upgrading or re-applying `2.0-rc2` preserves unchanged reader routine OIDs
-  and their dependent views and SQL functions instead of dropping and
-  recreating them. Incompatible return-type changes still fail atomically via
-  `DROP RESTRICT`. Historical legacy admin-helper grants are scrubbed cleanly.
-  (issue #290)
+  and their dependent views and SQL functions. Incompatible return-type changes
+  still fail atomically via `DROP RESTRICT`. Re-apply also removes historical
+  legacy admin-helper grants cleanly. (issue #290)
 - **Database-scoped query text attribution.** Query text lookups now match
-  source `datid`, handle missing `pg_stat_statements` entries and restricted
-  role visibility accurately, and return `NULL` when database attribution is
-  ambiguous. (issue #279)
+  source `datid` and handle missing `pg_stat_statements` rows or restricted
+  privileges accurately. Ambiguous cross-database attribution returns `NULL`.
+  (issue #279)
 - **Effective-window coverage in `ash.compare()`.** Comparison deltas now use
-  effective windows and per-side coverage; uncovered windows return `NULL`
-  deltas with a diagnostic notice instead of misleading changes. (issue #278)
+  effective windows and per-side coverage. Uncovered windows return `NULL`
+  deltas with a notice instead of misleading changes. (issue #278)
 - **Sampler timestamps taken after acquiring the lock.** `ash.take_sample()`
-  now reads the wall clock after acquiring the sampler advisory lock rather
-  than using transaction start time. (issue #276)
+  reads the wall clock after acquiring the sampler advisory lock instead of
+  using transaction start time. (issue #276)
 - **Pending hourly rollup input preserved during cleanup.**
   `ash.rollup_cleanup()` retains `rollup_1m` rows that pending `rollup_hour()`
   aggregation still requires. (issue #275)
 - **Reader performance and invariant hoisting.** Readers hoist invariant global
   helper lookups, reuse the trusted `pg_stat_statements` schema once per call,
-  and share a single `pg_stat_statements` text lookup template; filtered raw
-  readers and `ash._hr_top_queryids()` select active slots once per call
-  instead of once per scanned row. (issue #269;
+  and share one `pg_stat_statements` text template. Filtered raw readers and
+  `ash._hr_top_queryids()` now select active slots once per call instead of
+  once per scanned row. (issue #269;
   [PR #305](https://github.com/NikolayS/pg_ash/pull/305))
 - **Restricted `pg_cron` RLS visibility hints.** `ash.status()` now explains
-  hidden `cron.job` rows clearly under row-level security for non-superuser
-  owners and monitoring roles. (issue #299)
+  hidden `cron.job` rows under row-level security for non-superuser owners and
+  monitoring roles. (issue #299)
 
 ### Documentation, demos, and release tooling
 
@@ -104,11 +102,11 @@ AAS-oriented 2.0 API:
   with an incident investigation walkthrough backed by executable SQL scripts,
   the reference guide, a before/after lock lab, and a reproducible blind-agent
   evaluation harness. (issues #283, #285)
-- **Reliable demo captures and asset freshness verification.** Demo workload
-  tuning reduces background storm writers so secondary lock waits stay visible
-  in the top-5 chart, suppresses psql startup banners, aligns stacked bars, and
-  adds a SHA-256 asset freshness manifest (`demos/fixtures/assets.json`) with
-  graceful malformed-manifest diagnostics plus 3-seed live CI checks.
+- **Reliable demo captures and asset freshness verification.** Demo tuning
+  reduces background storm writers so both lock waits stay in the top-5 chart.
+  The harness also suppresses psql startup banners and aligns stacked bars. A
+  SHA-256 asset freshness manifest (`demos/fixtures/assets.json`) with clear
+  invalid-manifest diagnostics and 3-seed live CI checks guard against drift.
   (issues #291, #302; [PR #313](https://github.com/NikolayS/pg_ash/pull/313))
 - **Release-gate and discovery hardening.** `devel/scripts/release_gate.sh` now
   isolates child `stdin` and verifies that every selected CI step actually

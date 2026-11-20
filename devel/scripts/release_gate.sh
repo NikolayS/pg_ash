@@ -409,7 +409,7 @@ run_fresh_install() {
   # this range runs the discriminating recovery seam on every server major.
   run_ci_selection \
     range \
-    "#122: disclose selected partial rollup source" \
+    "#177: reader input validation" \
     "#222: recovery guard coverage on every PostgreSQL version"
   run_ci_selection \
     range \

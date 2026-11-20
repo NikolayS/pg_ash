@@ -227,11 +227,12 @@ def main() -> None:
                 if tag == "v1.0":
                     # Upgrading from v1.0 reaches ash-1.5-to-2.0.sql with
                     # non-canonical ash.config column order, exercising table
-                    # recreation. Custom column options must fail atomically
-                    # even alongside server-owned pg_attver metadata, and
-                    # resetting only n_distinct must let normalization succeed.
+                    # recreation. Use num_partitions (added by migration, so it
+                    # carries server-owned pg_attver on PG19 and patched PG14-18)
+                    # to test coexisting {pg_attver=N, n_distinct=1} rejection
+                    # and reset-only-n_distinct recovery.
                     run(["--command",
-                         "alter table ash.config alter column sample_interval set (n_distinct = 1)"])
+                         "alter table ash.config alter column num_partitions set (n_distinct = 1)"])
                     before_schema = snapshot()
                     try:
                         install(wrapper)
@@ -241,7 +242,7 @@ def main() -> None:
                         raise AssertionError("v1.0->2.0: custom n_distinct option did not block normalization")
                     assert snapshot() == before_schema, "v1.0->2.0: rejected custom option changed schema"
                     run(["--command",
-                         "alter table ash.config alter column sample_interval reset (n_distinct)"])
+                         "alter table ash.config alter column num_partitions reset (n_distinct)"])
                 install(wrapper)
                 assert run(["--command", "select version from ash.config where singleton"]).strip() == expected_version, tag
                 assert run(["--command", "select sample_interval = interval '5 seconds' "
