@@ -26,15 +26,14 @@ class ReleaseStampTest(unittest.TestCase):
         cls.final_version = cls.payload_version.split("-", 1)[0]
         cls.prerelease_version = f"{cls.final_version}-rc1"
 
-    def test_pg19_compat_migration_keeps_frozen_path(self) -> None:
+    def test_compat_migration_keeps_frozen_path(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()) as output:
             ash_sql_chain.emit_psql_include(
                 ash_sql_chain.ROOT / "sql/migrations/ash-1.5-to-2.0.sql"
             )
         script = output.getvalue()
-        self.assertIn("server_version_num", script)
-        self.assertIn("then 'devel/sql/compat/ash-1.5-to-2.0.sql'", script)
-        self.assertIn("else 'sql/migrations/ash-1.5-to-2.0.sql'", script)
+        self.assertIn("\\i devel/sql/compat/ash-1.5-to-2.0.sql", script)
+        self.assertIn("-- released-migration: sql/migrations/ash-1.5-to-2.0.sql", script)
 
     def run_checker(
         self,

@@ -147,15 +147,12 @@ def payload_version_parts(version: str, *, label: str) -> tuple[str, bool]:
 
 
 def emit_psql_include(path: Path) -> None:
-    # Released migrations remain frozen. Compatibility replacements are
-    # explicit and server-gated; older servers still exercise the public path.
+    # Released SQL stays frozen. Explicit development replacements also
+    # support catalog changes backpatched to older PostgreSQL majors.
     compat = ROOT / "devel" / "sql" / "compat" / path.name
     if path.parent in (ROOT / "sql", ROOT / "sql" / "migrations") and compat.exists():
         print(f"-- released-migration: {rel(path)}")
-        print("select case when current_setting('server_version_num')::int >= 190000 "
-              f"then '{rel(compat)}' else '{rel(path)}' end "
-              "as ash_compat_migration \\gset")
-        print(r"\i :ash_compat_migration")
+        print(rf"\i {rel(compat)}")
     else:
         print(rf"\i {rel(path)}")
 

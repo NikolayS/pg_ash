@@ -8575,8 +8575,7 @@ jobs:
             exit 1
           fi
 
-      - name: "PG19 upgrade preserves custom storage rejection"
-        if: matrix.postgres == 19
+      - name: "Upgrade preserves custom storage rejection"
         env:
           PGPASSWORD: postgres
         run: |
@@ -8607,8 +8606,7 @@ jobs:
               select from pg_attribute
               where attrelid = 'ash.config'::regclass and attname = 'singleton'
                 and attoptions @> array['n_distinct=1']
-                and exists (select from unnest(attoptions) as opt where opt ~ '^pg_attver=[0-9]+$')
-            ), 'rejected normalization must preserve custom and server-owned options';
+            ), 'rejected normalization must preserve custom options';
           end $$;
           alter table ash.config alter column singleton reset (n_distinct);
           SQL

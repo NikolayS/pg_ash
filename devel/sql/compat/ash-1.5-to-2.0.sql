@@ -1,5 +1,5 @@
 /*
- * PG19 development replacement for the frozen 1.5-to-2.0 migration.
+ * Development replacement for the frozen 1.5-to-2.0 migration.
  * pg_attver is a server-owned attribute version, not a custom storage option.
  * See PostgreSQL src/backend/catalog/README.attver.md. Do not replay it:
  * rebuilding ash.config assigns new attribute versions automatically.
@@ -325,8 +325,7 @@ begin
           select
           from unnest(attribute.attoptions) as option(value)
           where not (
-            current_setting('server_version_num')::int >= 190000
-            and option.value ~ '^pg_attver=[0-9]+$'
+            option.value ~ '^pg_attver=[0-9]+$'
           )
         )
         or (
